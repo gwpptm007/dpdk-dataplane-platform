@@ -1,0 +1,15 @@
+project('dpdk-dataplane-platform', 'c', version: '0.2.0', default_options: ['c_std=gnu11', 'warning_level=2'])
+
+dpdk = dependency('libdpdk', required: false)
+inc = include_directories('include')
+
+subdir('lib/common')
+subdir('lib/pkt')
+subdir('lib/flow')
+subdir('lib/offload/core')
+subdir('lib/offload/soft')
+subdir('lib/offload/rte_flow')
+subdir('lib/offload/hw')
+subdir('lib/representor')
+subdir('lib/switch')
+subdir('app')
