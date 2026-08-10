@@ -1,0 +1,1642 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DPDK Dataplane Platform · Architecture Canvas</title>
+  <style>
+    :root {
+      --ink: #17323d;
+      --muted: #667b84;
+      --line: #cbd8dc;
+      --paper: #fbfcfc;
+      --wash: #edf3f4;
+      --teal: #137b75;
+      --teal-soft: #e8f5f2;
+      --navy: #173e49;
+      --blue: #317db3;
+      --blue-soft: #eaf3fb;
+      --green: #288b6f;
+      --green-soft: #eaf6f0;
+      --orange: #e47a26;
+      --orange-soft: #fff2e7;
+      --violet: #745aa7;
+      --violet-soft: #f1edf9;
+      --red: #c95050;
+      --red-soft: #fbecec;
+      --shadow: 0 20px 50px rgba(21, 55, 65, .12);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 15% 15%, rgba(19, 123, 117, .08), transparent 28%),
+        linear-gradient(180deg, #e9eff1 0%, #dfe8eb 100%);
+      font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+    }
+
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      height: 64px;
+      padding: 0 28px;
+      color: #eaf6f4;
+      background: rgba(18, 54, 64, .96);
+      box-shadow: 0 8px 26px rgba(15, 42, 50, .2);
+      backdrop-filter: blur(12px);
+    }
+    .toolbar strong { font-size: 18px; letter-spacing: .3px; }
+    .toolbar span { color: #a9c7c8; font-size: 13px; }
+    .toolbar nav { margin-left: auto; display: flex; gap: 7px; }
+    .toolbar a {
+      min-width: 30px;
+      padding: 6px 8px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px;
+      color: #d7e9e8;
+      font: 700 11px/1 "Consolas", monospace;
+      text-align: center;
+      text-decoration: none;
+    }
+    .toolbar a:hover { background: #137b75; border-color: #62b7ae; }
+
+    .board { padding: 38px 24px 80px; display: flex; flex-direction: column; }
+    #c00 { order: 0; } #c01 { order: 1; } #c02 { order: 2; } #c03 { order: 3; }
+    #c04 { order: 4; } #c05 { order: 5; } #c06 { order: 6; } #c07 { order: 7; }
+    #c08 { order: 8; } #c09 { order: 9; } #c10 { order: 10; } #c11 { order: 11; } #c12 { order: 12; }
+    #c13 { order: 13; } #c14 { order: 14; } #c15 { order: 15; } #c16 { order: 16; }
+    .canvas-shell {
+      width: 1600px;
+      height: 900px;
+      margin: 0 auto 54px;
+    }
+    .canvas {
+      position: relative;
+      width: 1600px;
+      height: 900px;
+      overflow: hidden;
+      background:
+        linear-gradient(rgba(255,255,255,.86), rgba(255,255,255,.86)),
+        repeating-linear-gradient(135deg, rgba(19,123,117,.035) 0 1px, transparent 1px 10px);
+      border: 1px solid #b9c9ce;
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+    }
+    .canvas::after {
+      content: "";
+      position: absolute;
+      inset: auto 0 0;
+      height: 7px;
+      background: linear-gradient(90deg, var(--teal) 0 28%, var(--blue) 28% 52%, var(--orange) 52% 70%, var(--navy) 70% 100%);
+    }
+
+    .head {
+      height: 112px;
+      padding: 21px 28px;
+      display: grid;
+      grid-template-columns: 76px 1fr auto;
+      align-items: center;
+      gap: 24px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(251,252,252,.92);
+    }
+    .num {
+      width: 76px;
+      height: 76px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: var(--teal);
+      border-radius: 11px;
+      font: 800 28px/1 "Segoe UI", sans-serif;
+      box-shadow: inset 0 -8px 18px rgba(7,72,69,.18);
+    }
+    .title h1 { margin: 0 0 7px; font-size: 28px; line-height: 1.15; letter-spacing: .2px; }
+    .title p { margin: 0; color: var(--muted); font-size: 15px; }
+    .tag {
+      padding: 10px 15px;
+      color: #17685f;
+      background: var(--teal-soft);
+      border: 1px solid #d1ebe6;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .stage {
+      height: 780px;
+      padding: 18px 22px 22px;
+      display: grid;
+      grid-template-columns: 1fr 432px;
+      gap: 18px;
+    }
+    .main-panel, .side-panel {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(252,253,253,.88);
+    }
+    .main-panel { padding: 22px 22px 52px; }
+    .panel-kicker {
+      margin-bottom: 5px;
+      color: var(--navy);
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: .2px;
+    }
+    .panel-desc { color: var(--muted); font-size: 13px; }
+    .side-panel { padding-top: 89px; }
+    .side-head {
+      position: absolute;
+      inset: 0 0 auto;
+      height: 72px;
+      padding: 13px 18px;
+      color: white;
+      background: var(--navy);
+    }
+    .side-head small { display: block; margin-bottom: 6px; color: #a9c9cf; font-size: 11px; font-weight: 800; }
+    .side-head strong { font-size: 19px; }
+    .insight {
+      margin: 0 13px 10px;
+      padding: 12px 13px;
+      border-left: 4px solid var(--teal);
+      background: var(--teal-soft);
+    }
+    .insight.blue { border-left-color: var(--blue); background: var(--blue-soft); }
+    .insight.orange { border-left-color: var(--orange); background: var(--orange-soft); }
+    .insight.violet { border-left-color: var(--violet); background: var(--violet-soft); }
+    .insight.red { border-left-color: var(--red); background: var(--red-soft); }
+    .insight b { display: block; margin-bottom: 5px; font-size: 12px; }
+    .insight p { margin: 0; color: #38535d; font-size: 12px; line-height: 1.55; }
+    .mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+
+    .legend {
+      position: absolute;
+      left: 22px;
+      bottom: 16px;
+      display: flex;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .legend span { padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
+    .legend i { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 50%; }
+
+    .module {
+      min-height: 66px;
+      padding: 11px 13px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      border: 2px solid #b9c9ce;
+      border-radius: 9px;
+      background: #f8fafb;
+      text-align: center;
+    }
+    .module strong { font-size: 14px; line-height: 1.25; }
+    .module small { margin-top: 5px; color: var(--muted); font: 11px/1.2 "Cascadia Mono", "Consolas", monospace; }
+    .module.teal { border-color: var(--teal); background: var(--teal-soft); }
+    .module.blue { border-color: var(--blue); background: var(--blue-soft); }
+    .module.green { border-color: var(--green); background: var(--green-soft); }
+    .module.orange { border-color: var(--orange); background: var(--orange-soft); }
+    .module.violet { border-color: var(--violet); background: var(--violet-soft); }
+    .module.navy { border-color: var(--navy); background: #e7eff1; }
+    .module.red { border-color: var(--red); background: var(--red-soft); }
+
+    .flow {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .flow > .module { flex: 1; }
+    .arr {
+      position: relative;
+      flex: 0 0 22px;
+      height: 2px;
+      background: #8ea3aa;
+    }
+    .arr::after {
+      content: "";
+      position: absolute;
+      right: -1px;
+      top: -4px;
+      border-left: 7px solid #8ea3aa;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+    }
+    .down-arr {
+      width: 2px;
+      height: 18px;
+      margin: 3px auto;
+      position: relative;
+      background: #8ea3aa;
+    }
+    .down-arr::after {
+      content: "";
+      position: absolute;
+      left: -4px;
+      bottom: -1px;
+      border-top: 7px solid #8ea3aa;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+    }
+
+    .layer-stack { margin-top: 18px; }
+    .layer {
+      display: grid;
+      grid-template-columns: 142px 1fr;
+      gap: 12px;
+      align-items: stretch;
+      min-height: 77px;
+    }
+    .layer-label {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 10px 13px;
+      color: white;
+      background: var(--navy);
+      border-radius: 8px;
+    }
+    .layer-label strong { font-size: 13px; }
+    .layer-label small { margin-top: 4px; color: #bcd2d6; font-size: 10px; }
+    .layer-modules { display: grid; gap: 8px; }
+    .cols-3 { grid-template-columns: repeat(3, 1fr); }
+    .cols-4 { grid-template-columns: repeat(4, 1fr); }
+    .cols-5 { grid-template-columns: repeat(5, 1fr); }
+    .cols-6 { grid-template-columns: repeat(6, 1fr); }
+
+    .section-label {
+      margin: 18px 0 9px;
+      color: var(--navy);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+    }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .group {
+      padding: 14px;
+      border: 1px dashed #a9bbc1;
+      border-radius: 10px;
+      background: rgba(238,244,245,.65);
+    }
+    .group-title { margin-bottom: 11px; color: var(--navy); font-size: 12px; font-weight: 800; }
+
+    .rail {
+      position: relative;
+      margin-top: 28px;
+      padding: 15px 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f5f8f9;
+    }
+    .rail::before {
+      content: "";
+      position: absolute;
+      left: 28px;
+      right: 28px;
+      top: 50%;
+      height: 2px;
+      background: #9eb1b7;
+    }
+    .rail .flow { position: relative; z-index: 1; }
+
+    .stamp {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      color: #28685f;
+      background: #e9f6f2;
+      border: 1px solid #b9e1d8;
+      border-radius: 5px;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .stamp::before { content: "✓"; }
+
+    .tiny { font-size: 10px; color: var(--muted); }
+
+    /* The second-level canvases carry denser state-machine material. */
+    #c13 .main-panel, #c14 .main-panel, #c15 .main-panel, #c16 .main-panel { padding-top: 18px; padding-bottom: 38px; }
+    #c13 .section-label, #c14 .section-label, #c15 .section-label, #c16 .section-label { margin: 10px 0 6px; }
+    #c13 .module, #c14 .module, #c15 .module, #c16 .module { min-height: 52px; padding: 8px 10px; }
+    #c13 .module strong, #c14 .module strong, #c15 .module strong, #c16 .module strong { font-size: 13px; }
+    #c13 .module small, #c14 .module small, #c15 .module small, #c16 .module small { margin-top: 3px; font-size: 10px; }
+    #c13 .group, #c14 .group, #c15 .group, #c16 .group { padding: 10px; }
+    #c13 .group-title, #c14 .group-title, #c15 .group-title, #c16 .group-title { margin-bottom: 7px; }
+    #c13 .group p.tiny, #c14 .group p.tiny, #c15 .group p.tiny, #c16 .group p.tiny { margin: 7px 0 0; }
+    #c13 .down-arr, #c14 .down-arr, #c15 .down-arr, #c16 .down-arr { height: 12px; margin: 2px auto; }
+
+    @media (max-width: 1660px) {
+      .board { width: 1660px; }
+    }
+    @media print {
+      .toolbar { display: none; }
+      .board { padding: 0; }
+      .canvas-shell { margin: 0; page-break-after: always; }
+      .canvas { box-shadow: none; border-radius: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <strong>DPDK Dataplane Platform · Architecture Canvas</strong>
+    <span>V4 · 平台级视觉设计稿 · 点击编号跳转</span>
+    <nav>
+      <a href="#c00">00</a><a href="#c01">01</a><a href="#c02">02</a><a href="#c03">03</a>
+      <a href="#c04">04</a><a href="#c05">05</a><a href="#c06">06</a><a href="#c07">07</a>
+      <a href="#c08">08</a><a href="#c09">09</a><a href="#c10">10</a><a href="#c11">11</a><a href="#c12">12</a>
+      <a href="#c13">13</a><a href="#c14">14</a><a href="#c15">15</a><a href="#c16">16</a>
+    </nav>
+  </div>
+  <main class="board">
+
+    <!-- 00 · Platform overview -->
+    <div class="canvas-shell" id="c00" data-file="00-platform-overview">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">00</div>
+          <div class="title">
+            <h1>DPDK Dataplane Platform · 平台总览</h1>
+            <p>声明式意图 → 能力感知规划 → 事务提交 → 多后端执行 → 持续收敛</p>
+          </div>
+          <div class="tag">平台，而不是增强版 l2fwd</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Northbound → Control → Execution → Runtime → Device</div>
+            <div class="panel-desc">控制面管理“状态和变化”，数据面只执行已经发布的稳定版本。</div>
+            <div class="layer-stack">
+              <div class="layer">
+                <div class="layer-label"><strong>入口与意图</strong><small>NORTHBOUND</small></div>
+                <div class="layer-modules cols-3">
+                  <div class="module teal"><strong>dppctl / SDK</strong><small>operator & automation</small></div>
+                  <div class="module teal"><strong>Management API</strong><small>auth · validate · idempotency</small></div>
+                  <div class="module teal"><strong>Versioned Intent</strong><small>tenant · policy · topology</small></div>
+                </div>
+              </div>
+              <div class="down-arr"></div>
+              <div class="layer">
+                <div class="layer-label"><strong>平台控制核</strong><small>CONTROL CORE</small></div>
+                <div class="layer-modules cols-5">
+                  <div class="module blue"><strong>Model / State</strong><small>desired · planned · actual</small></div>
+                  <div class="module blue"><strong>Topology</strong><small>ports · reps · switch domain</small></div>
+                  <div class="module blue"><strong>Planner</strong><small>placement · compile</small></div>
+                  <div class="module orange"><strong>Transaction</strong><small>prepare · commit · rollback</small></div>
+                  <div class="module violet"><strong>Reconciler</strong><small>observe · diff · repair</small></div>
+                </div>
+              </div>
+              <div class="down-arr"></div>
+              <div class="layer">
+                <div class="layer-label"><strong>执行后端</strong><small>BACKENDS</small></div>
+                <div class="layer-modules cols-3">
+                  <div class="module green"><strong>Software Backend</strong><small>immutable snapshot</small></div>
+                  <div class="module orange"><strong>rte_flow Backend</strong><small>validate · create · query</small></div>
+                  <div class="module violet"><strong>Vendor Backend</strong><small>future extension</small></div>
+                </div>
+              </div>
+              <div class="down-arr"></div>
+              <div class="layer">
+                <div class="layer-label"><strong>运行时</strong><small>RUNTIME</small></div>
+                <div class="layer-modules cols-4">
+                  <div class="module green"><strong>SW Snapshot</strong><small>generation N</small></div>
+                  <div class="module green"><strong>RTC Workers</strong><small>queue per lcore</small></div>
+                  <div class="module orange"><strong>Flow Objects</strong><small>rules · counters · meters</small></div>
+                  <div class="module navy"><strong>Telemetry</strong><small>metrics · audit · health</small></div>
+                </div>
+              </div>
+              <div class="down-arr"></div>
+              <div class="layer">
+                <div class="layer-label"><strong>设备与交换域</strong><small>DEVICE FABRIC</small></div>
+                <div class="layer-modules cols-5">
+                  <div class="module"><strong>Physical Port</strong><small>ethdev / PF</small></div>
+                  <div class="module"><strong>VF / SF</strong><small>tenant endpoint</small></div>
+                  <div class="module"><strong>Representor</strong><small>control endpoint</small></div>
+                  <div class="module"><strong>Embedded Switch</strong><small>transfer domain</small></div>
+                  <div class="module"><strong>SmartNIC / DPU</strong><small>host · arm · hardware</small></div>
+                </div>
+              </div>
+            </div>
+            <div class="legend">
+              <span><i style="background:var(--teal)"></i>用户意图</span>
+              <span><i style="background:var(--blue)"></i>平台状态</span>
+              <span><i style="background:var(--orange)"></i>硬件对象</span>
+              <span><i style="background:var(--green)"></i>软件执行</span>
+              <span><i style="background:var(--violet)"></i>状态收敛</span>
+            </div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>PRODUCT IDENTITY</small><strong>一个持续运行的数据面平台</strong></div>
+            <div class="insight"><b>平台职责</b><p>接受网络意图，维护版本化状态，按设备能力选择执行位置，并保证失败可恢复。</p></div>
+            <div class="insight blue"><b>三份事实</b><p><span class="mono">Desired</span> 是目标，<span class="mono">Planned</span> 是执行方案，<span class="mono">Actual</span> 是已观测现实。</p></div>
+            <div class="insight orange"><b>硬件语义</b><p><span class="mono">rte_flow</span> 与 embedded-switch rule 是控制面创建的对象，不是 worker 的逐包 stage。</p></div>
+            <div class="insight violet"><b>持续收敛</b><p>设备重置、热插拔、规则老化或进程恢复后，由 Reconciler 重建一致状态。</p></div>
+            <div class="insight red"><b>明确排除</b><p>不把 PMD 调用泄漏到上层，不承诺所有策略都能卸载，也不伪装“软硬件逐包 fallback”。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 08 · Backend framework -->
+    <div class="canvas-shell" id="c08" data-file="08-backend-framework">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">08</div>
+          <div class="title"><h1>Backend Framework · 多执行后端</h1><p>用统一生命周期承载软件快照、rte_flow 对象和未来 vendor backend</p></div>
+          <div class="tag">统一语义，不强行统一能力</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Canonical Artifact → Backend Contract → Native Objects → Observed State</div>
+            <div class="panel-desc">每个 backend 公开真实能力、验证结果和对象状态，不对上层伪装完全等价。</div>
+
+            <div class="section-label">统一 Backend Contract</div>
+            <div class="flow">
+              <div class="module blue"><strong>Capability</strong><small>supports(artifact)</small></div>
+              <div class="module blue"><strong>Prepare</strong><small>validate + reserve</small></div>
+              <div class="module orange"><strong>Apply</strong><small>create + publish</small></div>
+              <div class="module violet"><strong>Observe</strong><small>query + health</small></div>
+              <div class="module red"><strong>Rollback / Delete</strong><small>compensate + release</small></div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="grid-3">
+              <div class="group" style="border-color:var(--green)">
+                <div class="group-title">SOFTWARE BACKEND</div>
+                <div class="module green"><strong>SW Compiler</strong><small>IR → tables / actions</small></div>
+                <div class="down-arr"></div>
+                <div class="module green"><strong>Immutable Snapshot</strong><small>generation + ref lifecycle</small></div>
+                <div class="down-arr"></div>
+                <div class="module green"><strong>Worker Publish</strong><small>atomic pointer swap</small></div>
+              </div>
+              <div class="group" style="border-color:var(--orange)">
+                <div class="group-title">RTE_FLOW BACKEND</div>
+                <div class="module orange"><strong>Flow Compiler</strong><small>IR → pattern / actions</small></div>
+                <div class="down-arr"></div>
+                <div class="module orange"><strong>Validate / Create</strong><small>PMD authoritative result</small></div>
+                <div class="down-arr"></div>
+                <div class="module orange"><strong>Flow Registry</strong><small>handle + counter + owner</small></div>
+              </div>
+              <div class="group" style="border-color:var(--violet)">
+                <div class="group-title">VENDOR BACKEND</div>
+                <div class="module violet"><strong>Vendor Compiler</strong><small>IR → native program</small></div>
+                <div class="down-arr"></div>
+                <div class="module violet"><strong>Native Transaction</strong><small>SDK / firmware API</small></div>
+                <div class="down-arr"></div>
+                <div class="module violet"><strong>Object Adapter</strong><small>stable platform identity</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">对象登记与归属</div>
+            <div class="flow">
+              <div class="module"><strong>Platform Object ID</strong><small>stable resource key</small></div><i class="arr"></i>
+              <div class="module"><strong>Backend Object ID</strong><small>opaque native identity</small></div><i class="arr"></i>
+              <div class="module"><strong>Owner Generation</strong><small>D17 / P17.2 / A17</small></div><i class="arr"></i>
+              <div class="module"><strong>Observed Condition</strong><small>ready · missing · stale</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--green)"></i>软件对象</span><span><i style="background:var(--orange)"></i>rte_flow 对象</span><span><i style="background:var(--violet)"></i>厂商扩展</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE G</small><strong>Backend Framework</strong></div>
+            <div class="insight"><b>统一部分</b><p>能力查询、prepare/apply/observe/delete、错误分类、对象归属和幂等语义。</p></div>
+            <div class="insight orange"><b>差异保留</b><p>软件快照、rte_flow 和 vendor 对象的原子性、容量与可查询能力可以不同。</p></div>
+            <div class="insight blue"><b>事务参与者</b><p>backend 是 Transaction Engine 的 participant，不拥有跨后端提交顺序。</p></div>
+            <div class="insight violet"><b>可恢复性</b><p>进程重启后可用稳定资源 ID 和 native metadata 重新关联实际对象。</p></div>
+            <div class="insight red"><b>禁止泄漏</b><p>PMD errno、handle 和 vendor SDK 结构必须转换为平台错误与 opaque reference。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 09 · Software dataplane -->
+    <div class="canvas-shell" id="c09" data-file="09-software-dataplane">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">09</div>
+          <div class="title"><h1>Software Dataplane · 稳定逐包热路径</h1><p>每队列单 worker 的 run-to-completion 模型，只读取已发布的不可变快照</p></div>
+          <div class="tag">无锁热路径 · generation-aware</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">RX Burst → Safe Parse → Classify → Snapshot Lookup → Action → TX Burst</div>
+            <div class="panel-desc">软件路径处理真正送达 CPU queue 的报文；已在硬件中完成的 flow 通常不会再次进入 worker。</div>
+
+            <div class="section-label">单 worker 的一次 burst</div>
+            <div class="rail">
+              <div class="flow">
+                <div class="module"><strong>RX Burst</strong><small>queue ownership</small></div><i class="arr"></i>
+                <div class="module green"><strong>Parser</strong><small>bounds-safe headers</small></div><i class="arr"></i>
+                <div class="module green"><strong>Classifier</strong><small>exact / ACL / table</small></div><i class="arr"></i>
+                <div class="module blue"><strong>Snapshot N</strong><small>read-only policy graph</small></div><i class="arr"></i>
+                <div class="module green"><strong>Actions</strong><small>forward · drop · mark</small></div><i class="arr"></i>
+                <div class="module"><strong>TX Buffer</strong><small>burst + retry policy</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">队列与 NUMA 布局</div>
+            <div class="grid-2">
+              <div class="group">
+                <div class="group-title">NUMA SOCKET 0</div>
+                <div class="grid-3">
+                  <div class="module navy"><strong>Port 0 / Q0</strong><small>lcore 2</small></div>
+                  <div class="module navy"><strong>Port 0 / Q1</strong><small>lcore 3</small></div>
+                  <div class="module"><strong>Mempool S0</strong><small>local allocation</small></div>
+                  <div class="module green"><strong>Worker Stats</strong><small>per-lcore atomic</small></div>
+                  <div class="module green"><strong>TX Buffers</strong><small>per destination</small></div>
+                  <div class="module blue"><strong>Snapshot Ref</strong><small>published generation</small></div>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">NUMA SOCKET 1</div>
+                <div class="grid-3">
+                  <div class="module navy"><strong>Port 1 / Q0</strong><small>lcore 6</small></div>
+                  <div class="module navy"><strong>Port 1 / Q1</strong><small>lcore 7</small></div>
+                  <div class="module"><strong>Mempool S1</strong><small>local allocation</small></div>
+                  <div class="module green"><strong>Worker Stats</strong><small>per-lcore atomic</small></div>
+                  <div class="module green"><strong>TX Buffers</strong><small>per destination</small></div>
+                  <div class="module blue"><strong>Snapshot Ref</strong><small>published generation</small></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="section-label">快照发布</div>
+            <div class="flow">
+              <div class="module orange"><strong>Compile N+1</strong><small>off hot path</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Publish Pointer</strong><small>atomic generation swap</small></div><i class="arr"></i>
+              <div class="module green"><strong>Workers Observe</strong><small>burst boundary</small></div><i class="arr"></i>
+              <div class="module violet"><strong>Retire N</strong><small>grace period / refcount</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--green)"></i>逐包执行</span><span><i style="background:var(--blue)"></i>不可变快照</span><span><i style="background:var(--orange)"></i>离线编译</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE H</small><strong>Software Dataplane</strong></div>
+            <div class="insight"><b>线程模型</b><p>每个 RX queue 只有一个 owner lcore，run-to-completion 避免跨核共享包处理状态。</p></div>
+            <div class="insight blue"><b>一致性边界</b><p>worker 在 burst 边界观察 generation；同一个 packet 始终使用同一 snapshot。</p></div>
+            <div class="insight orange"><b>解析原则</b><p>支持多段 mbuf、长度检查、双 VLAN、ARP、IPv4、UDP/TCP，并显式处理异常包。</p></div>
+            <div class="insight violet"><b>可观测</b><p>per-lcore counters 在热路径累积，控制线程异步聚合，不引入全局锁。</p></div>
+            <div class="insight red"><b>热路径禁区</b><p>RPC、日志格式化、设备探测、rte_flow create、动态内存和控制面锁。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 10 · Runtime and device manager -->
+    <div class="canvas-shell" id="c10" data-file="10-runtime-device-manager">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">10</div>
+          <div class="title"><h1>Runtime / Device Manager · 进程与设备生命周期</h1><p>把 EAL、端口、队列、mempool、worker 和设备事件组织成可恢复运行时</p></div>
+          <div class="tag">资源所有权必须唯一</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Bootstrap → Discover → Allocate → Configure → Start → Supervise → Stop</div>
+            <div class="panel-desc">启动顺序和关闭顺序均由资源依赖图驱动，设备变化进入受控状态机。</div>
+
+            <div class="section-label">启动状态机</div>
+            <div class="flow">
+              <div class="module teal"><strong>EAL Ready</strong><small>args + lcores + memory</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Inventory Ready</strong><small>ports + reps + topology</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Resources Ready</strong><small>mempool + queues</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Ports Started</strong><small>configure + RSS + link</small></div><i class="arr"></i>
+              <div class="module green"><strong>Workers Running</strong><small>health supervised</small></div>
+            </div>
+
+            <div class="section-label">进程内部角色</div>
+            <div class="grid-3">
+              <div class="group" style="border-color:var(--blue)">
+                <div class="group-title">CONTROL THREADS</div>
+                <div class="module blue"><strong>Main / Supervisor</strong><small>lifecycle + signals</small></div>
+                <div class="module blue" style="margin-top:8px"><strong>Planner / Txn</strong><small>serialized mutations</small></div>
+                <div class="module violet" style="margin-top:8px"><strong>Reconciler</strong><small>event queue + timers</small></div>
+              </div>
+              <div class="group" style="border-color:var(--green)">
+                <div class="group-title">DATA WORKERS</div>
+                <div class="module green"><strong>RXQ 0 Owner</strong><small>lcore 2 · RTC</small></div>
+                <div class="module green" style="margin-top:8px"><strong>RXQ 1 Owner</strong><small>lcore 3 · RTC</small></div>
+                <div class="module green" style="margin-top:8px"><strong>RXQ N Owner</strong><small>lcore N · RTC</small></div>
+              </div>
+              <div class="group" style="border-color:var(--orange)">
+                <div class="group-title">DEVICE OBJECTS</div>
+                <div class="module orange"><strong>Port / Queue Registry</strong><small>ownership + generation</small></div>
+                <div class="module orange" style="margin-top:8px"><strong>Flow Registry</strong><small>handle + owner + health</small></div>
+                <div class="module orange" style="margin-top:8px"><strong>Event Adapter</strong><small>reset + hotplug + link</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">设备异常路径</div>
+            <div class="flow">
+              <div class="module red"><strong>Device Event</strong><small>reset / removal</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Quiesce</strong><small>stop affected owners</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Rediscover</strong><small>new topology generation</small></div><i class="arr"></i>
+              <div class="module violet"><strong>Reconcile</strong><small>replan + rebuild</small></div><i class="arr"></i>
+              <div class="module green"><strong>Resume</strong><small>health verified</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--blue)"></i>控制角色</span><span><i style="background:var(--green)"></i>数据 worker</span><span><i style="background:var(--orange)"></i>设备对象</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE I</small><strong>Runtime / Device Manager</strong></div>
+            <div class="insight"><b>所有权</b><p>queue、flow handle、mempool 与 worker 都有唯一 owner 和明确释放顺序。</p></div>
+            <div class="insight blue"><b>生命周期</b><p>初始化分阶段提交；任一阶段失败都只回滚已经成功的资源。</p></div>
+            <div class="insight orange"><b>设备事件</b><p>回调只记录事件，真正的停止、重建和发布在受控线程完成。</p></div>
+            <div class="insight violet"><b>线程协作</b><p>控制面通过 generation/snapshot 与 worker 通信，不共享可变策略对象。</p></div>
+            <div class="insight red"><b>关闭语义</b><p>先停止接收新变更，再 quiesce worker，最后按依赖反序释放设备对象。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 11 · Observability -->
+    <div class="canvas-shell" id="c11" data-file="11-observability-operations">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">11</div>
+          <div class="title"><h1>Observability / Operations · 可运营的数据面</h1><p>把请求、计划、事务、对象、报文和设备事件串成可查询的因果链</p></div>
+          <div class="tag">不仅有 counters，还能解释为什么</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Signals → Correlation → Stores → Views → Operations</div>
+            <div class="panel-desc">指标用于发现，事件用于时间线，审计用于追责，Explain 用于理解决策。</div>
+
+            <div class="section-label">信号来源</div>
+            <div class="grid-4">
+              <div class="module green"><strong>Worker Metrics</strong><small>packets · drops · latency</small></div>
+              <div class="module orange"><strong>Backend Metrics</strong><small>flows · counters · errors</small></div>
+              <div class="module blue"><strong>Control Events</strong><small>plan · txn · reconcile</small></div>
+              <div class="module violet"><strong>Device Events</strong><small>link · reset · hotplug</small></div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="group">
+              <div class="group-title">统一关联上下文</div>
+              <div class="flow">
+                <div class="module navy"><strong>tenant_id</strong><small>isolation</small></div>
+                <div class="module navy"><strong>resource_id</strong><small>stable identity</small></div>
+                <div class="module navy"><strong>generation</strong><small>version lineage</small></div>
+                <div class="module navy"><strong>transaction_id</strong><small>change boundary</small></div>
+                <div class="module navy"><strong>backend_object_id</strong><small>native link</small></div>
+              </div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="grid-4">
+              <div class="group" style="border-color:var(--green)"><div class="group-title">METRICS</div><div class="module green"><strong>Time Series</strong><small>rates · saturation · SLO</small></div></div>
+              <div class="group" style="border-color:var(--blue)"><div class="group-title">EVENTS</div><div class="module blue"><strong>Event Journal</strong><small>ordered lifecycle</small></div></div>
+              <div class="group" style="border-color:var(--orange)"><div class="group-title">AUDIT</div><div class="module orange"><strong>Audit Log</strong><small>actor · intent · result</small></div></div>
+              <div class="group" style="border-color:var(--violet)"><div class="group-title">SNAPSHOTS</div><div class="module violet"><strong>State History</strong><small>desired · planned · actual</small></div></div>
+            </div>
+
+            <div class="section-label">运维视图与动作</div>
+            <div class="flow">
+              <div class="module"><strong>Health Dashboard</strong><small>ready / degraded / blocked</small></div>
+              <div class="module"><strong>Explain Placement</strong><small>why HW / SW / reject</small></div>
+              <div class="module"><strong>Trace Resource</strong><small>intent → native object</small></div>
+              <div class="module"><strong>Diagnostics Bundle</strong><small>safe support package</small></div>
+              <div class="module"><strong>Controlled Repair</strong><small>retry / drain / rebuild</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--green)"></i>性能信号</span><span><i style="background:var(--blue)"></i>控制事件</span><span><i style="background:var(--orange)"></i>审计</span><span><i style="background:var(--violet)"></i>状态历史</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE J</small><strong>Observability / Operations</strong></div>
+            <div class="insight"><b>四类信息</b><p>Metrics 回答多少，Events 回答何时，Audit 回答谁做的，Explain 回答为什么。</p></div>
+            <div class="insight blue"><b>关键 SLO</b><p>提交延迟、收敛延迟、规则创建失败率、worker drop、队列饱和和资源余量。</p></div>
+            <div class="insight orange"><b>基数控制</b><p>高基数 resource_id 进入事件与查询索引，不直接污染所有时序指标标签。</p></div>
+            <div class="insight violet"><b>安全诊断</b><p>诊断包包含版本、拓扑、能力、状态和错误，但默认脱敏租户 payload。</p></div>
+            <div class="insight red"><b>避免假健康</b><p>进程存活不等于数据面 Ready；健康度必须覆盖端口、队列、对象和 generation。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 12 · Deployment -->
+    <div class="canvas-shell" id="c12" data-file="12-host-smartnic-dpu-deployment">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">12</div>
+          <div class="title"><h1>Host / SmartNIC / DPU · 部署画布</h1><p>同一控制模型适配三种执行拓扑，差异由 agent、backend 和设备能力承载</p></div>
+          <div class="tag">控制一致，执行位置可变</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Deployment Profiles · Host-only / SmartNIC Offload / DPU Split</div>
+            <div class="panel-desc">平台对象和 generation 跨部署保持一致，native execution object 随环境改变。</div>
+
+            <div class="grid-3" style="margin-top:20px">
+              <div class="group" style="border:2px solid var(--green)">
+                <div class="group-title">PROFILE A · HOST-ONLY</div>
+                <div class="module blue"><strong>Host Control Plane</strong><small>API · planner · txn · reconcile</small></div>
+                <div class="down-arr"></div>
+                <div class="module green"><strong>Host SW Dataplane</strong><small>workers + snapshot</small></div>
+                <div class="down-arr"></div>
+                <div class="module"><strong>Standard NIC</strong><small>RX/TX · RSS · basic flow</small></div>
+                <p class="tiny">用于通用 NIC、开发环境和软件策略优先的场景。</p>
+              </div>
+
+              <div class="group" style="border:2px solid var(--orange)">
+                <div class="group-title">PROFILE B · SMARTNIC OFFLOAD</div>
+                <div class="module blue"><strong>Host Control Plane</strong><small>topology + placement + txn</small></div>
+                <div class="down-arr"></div>
+                <div class="module orange"><strong>rte_flow Backend</strong><small>host PMD control</small></div>
+                <div class="down-arr"></div>
+                <div class="module orange"><strong>Embedded Switch</strong><small>representor + transfer rules</small></div>
+                <div class="down-arr"></div>
+                <div class="module"><strong>PF / VF / SF</strong><small>tenant endpoints</small></div>
+              </div>
+
+              <div class="group" style="border:2px solid var(--violet)">
+                <div class="group-title">PROFILE C · DPU SPLIT</div>
+                <div class="module blue"><strong>Central / Host Manager</strong><small>intent + global policy</small></div>
+                <div class="down-arr"></div>
+                <div class="module violet"><strong>DPU Agent</strong><small>local txn + reconcile</small></div>
+                <div class="down-arr"></div>
+                <div class="grid-2">
+                  <div class="module green"><strong>ARM Workers</strong><small>software path</small></div>
+                  <div class="module orange"><strong>HW Backend</strong><small>eswitch pipeline</small></div>
+                </div>
+                <div class="down-arr"></div>
+                <div class="module"><strong>Host VF / Uplink</strong><small>isolated endpoints</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">跨节点控制契约</div>
+            <div class="flow">
+              <div class="module teal"><strong>Signed Intent</strong><small>tenant + generation</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Capability Report</strong><small>DPU inventory</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Prepared Result</strong><small>reservation + validation</small></div><i class="arr"></i>
+              <div class="module green"><strong>Commit Token</strong><small>publish generation</small></div><i class="arr"></i>
+              <div class="module violet"><strong>Actual Report</strong><small>health + drift</small></div>
+            </div>
+
+            <div class="section-label">故障域</div>
+            <div class="grid-4">
+              <div class="module"><strong>Host Process</strong><small>restart independent</small></div>
+              <div class="module"><strong>DPU Agent</strong><small>local persistence</small></div>
+              <div class="module"><strong>Firmware / Eswitch</strong><small>reset + replay</small></div>
+              <div class="module"><strong>Control Link</strong><small>disconnect tolerance</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--green)"></i>Host 软件执行</span><span><i style="background:var(--orange)"></i>SmartNIC 硬件执行</span><span><i style="background:var(--violet)"></i>DPU 本地代理</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>DEPLOYMENT CANVAS</small><strong>Host / SmartNIC / DPU</strong></div>
+            <div class="insight"><b>统一对象模型</b><p>同一 Endpoint、Policy 和 generation 在不同部署中保持稳定身份。</p></div>
+            <div class="insight blue"><b>DPU 分层</b><p>全局管理器决定意图和策略；DPU agent 负责本地能力、事务、状态与恢复。</p></div>
+            <div class="insight orange"><b>断链行为</b><p>控制链路中断时继续执行最后 committed generation，拒绝未经授权的新版本。</p></div>
+            <div class="insight violet"><b>恢复</b><p>agent 重连后先上报 Actual 与 capability generation，再执行差异收敛。</p></div>
+            <div class="insight red"><b>安全边界</b><p>租户不能直接控制 representor、eswitch 或 vendor objects；所有动作经授权意图产生。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 04 · Topology and capability -->
+    <div class="canvas-shell" id="c04" data-file="04-topology-capability">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">04</div>
+          <div class="title"><h1>Topology / Capability · 设备事实发现</h1><p>从 PCI、ethdev、representor 和 embedded-switch 关系构建可规划的能力图谱</p></div>
+          <div class="tag">先认清设备，再谈卸载</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Discover → Classify → Correlate → Probe → Inventory</div>
+            <div class="panel-desc">port id 只是运行时句柄；真正的拓扑由稳定设备身份和 switch-domain 关系组成。</div>
+
+            <div class="section-label">发现与能力探测流水线</div>
+            <div class="flow">
+              <div class="module"><strong>Device Scan</strong><small>PCI · auxiliary · devargs</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Ethdev Classify</strong><small>PF · VF · SF · rep</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Identity Correlate</strong><small>stable endpoint identity</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Capability Probe</strong><small>info + validate probes</small></div><i class="arr"></i>
+              <div class="module green"><strong>Inventory</strong><small>versioned snapshot</small></div>
+            </div>
+
+            <div class="section-label">交换域拓扑</div>
+            <div class="grid-2">
+              <div class="group">
+                <div class="group-title">HOST VIEW · OS / PCI / ethdev</div>
+                <div class="grid-3">
+                  <div class="module navy"><strong>PF 0000:03:00.0</strong><small>uplink ethdev</small></div>
+                  <div class="module"><strong>VF 0</strong><small>tenant function</small></div>
+                  <div class="module"><strong>SF 7</strong><small>subfunction</small></div>
+                  <div class="module blue"><strong>PF Representor</strong><small>esw endpoint</small></div>
+                  <div class="module blue"><strong>VF0 Representor</strong><small>esw endpoint</small></div>
+                  <div class="module blue"><strong>SF7 Representor</strong><small>esw endpoint</small></div>
+                </div>
+              </div>
+              <div class="group" style="border-color:var(--orange)">
+                <div class="group-title">EMBEDDED SWITCH · transfer domain #42</div>
+                <div class="module orange"><strong>Switch Domain 42</strong><small>ingress / egress port graph</small></div>
+                <div class="down-arr"></div>
+                <div class="grid-3">
+                  <div class="module orange"><strong>Uplink Port</strong><small>physical wire</small></div>
+                  <div class="module orange"><strong>VF0 vport</strong><small>tenant endpoint</small></div>
+                  <div class="module orange"><strong>SF7 vport</strong><small>service endpoint</small></div>
+                </div>
+                <p class="tiny">只有兼容的 switch domain 端点之间才能规划 transfer rule。</p>
+              </div>
+            </div>
+
+            <div class="section-label">能力画像</div>
+            <div class="grid-4">
+              <div class="module green"><strong>Match / Action</strong><small>supported shapes</small></div>
+              <div class="module green"><strong>Resource Limits</strong><small>flows · counters · meters</small></div>
+              <div class="module green"><strong>Queue / RSS</strong><small>rx · tx · hash · reta</small></div>
+              <div class="module green"><strong>Transfer / Isolation</strong><small>domain semantics</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--blue)"></i>逻辑端点</span><span><i style="background:var(--orange)"></i>交换域对象</span><span><i style="background:var(--green)"></i>可验证能力</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE C</small><strong>Topology / Capability</strong></div>
+            <div class="insight"><b>稳定身份</b><p>组合使用 PCI/aux identity、PF/VF/SF identity、representor 属性与 switch-domain。</p></div>
+            <div class="insight blue"><b>能力来源</b><p>ethdev info 给出声明能力，<span class="mono">rte_flow_validate()</span> 给出具体规则形状的最终答案。</p></div>
+            <div class="insight orange"><b>动态事件</b><p>热插拔、link change、device reset、representor 变化都会生成新的 inventory generation。</p></div>
+            <div class="insight violet"><b>Planner 输入</b><p>拓扑可达性、match/action 支持度、资源余量、NUMA 与隔离约束。</p></div>
+            <div class="insight red"><b>禁止猜测</b><p>不能只根据 port id 或设备型号推断 transfer 关系和规则支持度。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 05 · Planner and compiler -->
+    <div class="canvas-shell" id="c05" data-file="05-planner-compiler">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">05</div>
+          <div class="title"><h1>Planner / Compiler Registry · 能力感知规划</h1><p>把设备无关策略拆成可执行对象，并明确每个对象的落点、代价与失败原因</p></div>
+          <div class="tag">先规划，再调用 backend</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Normalize → Expand → Place → Compile → Validate Plan</div>
+            <div class="panel-desc">Planner 产生确定性的执行计划；Compiler 只负责从 canonical IR 生成后端对象。</div>
+
+            <div class="section-label">规划输入</div>
+            <div class="grid-4">
+              <div class="module teal"><strong>Desired Graph</strong><small>policy + dependencies</small></div>
+              <div class="module blue"><strong>Topology Snapshot</strong><small>endpoint reachability</small></div>
+              <div class="module blue"><strong>Capability Snapshot</strong><small>features + limits</small></div>
+              <div class="module orange"><strong>Current Allocation</strong><small>objects + budget</small></div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="flow">
+              <div class="module blue"><strong>Normalize</strong><small>canonical match/action</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Expand</strong><small>dependency DAG</small></div><i class="arr"></i>
+              <div class="module violet"><strong>Placement Solver</strong><small>constraints + priority</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Compiler Registry</strong><small>backend selection</small></div><i class="arr"></i>
+              <div class="module green"><strong>Executable Plan</strong><small>steps + rollback</small></div>
+            </div>
+
+            <div class="section-label">Placement 决策树</div>
+            <div class="grid-3">
+              <div class="group" style="border-color:var(--orange)">
+                <div class="group-title">PATH A · Hardware Offload</div>
+                <div class="module orange"><strong>rte_flow / Vendor</strong><small>supported + resources available</small></div>
+                <p class="tiny">满足拓扑、原子性、资源和可观测约束后优先卸载。</p>
+              </div>
+              <div class="group" style="border-color:var(--green)">
+                <div class="group-title">PATH B · Software</div>
+                <div class="module green"><strong>SW Snapshot</strong><small>CPU reachable + policy allowed</small></div>
+                <p class="tiny">报文确实会到达 CPU queue，且性能预算允许时选择软件执行。</p>
+              </div>
+              <div class="group" style="border-color:var(--red)">
+                <div class="group-title">PATH C · Rejected</div>
+                <div class="module red"><strong>Unsatisfied</strong><small>explainable constraint failure</small></div>
+                <p class="tiny">不能安全落地时拒绝，并返回缺失能力和冲突约束。</p>
+              </div>
+            </div>
+
+            <div class="section-label">计划产物</div>
+            <div class="flow">
+              <div class="module"><strong>Object DAG</strong><small>create / update / delete</small></div>
+              <div class="module"><strong>Resource Reservation</strong><small>quota + hardware budget</small></div>
+              <div class="module"><strong>Rollback Graph</strong><small>compensating actions</small></div>
+              <div class="module"><strong>Explain Record</strong><small>why this placement</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--blue)"></i>确定性规划</span><span><i style="background:var(--orange)"></i>硬件落点</span><span><i style="background:var(--green)"></i>软件落点</span><span><i style="background:var(--red)"></i>拒绝原因</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE D</small><strong>Planner / Compiler Registry</strong></div>
+            <div class="insight"><b>确定性</b><p>相同 Desired、Topology、Capabilities 和 Allocation 必须产生相同计划。</p></div>
+            <div class="insight blue"><b>可解释</b><p>每个 placement 都记录命中的约束、候选后端和未选择原因。</p></div>
+            <div class="insight orange"><b>验证时机</b><p>具体硬件规则在 prepare 阶段调用 validate；失败可触发重新规划，而不是静默降级。</p></div>
+            <div class="insight violet"><b>扩展机制</b><p>新 backend 注册 capability matcher、compiler、validator 与 lifecycle adapter。</p></div>
+            <div class="insight red"><b>关键边界</b><p>Planner 不直接创建 rte_flow；backend 不自行改变上层策略语义。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 06 · Transaction Git graph -->
+    <div class="canvas-shell" id="c06" data-file="06-transaction-git-graph">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">06</div>
+          <div class="title"><h1>一次策略变更的完整演进</h1><p>用 Git 式分支 / 合流图表达 Desired、Plan、Transaction、Actual 与 Repair 的版本关系</p></div>
+          <div class="tag">generation graph · 非线性调用链</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel" style="padding-left:12px;padding-right:12px">
+            <div class="panel-kicker" style="padding-left:10px">D17 → P17.1 → validate failed → P17.2 → T92 commit → A17 → drift → T93 repair</div>
+            <div class="panel-desc" style="padding-left:10px">分支代表候选方案或失败路径；合流代表经过事务边界后形成新的稳定事实。</div>
+
+            <svg viewBox="0 0 1090 600" width="1090" height="600" role="img" aria-label="Git-style transaction generation graph" style="margin-top:10px">
+              <defs>
+                <filter id="shadow"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#17323d" flood-opacity=".16"/></filter>
+                <marker id="arrow-teal" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#137b75"/></marker>
+                <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#317db3"/></marker>
+                <marker id="arrow-orange" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#e47a26"/></marker>
+                <marker id="arrow-violet" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#745aa7"/></marker>
+              </defs>
+
+              <g font-family="Microsoft YaHei, Segoe UI, sans-serif">
+                <rect x="18" y="18" width="1054" height="64" rx="9" fill="#edf3f4" stroke="#cbd8dc"/>
+                <g font-size="13" font-weight="700" fill="#173e49" text-anchor="middle">
+                  <text x="100" y="47">DESIRED</text><text x="305" y="47">PLAN</text><text x="520" y="47">TRANSACTION</text><text x="750" y="47">ACTUAL</text><text x="960" y="47">RECONCILE</text>
+                </g>
+                <g font-size="10" fill="#667b84" text-anchor="middle">
+                  <text x="100" y="66">用户目标版本</text><text x="305" y="66">候选执行方案</text><text x="520" y="66">原子提交边界</text><text x="750" y="66">已观测现实</text><text x="960" y="66">漂移与修复</text>
+                </g>
+
+                <!-- lane baselines -->
+                <path d="M100 105 L100 545" stroke="#137b75" stroke-width="5" opacity=".22"/>
+                <path d="M305 105 L305 545" stroke="#317db3" stroke-width="5" opacity=".22"/>
+                <path d="M520 105 L520 545" stroke="#e47a26" stroke-width="5" opacity=".22"/>
+                <path d="M750 105 L750 545" stroke="#288b6f" stroke-width="5" opacity=".22"/>
+                <path d="M960 105 L960 545" stroke="#745aa7" stroke-width="5" opacity=".22"/>
+
+                <!-- graph edges -->
+                <path d="M100 126 C155 126 235 150 305 162" fill="none" stroke="#137b75" stroke-width="4" marker-end="url(#arrow-teal)"/>
+                <path d="M305 176 C365 176 445 194 520 215" fill="none" stroke="#317db3" stroke-width="4" marker-end="url(#arrow-blue)"/>
+                <path d="M520 230 C470 258 370 270 305 300" fill="none" stroke="#c95050" stroke-width="4" stroke-dasharray="8 6" marker-end="url(#arrow-blue)"/>
+                <path d="M305 315 C370 330 448 340 520 365" fill="none" stroke="#317db3" stroke-width="4" marker-end="url(#arrow-blue)"/>
+                <path d="M520 380 L520 445" fill="none" stroke="#e47a26" stroke-width="4" marker-end="url(#arrow-orange)"/>
+                <path d="M520 458 C585 458 680 458 750 458" fill="none" stroke="#e47a26" stroke-width="4" marker-end="url(#arrow-orange)"/>
+                <path d="M750 470 C820 470 890 430 960 410" fill="none" stroke="#745aa7" stroke-width="4" marker-end="url(#arrow-violet)"/>
+                <path d="M960 425 C960 472 880 510 750 525" fill="none" stroke="#745aa7" stroke-width="4" marker-end="url(#arrow-violet)"/>
+
+                <!-- nodes -->
+                <g filter="url(#shadow)">
+                  <circle cx="100" cy="126" r="18" fill="#137b75" stroke="white" stroke-width="5"/>
+                  <circle cx="305" cy="162" r="18" fill="#317db3" stroke="white" stroke-width="5"/>
+                  <circle cx="520" cy="215" r="18" fill="#e47a26" stroke="white" stroke-width="5"/>
+                  <circle cx="305" cy="300" r="18" fill="#317db3" stroke="white" stroke-width="5"/>
+                  <circle cx="520" cy="365" r="18" fill="#e47a26" stroke="white" stroke-width="5"/>
+                  <circle cx="520" cy="445" r="18" fill="#e47a26" stroke="white" stroke-width="5"/>
+                  <circle cx="750" cy="458" r="18" fill="#288b6f" stroke="white" stroke-width="5"/>
+                  <circle cx="960" cy="410" r="18" fill="#745aa7" stroke="white" stroke-width="5"/>
+                  <circle cx="750" cy="525" r="18" fill="#288b6f" stroke="white" stroke-width="5"/>
+                </g>
+
+                <!-- labels -->
+                <g font-size="12" fill="#17323d">
+                  <g><rect x="24" y="94" width="56" height="62" rx="7" fill="#e8f5f2" stroke="#9fd0c8"/><text x="52" y="116" font-weight="800" text-anchor="middle">D17</text><text x="52" y="136" font-size="9" text-anchor="middle">intent accepted</text></g>
+                  <g><rect x="329" y="132" width="126" height="58" rx="7" fill="#eaf3fb" stroke="#a8cbe4"/><text x="342" y="154" font-weight="800">P17.1 · HW</text><text x="342" y="174" font-size="9">first candidate</text></g>
+                  <g><rect x="545" y="186" width="152" height="61" rx="7" fill="#fff2e7" stroke="#f0bb91"/><text x="558" y="208" font-weight="800">T92 · PREPARE</text><text x="558" y="228" font-size="9">validate hardware objects</text></g>
+                  <g><rect x="329" y="270" width="157" height="61" rx="7" fill="#fbecec" stroke="#dfa5a5"/><text x="342" y="292" font-weight="800" fill="#a83f3f">P17.1 rejected</text><text x="342" y="312" font-size="9">resource / shape mismatch</text></g>
+                  <g><rect x="131" y="270" width="150" height="61" rx="7" fill="#eaf3fb" stroke="#a8cbe4"/><text x="144" y="292" font-weight="800">P17.2 · MIXED</text><text x="144" y="312" font-size="9">replanned candidate</text></g>
+                  <g><rect x="545" y="337" width="159" height="57" rx="7" fill="#fff2e7" stroke="#f0bb91"/><text x="558" y="358" font-weight="800">T92 · PREPARED</text><text x="558" y="378" font-size="9">all validation passed</text></g>
+                  <g><rect x="545" y="417" width="152" height="57" rx="7" fill="#fff2e7" stroke="#f0bb91"/><text x="558" y="438" font-weight="800">T92 · COMMIT</text><text x="558" y="458" font-size="9">publish in dependency order</text></g>
+                  <g><rect x="773" y="429" width="142" height="58" rx="7" fill="#eaf6f0" stroke="#a9d5c4"/><text x="786" y="451" font-weight="800">A17 · READY</text><text x="786" y="471" font-size="9">generation published</text></g>
+                  <g><rect x="843" y="374" width="94" height="58" rx="7" fill="#f1edf9" stroke="#c6b8e2"/><text x="855" y="396" font-weight="800">DRIFT</text><text x="855" y="416" font-size="9">rule missing</text></g>
+                  <g><rect x="773" y="501" width="174" height="58" rx="7" fill="#eaf6f0" stroke="#a9d5c4"/><text x="786" y="523" font-weight="800">A17' · REPAIRED</text><text x="786" y="543" font-size="9">T93 converged</text></g>
+                </g>
+              </g>
+            </svg>
+            <div class="legend"><span><i style="background:var(--teal)"></i>Desired</span><span><i style="background:var(--blue)"></i>Plan branch</span><span><i style="background:var(--orange)"></i>Transaction</span><span><i style="background:var(--green)"></i>Actual</span><span><i style="background:var(--violet)"></i>Reconcile</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE E · CURRENT GRAPH</small><strong>Transaction / Generation History</strong></div>
+            <div class="insight"><b>1 · 接受目标</b><p><span class="mono">D17</span> 成为新的 Desired，但此时数据面仍执行 A16。</p></div>
+            <div class="insight blue"><b>2 · 候选分支</b><p><span class="mono">P17.1</span> 尝试纯硬件卸载；validate 失败后显式产生 <span class="mono">P17.2</span>。</p></div>
+            <div class="insight orange"><b>3 · 事务合流</b><p>T92 先 prepare 全部对象，再按依赖顺序 commit，最后一次性发布 generation。</p></div>
+            <div class="insight violet"><b>4 · 漂移分支</b><p>硬件对象丢失形成 drift；T93 只修复差异，不改变 D17 的策略语义。</p></div>
+            <div class="insight red"><b>失败事实保留</b><p>失败 Plan 和 Transaction 进入历史图，用于 explain、审计和故障复盘。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 07 · Reconciler -->
+    <div class="canvas-shell" id="c07" data-file="07-reconciler">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">07</div>
+          <div class="title"><h1>Reconciler · 持续状态收敛</h1><p>把设备和进程变化转化为可观测差异，再以最小安全事务修复</p></div>
+          <div class="tag">声明式平台的生命线</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Observe → Normalize Actual → Diff → Classify → Repair → Verify</div>
+            <div class="panel-desc">Reconciler 面向资源状态工作，不直接在事件回调里盲目重建所有对象。</div>
+
+            <div class="section-label">观测源</div>
+            <div class="grid-4">
+              <div class="module violet"><strong>Device Events</strong><small>reset · hotplug · link</small></div>
+              <div class="module violet"><strong>Backend Query</strong><small>flow · counter · aging</small></div>
+              <div class="module violet"><strong>Runtime Health</strong><small>worker · queue · snapshot</small></div>
+              <div class="module violet"><strong>Periodic Scan</strong><small>anti-entropy</small></div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="flow">
+              <div class="module blue"><strong>Actual Normalizer</strong><small>stable resource view</small></div><i class="arr"></i>
+              <div class="module violet"><strong>Diff Engine</strong><small>desired / planned / actual</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Drift Classifier</strong><small>missing · extra · stale · broken</small></div><i class="arr"></i>
+              <div class="module green"><strong>Repair Planner</strong><small>minimal safe delta</small></div>
+            </div>
+
+            <div class="section-label">差异处理策略</div>
+            <div class="grid-4">
+              <div class="group" style="border-color:var(--green)"><div class="group-title">MISSING</div><div class="module green"><strong>Recreate</strong><small>object absent</small></div><p class="tiny">目标存在、实际缺失。</p></div>
+              <div class="group" style="border-color:var(--orange)"><div class="group-title">STALE</div><div class="module orange"><strong>Replace</strong><small>wrong generation</small></div><p class="tiny">对象属于旧版本。</p></div>
+              <div class="group" style="border-color:var(--violet)"><div class="group-title">EXTRA</div><div class="module violet"><strong>Garbage Collect</strong><small>unowned object</small></div><p class="tiny">实际存在但无目标所有者。</p></div>
+              <div class="group" style="border-color:var(--red)"><div class="group-title">BLOCKED</div><div class="module red"><strong>Degrade / Alarm</strong><small>cannot repair safely</small></div><p class="tiny">能力或拓扑已不满足。</p></div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="flow">
+              <div class="module orange"><strong>Repair Transaction</strong><small>T93 · bounded retry</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Post-verify</strong><small>read back actual</small></div><i class="arr"></i>
+              <div class="module green"><strong>Condition Update</strong><small>Ready / Degraded</small></div><i class="arr"></i>
+              <div class="module navy"><strong>Event + Audit</strong><small>explain convergence</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--violet)"></i>观测</span><span><i style="background:var(--orange)"></i>差异处理</span><span><i style="background:var(--green)"></i>恢复稳定</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE F</small><strong>Reconciler</strong></div>
+            <div class="insight"><b>触发方式</b><p>事件触发负责低延迟，周期扫描负责兜底；二者最终进入同一去重队列。</p></div>
+            <div class="insight blue"><b>修复粒度</b><p>以 resource dependency graph 计算最小差异，避免全量 flush 造成数据面抖动。</p></div>
+            <div class="insight orange"><b>重试策略</b><p>指数退避、错误分类、最大尝试次数与 circuit breaker 防止故障风暴。</p></div>
+            <div class="insight violet"><b>一致性</b><p>修复仍然走 Planner 与 Transaction Engine，不开第二条隐蔽执行路径。</p></div>
+            <div class="insight red"><b>无法修复</b><p>标记 Degraded/Blocked，保留 Desired，给出缺失能力与人工处置建议。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 01 · Three loops -->
+    <div class="canvas-shell" id="c01" data-file="01-three-critical-loops">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">01</div>
+          <div class="title"><h1>平台的三条关键闭环</h1><p>配置提交、报文执行、状态收敛彼此解耦，通过版本和观测关联</p></div>
+          <div class="tag">控制面不进入逐包热路径</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Intent Commit Loop / Packet Execution Loop / Reconcile Loop</div>
+            <div class="panel-desc">只有“已提交的 generation”能够被 worker 或硬件执行。</div>
+
+            <div class="section-label">A · 配置提交闭环</div>
+            <div class="rail">
+              <div class="flow">
+                <div class="module teal"><strong>Intent</strong><small>request + precondition</small></div><i class="arr"></i>
+                <div class="module blue"><strong>Desired Gen</strong><small>D17</small></div><i class="arr"></i>
+                <div class="module blue"><strong>Plan</strong><small>P17 · placement</small></div><i class="arr"></i>
+                <div class="module orange"><strong>Transaction</strong><small>T92 · validate / apply</small></div><i class="arr"></i>
+                <div class="module green"><strong>Published</strong><small>A17 + SW snapshot</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">B · 报文执行闭环</div>
+            <div class="rail">
+              <div class="flow">
+                <div class="module"><strong>RX Queue</strong><small>mbuf burst</small></div><i class="arr"></i>
+                <div class="module green"><strong>Parse</strong><small>L2 · VLAN · L3 · L4</small></div><i class="arr"></i>
+                <div class="module green"><strong>Snapshot Lookup</strong><small>generation = 17</small></div><i class="arr"></i>
+                <div class="module green"><strong>Action</strong><small>forward · drop · mark</small></div><i class="arr"></i>
+                <div class="module"><strong>TX / HW</strong><small>burst or offloaded path</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">C · 状态收敛闭环</div>
+            <div class="rail">
+              <div class="flow">
+                <div class="module violet"><strong>Observe</strong><small>device · rules · process</small></div><i class="arr"></i>
+                <div class="module violet"><strong>Actual State</strong><small>observed generation</small></div><i class="arr"></i>
+                <div class="module violet"><strong>Diff</strong><small>desired ≠ actual</small></div><i class="arr"></i>
+                <div class="module orange"><strong>Repair Txn</strong><small>minimal safe delta</small></div><i class="arr"></i>
+                <div class="module green"><strong>Converged</strong><small>health = ready</small></div>
+              </div>
+            </div>
+            <div class="legend">
+              <span><i style="background:var(--blue)"></i>控制面 generation</span>
+              <span><i style="background:var(--green)"></i>逐包稳定快照</span>
+              <span><i style="background:var(--violet)"></i>观测与修复</span>
+            </div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>CURRENT VIEW</small><strong>状态变化，而不是函数调用链</strong></div>
+            <div class="insight"><b>闭环 A 的承诺</b><p>请求成功意味着目标版本已提交；失败必须给出明确阶段、对象和可重试语义。</p></div>
+            <div class="insight blue"><b>闭环 B 的约束</b><p>worker 只读稳定 snapshot，绝不等待数据库、RPC、设备探测或规则创建。</p></div>
+            <div class="insight violet"><b>闭环 C 的价值</b><p>平台不会把一次 API 成功当作永恒事实，而会持续验证硬件和软件实际状态。</p></div>
+            <div class="insight orange"><b>关联键</b><p><span class="mono">tenant / resource_id / generation / transaction_id / backend_object_id</span></p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 02 · Management plane -->
+    <div class="canvas-shell" id="c02" data-file="02-management-plane">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">02</div>
+          <div class="title"><h1>Management Plane · 平台入口</h1><p>所有入口共享认证、幂等、版本前置条件、审计与错误模型</p></div>
+          <div class="tag">请求边界，不是 PMD 包装层</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Clients → API Edge → Command / Query → State Services</div>
+            <div class="panel-desc">上层提交意图和查询状态，不直接拼装 <span class="mono">rte_flow_item/action</span>。</div>
+
+            <div class="section-label">访问通道</div>
+            <div class="flow">
+              <div class="module teal"><strong>dppctl</strong><small>human operator</small></div>
+              <div class="module teal"><strong>Northbound API</strong><small>controller / orchestrator</small></div>
+              <div class="module teal"><strong>SDK</strong><small>automation / CI</small></div>
+              <div class="module teal"><strong>Telemetry Read</strong><small>ops tools</small></div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="group">
+              <div class="group-title">统一 API Edge</div>
+              <div class="grid-4">
+                <div class="module blue"><strong>Identity & RBAC</strong><small>tenant boundary</small></div>
+                <div class="module blue"><strong>Schema Validate</strong><small>semantic checks</small></div>
+                <div class="module blue"><strong>Idempotency</strong><small>request key</small></div>
+                <div class="module blue"><strong>Concurrency Guard</strong><small>if-generation-match</small></div>
+              </div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="grid-2">
+              <div class="group">
+                <div class="group-title">Command Side · 改变目标状态</div>
+                <div class="flow">
+                  <div class="module orange"><strong>Intent Command</strong><small>create · update · delete</small></div><i class="arr"></i>
+                  <div class="module orange"><strong>Admission</strong><small>policy + quota</small></div><i class="arr"></i>
+                  <div class="module orange"><strong>Desired Store</strong><small>new generation</small></div>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">Query Side · 解释平台现实</div>
+                <div class="flow">
+                  <div class="module green"><strong>Resource Query</strong><small>desired / actual</small></div><i class="arr"></i>
+                  <div class="module green"><strong>Explain</strong><small>placement + failure</small></div><i class="arr"></i>
+                  <div class="module green"><strong>Watch / Event</strong><small>ordered changes</small></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="flow">
+              <div class="module navy"><strong>Audit Journal</strong><small>who · what · when</small></div>
+              <div class="module navy"><strong>Error Model</strong><small>stage · object · retryable</small></div>
+              <div class="module navy"><strong>Operation Handle</strong><small>async progress</small></div>
+              <div class="module navy"><strong>API Versioning</strong><small>compatibility contract</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--teal)"></i>外部入口</span><span><i style="background:var(--blue)"></i>平台边界</span><span><i style="background:var(--orange)"></i>写路径</span><span><i style="background:var(--green)"></i>读路径</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE A</small><strong>Management Plane</strong></div>
+            <div class="insight"><b>输入</b><p>面向租户的网络意图、操作请求、查询条件与 generation 前置条件。</p></div>
+            <div class="insight blue"><b>输出</b><p>资源标识、目标 generation、operation handle、结构化错误或解释结果。</p></div>
+            <div class="insight orange"><b>写入原则</b><p>API 只接受并持久化意图；实际执行由 Planner 与 Transaction Engine 接管。</p></div>
+            <div class="insight red"><b>禁止</b><p>不把 ethdev port id、PMD 私有字段或 rte_flow 原生结构作为稳定北向契约。</p></div>
+            <div class="insight violet"><b>项目级能力</b><p>多租户隔离、配额、幂等、乐观并发、异步操作、审计与兼容性。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 03 · Intent, model and state -->
+    <div class="canvas-shell" id="c03" data-file="03-intent-model-state">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">03</div>
+          <div class="title"><h1>Intent / Model / State · 平台事实模型</h1><p>把“用户想要什么”“平台准备怎么做”“设备实际是什么”分开建模</p></div>
+          <div class="tag">Desired ≠ Planned ≠ Actual</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Intent → Canonical Model → Three State Views → Published Generation</div>
+            <div class="panel-desc">所有资源都拥有稳定 ID、版本、所有者、依赖和状态条件。</div>
+
+            <div class="section-label">规范化链路</div>
+            <div class="flow">
+              <div class="module teal"><strong>Tenant Intent</strong><small>policy · endpoint · service</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Canonical Model</strong><small>device-neutral IR</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Dependency Graph</strong><small>resource DAG</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Generation</strong><small>immutable revision</small></div>
+            </div>
+
+            <div class="section-label">三份状态视图</div>
+            <div class="grid-3">
+              <div class="group" style="border-color:var(--teal)">
+                <div class="group-title">DESIRED · 用户目标</div>
+                <div class="module teal"><strong>D17</strong><small>accepted intent</small></div>
+                <p class="tiny">期望存在的 endpoint、policy、attachment、service chain 与约束。</p>
+              </div>
+              <div class="group" style="border-color:var(--blue)">
+                <div class="group-title">PLANNED · 执行方案</div>
+                <div class="module blue"><strong>P17.2</strong><small>placement + compiled artifacts</small></div>
+                <p class="tiny">落到 software、rte_flow 或 vendor backend 的对象、顺序和资源预算。</p>
+              </div>
+              <div class="group" style="border-color:var(--green)">
+                <div class="group-title">ACTUAL · 已观测现实</div>
+                <div class="module green"><strong>A17</strong><small>observed + published</small></div>
+                <p class="tiny">真实端口、规则句柄、counter、worker snapshot、健康度与漂移。</p>
+              </div>
+            </div>
+
+            <div class="section-label">一级资源图谱</div>
+            <div class="grid-4">
+              <div class="module"><strong>Endpoint</strong><small>PF · VF · SF · representor</small></div>
+              <div class="module"><strong>Attachment</strong><small>port · queue · switch domain</small></div>
+              <div class="module"><strong>Policy</strong><small>match · action · constraints</small></div>
+              <div class="module"><strong>Service</strong><small>chain · mirror · meter</small></div>
+              <div class="module"><strong>Topology Node</strong><small>device · domain · relation</small></div>
+              <div class="module"><strong>Capability Set</strong><small>match · action · limits</small></div>
+              <div class="module"><strong>Backend Object</strong><small>flow · counter · snapshot</small></div>
+              <div class="module"><strong>Operation</strong><small>txn · step · condition</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--teal)"></i>目标事实</span><span><i style="background:var(--blue)"></i>计算事实</span><span><i style="background:var(--green)"></i>观测事实</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>MODULE B</small><strong>Intent / Model / State</strong></div>
+            <div class="insight"><b>核心区别</b><p>Desired 不能因为硬件暂时失败而消失；Actual 不能因为 API 成功就被假定存在。</p></div>
+            <div class="insight blue"><b>版本原则</b><p>同一 generation 内对象不可变；新策略产生新版本，通过原子发布切换。</p></div>
+            <div class="insight orange"><b>依赖关系</b><p>规则依赖 endpoint 与 topology；删除按依赖反序执行，创建按正序执行。</p></div>
+            <div class="insight violet"><b>可解释性</b><p>任一 Actual 对象都应能追溯到 Plan、Desired intent 与原始请求。</p></div>
+            <div class="insight red"><b>禁止</b><p>不把进程内指针、rte_flow handle 或短生命周期 port id 当作领域主键。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 13 · Canonical resource model detail -->
+    <div class="canvas-shell" id="c13" data-file="13-canonical-resource-model">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">13</div>
+          <div class="title"><h1>二级细分 · Canonical Resource Model</h1><p>所有资源使用统一外壳、稳定身份和显式依赖；平台状态与后端对象分层保存</p></div>
+          <div class="tag">领域模型，不绑定 DPDK 原生结构</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Resource Envelope = Metadata + Spec + Status + References</div>
+            <div class="panel-desc">北向 API、Planner、Transaction、Reconciler 和 Backend 通过同一个规范模型协作。</div>
+
+            <div class="section-label">资源统一外壳</div>
+            <div class="grid-3">
+              <div class="group" style="border-color:var(--teal)">
+                <div class="group-title">METADATA · 稳定身份</div>
+                <div class="module teal"><strong>resource_id</strong><small>globally stable UUID</small></div>
+                <div class="module teal" style="margin-top:8px"><strong>tenant / kind / name</strong><small>ownership + human lookup</small></div>
+                <div class="module teal" style="margin-top:8px"><strong>generation / revision</strong><small>optimistic concurrency</small></div>
+              </div>
+              <div class="group" style="border-color:var(--blue)">
+                <div class="group-title">SPEC · 目标语义</div>
+                <div class="module blue"><strong>match / action / constraint</strong><small>device-neutral policy IR</small></div>
+                <div class="module blue" style="margin-top:8px"><strong>selectors / attachment</strong><small>logical endpoint intent</small></div>
+                <div class="module blue" style="margin-top:8px"><strong>priority / quota / SLO</strong><small>placement input</small></div>
+              </div>
+              <div class="group" style="border-color:var(--green)">
+                <div class="group-title">STATUS · 已观测事实</div>
+                <div class="module green"><strong>observed_generation</strong><small>last converged target</small></div>
+                <div class="module green" style="margin-top:8px"><strong>phase / conditions</strong><small>Ready · Degraded · Blocked</small></div>
+                <div class="module green" style="margin-top:8px"><strong>backend_refs / health</strong><small>opaque native objects</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">资源关系与归属图</div>
+            <div class="grid-4">
+              <div class="group" style="border-color:var(--teal)">
+                <div class="group-title">TENANT</div>
+                <div class="module teal"><strong>Tenant</strong><small>quota · RBAC · namespace</small></div>
+                <div class="down-arr"></div>
+                <div class="module teal"><strong>Endpoint</strong><small>logical workload endpoint</small></div>
+              </div>
+              <div class="group" style="border-color:var(--blue)">
+                <div class="group-title">CONNECTIVITY</div>
+                <div class="module blue"><strong>Attachment</strong><small>endpoint ↔ topology selector</small></div>
+                <div class="down-arr"></div>
+                <div class="module blue"><strong>Topology Node</strong><small>PF · VF · SF · representor</small></div>
+              </div>
+              <div class="group" style="border-color:var(--orange)">
+                <div class="group-title">POLICY</div>
+                <div class="module orange"><strong>Policy</strong><small>intent-level contract</small></div>
+                <div class="down-arr"></div>
+                <div class="module orange"><strong>Rule / Service</strong><small>expanded dependency DAG</small></div>
+              </div>
+              <div class="group" style="border-color:var(--violet)">
+                <div class="group-title">EXECUTION</div>
+                <div class="module violet"><strong>Plan Artifact</strong><small>placement + compiled shape</small></div>
+                <div class="down-arr"></div>
+                <div class="module violet"><strong>Backend Object</strong><small>flow / counter / snapshot ref</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">状态与引用的边界</div>
+            <div class="flow">
+              <div class="module teal"><strong>Desired</strong><small>Spec + accepted generation</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Planned</strong><small>artifact DAG + reservation</small></div><i class="arr"></i>
+              <div class="module green"><strong>Actual</strong><small>native refs + observed condition</small></div><i class="arr"></i>
+              <div class="module violet"><strong>History</strong><small>operation + event + audit links</small></div>
+            </div>
+
+            <div class="section-label">资源条件（Conditions）</div>
+            <div class="grid-4">
+              <div class="module green"><strong>Ready</strong><small>actual == desired</small></div>
+              <div class="module orange"><strong>Progressing</strong><small>plan / transaction active</small></div>
+              <div class="module red"><strong>Blocked</strong><small>hard constraint unsatisfied</small></div>
+              <div class="module violet"><strong>Degraded</strong><small>partial service or drift</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--teal)"></i>所有者与目标</span><span><i style="background:var(--blue)"></i>规范化模型</span><span><i style="background:var(--orange)"></i>策略与计划</span><span><i style="background:var(--green)"></i>实际状态</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>DETAIL A · MODEL CONTRACT</small><strong>稳定对象，而非运行时句柄</strong></div>
+            <div class="insight"><b>主键规则</b><p><span class="mono">resource_id</span> 跨进程重启和设备重枚举保持稳定；port id、指针和 flow handle 只能作为 Status 中的引用。</p></div>
+            <div class="insight blue"><b>Spec 与 Status 分离</b><p>Spec 表达用户目标；Status 只记录平台已观测到的结果，不能反向篡改策略。</p></div>
+            <div class="insight orange"><b>依赖顺序</b><p>Attachment 依赖 Endpoint 和 Topology；Rule 依赖 Policy 与 Attachment；Backend Object 依赖 Plan Artifact。</p></div>
+            <div class="insight violet"><b>可追溯性</b><p>每个 native object 都要能回溯到 resource、generation、transaction 和 planner decision。</p></div>
+            <div class="insight red"><b>删除语义</b><p>删除先标记目标不存在，再反向释放依赖；Actual 清理由 Transaction 和 Reconciler 确认完成。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 14 · Placement decision detail -->
+    <div class="canvas-shell" id="c14" data-file="14-placement-decision">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">14</div>
+          <div class="title"><h1>二级细分 · Placement Decision</h1><p>Planner 如何从策略、拓扑、能力和预算中得到可解释的 Hardware / Software / Reject 决策</p></div>
+          <div class="tag">硬约束先过滤，软目标再排序</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Inputs → Normalize → Candidate Filter → Score → Selected Plan → Explain</div>
+            <div class="panel-desc">所有决策保留候选集与淘汰原因；“不能卸载”不是默认走软件，而是一次有条件的 placement 结果。</div>
+
+            <div class="section-label">规划输入快照</div>
+            <div class="grid-4">
+              <div class="module teal"><strong>Policy Intent</strong><small>match · action · priority · SLO</small></div>
+              <div class="module blue"><strong>Topology</strong><small>reachability · domain · NUMA</small></div>
+              <div class="module blue"><strong>Capability</strong><small>supported shape · atomicity</small></div>
+              <div class="module orange"><strong>Allocation</strong><small>quota · capacity · fragmentation</small></div>
+            </div>
+
+            <div class="down-arr"></div>
+            <div class="group">
+              <div class="group-title">STEP 1 · 规范化与候选扩展</div>
+              <div class="flow">
+                <div class="module blue"><strong>Normalize IR</strong><small>canonical match/action</small></div><i class="arr"></i>
+                <div class="module blue"><strong>Expand DAG</strong><small>rules + dependencies</small></div><i class="arr"></i>
+                <div class="module violet"><strong>Enumerate Candidates</strong><small>backend × endpoint × domain</small></div><i class="arr"></i>
+                <div class="module violet"><strong>Attach Constraints</strong><small>hard + soft objectives</small></div>
+              </div>
+            </div>
+
+            <div class="section-label">STEP 2 · 硬约束过滤</div>
+            <div class="grid-3">
+              <div class="group" style="border-color:var(--orange)">
+                <div class="group-title">HARDWARE CANDIDATE</div>
+                <div class="module orange"><strong>rte_flow / Vendor</strong><small>candidate H1</small></div>
+                <p class="tiny">匹配 shape、action、switch domain、资源余量、隔离与事务能力均满足才保留。</p>
+                <span class="stamp">validate eligible</span>
+              </div>
+              <div class="group" style="border-color:var(--green)">
+                <div class="group-title">SOFTWARE CANDIDATE</div>
+                <div class="module green"><strong>SW Snapshot</strong><small>candidate S1</small></div>
+                <p class="tiny">报文可达 CPU、NUMA 可接受、速率预算和策略约束允许才保留。</p>
+                <span class="stamp">runtime eligible</span>
+              </div>
+              <div class="group" style="border-color:var(--red)">
+                <div class="group-title">REJECTED CANDIDATE</div>
+                <div class="module red"><strong>Unsatisfied</strong><small>candidate X1</small></div>
+                <p class="tiny">记录 <span class="mono">missing_capability</span>、<span class="mono">domain_mismatch</span>、<span class="mono">quota_exceeded</span> 等原因。</p>
+                <span class="stamp" style="color:#9e3b3b;background:#fbecec;border-color:#e8b3b3">explain recorded</span>
+              </div>
+            </div>
+
+            <div class="section-label">STEP 3 · 排序与计划生成</div>
+            <div class="flow">
+              <div class="module violet"><strong>Score</strong><small>latency · CPU · cost · risk</small></div><i class="arr"></i>
+              <div class="module violet"><strong>Choose Placement</strong><small>H1 / S1 / mixed plan</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Reserve Budget</strong><small>tentative resource claim</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Build Plan DAG</strong><small>apply + rollback edges</small></div><i class="arr"></i>
+              <div class="module green"><strong>Plan P17.2</strong><small>deterministic output</small></div>
+            </div>
+
+            <div class="section-label">Explain Record · 每次选择必须回答</div>
+            <div class="grid-4">
+              <div class="module"><strong>为何选择它？</strong><small>winning constraints + score</small></div>
+              <div class="module"><strong>为何未选硬件？</strong><small>unsupported / budget / domain</small></div>
+              <div class="module"><strong>为何未选软件？</strong><small>unreachable / SLO / policy</small></div>
+              <div class="module"><strong>能否重试？</strong><small>trigger + backoff + condition</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--blue)"></i>事实快照</span><span><i style="background:var(--violet)"></i>求解与排序</span><span><i style="background:var(--orange)"></i>硬件候选</span><span><i style="background:var(--green)"></i>软件候选</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>DETAIL B · PLACEMENT ENGINE</small><strong>选择是可解释的约束求解</strong></div>
+            <div class="insight"><b>硬约束示例</b><p>match/action 支持、switch domain 可达、租户隔离、容量、数据包可达性、必需原子性。</p></div>
+            <div class="insight blue"><b>软目标示例</b><p>延迟、CPU 开销、硬件资源碎片、可恢复性、可观测性、后端风险与策略偏好。</p></div>
+            <div class="insight orange"><b>最终验证</b><p>H1 只是在规划时可行；prepare 仍要由 <span class="mono">rte_flow_validate()</span> 或 vendor validate 最终确认。</p></div>
+            <div class="insight violet"><b>重新规划</b><p>准备阶段失败时，保留失败原因并在相同输入快照或新 capability snapshot 上创建新的 Plan 分支。</p></div>
+            <div class="insight red"><b>禁止静默降级</b><p>只有 Policy 显式允许且软件候选通过硬约束时，才可从硬件计划切换到软件计划。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 15 · Transaction state machine detail -->
+    <div class="canvas-shell" id="c15" data-file="15-transaction-state-machine">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">15</div>
+          <div class="title"><h1>二级细分 · Transaction State Machine</h1><p>一次变更如何经过 admission、prepare、commit、publish、verify，并对失败保持可恢复事实</p></div>
+          <div class="tag">先准备全部，再发布一个 generation</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Transaction T92 · serialized mutation + dependency DAG + compensation</div>
+            <div class="panel-desc">Transaction 是跨软件快照、rte_flow 和未来后端的一致性边界；它不是单个 backend 的 API 包装。</div>
+
+            <div class="section-label">主状态机 · 成功路径</div>
+            <div class="flow">
+              <div class="module teal"><strong>Requested</strong><small>operation + precondition</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Admitted</strong><small>generation / quota / lock</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Planned</strong><small>Plan P17.2 attached</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Preparing</strong><small>validate + reserve all steps</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Prepared</strong><small>commit barrier reached</small></div>
+            </div>
+            <div class="down-arr"></div>
+            <div class="flow">
+              <div class="module orange"><strong>Committing</strong><small>dependency order</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Publishing</strong><small>Actual + snapshot generation</small></div><i class="arr"></i>
+              <div class="module green"><strong>Verifying</strong><small>read-back + health check</small></div><i class="arr"></i>
+              <div class="module green"><strong>Committed</strong><small>A17 Ready + audit event</small></div>
+            </div>
+
+            <div class="section-label">参与者与步骤 DAG</div>
+            <div class="grid-4">
+              <div class="group" style="border-color:var(--blue)">
+                <div class="group-title">CONTROL STORE</div>
+                <div class="module blue"><strong>Desired / Plan</strong><small>revision guard</small></div>
+                <p class="tiny">记录 operation、锁定前置版本与最终状态。</p>
+              </div>
+              <div class="group" style="border-color:var(--green)">
+                <div class="group-title">SW BACKEND</div>
+                <div class="module green"><strong>Compile / Publish</strong><small>snapshot N+1</small></div>
+                <p class="tiny">先构建不可变快照，提交时原子切换引用。</p>
+              </div>
+              <div class="group" style="border-color:var(--orange)">
+                <div class="group-title">RTE_FLOW BACKEND</div>
+                <div class="module orange"><strong>Validate / Create</strong><small>native flow objects</small></div>
+                <p class="tiny">预留或创建有序对象，登记 opaque handle。</p>
+              </div>
+              <div class="group" style="border-color:var(--violet)">
+                <div class="group-title">VENDOR / AGENT</div>
+                <div class="module violet"><strong>Native Prepare</strong><small>remote participant</small></div>
+                <p class="tiny">以 capability 和 native transaction 语义参与。</p>
+              </div>
+            </div>
+
+            <div class="section-label">失败与补偿分支</div>
+            <div class="grid-3">
+              <div class="group" style="border-color:var(--red)">
+                <div class="group-title">PREPARE FAILED</div>
+                <div class="module red"><strong>Abort</strong><small>no published generation</small></div>
+                <p class="tiny">释放 reservation，记录失败 backend、step、native reason；可触发 replan。</p>
+              </div>
+              <div class="group" style="border-color:var(--orange)">
+                <div class="group-title">COMMIT PARTIAL</div>
+                <div class="module orange"><strong>Compensating</strong><small>reverse completed DAG</small></div>
+                <p class="tiny">执行补偿动作；若不能完全撤销，进入 Degraded 并交给 Reconciler。</p>
+              </div>
+              <div class="group" style="border-color:var(--violet)">
+                <div class="group-title">VERIFY FAILED</div>
+                <div class="module violet"><strong>Reconciling</strong><small>published but unconfirmed</small></div>
+                <p class="tiny">保留提交历史，标记 condition，持续读取 Actual 后修复或降级。</p>
+              </div>
+            </div>
+
+            <div class="section-label">事务不变量</div>
+            <div class="flow">
+              <div class="module"><strong>单资源串行化</strong><small>conflicting generations cannot race</small></div>
+              <div class="module"><strong>准备不发布</strong><small>workers stay on last stable snapshot</small></div>
+              <div class="module"><strong>发布可追溯</strong><small>generation ↔ step ↔ object</small></div>
+              <div class="module"><strong>失败可解释</strong><small>phase + participant + retryability</small></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--blue)"></i>控制状态</span><span><i style="background:var(--orange)"></i>准备与提交</span><span><i style="background:var(--green)"></i>成功发布</span><span><i style="background:var(--red)"></i>失败处理</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>DETAIL C · TRANSACTION ENGINE</small><strong>一个明确的提交边界</strong></div>
+            <div class="insight"><b>Admission</b><p>检查 if-generation-match、租户配额、依赖健康度与资源锁；避免无效事务进入执行阶段。</p></div>
+            <div class="insight blue"><b>Prepare</b><p>只在全部 participant 具备可提交条件后进入 Prepared；worker 与外部读者仍看见上一稳定 generation。</p></div>
+            <div class="insight orange"><b>Commit 顺序</b><p>按 Plan DAG 顺序创建底层对象，最后发布控制状态和软件 snapshot；删除遵循反向依赖顺序。</p></div>
+            <div class="insight violet"><b>补偿不是回到过去</b><p>补偿尽力恢复安全状态；设备不可逆或外部变化时保留事实，交给 Reconciler 收敛。</p></div>
+            <div class="insight red"><b>错误契约</b><p>必须返回 <span class="mono">phase / resource / backend / native reason / retryability / operation_id</span>。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- 16 · Reconciliation state machine detail -->
+    <div class="canvas-shell" id="c16" data-file="16-reconciliation-state-machine">
+      <section class="canvas">
+        <header class="head">
+          <div class="num">16</div>
+          <div class="title"><h1>二级细分 · Reconciliation State Machine</h1><p>资源如何从事件与周期扫描中被观察、归类、修复、验证，直至 Ready、Degraded 或 Blocked</p></div>
+          <div class="tag">事件驱动 + 周期反熵</div>
+        </header>
+        <div class="stage">
+          <div class="main-panel">
+            <div class="panel-kicker">Watch / Scan → Observe Actual → Compare → Classify → Repair → Verify → Condition</div>
+            <div class="panel-desc">Reconciler 复用 Planner 和 Transaction Engine；它不直接绕过事务去触碰硬件对象。</div>
+
+            <div class="section-label">触发与去重</div>
+            <div class="grid-4">
+              <div class="module violet"><strong>Desired Changed</strong><small>new generation committed</small></div>
+              <div class="module violet"><strong>Device Event</strong><small>reset · aging · hotplug</small></div>
+              <div class="module violet"><strong>Runtime Alarm</strong><small>worker / queue / snapshot</small></div>
+              <div class="module violet"><strong>Periodic Scan</strong><small>anti-entropy sweep</small></div>
+            </div>
+            <div class="down-arr"></div>
+            <div class="flow">
+              <div class="module blue"><strong>Work Queue</strong><small>resource key + reason + deadline</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Deduplicate</strong><small>latest generation wins</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Rate Limit</strong><small>per tenant / device / resource</small></div><i class="arr"></i>
+              <div class="module violet"><strong>Observe Actual</strong><small>backend query + inventory</small></div>
+            </div>
+
+            <div class="section-label">差异分类状态机</div>
+            <div class="flow">
+              <div class="module blue"><strong>Compare</strong><small>desired vs plan vs actual</small></div><i class="arr"></i>
+              <div class="module violet"><strong>In Sync?</strong><small>generation + object shape</small></div><i class="arr"></i>
+              <div class="module green"><strong>Ready</strong><small>condition=true</small></div>
+            </div>
+            <div class="grid-4" style="margin-top:14px">
+              <div class="group" style="border-color:var(--green)"><div class="group-title">MISSING</div><div class="module green"><strong>Recreate</strong><small>expected object absent</small></div></div>
+              <div class="group" style="border-color:var(--orange)"><div class="group-title">STALE</div><div class="module orange"><strong>Replace</strong><small>wrong generation / shape</small></div></div>
+              <div class="group" style="border-color:var(--violet)"><div class="group-title">EXTRA</div><div class="module violet"><strong>Garbage Collect</strong><small>unowned actual object</small></div></div>
+              <div class="group" style="border-color:var(--red)"><div class="group-title">UNSATISFIABLE</div><div class="module red"><strong>Block</strong><small>capability / topology lost</small></div></div>
+            </div>
+
+            <div class="section-label">修复路径与回压</div>
+            <div class="flow">
+              <div class="module orange"><strong>Replan</strong><small>new topology / capability?</small></div><i class="arr"></i>
+              <div class="module orange"><strong>Repair Transaction</strong><small>minimal safe delta</small></div><i class="arr"></i>
+              <div class="module blue"><strong>Read-back Verify</strong><small>actual state confirms</small></div><i class="arr"></i>
+              <div class="module green"><strong>Ready</strong><small>observed_generation = desired</small></div>
+            </div>
+
+            <div class="section-label">失败阈值后的资源条件</div>
+            <div class="grid-3">
+              <div class="group" style="border-color:var(--green)"><div class="group-title">READY</div><div class="module green"><strong>Converged</strong><small>all expected objects healthy</small></div><p class="tiny">停止重试，保持周期反熵。</p></div>
+              <div class="group" style="border-color:var(--orange)"><div class="group-title">DEGRADED</div><div class="module orange"><strong>Retrying</strong><small>safe recovery still possible</small></div><p class="tiny">指数退避、限制并发、持续告警。</p></div>
+              <div class="group" style="border-color:var(--red)"><div class="group-title">BLOCKED</div><div class="module red"><strong>Human / Policy Action</strong><small>hard constraint remains</small></div><p class="tiny">保留 Desired 和 explain，等待条件变化。</p></div>
+            </div>
+            <div class="legend"><span><i style="background:var(--violet)"></i>观察触发</span><span><i style="background:var(--blue)"></i>队列与比较</span><span><i style="background:var(--orange)"></i>修复事务</span><span><i style="background:var(--green)"></i>已收敛</span></div>
+          </div>
+          <aside class="side-panel">
+            <div class="side-head"><small>DETAIL D · RECONCILIATION LOOP</small><strong>持续验证，而非一次性成功</strong></div>
+            <div class="insight"><b>队列键</b><p>以 <span class="mono">resource_id</span> 去重，同一资源只保留最新目标 generation 和最高优先级触发原因。</p></div>
+            <div class="insight blue"><b>反熵扫描</b><p>即使设备事件丢失，也会定期读回实际规则、counter、端口健康度和 worker snapshot。</p></div>
+            <div class="insight orange"><b>最小差异</b><p>优先修复缺失或过期的单个对象；只有拓扑或能力变化时才要求重新规划整个资源图。</p></div>
+            <div class="insight violet"><b>风暴控制</b><p>按资源、设备、租户做 rate limit 与 backoff；重复失败触发 circuit breaker 和告警。</p></div>
+            <div class="insight red"><b>最终状态</b><p>Blocked 不是删除 Desired；它是可解释的目标未满足状态，等待设备、容量或用户策略改变。</p></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+  </main>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const only = params.get('canvas');
+    if (only) {
+      document.body.classList.add('export-mode');
+      document.querySelector('.toolbar').remove();
+      document.querySelectorAll('.canvas-shell').forEach((node) => {
+        node.style.display = node.id === `c${only}` ? 'block' : 'none';
+      });
+      document.querySelector('.board').style.padding = '0';
+    }
+  </script>
+</body>
+</html>

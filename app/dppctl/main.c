@@ -1,0 +1,772 @@
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
+#include "dppd/management.h"
+
+static void print_usage(const char *program)
+{
+    fprintf(stderr, "usage:\n");
+    fprintf(stderr, "  %s [--socket PATH] ping\n", program);
+    fprintf(stderr, "  %s [--socket PATH] persistence-status\n", program);
+    fprintf(stderr, "  %s [--socket PATH] persistence-flush\n", program);
+    fprintf(stderr, "  %s [--socket PATH] port-show PORT\n", program);
+    fprintf(stderr,
+            "  %s [--socket PATH] list [AFTER_RULE_ID [REPOSITORY_GENERATION]]\n",
+            program);
+    fprintf(stderr, "  %s [--socket PATH] get RULE_ID\n", program);
+    fprintf(stderr, "  %s [--socket PATH] count RULE_ID EXPECTED_GENERATION\n",
+            program);
+    fprintf(stderr, "  %s [--socket PATH] delete RULE_ID EXPECTED_GENERATION\n",
+            program);
+    fprintf(stderr,
+            "  %s [--socket PATH] apply-filter RULE_ID PORT EXPECTED_GENERATION"
+            " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
+            " drop|queue:N [count] [mark:N] [priority:N] [prefer|require]\n",
+            program);
+    fprintf(stderr, "  %s [--socket PATH] apply-drop RULE_ID PORT EXPECTED_GENERATION"
+                    " [PRIORITY] [prefer|require]\n", program);
+    fprintf(stderr,
+            "  %s [--socket PATH] apply-filter-drop RULE_ID PORT EXPECTED_GENERATION"
+            " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
+            " [PRIORITY] [prefer|require]\n",
+            program);
+    fprintf(stderr, "EXPECTED_GENERATION may be 'any'; use 0 when creating a new rule.\n");
+    fprintf(stderr, "CIDR or L4 port may be 'any'; ipv4 requires both ports to be 'any'.\n");
+}
+
+static int parse_u64(const char *text, uint64_t min, uint64_t max,
+                     uint64_t *value)
+{
+    char *end = NULL;
+    unsigned long long parsed;
+
+    /* strtoull 会接受负号并发生无符号转换，因此必须在调用前显式拒绝。 */
+    if (text == NULL || value == NULL || text[0] == '-')
+        return -EINVAL;
+    errno = 0;
+    parsed = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || parsed < min || parsed > max)
+        return -EINVAL;
+    *value = (uint64_t)parsed;
+    return 0;
+}
+
+static int parse_expected(const char *text, uint64_t *generation)
+{
+    /*
+     * any 是有意绕过乐观并发保护的显式写法；数值 UINT64_MAX 保留为内部哨兵，
+     * 普通 generation 解析不能通过十进制数间接构造该值。
+     */
+    if (strcmp(text, "any") == 0) {
+        *generation = DPPD_RULE_GENERATION_ANY;
+        return 0;
+    }
+    return parse_u64(text, 0, UINT64_MAX - 1U, generation);
+}
+
+/*
+ * 把 IPv4 CIDR 转成 rule IR 使用的网络字节序地址和掩码。
+ * “any”显式表示 address=0/mask=0；普通地址必须带 /0..32，避免调用方误以为
+ * 裸地址是精确匹配还是全网段。地址会与掩码相与，统一成规范化网络地址。
+ */
+static int parse_ipv4_cidr(const char *text, uint32_t *address_be,
+                           uint32_t *mask_be)
+{
+    char copy[INET_ADDRSTRLEN + 4U];
+    struct in_addr address;
+    char *slash;
+    uint64_t prefix;
+    uint32_t mask_host;
+
+    if (text == NULL || address_be == NULL || mask_be == NULL)
+        return -EINVAL;
+    if (strcmp(text, "any") == 0) {
+        *address_be = 0;
+        *mask_be = 0;
+        return 0;
+    }
+    if (strlen(text) >= sizeof(copy))
+        return -EINVAL;
+    memcpy(copy, text, strlen(text) + 1U);
+    slash = strchr(copy, '/');
+    if (slash == NULL || strchr(slash + 1, '/') != NULL)
+        return -EINVAL;
+    *slash = '\0';
+    if (parse_u64(slash + 1, 0, 32, &prefix) != 0 ||
+        inet_pton(AF_INET, copy, &address) != 1)
+        return -EINVAL;
+
+    mask_host = prefix == 0 ? 0 : UINT32_MAX << (32U - (uint32_t)prefix);
+    *mask_be = htonl(mask_host);
+    *address_be = address.s_addr & *mask_be;
+    return 0;
+}
+
+/*
+ * L4 端口在 rte_flow item 中使用网络字节序。数字 0 是合法精确值，
+ * 所以通配语义必须使用单独的“any”，不能用 0 兼任。
+ */
+static int parse_l4_port(const char *text, uint16_t *port_be, uint16_t *mask_be)
+{
+    uint64_t value;
+
+    if (text == NULL || port_be == NULL || mask_be == NULL)
+        return -EINVAL;
+    if (strcmp(text, "any") == 0) {
+        *port_be = 0;
+        *mask_be = 0;
+        return 0;
+    }
+    if (parse_u64(text, 0, UINT16_MAX, &value) != 0)
+        return -EINVAL;
+    *port_be = htons((uint16_t)value);
+    *mask_be = htons(UINT16_MAX);
+    return 0;
+}
+
+/* 统一解析两个规则命令共享的可选 priority/fallback 尾部参数。 */
+static int parse_rule_options(int argc, char **argv, int first,
+                              struct dppd_rule *rule)
+{
+    uint64_t value;
+
+    if (argc > first) {
+        if (parse_u64(argv[first], 0, UINT32_MAX, &value) != 0)
+            return -EINVAL;
+        rule->priority = (uint32_t)value;
+    }
+    if (argc > first + 1) {
+        if (strcmp(argv[first + 1], "require") == 0)
+            rule->fallback = DPPD_FALLBACK_REQUIRE_HARDWARE;
+        else if (strcmp(argv[first + 1], "prefer") != 0)
+            return -EINVAL;
+    }
+    return argc <= first + 2 ? 0 : -EINVAL;
+}
+
+/*
+ * 构造过滤规则共享的 pattern。pattern 必须从外层协议向内排列：
+ * ETH → IPv4 → UDP/TCP；该顺序既是 rule IR 的规范形式，也是 rte_flow 的要求。
+ */
+static int build_filter_pattern(struct dppd_rule *rule,
+                                const char *protocol,
+                                const char *source_cidr,
+                                const char *destination_cidr,
+                                const char *source_port,
+                                const char *destination_port)
+{
+    struct dppd_match *ipv4;
+    struct dppd_match *l4 = NULL;
+
+    rule->nb_matches = 2;
+    rule->matches[0].type = DPPD_MATCH_ETH;
+    ipv4 = &rule->matches[1];
+    ipv4->type = DPPD_MATCH_IPV4;
+    if (strcmp(protocol, "udp") == 0) {
+        rule->nb_matches = 3;
+        l4 = &rule->matches[2];
+        l4->type = DPPD_MATCH_UDP;
+    } else if (strcmp(protocol, "tcp") == 0) {
+        rule->nb_matches = 3;
+        l4 = &rule->matches[2];
+        l4->type = DPPD_MATCH_TCP;
+    } else if (strcmp(protocol, "ipv4") != 0) {
+        return -EINVAL;
+    }
+
+    if (parse_ipv4_cidr(source_cidr, &ipv4->spec.ipv4.src_be,
+                        &ipv4->spec.ipv4.src_mask_be) != 0 ||
+        parse_ipv4_cidr(destination_cidr, &ipv4->spec.ipv4.dst_be,
+                        &ipv4->spec.ipv4.dst_mask_be) != 0)
+        return -EINVAL;
+    if (l4 != NULL) {
+        if (parse_l4_port(source_port, &l4->spec.l4.src_be,
+                          &l4->spec.l4.src_mask_be) != 0 ||
+            parse_l4_port(destination_port, &l4->spec.l4.dst_be,
+                          &l4->spec.l4.dst_mask_be) != 0)
+            return -EINVAL;
+    } else if (strcmp(source_port, "any") != 0 ||
+               strcmp(destination_port, "any") != 0) {
+        /* IPv4 item不表达端口，拒绝看似有效但实际会被忽略的数字参数。 */
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int parse_prefixed_u64(const char *text, const char *prefix,
+                              uint64_t max, uint64_t *value)
+{
+    const size_t prefix_length = strlen(prefix);
+
+    if (strncmp(text, prefix, prefix_length) != 0)
+        return -EINVAL;
+    return parse_u64(text + prefix_length, 0, max, value);
+}
+
+/*
+ * apply-filter 的 action 使用紧凑 token，而不是依赖参数位置：
+ * fate 必须首先给出 drop 或 queue:N；其后 modifier 可任意排序但不可重复。
+ * 最终始终按 MARK → COUNT → fate 生成 canonical action 顺序，确保幂等比较稳定。
+ */
+static int build_filter_actions(int argc, char **argv, int first,
+                                struct dppd_rule *rule)
+{
+    enum dppd_action_type fate_type;
+    uint16_t queue_id = 0;
+    uint32_t mark_id = 0;
+    uint64_t value;
+    bool has_count = false;
+    bool has_mark = false;
+    bool has_priority = false;
+    bool has_fallback = false;
+    int index;
+
+    if (argc <= first)
+        return -EINVAL;
+    if (strcmp(argv[first], "drop") == 0) {
+        fate_type = DPPD_ACTION_DROP;
+    } else if (parse_prefixed_u64(argv[first], "queue:", UINT16_MAX,
+                                  &value) == 0) {
+        fate_type = DPPD_ACTION_QUEUE;
+        queue_id = (uint16_t)value;
+    } else {
+        return -EINVAL;
+    }
+
+    for (index = first + 1; index < argc; ++index) {
+        if (strcmp(argv[index], "count") == 0) {
+            if (has_count)
+                return -EINVAL;
+            has_count = true;
+        } else if (parse_prefixed_u64(argv[index], "mark:", UINT32_MAX,
+                                      &value) == 0) {
+            if (has_mark)
+                return -EINVAL;
+            has_mark = true;
+            mark_id = (uint32_t)value;
+        } else if (parse_prefixed_u64(argv[index], "priority:", UINT32_MAX,
+                                      &value) == 0) {
+            if (has_priority)
+                return -EINVAL;
+            has_priority = true;
+            rule->priority = (uint32_t)value;
+        } else if (strcmp(argv[index], "require") == 0 ||
+                   strcmp(argv[index], "prefer") == 0) {
+            if (has_fallback)
+                return -EINVAL;
+            has_fallback = true;
+            rule->fallback = strcmp(argv[index], "require") == 0 ?
+                DPPD_FALLBACK_REQUIRE_HARDWARE :
+                DPPD_FALLBACK_PREFER_HARDWARE;
+        } else {
+            return -EINVAL;
+        }
+    }
+
+    rule->nb_actions = 0;
+    if (has_mark) {
+        rule->actions[rule->nb_actions].type = DPPD_ACTION_MARK;
+        rule->actions[rule->nb_actions].conf.mark_id = mark_id;
+        rule->nb_actions++;
+    }
+    if (has_count) {
+        rule->actions[rule->nb_actions].type = DPPD_ACTION_COUNT;
+        rule->nb_actions++;
+    }
+    rule->actions[rule->nb_actions].type = fate_type;
+    if (fate_type == DPPD_ACTION_QUEUE)
+        rule->actions[rule->nb_actions].conf.queue_id = queue_id;
+    rule->nb_actions++;
+    return 0;
+}
+
+static void initialize_request(struct dppd_management_request *request,
+                               enum dppd_management_operation operation)
+{
+    struct timespec now;
+
+    /* 清零整个结构也会清零 union padding/reserved，确保本地 ABI 报文可重复。 */
+    memset(request, 0, sizeof(*request));
+    (void)clock_gettime(CLOCK_MONOTONIC, &now);
+    request->version = DPPD_MANAGEMENT_VERSION;
+    request->operation = operation;
+    request->size = sizeof(*request);
+    /*
+     * 当前客户端一次只保持一个在途请求，不需要全局唯一 ID；PID 与单调时钟
+     * 纳秒部分足以发现串线响应。服务端只回显，不把该值作为幂等键。
+     */
+    request->request_id = ((uint64_t)(uint32_t)getpid() << 32) ^
+                          (uint64_t)now.tv_nsec;
+}
+
+static int exchange(const char *socket_path,
+                    const struct dppd_management_request *request,
+                    struct dppd_management_response *response)
+{
+    struct sockaddr_un address;
+    size_t path_length = strlen(socket_path);
+    ssize_t bytes;
+    int fd;
+    int error;
+
+    /* sun_path 是定长数组，必须在 memcpy 前为末尾 '\0' 预留一字节。 */
+    if (path_length == 0 || path_length > DPPD_MANAGEMENT_SOCKET_PATH_MAX)
+        return -ENAMETOOLONG;
+    /* CLI 可阻塞等待一次响应；CLOEXEC 防止调用方扩展子进程逻辑时泄漏连接。 */
+    fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -errno;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, socket_path, path_length + 1U);
+    if (connect(fd, (const struct sockaddr *)&address, sizeof(address)) != 0) {
+        error = -errno;
+        close(fd);
+        return error;
+    }
+
+    /* SOCK_SEQPACKET 保留消息边界；短发送或短响应都视为协议损坏。 */
+    bytes = send(fd, request, sizeof(*request), MSG_NOSIGNAL);
+    if (bytes != (ssize_t)sizeof(*request)) {
+        error = bytes < 0 ? -errno : -EMSGSIZE;
+        close(fd);
+        return error;
+    }
+    bytes = recv(fd, response, sizeof(*response), 0);
+    if (bytes != (ssize_t)sizeof(*response)) {
+        error = bytes < 0 ? -errno : -EMSGSIZE;
+        close(fd);
+        return error;
+    }
+    close(fd);
+    /*
+     * transport 成功并不代表响应属于本请求。四项头字段全部匹配后，调用方才能
+     * 按 operation 解释 union；否则返回 -EPROTO，绝不展示可能错位的 payload。
+     */
+    if (response->version != DPPD_MANAGEMENT_VERSION ||
+        response->size != sizeof(*response) ||
+        response->operation != request->operation ||
+        response->request_id != request->request_id)
+        return -EPROTO;
+    return 0;
+}
+
+static int build_request(int argc, char **argv,
+                         struct dppd_management_request *request)
+{
+    uint64_t value;
+
+    /* 每个分支同时校验命令名和精确参数数量，拒绝被静默忽略的多余参数。 */
+    if (argc == 1 && strcmp(argv[0], "ping") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_PING);
+        return 0;
+    }
+    if (argc == 1 && strcmp(argv[0], "persistence-status") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_PERSISTENCE_STATUS);
+        return 0;
+    }
+    if (argc == 1 && strcmp(argv[0], "persistence-flush") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_PERSISTENCE_FLUSH);
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[0], "port-show") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_PORT_GET);
+        if (parse_u64(argv[1], 0, UINT16_MAX, &value) != 0)
+            return -EINVAL;
+        request->payload.port_get.port_id = (uint16_t)value;
+        return 0;
+    }
+    if (argc >= 1 && argc <= 3 && strcmp(argv[0], "list") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RULE_LIST);
+        request->payload.list.expected_repository_generation =
+            DPPD_RULE_GENERATION_ANY;
+        if (argc >= 2 &&
+            parse_u64(argv[1], 0, UINT64_MAX,
+                      &request->payload.list.after_rule_id) != 0)
+            return -EINVAL;
+        if (argc == 3 &&
+            parse_expected(argv[2],
+                           &request->payload.list.expected_repository_generation) != 0)
+            return -EINVAL;
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[0], "get") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RULE_GET);
+        if (parse_u64(argv[1], 1, UINT64_MAX, &request->payload.get.rule_id) != 0)
+            return -EINVAL;
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[0], "delete") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RULE_DELETE);
+        if (parse_u64(argv[1], 1, UINT64_MAX,
+                      &request->payload.delete_rule.rule_id) != 0 ||
+            parse_expected(argv[2],
+                           &request->payload.delete_rule.expected_generation) != 0)
+            return -EINVAL;
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[0], "count") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RULE_COUNT_QUERY);
+        if (parse_u64(argv[1], 1, UINT64_MAX,
+                      &request->payload.count_query.rule_id) != 0 ||
+            parse_expected(argv[2],
+                           &request->payload.count_query.expected_generation) != 0)
+            return -EINVAL;
+        return 0;
+    }
+    if (argc >= 4 && argc <= 6 && strcmp(argv[0], "apply-drop") == 0) {
+        struct dppd_rule *rule;
+
+        initialize_request(request, DPPD_MANAGEMENT_RULE_APPLY);
+        /*
+         * apply-drop 是验证管理闭环的最小规则构造器：匹配所有 Ethernet ingress，
+         * fate action 为 DROP。generation 保持 0，由 daemon 在提交成功后统一分配。
+         */
+        rule = &request->payload.apply.rule;
+        if (parse_u64(argv[1], 1, UINT64_MAX, &rule->id) != 0 ||
+            parse_u64(argv[2], 0, UINT16_MAX, &value) != 0 ||
+            parse_expected(argv[3], &request->payload.apply.expected_generation) != 0)
+            return -EINVAL;
+        request->payload.apply.install_port_id = (uint16_t)value;
+        rule->domain = DPPD_RULE_DOMAIN_INGRESS;
+        /* 默认 prefer；由于通用软件规则执行器尚未实现，硬件失败仍会明确返回错误。 */
+        rule->fallback = DPPD_FALLBACK_PREFER_HARDWARE;
+        rule->nb_matches = 1;
+        rule->matches[0].type = DPPD_MATCH_ETH;
+        rule->nb_actions = 1;
+        rule->actions[0].type = DPPD_ACTION_DROP;
+        return parse_rule_options(argc, argv, 4, rule);
+    }
+    if (argc >= 9 && argc <= 11 &&
+        strcmp(argv[0], "apply-filter-drop") == 0) {
+        struct dppd_rule *rule;
+
+        initialize_request(request, DPPD_MANAGEMENT_RULE_APPLY);
+        rule = &request->payload.apply.rule;
+        if (parse_u64(argv[1], 1, UINT64_MAX, &rule->id) != 0 ||
+            parse_u64(argv[2], 0, UINT16_MAX, &value) != 0 ||
+            parse_expected(argv[3], &request->payload.apply.expected_generation) != 0)
+            return -EINVAL;
+        request->payload.apply.install_port_id = (uint16_t)value;
+
+        rule->domain = DPPD_RULE_DOMAIN_INGRESS;
+        rule->fallback = DPPD_FALLBACK_PREFER_HARDWARE;
+        if (build_filter_pattern(rule, argv[4], argv[5], argv[6],
+                                 argv[7], argv[8]) != 0)
+            return -EINVAL;
+        rule->nb_actions = 1;
+        rule->actions[0].type = DPPD_ACTION_DROP;
+        return parse_rule_options(argc, argv, 9, rule);
+    }
+    if (argc >= 10 && strcmp(argv[0], "apply-filter") == 0) {
+        struct dppd_rule *rule;
+
+        initialize_request(request, DPPD_MANAGEMENT_RULE_APPLY);
+        rule = &request->payload.apply.rule;
+        if (parse_u64(argv[1], 1, UINT64_MAX, &rule->id) != 0 ||
+            parse_u64(argv[2], 0, UINT16_MAX, &value) != 0 ||
+            parse_expected(argv[3], &request->payload.apply.expected_generation) != 0)
+            return -EINVAL;
+        request->payload.apply.install_port_id = (uint16_t)value;
+        rule->domain = DPPD_RULE_DOMAIN_INGRESS;
+        rule->fallback = DPPD_FALLBACK_PREFER_HARDWARE;
+        if (build_filter_pattern(rule, argv[4], argv[5], argv[6],
+                                 argv[7], argv[8]) != 0 ||
+            build_filter_actions(argc, argv, 9, rule) != 0)
+            return -EINVAL;
+        return 0;
+    }
+    return -EINVAL;
+}
+
+static const char *domain_name(uint8_t domain)
+{
+    switch ((enum dppd_rule_domain)domain) {
+    case DPPD_RULE_DOMAIN_INGRESS:
+        return "ingress";
+    case DPPD_RULE_DOMAIN_EGRESS:
+        return "egress";
+    case DPPD_RULE_DOMAIN_TRANSFER:
+        return "transfer";
+    }
+    return "unknown";
+}
+
+static const char *fallback_name(uint8_t fallback)
+{
+    switch ((enum dppd_fallback_policy)fallback) {
+    case DPPD_FALLBACK_REQUIRE_HARDWARE:
+        return "require-hardware";
+    case DPPD_FALLBACK_PREFER_HARDWARE:
+        return "prefer-hardware";
+    case DPPD_FALLBACK_SOFTWARE_ONLY:
+        return "software-only";
+    }
+    return "unknown";
+}
+
+static void print_ipv4_value(const char *label, uint32_t address_be,
+                             uint32_t mask_be)
+{
+    struct in_addr address = {.s_addr = address_be};
+    struct in_addr mask = {.s_addr = mask_be};
+    char address_text[INET_ADDRSTRLEN];
+    char mask_text[INET_ADDRSTRLEN];
+
+    if (mask_be == 0) {
+        printf(" %s=any", label);
+        return;
+    }
+    /*
+     * IR 允许任意 IPv4 mask，不强制连续 CIDR；因此 get 使用 address/mask 原样
+     * 输出，而不是尝试转换成可能丢失信息的 prefix length。
+     */
+    if (inet_ntop(AF_INET, &address, address_text, sizeof(address_text)) == NULL ||
+        inet_ntop(AF_INET, &mask, mask_text, sizeof(mask_text)) == NULL) {
+        printf(" %s=<invalid>", label);
+        return;
+    }
+    printf(" %s=%s/%s", label, address_text, mask_text);
+}
+
+static void print_rule_detail(const struct dppd_rule *rule)
+{
+    uint16_t i;
+
+    printf("rule id=%" PRIu64 " generation=%" PRIu64
+           " install-port=%u domain=%s fallback=%s group=%u priority=%u\n",
+           rule->id, rule->generation, rule->install_port_id,
+           domain_name((uint8_t)rule->domain),
+           fallback_name((uint8_t)rule->fallback), rule->group, rule->priority);
+    for (i = 0; i < rule->nb_matches; ++i) {
+        const struct dppd_match *match = &rule->matches[i];
+
+        printf("  match[%u] ", i);
+        switch (match->type) {
+        case DPPD_MATCH_ETH:
+            printf("eth");
+            break;
+        case DPPD_MATCH_IPV4:
+            printf("ipv4");
+            print_ipv4_value("src", match->spec.ipv4.src_be,
+                             match->spec.ipv4.src_mask_be);
+            print_ipv4_value("dst", match->spec.ipv4.dst_be,
+                             match->spec.ipv4.dst_mask_be);
+            break;
+        case DPPD_MATCH_UDP:
+        case DPPD_MATCH_TCP:
+            printf("%s", match->type == DPPD_MATCH_UDP ? "udp" : "tcp");
+            if (match->spec.l4.src_mask_be == 0)
+                printf(" src=any");
+            else
+                printf(" src=%u/mask:0x%04x", ntohs(match->spec.l4.src_be),
+                       ntohs(match->spec.l4.src_mask_be));
+            if (match->spec.l4.dst_mask_be == 0)
+                printf(" dst=any");
+            else
+                printf(" dst=%u/mask:0x%04x", ntohs(match->spec.l4.dst_be),
+                       ntohs(match->spec.l4.dst_mask_be));
+            break;
+        case DPPD_MATCH_REPRESENTED_PORT:
+            printf("represented-port port=%u", match->spec.ethdev_port_id);
+            break;
+        default:
+            printf("unknown type=%d", match->type);
+            break;
+        }
+        printf("\n");
+    }
+    for (i = 0; i < rule->nb_actions; ++i) {
+        const struct dppd_action *action = &rule->actions[i];
+
+        printf("  action[%u] ", i);
+        switch (action->type) {
+        case DPPD_ACTION_DROP:
+            printf("drop");
+            break;
+        case DPPD_ACTION_QUEUE:
+            printf("queue index=%u", action->conf.queue_id);
+            break;
+        case DPPD_ACTION_MARK:
+            printf("mark id=%u", action->conf.mark_id);
+            break;
+        case DPPD_ACTION_COUNT:
+            printf("count");
+            break;
+        case DPPD_ACTION_REPRESENTED_PORT:
+            printf("represented-port port=%u", action->conf.ethdev_port_id);
+            break;
+        default:
+            printf("unknown type=%d", action->type);
+            break;
+        }
+        printf("\n");
+    }
+}
+
+static void print_response(const struct dppd_management_response *response)
+{
+    /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释。 */
+    switch (response->operation) {
+    case DPPD_MANAGEMENT_PING:
+        printf("pong version=%u generation=%" PRIu64 " rules=%u\n",
+               response->version,
+               response->payload.pong.repository_generation,
+               response->payload.pong.rule_count);
+        break;
+    case DPPD_MANAGEMENT_PORT_GET:
+        printf("port=%u peer=%u kind=%s driver=%s socket=%d state=%s/%s "
+               "queues(rx=%u,tx=%u) reta=%u mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+               response->payload.port.port_id,
+               response->payload.port.peer_port_id,
+               response->payload.port.endpoint_kind == DPPD_ENDPOINT_REPRESENTOR ?
+                   "representor" : "ethdev",
+               response->payload.port.driver_name,
+               response->payload.port.socket_id,
+               response->payload.port.configured ? "configured" : "unconfigured",
+               response->payload.port.started ? "started" : "stopped",
+               response->payload.port.max_rx_queues,
+               response->payload.port.max_tx_queues,
+               response->payload.port.reta_size,
+               response->payload.port.mac[0], response->payload.port.mac[1],
+               response->payload.port.mac[2], response->payload.port.mac[3],
+               response->payload.port.mac[4], response->payload.port.mac[5]);
+        printf("rss-cap=0x%" PRIx64 " rss-enabled=0x%" PRIx64
+               " rx-offloads=0x%" PRIx64 " tx-offloads=0x%" PRIx64
+               " tx-enabled=0x%" PRIx64 " dev-cap=0x%" PRIx64 "\n",
+               response->payload.port.rss_offloads,
+               response->payload.port.configured_rss_hf,
+               response->payload.port.rx_offloads,
+               response->payload.port.tx_offloads,
+               response->payload.port.configured_tx_offloads,
+               response->payload.port.device_capabilities);
+        if (response->payload.port.has_switch_domain)
+            printf("switch-domain=%u switch-port=%u switch=%s\n",
+                   response->payload.port.switch_domain_id,
+                   response->payload.port.switch_port_id,
+                   response->payload.port.switch_name);
+        else
+            printf("switch-domain=none\n");
+        break;
+    case DPPD_MANAGEMENT_RULE_GET:
+        print_rule_detail(&response->payload.rule);
+        break;
+    case DPPD_MANAGEMENT_RULE_APPLY:
+        printf("applied status=%d generation=%" PRIu64 " transaction=%" PRIu64
+               " backend=%d reason=%d\n",
+               response->payload.apply.status, response->payload.apply.generation,
+               response->payload.apply.transaction_id,
+               response->payload.apply.plan.backend,
+               response->payload.apply.plan.reason);
+        break;
+    case DPPD_MANAGEMENT_RULE_DELETE:
+        printf("deleted=%s generation=%" PRIu64 "\n",
+               response->payload.delete_rule.removed ? "yes" : "no",
+               response->payload.delete_rule.generation);
+        break;
+    case DPPD_MANAGEMENT_RULE_COUNT_QUERY:
+        printf("count rule=%" PRIu64 " generation=%" PRIu64 " hits=%" PRIu64
+               " bytes=%" PRIu64 "\n",
+               response->payload.count.rule_id,
+               response->payload.count.generation,
+               response->payload.count.hits,
+               response->payload.count.bytes);
+        break;
+    case DPPD_MANAGEMENT_RULE_LIST: {
+        const struct dppd_management_rule_page *page =
+            &response->payload.rule_page;
+        uint16_t i;
+
+        printf("repository-generation=%" PRIu64 " total=%u page-count=%u"
+               " more=%s next=%" PRIu64 "\n",
+               page->repository_generation, page->total_count, page->count,
+               page->has_more ? "yes" : "no", page->next_after_rule_id);
+        for (i = 0; i < page->count; ++i) {
+            const struct dppd_management_rule_summary *rule = &page->rules[i];
+
+            printf("  id=%" PRIu64 " generation=%" PRIu64 " install-port=%u"
+                   " domain=%s fallback=%s group=%u priority=%u"
+                   " matches=%u mask=0x%x actions=%u mask=0x%x\n",
+                   rule->rule_id, rule->generation, rule->install_port_id,
+                   domain_name(rule->domain),
+                   fallback_name(rule->fallback), rule->group, rule->priority,
+                   rule->nb_matches, rule->match_mask, rule->nb_actions,
+                   rule->action_mask);
+        }
+        if (page->has_more)
+            printf("next-command: list %" PRIu64 " %" PRIu64 "\n",
+                   page->next_after_rule_id, page->repository_generation);
+        break;
+    }
+    case DPPD_MANAGEMENT_PERSISTENCE_STATUS:
+    case DPPD_MANAGEMENT_PERSISTENCE_FLUSH:
+        printf("persistence enabled=%s dirty=%s persisted-generation=%" PRIu64
+               " current-generation=%" PRIu64 " last-error=%d\n",
+               response->payload.persistence.enabled ? "yes" : "no",
+               response->payload.persistence.dirty ? "yes" : "no",
+               response->payload.persistence.persisted_generation,
+               response->payload.persistence.current_generation,
+               response->payload.persistence.last_error);
+        break;
+    default:
+        break;
+    }
+}
+
+int main(int argc, char **argv)
+{
+    const char *socket_path = DPPD_MANAGEMENT_DEFAULT_SOCKET;
+    struct dppd_management_request request;
+    struct dppd_management_response response;
+    int argument = 1;
+    int rc;
+
+    /* 当前只支持全局 --socket 前缀，剩余 argv 完整交给命令构造器校验。 */
+    if (argc >= 3 && strcmp(argv[1], "--socket") == 0) {
+        socket_path = argv[2];
+        argument = 3;
+    }
+    rc = build_request(argc - argument, argv + argument, &request);
+    if (rc != 0) {
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    rc = exchange(socket_path, &request, &response);
+    if (rc != 0) {
+        fprintf(stderr, "dppctl: transport failed: %s (%d)\n", strerror(-rc), rc);
+        return EXIT_FAILURE;
+    }
+    /* transport 错误与 daemon 业务错误分开报告，便于脚本区分连接和规则失败。 */
+    if (response.status != 0) {
+        int status = response.status;
+
+        fprintf(stderr, "dppctl: request failed: %s (%d)\n",
+                status < 0 && status >= -4095 ? strerror(-status) : "unknown error",
+                status);
+        /*
+         * EUCLEAN 与普通“完全未执行”错误不同：硬件和内存 repository 可能已经提交，
+         * 只是 snapshot 保存失败。apply 可以幂等重试，但 delete 已生效后用旧
+         * generation 重试会返回 ESTALE，因此统一引导操作者先显式 flush 再核对状态。
+         */
+        if (status == -EUCLEAN &&
+            (response.operation == DPPD_MANAGEMENT_RULE_APPLY ||
+             response.operation == DPPD_MANAGEMENT_RULE_DELETE)) {
+            fprintf(stderr,
+                    "dppctl: operation may already be active, but the snapshot "
+                    "is dirty; fix storage, run persistence-flush, then verify "
+                    "with persistence-status and get/list\n");
+        }
+        return EXIT_FAILURE;
+    }
+    print_response(&response);
+    return EXIT_SUCCESS;
+}

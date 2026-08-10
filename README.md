@@ -1,217 +1,58 @@
 # dpdk-dataplane-platform
 
-一个面向 **现代 DPDK 用户态数据面 / SmartNIC / DPU / rte_flow / representor** 演进方向的项目。
+面向现代 DPDK 用户态数据面、SmartNIC/DPU、`rte_flow` 与 representor 的演进型平台基线。
 
-当前版本已经从“纯骨架/可编译调用链”进一步收口到 **Phase 1 真实数据面闭环基线**：
+V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软件路径处理送达 CPU RX queue 的包；`rte_flow` 和 embedded-switch transfer rule 属于控制面下发的硬件规则，硬件成功处理的包通常不会进入软件 worker；representor 是 PMD 暴露的 ethdev 拓扑端点，而不是一个软件转发后端。
 
-- **主线只保留现代 DPDK 方式**：用户态 DPDK 应用 + 现代运行环境准备。
-- **不把 DPDK 17 的 `igb_uio + KNI + 配套 ko` 当成当前工程目标**。
-- **保留 DPDK 17 旧模式说明文档**，作为历史经验沉淀与面试材料。
-- **Phase 1 已接入真实 DPDK 主路径代码**：EAL、mempool、ethdev、rx/tx burst、真实二三四层解析、最小 ACL/route/NAT/rewrite 调用链。
+当前可运行基线提供：
 
----
+- DPDK 21.11+ 的 Meson 构建，不提供会掩盖问题的 mock 模式；
+- 每队列一个 lcore 的 run-to-completion 软件路径；
+- RSS、多 NUMA socket mbuf pool、burst RX/TX 与多段 mbuf 能力处理；
+- Ethernet、双 VLAN、ARP、IPv4、UDP/TCP 的边界安全解析；
+- immutable forwarding snapshot 和 per-worker 原子统计；
+- ethdev/representor/switch-domain 拓扑发现；
+- 统一 rule IR 到 `rte_flow` 的真实 validate/create/query/destroy/flush；
+- 带稳定 ID、generation、幂等更新和乐观并发控制的 rule repository；
+- versioned rule snapshot v2、install port、CRC32、原子替换、dirty 写路径和 fail-closed 启动重放；
+- 可解释的软硬件 planner，以及 validate/prepare/commit/rollback transaction engine；
+- 连接 desired repository 与真实 `rte_flow` 对象仓库、支持 generation replacement 的进程内 control service；
+- 版本化 Unix `SOCK_SEQPACKET` 管理接口和 `dppctl`，支持端口能力查询、generation 稳定分页、完整规则详情、单规则 apply/delete 及硬件 COUNT 查询；
+- DPDK telemetry `/dppd/stats` 与可选 pdump 服务。
 
-## 当前版本定位
+当前软件策略故意只实现可验证的双向端口对接，不伪装尚未完成的 ACL、NAT、路由或硬件 fallback。管理 CLI 已能构造 Ethernet/IPv4/UDP/TCP 规则并组合 DROP/QUEUE/MARK/COUNT；具体规则仍必须以 PMD 的 `rte_flow_validate()` 结果为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；默认不指定路径时保持禁用。批量规则事务、软件分类器、degraded recovery 和 flow template 是下一阶段工作，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
 
-这不是最终产品版，但已经不再只是目录样机。
+## 快速开始
 
-当前仓库应理解为：
+```bash
+bash scripts/build.sh
+sudo ./build/dppd -l 0-2 -n 4 -- --ports 0,1 --queues 2 --burst 64 --promisc
+```
 
-> **一个以现代 DPDK 为目标、具备 Phase 1 真实主路径代码的工程基线。**
+`-l/-n/-a` 等参数属于 EAL；`--` 后属于 dppd。`--ports 0,1,2,3` 表示建立 `0↔1`、`2↔3` 两组双向端口对。每个 queue 需要一个 EAL worker lcore，主 lcore 不参与轮询。
 
-它现在处于这样一个阶段：
+完整环境准备、运行、telemetry 与抓包方式见 [构建与运行](docs/build_and_run.md)。架构语义和扩展边界见 [V3 架构](docs/architecture_v3.md)。
 
-- 工程结构已经稳定下来；
-- mock 模式可实际编译与运行；
-- 真实 DPDK 路径代码已经落地到 `main / port_init / worker / parser / rewrite` 主线上；
-- 但容器里没有 `libdpdk`，所以本包中只验证了 mock 构建，没有在当前容器里完成真实 DPDK 链接验证。
-
----
-
-## 当前已完成什么
-
-### 1. 工程层
-
-- `include/dppd/` 公共头目录已建立
-- `app/` / `lib/` / `examples/` / `tests/` / `scenarios/` / `docs/` 目录边界已收敛
-- `lib/offload/` 已拆为 `core / soft / rte_flow / hw`
-- `lib/representor/`、`lib/switch/` 已作为后续扩展位保留
-- `docs/plans/` 中保留项目计划书原件
-
-### 2. 构建层
-
-当前支持两种构建模式：
-
-#### mock 模式
-- 用于当前容器内实际验证
-- 可完整编译
-- 可运行主调用链
-- 用构造的 ARP / IPv4 / UDP 报文验证 parser / pipeline / NAT rewrite
-
-#### dpdk 模式
-- 通过 `pkg-config libdpdk` 链接真实 DPDK
-- 当前代码里已经接入真实 DPDK 主路径
-- 需要目标机器上具备 `libdpdk`
-
-### 3. Phase 1 主路径层
-
-这一版已经落地的真实主路径包括：
-
-- `main.c`
-  - DPDK 模式下的 EAL 初始化入口
-  - `--` 分隔 EAL 参数与应用参数
-- `port_init.c`
-  - mbuf pool 创建
-  - ethdev 配置
-  - rx/tx queue setup
-  - 端口启动与链路信息输出
-- `worker.c`
-  - DPDK 模式真实 `rte_eth_rx_burst / rte_eth_tx_burst`
-  - mock 模式构造真实协议报文而不是 fake len 占位
-- `parser.c`
-  - 真正解析 Ethernet / ARP / IPv4 / UDP / TCP 最小头部
-- `pipeline_fwd.c`
-  - ARP 允许发送
-  - IPv4/UDP 进入 ACL + route 决策
-- `nat_session.c`
-  - 最小 session table + 端口转换基线
-- `pkt_rewrite.c`
-  - UDP 源端口改写 + IPv4/UDP checksum 重算
-
----
-
-## 当前还没有完成什么
-
-为了避免误判，这一版明确 **还没有完成** 下面这些内容：
-
-- 多 worker / `rte_eal_remote_launch` 真正拉起
-- per-lcore stats
-- 配置文件真正加载到 ACL / route / NAT
-- 真实 RSS 配置优化和队列映射调优
-- 真实 rte_flow pattern/action 映射
-- representor / transfer 的真实行为实现
-- DPU / SmartNIC 硬件场景验证
-- 当前容器内的真实 `libdpdk` 链接验证
-
-所以这版虽然已经进入“真实 DPDK 主路径代码”阶段，但仍应被视为：
-
-> **Phase 1 真实闭环基线，而不是完整数据面平台成品。**
-
----
-
-## 目录速览
+## 仓库边界
 
 ```text
-.
-├── app/                  # 主程序、控制、worker、端口初始化、统计
-├── include/dppd/         # 公共头文件
-├── lib/
-│   ├── common/           # 日志、checksum、RSS config 等
-│   ├── pkt/              # parser / rewrite / ARP table / tx offload
-│   ├── flow/             # pipeline / route / ACL / NAT
-│   ├── offload/          # core/soft/rte_flow/hw
-│   ├── representor/      # representor 抽象
-│   └── switch/           # transfer pipeline 抽象
-├── examples/             # 最小示例规划
-├── scenarios/            # Intel/NVIDIA/通用场景文档
-├── tests/                # Scapy / pdump / regression
-├── scripts/              # 构建、运行、抓包、绑定脚本
-└── docs/                 # 架构、路线图、legacy 经验、计划书
+app/dppd/            进程入口、信号与主循环
+app/dppctl/          本机管理命令行客户端
+include/dppd/        稳定的模块接口与数据模型
+lib/runtime/         配置和生命周期
+lib/device/          ethdev、NUMA、队列与拓扑
+lib/control/         immutable snapshot、rule IR 校验
+lib/management/      Unix socket 管理协议与服务端
+lib/dataplane/       parser、software pipeline、worker
+lib/offload/         rte_flow 编译与对象生命周期
+lib/observability/   per-worker stats、telemetry
+tests/unit/          无网卡单元测试
+tests/integration/   双端口和 SmartNIC/DPU 验收说明
 ```
 
----
+## 重要约束
 
-## 构建方式
-
-### 1. 当前容器可验证方式
-
-```bash
-./scripts/build.sh
-./scripts/run_platform.sh --port 0 --rxq 1 --txq 1 --burst 32 --loops 1
-```
-
-### 2. 目标机器上的真实 DPDK 构建方式
-
-```bash
-DPPD_BUILD_MODE=dpdk ./scripts/build.sh
-./build/dppd -l 0-1 -n 4 -- --port 0 --rxq 1 --txq 1 --burst 32 --loops 1000
-```
-
-说明：
-- `-l 0-1 -n 4` 这类参数属于 EAL
-- `--` 后面的参数属于 `dppd` 应用本身
-
----
-
-## 当前完成度判断
-
-### 从工程结构角度
-- **约 85%**
-- 目录边界、扩展位、文档主线已经比较稳定
-
-### 从 Phase 1 可编译工程角度
-- **约 75%**
-- mock 主路径可跑
-- DPDK 主路径代码已经接入
-
-### 从“真实 DPDK Phase 1 可在目标机运行”的角度
-- **约 45% ~ 55%**
-- 代码主路径已经落地
-- 但还缺目标机上的真实编译、收包验证、发送验证和配置加载
-
----
-
-## 建议先看哪些文件
-
-### 主代码入口
-- `app/main.c`
-- `app/port_init.c`
-- `app/worker.c`
-- `lib/pkt/parser.c`
-- `lib/pkt/pkt_rewrite.c`
-- `lib/flow/pipeline_fwd.c`
-- `lib/flow/nat_session.c`
-
-### 设计与路线文档
-- `docs/architecture_v2.md`
-- `docs/phase1_scope_v2.md`
-- `docs/phase4_offload_design.md`
-- `docs/repo_map_v2.md`
-- `docs/build_verified.md`
-
-### legacy 经验文档
-- `docs/legacy_dpdk17_mode.md`
-- `docs/legacy_vs_modern.md`
-
-### 计划书
-- `docs/plans/PLAN_INDEX.md`
-- `docs/plans/DPDK_*.pdf`
-- `docs/plans/DPDK_*.docx`
-
----
-
-## 下一步最值得完成什么
-
-建议后续只盯住三件事，不要再散：
-
-### 1. 在真实 DPDK 机器上完成构建和收发验证
-- `MODE=dpdk` 编译
-- 真正绑网卡
-- 真正跑一轮 RX/TX
-- 验证 parser / NAT / rewrite 行为
-
-### 2. 把配置文件真正接入主路径
-- `route.conf`
-- `acl.conf`
-- `nat.conf`
-
-### 3. 把统计升级为 per-lcore
-- 为后续多 worker 做准备
-
----
-
-## 一句话总结
-
-当前仓库已经从“工程骨架”升级为：
-
-> **一个以现代 DPDK 为目标、Phase 1 真实主路径已经接入、mock 模式可运行、真实 DPDK 模式待目标机验证的用户态数据面平台基线。**
+- 当前兼容基线是 Linux + DPDK 21.11 LTS；升级版本通过独立构建矩阵验证。
+- 是否支持 match/action、transfer、counter、representor 由 PMD 与设备决定；`rte_flow_validate()` 的失败是能力结果，不是可忽略告警。
+- transfer rule 的两个端点必须处于兼容的 embedded-switch domain，不能仅凭 ethdev port id 猜测。
+- 本仓库尚未在当前 Windows 工作区完成真实 DPDK 编译或线速硬件验证；请以目标 Linux 主机的构建与测试结果为准。
