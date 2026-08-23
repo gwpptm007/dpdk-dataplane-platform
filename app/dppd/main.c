@@ -49,6 +49,7 @@ int main(int argc, char **argv)
     int eal_consumed;
     int loop_error = 0;
     int rc = EXIT_FAILURE;
+    bool recovery_isolation = false;
 
     /* EAL 必须先消费 -l/-a/--vdev 等参数，后续只解析 -- 后的应用参数。 */
     eal_consumed = rte_eal_init(argc, argv);
@@ -88,19 +89,33 @@ int main(int argc, char **argv)
                                                           config.state_path);
 
         if (restore_rc != 0) {
+            if (restore_rc != -EUCLEAN ||
+                control.recovery_state !=
+                    DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED) {
+                fprintf(stderr,
+                        "[dppd] rule snapshot restore failed: path=%s error=%s (%d)\n",
+                        config.state_path,
+                        restore_rc < 0 && restore_rc >= -4095 ?
+                            strerror(-restore_rc) : "unknown",
+                        restore_rc);
+                goto cleanup_control;
+            }
+            /*
+             * transaction 回滚未完成：绝不能启动 worker 或开放普通规则接口，但保留
+             * 当前进程的 backend handle，供受限的 reconcile-retry 再次删除。
+             */
+            recovery_isolation = true;
             fprintf(stderr,
-                    "[dppd] rule snapshot restore failed: path=%s error=%s (%d)\n",
-                    config.state_path,
-                    restore_rc < 0 && restore_rc >= -4095 ?
-                        strerror(-restore_rc) : "unknown",
-                    restore_rc);
-            goto cleanup_control;
+                    "[dppd] snapshot rollback incomplete; entering recovery isolation "
+                    "for path=%s\n",
+                    config.state_path);
         }
-        printf("[dppd] rule snapshot ready: path=%s generation=%" PRIu64
-               " rules=%u\n",
-               config.state_path,
-               dppd_rule_repository_generation(&control.rules),
-               dppd_rule_repository_count(&control.rules));
+        if (!recovery_isolation)
+            printf("[dppd] rule snapshot ready: path=%s generation=%" PRIu64
+                   " rules=%u\n",
+                   config.state_path,
+                   dppd_rule_repository_generation(&control.rules),
+                   dppd_rule_repository_count(&control.rules));
     }
     if (dppd_management_start(&management, &control, &runtime.devices,
                               config.control_socket) != 0) {
@@ -108,13 +123,37 @@ int main(int argc, char **argv)
                 config.control_socket);
         goto cleanup_control;
     }
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+    if (recovery_isolation) {
+        /*
+         * 隔离循环不注册 telemetry、不启动 ethdev worker，也不输出正常转发统计。
+         * 唯一允许的状态转换是 reconcile-retry 成功后进入 RESTART_REQUIRED。
+         */
+        while (!stop_signal) {
+            loop_error = dppd_management_poll(&management);
+            if (loop_error != 0) {
+                fprintf(stderr,
+                        "[dppd] recovery management processing failed: %d\n",
+                        loop_error);
+                break;
+            }
+            if (control.recovery_state ==
+                DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {
+                fprintf(stderr,
+                        "[dppd] residual flows cleared; exiting for clean snapshot replay\n");
+                loop_error = -EUCLEAN;
+                break;
+            }
+            sleep_control_loop();
+        }
+        goto cleanup_management;
+    }
     if (dppd_telemetry_register(&runtime) != 0) {
         fprintf(stderr, "[dppd] telemetry command registration failed\n");
         goto cleanup_management;
     }
 
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
     if (dppd_runtime_start(&runtime) != 0)
         goto cleanup_telemetry;
 

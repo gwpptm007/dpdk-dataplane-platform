@@ -225,6 +225,13 @@ int main(void)
     assert(response.payload.persistence.persisted_generation == 0);
     assert(response.payload.persistence.current_generation == 0);
 
+    /* 正常模式也可查询恢复状态；此时没有 residual backend 对象。 */
+    initialize_request(&request, DPPD_MANAGEMENT_RECOVERY_STATUS);
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == 0);
+    assert(response.payload.recovery.state == DPPD_CONTROL_RECOVERY_READY);
+    assert(response.payload.recovery.residual_objects == 0);
+
     /* apply 成功后 desired generation 从 0 发布为 1。 */
     make_drop_request(&request);
     assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
@@ -308,6 +315,28 @@ int main(void)
     assert(response.payload.persistence.persisted_generation == 2);
     assert(response.payload.persistence.current_generation == 2);
     assert(response.payload.persistence.last_error == 0);
+
+    /*
+     * 协议层必须只放行 recovery status/retry。这里直接注入隔离状态，专注验证
+     * dispatch 边界；实际 residual handle 的重试行为由 control service 单测覆盖。
+     */
+    control.recovery_state =
+        DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+    control.recovery_last_error = -EFAULT;
+    initialize_request(&request, DPPD_MANAGEMENT_PING);
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == -EUCLEAN);
+    initialize_request(&request, DPPD_MANAGEMENT_RECOVERY_STATUS);
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == 0);
+    assert(response.payload.recovery.state ==
+           DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED);
+    assert(response.payload.recovery.last_error == -EFAULT);
+    initialize_request(&request, DPPD_MANAGEMENT_RECOVERY_RETRY);
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == 0);
+    assert(response.payload.recovery.state ==
+           DPPD_CONTROL_RECOVERY_RESTART_REQUIRED);
 
     assert(dppd_control_fini(&control) == 0);
     assert(unlink(state_path) == 0);

@@ -19,16 +19,18 @@
 - 保存失败后进入 dirty/fail-stop 状态，并以 `-EUCLEAN` 报告“变更可能已生效但未持久化”；
 - dirty 状态下的新写操作必须先成功保存当前 repository，失败则拒绝继续变更；
 - 相同 apply 命令幂等重试时先修复 snapshot，再返回 `UNCHANGED`；
-- management v3 的 `persistence-status` 状态查询和 `persistence-flush` 显式修复；
+- management v4 的 `persistence-status` 状态查询和 `persistence-flush` 显式修复；
 - `--state-path` 显式启用 daemon 持久化；
 - 启动时加载、topology resolve、全量硬件事务重放及 preserved generation 发布；
 - 任一规则重放失败时逆序回滚本轮硬件对象并拒绝启动。
+- v1 到 v2 的离线迁移工具；迁移时显式指定统一的安装端口。
 
 尚未实现：
 
 - degraded startup 和部分规则恢复；当前策略固定为 fail closed；
-- rollback 自身失败后的自动 reconciliation；此时返回 `EUCLEAN` 并拒绝启动；
-- 格式升级和跨版本迁移工具。
+- 跨进程的 residual flow 枚举/删除；不同 PMD 的可用能力不同，不能用无差别
+  `rte_flow_flush()` 代替；
+- 多端口 v1 快照的逐规则端口映射迁移；v1 格式没有该信息，不能安全推断。
 
 默认仍不启用持久化；只有显式传入 `--state-path PATH` 才会读取或创建 snapshot。
 启用后，daemon 必须成功完成整个恢复事务才开放 management socket 和启动 worker。
@@ -183,5 +185,40 @@ repository global generation。文件不存在时会原子创建一个空 v2 sna
 或空快照创建失败时同样拒绝启动，不会静默退化为内存模式。
 
 v1 记录没有 `install_port_id`，无法判断 ingress/egress 规则应重放到哪个 ethdev。
-加载器因此对 v1 返回 `EPROTONOSUPPORT`，不使用 port 0 或第一个端口进行猜测。迁移工具
-必须由操作者为每条旧规则补充安装端口后才能生成 v2。
+daemon 加载器因此对 v1 返回 `EPROTONOSUPPORT`，不使用 port 0 或第一个端口进行猜测。
+
+若确认旧快照内的**所有**规则原本都安装在同一 ethdev，可在 daemon 未运行时使用：
+
+```bash
+./build/dppd-snapshot-migrate \
+  --input /var/lib/dppd/rules.v1 \
+  --output /var/lib/dppd/rules.v2 \
+  --install-port 5
+```
+
+工具只读取通过完整 CRC、长度、旧 record 布局和 rule IR 校验的 v1 文件；将指定端口
+赋给所有规则，保留 rule generation 与 repository generation，并以 v2 的原子保存语义
+写出新文件。它拒绝输入和输出为同一 inode，绝不原地修改旧快照。若旧规则实际分布在
+多个安装端口，不能使用该工具；必须先取得逐规则端口映射，再由后续专用迁移流程处理。
+
+## 7. 回滚失败的恢复隔离模式
+
+如果启动重放中某条 flow 创建失败，且 transaction 逆序删除已创建 flow 时又失败，daemon
+不会启动 worker，也不会发布空 repository。它保留当前进程仍持有的 `rte_flow` handle，
+只开放本地管理 socket 的两个命令：
+
+```text
+dppctl reconcile-status
+dppctl reconcile-retry
+```
+
+`reconcile-status` 返回恢复状态、仍残留的 backend 对象数以及最近一次 PMD 删除错误。
+隔离期间包括 `ping`、`list`、`get`、apply/delete/count、持久化 flush 在内的普通操作均
+返回 `EUCLEAN`。`reconcile-retry` 对每个仍持有 handle 的对象再次调用 PMD remove；若
+全部删除成功，daemon 进入 `restart-required` 并以失败码退出。服务管理器或操作者必须
+重新启动 daemon，让它从未改变的 snapshot 重新执行完整恢复。
+
+该机制仅解决进程仍存活时的瞬态 PMD 删除失败。若进程在 retry 前被 `SIGKILL`、崩溃或
+机器断电，handle 无法跨进程序列化，当前版本不会尝试猜测或对整个端口执行
+`rte_flow_flush()`；部署方应按目标 PMD 的受支持流程复位/清理设备。跨进程 residual
+flow journal 与 PMD 专用 reconciliation 是后续独立工作。

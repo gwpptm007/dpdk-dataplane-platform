@@ -318,6 +318,38 @@ int dppd_rte_flow_backend_remove_version(struct dppd_rte_flow_backend *backend,
     return rc;
 }
 
+int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend,
+                                    uint32_t *residual_objects)
+{
+    struct dppd_flow_error error;
+    uint32_t i;
+    int first_error = 0;
+
+    if (backend == NULL || backend->objects == NULL ||
+        residual_objects == NULL)
+        return -EINVAL;
+
+    /*
+     * prepare 后但 create 尚未留下 handle 的槽位可直接归还；有 handle 的槽位必须
+     * 通过同一 PMD remove 回收，不能只清内存标记而把真实硬件 flow 遗留在设备中。
+     */
+    for (i = 0; i < backend->capacity; ++i) {
+        struct dppd_rte_flow_object *object = &backend->objects[i];
+        int rc = 0;
+
+        if (!object->occupied)
+            continue;
+        if (object->installed || object->handle.flow != NULL)
+            rc = backend->api.remove(&object->handle, &error);
+        if (rc == 0)
+            release_object(backend, object);
+        else if (first_error == 0)
+            first_error = rc;
+    }
+    *residual_objects = backend->count;
+    return first_error;
+}
+
 int dppd_rte_flow_backend_query_count(
     const struct dppd_rte_flow_backend *backend,
     uint64_t rule_id,

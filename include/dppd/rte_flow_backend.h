@@ -58,6 +58,12 @@ int dppd_rte_flow_backend_remove_version(struct dppd_rte_flow_backend *backend,
                                          uint64_t generation,
                                          struct dppd_flow_error *error);
 /*
+ * 对一次失败事务遗留的 backend 对象再次执行删除。调用方只能在未发布 desired
+ * repository 的恢复隔离模式使用它；成功时 residual_objects 必为 0。
+ */
+int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend,
+                                    uint32_t *residual_objects);
+/*
  * 查询指定 (rule_id, generation) 的 COUNT action。返回值区分：
  * -ENOENT：对象不存在；-ENODATA：规则没有 COUNT；-ENOTSUP：backend 无查询实现。
  */

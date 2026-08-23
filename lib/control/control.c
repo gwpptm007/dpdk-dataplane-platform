@@ -39,6 +39,16 @@ static int persistence_write_preflight(struct dppd_control_service *service)
         persist_current_repository(service) : 0;
 }
 
+static int recovery_write_preflight(const struct dppd_control_service *service)
+{
+    /*
+     * 进入恢复隔离模式意味着上一轮启动事务的 actual state 已不可信。此时绝不能
+     * 接受 apply/delete 或重新覆盖 snapshot；只能通过专用 retry 清除遗留 handle。
+     */
+    return service->recovery_state == DPPD_CONTROL_RECOVERY_READY ? 0 :
+        -EUCLEAN;
+}
+
 int dppd_control_init(struct dppd_control_service *service,
                       const struct dppd_topology *topology,
                       uint32_t rule_capacity,
@@ -72,7 +82,8 @@ int dppd_control_fini(struct dppd_control_service *service)
 
     if (service == NULL)
         return -EINVAL;
-    if (service->persistence_dirty)
+    if (service->recovery_state == DPPD_CONTROL_RECOVERY_READY &&
+        service->persistence_dirty)
         persistence_rc = dppd_control_persistence_flush(service);
     rc = dppd_rte_flow_backend_fini(&service->rte_flow);
     if (rc != 0)
@@ -94,6 +105,8 @@ int dppd_control_persistence_attach(struct dppd_control_service *service,
         return -EINVAL;
     if (service->persistence_path != NULL)
         return -EALREADY;
+    if (recovery_write_preflight(service) != 0)
+        return -EUCLEAN;
     copy = strdup(path);
     if (copy == NULL)
         return -ENOMEM;
@@ -125,6 +138,8 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
     if (service == NULL || service->topology == NULL || path == NULL ||
         path[0] == '\0' || service->rules.records == NULL)
         return -EINVAL;
+    if (recovery_write_preflight(service) != 0)
+        return -EUCLEAN;
     if (service->persistence_path != NULL ||
         dppd_rule_repository_count(&service->rules) != 0 ||
         dppd_rule_repository_generation(&service->rules) != 0 ||
@@ -195,8 +210,16 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
         /* 全量 validate/prepare/commit；任一失败由 transaction 自动逆序回滚。 */
         rc = dppd_transaction_run(&transaction, &backends);
         if (rc != 0) {
-            if (transaction.rollback_code != 0)
+            if (transaction.rollback_code != 0) {
+                /*
+                 * transaction 已尽力回滚，但 backend 仍持有可定位对象。保留 service
+                 * 和 handle，交给恢复隔离模式中的显式 retry；不能继续向下发布规则。
+                 */
+                service->recovery_state =
+                    DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+                service->recovery_last_error = transaction.rollback_code;
                 rc = -EUCLEAN;
+            }
             goto cleanup;
         }
     }
@@ -239,6 +262,8 @@ int dppd_control_persistence_flush(struct dppd_control_service *service)
 
     if (service == NULL || service->persistence_path == NULL)
         return -EINVAL;
+    if (recovery_write_preflight(service) != 0)
+        return -EUCLEAN;
     rc = dppd_persistence_save(service->persistence_path, &service->rules);
     if (rc != 0) {
         service->persistence_dirty = true;
@@ -269,6 +294,47 @@ void dppd_control_persistence_status(
     status->last_error = service->persistence_last_error;
 }
 
+void dppd_control_recovery_status(
+    const struct dppd_control_service *service,
+    struct dppd_control_recovery_status *status)
+{
+    if (status == NULL)
+        return;
+    memset(status, 0, sizeof(*status));
+    if (service == NULL)
+        return;
+    status->state = service->recovery_state;
+    status->residual_objects =
+        dppd_rte_flow_backend_count(&service->rte_flow);
+    status->last_error = service->recovery_last_error;
+}
+
+int dppd_control_reconciliation_retry(struct dppd_control_service *service)
+{
+    uint32_t residual_objects;
+    int rc;
+
+    if (service == NULL)
+        return -EINVAL;
+    if (service->recovery_state == DPPD_CONTROL_RECOVERY_READY ||
+        service->recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED)
+        return -EALREADY;
+
+    rc = dppd_rte_flow_backend_reconcile(&service->rte_flow,
+                                         &residual_objects);
+    if (rc != 0 || residual_objects != 0) {
+        /*
+         * remove 失败时仍保留对象和其 handle，下一次 retry 可以继续调用同一个 PMD
+         * destroy。API 返回 EUCLEAN，具体底层 errno 通过 status.last_error 提供。
+         */
+        service->recovery_last_error = rc != 0 ? rc : -EUCLEAN;
+        return -EUCLEAN;
+    }
+    service->recovery_last_error = 0;
+    service->recovery_state = DPPD_CONTROL_RECOVERY_RESTART_REQUIRED;
+    return 0;
+}
+
 int dppd_control_apply(struct dppd_control_service *service,
                        uint16_t install_port_id,
                        const struct dppd_rule *rule,
@@ -290,6 +356,9 @@ int dppd_control_apply(struct dppd_control_service *service,
         rule == NULL || rule->id == 0 || result == NULL)
         return -EINVAL;
     memset(result, 0, sizeof(*result));
+    rc = recovery_write_preflight(service);
+    if (rc != 0)
+        return rc;
     rc = persistence_write_preflight(service);
     if (rc != 0)
         return rc;
@@ -381,6 +450,9 @@ int dppd_control_remove(struct dppd_control_service *service,
 
     if (service == NULL || rule_id == 0 || removed == NULL || generation == NULL)
         return -EINVAL;
+    rc = recovery_write_preflight(service);
+    if (rc != 0)
+        return rc;
     rc = persistence_write_preflight(service);
     if (rc != 0)
         return rc;
@@ -421,6 +493,8 @@ int dppd_control_query_count(struct dppd_control_service *service,
     if (service == NULL || rule_id == 0 || result == NULL)
         return -EINVAL;
     memset(result, 0, sizeof(*result));
+    if (recovery_write_preflight(service) != 0)
+        return -EUCLEAN;
 
     /*
      * repository 是 desired state 的发布点。先读 repository 再定位同 generation

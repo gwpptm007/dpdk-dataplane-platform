@@ -60,6 +60,13 @@ executable(
   install: false,
 )
 
+executable(
+  'dppd-snapshot-migrate',
+  'app/dppd_snapshot_migrate/main.c',
+  dependencies: dppd_core_dep,
+  install: false,
+)
+
 if get_option('tests')
   subdir('tests/unit')
 endif

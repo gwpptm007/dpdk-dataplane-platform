@@ -120,6 +120,16 @@ int dppd_management_handle(struct dppd_control_service *control,
         response->status = -EPROTO;
         return 0;
     }
+    /*
+     * 回滚失败时 repository 从未发布，但 backend 可能还有实际 flow。除恢复状态和
+     * retry 外一律拒绝，防止“空 desired state”被误认为是可继续运行的正常状态。
+     */
+    if (control->recovery_state != DPPD_CONTROL_RECOVERY_READY &&
+        request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS &&
+        request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY) {
+        response->status = -EUCLEAN;
+        return 0;
+    }
 
     switch (request->operation) {
     case DPPD_MANAGEMENT_PING:
@@ -215,6 +225,19 @@ int dppd_management_handle(struct dppd_control_service *control,
         rc = dppd_control_persistence_flush(control);
         dppd_control_persistence_status(control,
                                         &response->payload.persistence);
+        break;
+    case DPPD_MANAGEMENT_RECOVERY_STATUS:
+        /* 只读快照，不触碰任何 backend 对象，隔离模式和正常模式均可查询。 */
+        dppd_control_recovery_status(control, &response->payload.recovery);
+        rc = 0;
+        break;
+    case DPPD_MANAGEMENT_RECOVERY_RETRY:
+        /*
+         * retry 只尝试删除本进程仍持有 handle 的遗留对象；成功后由主循环退出，
+         * 后续重启重新执行完整 snapshot 恢复，而不在此处发布空 repository。
+         */
+        rc = dppd_control_reconciliation_retry(control);
+        dppd_control_recovery_status(control, &response->payload.recovery);
         break;
     default:
         rc = -ENOTSUP;

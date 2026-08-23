@@ -108,6 +108,7 @@ int main(void)
     struct dppd_control_apply_result result;
     struct dppd_control_count_result count_result;
     struct dppd_control_persistence_status persistence_status;
+    struct dppd_control_recovery_status recovery_status;
     struct dppd_persisted_snapshot snapshot;
     struct dppd_rule_repository source_repository;
     struct dppd_rule_apply_result repository_result;
@@ -356,20 +357,37 @@ int main(void)
     assert(dppd_control_fini(&service) == 0);
 
     /*
-     * 第二条 flow 创建失败时，transaction 必须删除第一条已创建对象，且 repository
-     * 保持全空、persistence 保持未 attach；daemon 因而可以安全地拒绝启动。
+     * 第二条 flow 创建失败且第一条回滚删除也失败时，不能丢掉本进程 handle 后直接
+     * 退出。service 必须进入隔离状态，阻断普通写入，并支持对同一对象显式重试。
      */
     memset(&fake, 0, sizeof(fake));
     fake.fail_create_at = 1;
-    fake.fail_remove_at = -1;
+    fake.fail_remove_at = 0;
     assert(dppd_control_init(&service, &topology, 4, &api) == 0);
-    assert(dppd_control_persistence_restore(&service, state_path) == -EIO);
+    assert(dppd_control_persistence_restore(&service, state_path) == -EUCLEAN);
     assert(fake.create_calls == 2 && fake.remove_calls == 1);
     assert(dppd_rule_repository_count(&service.rules) == 0);
     assert(dppd_rule_repository_generation(&service.rules) == 0);
-    assert(dppd_rte_flow_backend_count(&service.rte_flow) == 0);
+    assert(dppd_rte_flow_backend_count(&service.rte_flow) == 1);
     dppd_control_persistence_status(&service, &persistence_status);
     assert(!persistence_status.enabled && !persistence_status.dirty);
+    dppd_control_recovery_status(&service, &recovery_status);
+    assert(recovery_status.state ==
+           DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED);
+    assert(recovery_status.residual_objects == 1);
+    assert(recovery_status.last_error == -EFAULT);
+    rule = make_rule(3002);
+    assert(dppd_control_apply(&service, 5, &rule, 0, &result) == -EUCLEAN);
+    assert(fake.create_calls == 2);
+
+    /* fake_remove 只在第 0 次调用失败；retry 复用残留 handle 的下一次 remove 成功。 */
+    assert(dppd_control_reconciliation_retry(&service) == 0);
+    assert(fake.remove_calls == 2);
+    dppd_control_recovery_status(&service, &recovery_status);
+    assert(recovery_status.state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED);
+    assert(recovery_status.residual_objects == 0);
+    assert(recovery_status.last_error == 0);
+    assert(dppd_control_reconciliation_retry(&service) == -EALREADY);
     assert(dppd_control_fini(&service) == 0);
 
     unlink(state_path);

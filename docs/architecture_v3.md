@@ -62,10 +62,13 @@ COUNT 查询先从 desired repository 读取已发布 generation，再定位完�
 保存网络字节序协议值、按 rule id 排序并用 CRC32 校验；文件通过同目录临时文件、
 `fsync`、原子 `rename` 和父目录 `fsync` 发布。control mutation 已连接完整 snapshot
 保存：落盘失败返回 `EUCLEAN` 并进入 dirty/fail-stop，后续写入先修复当前快照，避免
-磁盘故障期间持续扩大偏差。management v3 可查询 dirty 和两个 generation，也可显式
+磁盘故障期间持续扩大偏差。management v4 可查询 dirty 和两个 generation，也可显式
 flush 当前完整 repository。`--state-path` 启用 v2 snapshot：记录同时保存 canonical
 rule 和 install port，启动时先对全部规则 plan/validate/prepare/commit，任一失败逆序
-回滚并拒绝启动；全部成功后才发布保留的逐规则及全局 generation。
+回滚并拒绝启动；全部成功后才发布保留的逐规则及全局 generation。若逆序删除本身失败，
+daemon 不启动 worker 而进入 recovery isolation，仅保留已知 handle 并允许受限 retry；
+retry 全部成功后退出重启。跨进程无法从 handle 重建未知 flow，因此不得把全端口 flush
+当作通用 reconciliation。
 
 端口查询合并 runtime device capability 与 topology endpoint，但只传递无指针的协议快照，不暴露 `rte_eth_dev_info`。它区分 PMD 报告的能力上限与 dppd 实际启用的 offload 子集；由于 `rte_flow` 能力依赖具体 pattern/action 组合，端口快照不能替代逐规则 validate。
 

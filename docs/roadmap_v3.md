@@ -8,11 +8,13 @@
 
 ## M1：能力规划与规则控制面
 
-当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、generation replacement、单规则 control service、本机 management API，以及 snapshot v2 写路径和 fail-closed 启动重放已落地；software adapter、批量 API、degraded recovery 与迁移工具尚未实现。
+当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、generation replacement、单规则 control service、本机 management API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；software adapter、批量 API、跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。
 
 持久化方面已完成 [versioned snapshot v2](persistence_snapshot_v2.md)、install port 保存、
 control mutation 后的完整保存、dirty state、管理状态查询、`--state-path` 和全量硬件
-事务重放；rollback 自身失败后的 reconciliation 与 v1 迁移工具仍属于 M1 待办。
+事务重放；rollback 自身失败时可保留 handle 进入隔离模式并重试删除。`dppd-snapshot-migrate`
+可将确认使用同一安装端口的 v1 文件显式转换为 v2。跨进程 residual flow reconciliation
+与多端口 v1 迁移仍属于 M1 待办。
 
 已登记延期项：[虚拟测试端口的规则执行能力](todo_virtual_flow_backend.md)。当前
 `net_ring` 不实现 rte_flow；后续按 TAP 基础 flow、平台 software backend、物理

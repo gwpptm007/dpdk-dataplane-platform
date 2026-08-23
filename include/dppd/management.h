@@ -10,10 +10,10 @@
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /*
- * v3 把 install_port_id 纳入 canonical rule 与规则摘要。当前协议直接传输本地 C ABI，
+ * v4 增加启动恢复隔离模式的状态与重试命令。当前协议直接传输本地 C ABI，
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 3U
+#define DPPD_MANAGEMENT_VERSION 4U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -34,6 +34,9 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_PERSISTENCE_STATUS,
     /* 显式保存当前完整 repository，可用于修复 dirty 状态。 */
     DPPD_MANAGEMENT_PERSISTENCE_FLUSH,
+    /* 启动重放回滚失败后的隔离状态查看与同进程 handle 删除重试。 */
+    DPPD_MANAGEMENT_RECOVERY_STATUS,
+    DPPD_MANAGEMENT_RECOVERY_RETRY,
 };
 
 /*
@@ -182,6 +185,7 @@ struct dppd_management_response {
         struct dppd_control_count_result count;
         struct dppd_management_rule_page rule_page;
         struct dppd_control_persistence_status persistence;
+        struct dppd_control_recovery_status recovery;
     } payload;
 };
 

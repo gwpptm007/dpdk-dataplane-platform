@@ -18,6 +18,8 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] ping\n", program);
     fprintf(stderr, "  %s [--socket PATH] persistence-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] persistence-flush\n", program);
+    fprintf(stderr, "  %s [--socket PATH] reconcile-status\n", program);
+    fprintf(stderr, "  %s [--socket PATH] reconcile-retry\n", program);
     fprintf(stderr, "  %s [--socket PATH] port-show PORT\n", program);
     fprintf(stderr,
             "  %s [--socket PATH] list [AFTER_RULE_ID [REPOSITORY_GENERATION]]\n",
@@ -378,6 +380,14 @@ static int build_request(int argc, char **argv,
         initialize_request(request, DPPD_MANAGEMENT_PERSISTENCE_FLUSH);
         return 0;
     }
+    if (argc == 1 && strcmp(argv[0], "reconcile-status") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RECOVERY_STATUS);
+        return 0;
+    }
+    if (argc == 1 && strcmp(argv[0], "reconcile-retry") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RECOVERY_RETRY);
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[0], "port-show") == 0) {
         initialize_request(request, DPPD_MANAGEMENT_PORT_GET);
         if (parse_u64(argv[1], 0, UINT16_MAX, &value) != 0)
@@ -510,6 +520,20 @@ static const char *fallback_name(uint8_t fallback)
         return "prefer-hardware";
     case DPPD_FALLBACK_SOFTWARE_ONLY:
         return "software-only";
+    }
+    return "unknown";
+}
+
+static const char *recovery_state_name(
+    enum dppd_control_recovery_state state)
+{
+    switch (state) {
+    case DPPD_CONTROL_RECOVERY_READY:
+        return "ready";
+    case DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED:
+        return "reconciliation-required";
+    case DPPD_CONTROL_RECOVERY_RESTART_REQUIRED:
+        return "restart-required";
     }
     return "unknown";
 }
@@ -717,6 +741,13 @@ static void print_response(const struct dppd_management_response *response)
                response->payload.persistence.current_generation,
                response->payload.persistence.last_error);
         break;
+    case DPPD_MANAGEMENT_RECOVERY_STATUS:
+    case DPPD_MANAGEMENT_RECOVERY_RETRY:
+        printf("recovery state=%s residual-objects=%u last-error=%d\n",
+               recovery_state_name(response->payload.recovery.state),
+               response->payload.recovery.residual_objects,
+               response->payload.recovery.last_error);
+        break;
     default:
         break;
     }
@@ -764,6 +795,12 @@ int main(int argc, char **argv)
                     "dppctl: operation may already be active, but the snapshot "
                     "is dirty; fix storage, run persistence-flush, then verify "
                     "with persistence-status and get/list\n");
+        }
+        if (status == -EUCLEAN) {
+            fprintf(stderr,
+                    "dppctl: daemon may be in recovery isolation; run "
+                    "reconcile-status and, after fixing the PMD/device issue, "
+                    "reconcile-retry\n");
         }
         return EXIT_FAILURE;
     }

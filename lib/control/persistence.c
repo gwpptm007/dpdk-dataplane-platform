@@ -12,15 +12,24 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define DPPD_SNAPSHOT_VERSION 2U
+#define DPPD_SNAPSHOT_V1_VERSION 1U
+#define DPPD_SNAPSHOT_V2_VERSION 2U
+#define DPPD_SNAPSHOT_VERSION DPPD_SNAPSHOT_V2_VERSION
 #define DPPD_SNAPSHOT_HEADER_SIZE 48U
-#define DPPD_SNAPSHOT_RULE_HEADER_SIZE 40U
+#define DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE 36U
+#define DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE 40U
+#define DPPD_SNAPSHOT_RULE_HEADER_SIZE DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE
 #define DPPD_SNAPSHOT_MATCH_SIZE 20U
 #define DPPD_SNAPSHOT_ACTION_SIZE 8U
-#define DPPD_SNAPSHOT_RECORD_SIZE \
+#define DPPD_SNAPSHOT_V1_RECORD_SIZE \
+    (DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE + \
+     DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE + \
+     DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE)
+#define DPPD_SNAPSHOT_V2_RECORD_SIZE \
     (DPPD_SNAPSHOT_RULE_HEADER_SIZE + \
      DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE + \
      DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE)
+#define DPPD_SNAPSHOT_RECORD_SIZE DPPD_SNAPSHOT_V2_RECORD_SIZE
 #define DPPD_SNAPSHOT_MAX_RULES 1000000U
 #define DPPD_SNAPSHOT_CHECKSUM_OFFSET 40U
 
@@ -173,7 +182,13 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
     return 0;
 }
 
-static int decode_rule(const uint8_t *input, struct dppd_rule *rule)
+/*
+ * v1 与 v2 的 match/action 编码完全相同，只是 v1 缺少 install_port_id 和
+ * 两字节保留位。将布局参数化可保证迁移读取与正常读取共享同一套 IR 校验。
+ */
+static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule,
+                              uint32_t rule_header_size,
+                              bool contains_install_port)
 {
     char validation_error[128];
     uint16_t i;
@@ -187,9 +202,10 @@ static int decode_rule(const uint8_t *input, struct dppd_rule *rule)
     rule->priority = get_u32_le(input + 28);
     rule->nb_matches = get_u16_le(input + 32);
     rule->nb_actions = get_u16_le(input + 34);
-    rule->install_port_id = get_u16_le(input + 36);
+    if (contains_install_port)
+        rule->install_port_id = get_u16_le(input + 36);
     if (rule->id == 0 || rule->generation == 0 ||
-        get_u16_le(input + 38) != 0 ||
+        (contains_install_port && get_u16_le(input + 38) != 0) ||
         rule->nb_matches > DPPD_RULE_MAX_ITEMS ||
         rule->nb_actions > DPPD_RULE_MAX_ACTIONS)
         return -EBADMSG;
@@ -197,7 +213,7 @@ static int decode_rule(const uint8_t *input, struct dppd_rule *rule)
     for (i = 0; i < rule->nb_matches; ++i) {
         struct dppd_match *match = &rule->matches[i];
         const uint8_t *encoded =
-            input + DPPD_SNAPSHOT_RULE_HEADER_SIZE +
+            input + rule_header_size +
             i * DPPD_SNAPSHOT_MATCH_SIZE;
 
         match->type = (enum dppd_match_type)get_u32_le(encoded);
@@ -227,7 +243,7 @@ static int decode_rule(const uint8_t *input, struct dppd_rule *rule)
 
     for (i = 0; i < rule->nb_actions; ++i) {
         struct dppd_action *action = &rule->actions[i];
-        const uint8_t *encoded = input + DPPD_SNAPSHOT_RULE_HEADER_SIZE +
+        const uint8_t *encoded = input + rule_header_size +
             DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE +
             i * DPPD_SNAPSHOT_ACTION_SIZE;
 
@@ -422,8 +438,30 @@ cleanup:
     return rc;
 }
 
-int dppd_persistence_load(const char *path,
-                          struct dppd_persisted_snapshot *snapshot)
+typedef int (*dppd_snapshot_rule_decoder)(const uint8_t *input,
+                                          struct dppd_rule *rule);
+
+static int decode_rule_v2(const uint8_t *input, struct dppd_rule *rule)
+{
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE,
+                              true);
+}
+
+static int decode_rule_v1(const uint8_t *input, struct dppd_rule *rule)
+{
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE,
+                              false);
+}
+
+/*
+ * 版本选择在这里集中完成：正常启动只传入 v2，迁移工具才传入 v1。这样不会
+ * 因为新增迁移能力而让守护进程误把缺少安装端口的旧快照当成可恢复状态。
+ */
+static int load_snapshot_version(const char *path,
+                                 struct dppd_persisted_snapshot *snapshot,
+                                 uint32_t expected_version,
+                                 uint32_t expected_record_size,
+                                 dppd_snapshot_rule_decoder decode_rule)
 {
     uint8_t header[DPPD_SNAPSHOT_HEADER_SIZE];
     uint8_t checksum_header[DPPD_SNAPSHOT_HEADER_SIZE];
@@ -465,12 +503,12 @@ int dppd_persistence_load(const char *path,
      * v1 没有 install_port_id，无法无歧义重放。对已识别但不兼容的版本返回
      * EPROTONOSUPPORT，和随机损坏使用的 EBADMSG 明确区分，便于迁移工具诊断。
      */
-    if (get_u32_le(header + 8) != DPPD_SNAPSHOT_VERSION) {
+    if (get_u32_le(header + 8) != expected_version) {
         rc = -EPROTONOSUPPORT;
         goto cleanup;
     }
     if (get_u32_le(header + 12) != DPPD_SNAPSHOT_HEADER_SIZE ||
-        get_u32_le(header + 16) != DPPD_SNAPSHOT_RECORD_SIZE ||
+        get_u32_le(header + 16) != expected_record_size ||
         get_u32_le(header + 44) != 0) {
         rc = -EBADMSG;
         goto cleanup;
@@ -479,7 +517,7 @@ int dppd_persistence_load(const char *path,
     generation = get_u64_le(header + 24);
     payload_size = get_u64_le(header + 32);
     if (count > DPPD_SNAPSHOT_MAX_RULES ||
-        payload_size != (uint64_t)count * DPPD_SNAPSHOT_RECORD_SIZE) {
+        payload_size != (uint64_t)count * expected_record_size) {
         rc = -EBADMSG;
         goto cleanup;
     }
@@ -515,7 +553,7 @@ int dppd_persistence_load(const char *path,
         goto cleanup;
     }
     for (i = 0; i < count; ++i) {
-        rc = decode_rule(payload + i * DPPD_SNAPSHOT_RECORD_SIZE,
+        rc = decode_rule(payload + i * expected_record_size,
                          &snapshot->rules[i]);
         if (rc != 0)
             goto cleanup;
@@ -536,6 +574,22 @@ cleanup:
     if (rc != 0)
         dppd_persisted_snapshot_destroy(snapshot);
     return rc;
+}
+
+int dppd_persistence_load(const char *path,
+                          struct dppd_persisted_snapshot *snapshot)
+{
+    return load_snapshot_version(path, snapshot, DPPD_SNAPSHOT_V2_VERSION,
+                                 DPPD_SNAPSHOT_V2_RECORD_SIZE,
+                                 decode_rule_v2);
+}
+
+int dppd_persistence_load_v1_for_migration(
+    const char *path, struct dppd_persisted_snapshot *snapshot)
+{
+    return load_snapshot_version(path, snapshot, DPPD_SNAPSHOT_V1_VERSION,
+                                 DPPD_SNAPSHOT_V1_RECORD_SIZE,
+                                 decode_rule_v1);
 }
 
 void dppd_persisted_snapshot_destroy(struct dppd_persisted_snapshot *snapshot)

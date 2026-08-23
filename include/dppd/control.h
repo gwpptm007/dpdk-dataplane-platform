@@ -7,6 +7,15 @@
 #include "dppd/rte_flow_backend.h"
 #include "dppd/rule_repository.h"
 
+enum dppd_control_recovery_state {
+    /* 正常运行：desired repository 与 backend 的控制面不变量成立。 */
+    DPPD_CONTROL_RECOVERY_READY = 0,
+    /* 启动重放的回滚失败，backend 可能仍留有本进程可定位的 flow handle。 */
+    DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED,
+    /* 残留对象已清除；必须重启后从 snapshot 重新建立完整 desired state。 */
+    DPPD_CONTROL_RECOVERY_RESTART_REQUIRED,
+};
+
 struct dppd_control_service {
     const struct dppd_topology *topology;
     struct dppd_rule_repository rules;
@@ -17,6 +26,9 @@ struct dppd_control_service {
     uint64_t persisted_generation;
     int persistence_last_error;
     bool persistence_dirty;
+    /* 仅在启动恢复回滚失败时置位；普通运行路径不能自行清除此状态。 */
+    enum dppd_control_recovery_state recovery_state;
+    int recovery_last_error;
 };
 
 struct dppd_control_apply_result {
@@ -44,6 +56,12 @@ struct dppd_control_persistence_status {
     int last_error;
 };
 
+struct dppd_control_recovery_status {
+    enum dppd_control_recovery_state state;
+    uint32_t residual_objects;
+    int last_error;
+};
+
 int dppd_control_init(struct dppd_control_service *service,
                       const struct dppd_topology *topology,
                       uint32_t rule_capacity,
@@ -67,6 +85,14 @@ int dppd_control_persistence_flush(struct dppd_control_service *service);
 void dppd_control_persistence_status(
     const struct dppd_control_service *service,
     struct dppd_control_persistence_status *status);
+void dppd_control_recovery_status(
+    const struct dppd_control_service *service,
+    struct dppd_control_recovery_status *status);
+/*
+ * 只允许恢复隔离模式调用。成功后进入 RESTART_REQUIRED，不恢复 worker 或发布空
+ * repository；必须由主程序退出并重新走完整 snapshot 恢复。
+ */
+int dppd_control_reconciliation_retry(struct dppd_control_service *service);
 /*
  * apply 的核心不变量：硬件事务成功后才发布 desired generation。
  * 相同规则为幂等重放；不同规则按新 generation 安装，旧 generation

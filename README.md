@@ -14,13 +14,13 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - ethdev/representor/switch-domain 拓扑发现；
 - 统一 rule IR 到 `rte_flow` 的真实 validate/create/query/destroy/flush；
 - 带稳定 ID、generation、幂等更新和乐观并发控制的 rule repository；
-- versioned rule snapshot v2、install port、CRC32、原子替换、dirty 写路径和 fail-closed 启动重放；
+- versioned rule snapshot v2、install port、CRC32、原子替换、dirty 写路径、fail-closed 启动重放、v1 单端口离线迁移和进程内 recovery isolation；
 - 可解释的软硬件 planner，以及 validate/prepare/commit/rollback transaction engine；
 - 连接 desired repository 与真实 `rte_flow` 对象仓库、支持 generation replacement 的进程内 control service；
 - 版本化 Unix `SOCK_SEQPACKET` 管理接口和 `dppctl`，支持端口能力查询、generation 稳定分页、完整规则详情、单规则 apply/delete 及硬件 COUNT 查询；
 - DPDK telemetry `/dppd/stats` 与可选 pdump 服务。
 
-当前软件策略故意只实现可验证的双向端口对接，不伪装尚未完成的 ACL、NAT、路由或硬件 fallback。管理 CLI 已能构造 Ethernet/IPv4/UDP/TCP 规则并组合 DROP/QUEUE/MARK/COUNT；具体规则仍必须以 PMD 的 `rte_flow_validate()` 结果为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；默认不指定路径时保持禁用。批量规则事务、软件分类器、degraded recovery 和 flow template 是下一阶段工作，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
+当前软件策略故意只实现可验证的双向端口对接，不伪装尚未完成的 ACL、NAT、路由或硬件 fallback。管理 CLI 已能构造 Ethernet/IPv4/UDP/TCP 规则并组合 DROP/QUEUE/MARK/COUNT；具体规则仍必须以 PMD 的 `rte_flow_validate()` 结果为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 只开放 `reconcile-status/reconcile-retry`，清除已知 handle 后退出重启。默认不指定路径时保持禁用。批量规则事务、软件分类器、跨进程 reconciliation、degraded recovery 和 flow template 是下一阶段工作，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
 
 ## 快速开始
 

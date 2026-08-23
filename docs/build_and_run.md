@@ -66,6 +66,18 @@ sudo ./build/dppd -l 0-2 -n 4 -- \
 port 对全部规则执行 plan/validate/prepare/commit；任一规则失败就回滚本轮对象并拒绝
 启动。v1 因没有 install port 会返回 `EPROTONOSUPPORT`，不会猜测默认端口。
 
+若已有确认全部规则使用同一 ethdev 的 v1 snapshot，先在 daemon 停止时离线迁移；
+`--install-port` 是目标 ethdev id，不是 PCI BDF。输入不会被改写：
+
+```bash
+./build/dppd-snapshot-migrate \
+  --input /var/lib/dppd/rules.v1 \
+  --output /var/lib/dppd/rules.snapshot \
+  --install-port 0
+```
+
+v1 没有每条规则的端口信息，多端口旧快照不能安全使用这个统一映射工具。
+
 ## 本机规则管理
 
 `dppd` 启动后，使用同一次构建生成的 `dppctl` 访问管理 socket：
@@ -74,6 +86,8 @@ port 对全部规则执行 plan/validate/prepare/commit；任一规则失败就�
 ./build/dppctl ping
 ./build/dppctl persistence-status
 ./build/dppctl persistence-flush
+./build/dppctl reconcile-status
+./build/dppctl reconcile-retry
 ./build/dppctl port-show 0
 ./build/dppctl list
 ./build/dppctl apply-drop 100 0 0 10 require
@@ -114,7 +128,13 @@ repository，用于修复 `EUCLEAN`。未指定 `--state-path` 时 status 为 `e
 flush 返回 `EINVAL`。显式启用后，
 status 在 management socket 开放时已经是恢复完成的 clean generation。
 
-管理 socket 权限为 `0600`。v3 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
+启动恢复的回滚若遇到 PMD 删除失败，daemon 会进入 recovery isolation：不启动 worker，
+普通管理操作返回 `EUCLEAN`，仅允许 `reconcile-status` 和 `reconcile-retry`。修复 PMD/
+设备问题后执行 retry；全部 residual 对象删除成功时 daemon 自动退出，随后应重新启动
+以执行完整 snapshot 重放。该 retry 只能处理当前进程仍持有 handle 的对象；进程已崩溃
+或被强制终止时，应使用目标 PMD/设备支持的复位或清理流程，不能直接使用全端口 flush。
+
+管理 socket 权限为 `0600`。v4 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
 
 ## Telemetry
 

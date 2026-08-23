@@ -29,6 +29,14 @@ int dppd_persistence_save(const char *path,
  */
 int dppd_persistence_load(const char *path,
                           struct dppd_persisted_snapshot *snapshot);
+
+/*
+ * 仅供离线迁移工具读取 v1 快照。v1 不保存 install_port_id，因此成功返回的
+ * 所有规则该字段均为 0；调用方必须显式补全端口，不能把结果直接用于启动恢复。
+ * 与普通加载一样，此接口会严格验证文件大小、CRC、记录布局和 rule IR 语义。
+ */
+int dppd_persistence_load_v1_for_migration(
+    const char *path, struct dppd_persisted_snapshot *snapshot);
 void dppd_persisted_snapshot_destroy(struct dppd_persisted_snapshot *snapshot);
 
 #endif
