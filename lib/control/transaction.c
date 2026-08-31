@@ -167,3 +167,33 @@ int dppd_transaction_rollback_committed(
     rollback_items(transaction, backends, transaction->nb_items);
     return transaction->rollback_code;
 }
+
+/**
+ * 将已提交事务转换为终态，并委托 backend 释放 prepare 阶段的临时资源。逐项清零 token
+ * 是为了让后续误用能尽早暴露：FINALIZED 事务既不拥有 rollback 资源，也不再拥有任何
+ * 可以重放 commit 的上下文。finalize 回调没有错误返回，backend 必须保证它只是释放动作。
+ */
+int dppd_transaction_finalize(struct dppd_transaction *transaction,
+                              const struct dppd_transaction_backends *backends)
+{
+    uint32_t i;
+
+    if (transaction == NULL || backends == NULL ||
+        transaction->state != DPPD_TRANSACTION_COMMITTED)
+        return -EINVAL;
+    for (i = 0; i < transaction->nb_items; ++i) {
+        struct dppd_transaction_item *item = &transaction->items[i];
+        const struct dppd_transaction_backend *backend =
+            backend_for(backends, item->plan.backend);
+
+        if (item->state != DPPD_TRANSACTION_ITEM_COMMITTED ||
+            !backend_valid(backend))
+            return -EUCLEAN;
+        /* 所有 item 均已实际提交；不能因某个 backend 没有 finalize 而跳过状态收口。 */
+        if (backend->finalize != NULL)
+            backend->finalize(backend->context, item, item->backend_token);
+        item->backend_token = 0;
+    }
+    transaction->state = DPPD_TRANSACTION_FINALIZED;
+    return 0;
+}

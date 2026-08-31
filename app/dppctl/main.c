@@ -30,16 +30,21 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] delete RULE_ID EXPECTED_GENERATION\n",
             program);
     fprintf(stderr,
+            "  %s [--socket PATH] delete-batch RULE_ID GENERATION RULE_ID GENERATION"
+            " [RULE_ID GENERATION [RULE_ID GENERATION]]\n", program);
+    fprintf(stderr,
             "  %s [--socket PATH] apply-filter RULE_ID PORT EXPECTED_GENERATION"
             " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
-            " drop|queue:N [count] [mark:N] [priority:N] [prefer|require]\n",
+            " drop|queue:N [count] [mark:N] [priority:N] [prefer|require|software]\n",
             program);
     fprintf(stderr, "  %s [--socket PATH] apply-drop RULE_ID PORT EXPECTED_GENERATION"
-                    " [PRIORITY] [prefer|require]\n", program);
+                    " [PRIORITY] [prefer|require|software]\n", program);
+    fprintf(stderr, "  %s [--socket PATH] apply-drop-batch PORT RULE_ID RULE_ID"
+                    " [RULE_ID [RULE_ID]]\n", program);
     fprintf(stderr,
             "  %s [--socket PATH] apply-filter-drop RULE_ID PORT EXPECTED_GENERATION"
             " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
-            " [PRIORITY] [prefer|require]\n",
+            " [PRIORITY] [prefer|require|software]\n",
             program);
     fprintf(stderr, "EXPECTED_GENERATION may be 'any'; use 0 when creating a new rule.\n");
     fprintf(stderr, "CIDR or L4 port may be 'any'; ipv4 requires both ports to be 'any'.\n");
@@ -149,6 +154,8 @@ static int parse_rule_options(int argc, char **argv, int first,
     if (argc > first + 1) {
         if (strcmp(argv[first + 1], "require") == 0)
             rule->fallback = DPPD_FALLBACK_REQUIRE_HARDWARE;
+        else if (strcmp(argv[first + 1], "software") == 0)
+            rule->fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
         else if (strcmp(argv[first + 1], "prefer") != 0)
             return -EINVAL;
     }
@@ -262,13 +269,15 @@ static int build_filter_actions(int argc, char **argv, int first,
             has_priority = true;
             rule->priority = (uint32_t)value;
         } else if (strcmp(argv[index], "require") == 0 ||
-                   strcmp(argv[index], "prefer") == 0) {
+                   strcmp(argv[index], "prefer") == 0 ||
+                   strcmp(argv[index], "software") == 0) {
             if (has_fallback)
                 return -EINVAL;
             has_fallback = true;
             rule->fallback = strcmp(argv[index], "require") == 0 ?
                 DPPD_FALLBACK_REQUIRE_HARDWARE :
-                DPPD_FALLBACK_PREFER_HARDWARE;
+                strcmp(argv[index], "software") == 0 ?
+                DPPD_FALLBACK_SOFTWARE_ONLY : DPPD_FALLBACK_PREFER_HARDWARE;
         } else {
             return -EINVAL;
         }
@@ -424,6 +433,27 @@ static int build_request(int argc, char **argv,
             return -EINVAL;
         return 0;
     }
+    if (argc >= 5 && argc <= 9 && ((argc - 1) % 2) == 0 &&
+        strcmp(argv[0], "delete-batch") == 0) {
+        uint32_t i;
+
+        /*
+         * 批量删除有意不接受 any 或 0：用户必须把 get/list 得到的精确 generation 成对
+         * 提供，daemon 才能在删除任何 actual object 前确认整批仍是同一份 desired 视图。
+         */
+        initialize_request(request, DPPD_MANAGEMENT_RULE_DELETE_BATCH);
+        request->payload.delete_batch.count = (uint16_t)((argc - 1) / 2);
+        for (i = 0; i < request->payload.delete_batch.count; ++i) {
+            struct dppd_control_batch_remove_request *entry =
+                &request->payload.delete_batch.rules[i];
+
+            if (parse_u64(argv[i * 2 + 1], 1, UINT64_MAX, &entry->rule_id) != 0 ||
+                parse_u64(argv[i * 2 + 2], 1, UINT64_MAX - 1U,
+                          &entry->expected_generation) != 0)
+                return -EINVAL;
+        }
+        return 0;
+    }
     if (argc == 3 && strcmp(argv[0], "count") == 0) {
         initialize_request(request, DPPD_MANAGEMENT_RULE_COUNT_QUERY);
         if (parse_u64(argv[1], 1, UINT64_MAX,
@@ -431,6 +461,40 @@ static int build_request(int argc, char **argv,
             parse_expected(argv[2],
                            &request->payload.count_query.expected_generation) != 0)
             return -EINVAL;
+        return 0;
+    }
+    if (argc >= 4 && argc <= 6 && strcmp(argv[0], "apply-drop-batch") == 0) {
+        uint32_t i;
+
+        /**
+         * CLI 首版故意收窄为：同一 ingress port、ETH 匹配、DROP 动作的纯新建。它不是
+         * apply-drop 的简单循环，而是一次管理协议请求，daemon 会为所有条目创建同一
+         * transaction；任何一条 ID 非法、重复或 backend 失败，均不会留下其它条目。
+         */
+        initialize_request(request, DPPD_MANAGEMENT_RULE_CREATE_BATCH);
+        if (parse_u64(argv[1], 0, UINT16_MAX, &value) != 0)
+            return -EINVAL;
+        request->payload.create_batch.count = (uint16_t)(argc - 2);
+        for (i = 0; i < request->payload.create_batch.count; ++i) {
+            struct dppd_control_batch_create_request *entry =
+                &request->payload.create_batch.rules[i];
+
+            if (parse_u64(argv[i + 2], 1, UINT64_MAX, &entry->rule.id) != 0)
+                return -EINVAL;
+            entry->install_port_id = (uint16_t)value;
+            /* 0 明确要求“此前不存在”；批量 CLI 不提供 ANY 或 update，以保持可补偿性。 */
+            entry->expected_generation = 0;
+            entry->rule.domain = DPPD_RULE_DOMAIN_INGRESS;
+            /*
+             * 优先走 rte_flow；仅 PMD 的无副作用 validate 明确失败且该 ETH/DROP 规则
+             * 由软件后端等价支持时，控制层才将本条降级为 software。
+             */
+            entry->rule.fallback = DPPD_FALLBACK_PREFER_HARDWARE;
+            entry->rule.nb_matches = 1;
+            entry->rule.matches[0].type = DPPD_MATCH_ETH;
+            entry->rule.nb_actions = 1;
+            entry->rule.actions[0].type = DPPD_ACTION_DROP;
+        }
         return 0;
     }
     if (argc >= 4 && argc <= 6 && strcmp(argv[0], "apply-drop") == 0) {
@@ -448,7 +512,7 @@ static int build_request(int argc, char **argv,
             return -EINVAL;
         request->payload.apply.install_port_id = (uint16_t)value;
         rule->domain = DPPD_RULE_DOMAIN_INGRESS;
-        /* 默认 prefer；由于通用软件规则执行器尚未实现，硬件失败仍会明确返回错误。 */
+        /* 默认 prefer；仅当硬件 validate 失败且规则可等价执行时才回退软件 backend。 */
         rule->fallback = DPPD_FALLBACK_PREFER_HARDWARE;
         rule->nb_matches = 1;
         rule->matches[0].type = DPPD_MATCH_ETH;
@@ -692,11 +756,39 @@ static void print_response(const struct dppd_management_response *response)
                response->payload.apply.plan.backend,
                response->payload.apply.plan.reason);
         break;
+    case DPPD_MANAGEMENT_RULE_CREATE_BATCH: {
+        uint16_t i;
+
+        printf("batch-applied count=%u\n", response->payload.create_batch.count);
+        for (i = 0; i < response->payload.create_batch.count; ++i) {
+            const struct dppd_control_apply_result *result =
+                &response->payload.create_batch.rules[i];
+
+            printf("  generation=%" PRIu64 " transaction=%" PRIu64
+                   " backend=%d reason=%d\n",
+                   result->generation, result->transaction_id,
+                   result->plan.backend, result->plan.reason);
+        }
+        break;
+    }
     case DPPD_MANAGEMENT_RULE_DELETE:
         printf("deleted=%s generation=%" PRIu64 "\n",
                response->payload.delete_rule.removed ? "yes" : "no",
                response->payload.delete_rule.generation);
         break;
+    case DPPD_MANAGEMENT_RULE_DELETE_BATCH: {
+        uint16_t i;
+
+        printf("batch-deleted count=%u\n", response->payload.delete_batch.count);
+        for (i = 0; i < response->payload.delete_batch.count; ++i) {
+            const struct dppd_control_batch_remove_result *result =
+                &response->payload.delete_batch.rules[i];
+
+            printf("  rule=%" PRIu64 " generation=%" PRIu64 "\n",
+                   result->rule_id, result->generation);
+        }
+        break;
+    }
     case DPPD_MANAGEMENT_RULE_COUNT_QUERY:
         printf("count rule=%" PRIu64 " generation=%" PRIu64 " hits=%" PRIu64
                " bytes=%" PRIu64 "\n",
@@ -790,6 +882,7 @@ int main(int argc, char **argv)
          */
         if (status == -EUCLEAN &&
             (response.operation == DPPD_MANAGEMENT_RULE_APPLY ||
+             response.operation == DPPD_MANAGEMENT_RULE_CREATE_BATCH ||
              response.operation == DPPD_MANAGEMENT_RULE_DELETE)) {
             fprintf(stderr,
                     "dppctl: operation may already be active, but the snapshot "

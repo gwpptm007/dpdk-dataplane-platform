@@ -10,20 +10,28 @@
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /*
- * v4 增加启动恢复隔离模式的状态与重试命令。当前协议直接传输本地 C ABI，
+ * v6 增加受限批量删除；v5 增加受限批量创建；v4 已增加启动恢复隔离模式的状态与重试命令。当前协议直接传输本地 C ABI，
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 4U
+#define DPPD_MANAGEMENT_VERSION 6U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
 /* 固定小页保证 response union 不因列表操作膨胀为大报文。 */
 #define DPPD_MANAGEMENT_RULE_PAGE_SIZE 4U
+/*
+ * 首版批量命令限制为四条 DROP 创建，保持本地 ABI 报文、SOCK_SEQPACKET 单消息与运维
+ * 输出都足够小。该值是协议 ABI 的一部分；提高上限会改变 request/response 的 sizeof，
+ * 必须同步提升 DPPD_MANAGEMENT_VERSION，不能只修改 daemon 或 dppctl 一侧。
+ */
+#define DPPD_MANAGEMENT_BATCH_CREATE_MAX 4U
+#define DPPD_MANAGEMENT_BATCH_REMOVE_MAX 4U
 
 /* 每个连接只承载一个请求和一个响应，operation 决定 payload union 的有效成员。 */
 enum dppd_management_operation {
     DPPD_MANAGEMENT_PING = 1,
     DPPD_MANAGEMENT_RULE_APPLY,
+    DPPD_MANAGEMENT_RULE_CREATE_BATCH,
     DPPD_MANAGEMENT_RULE_GET,
     DPPD_MANAGEMENT_RULE_DELETE,
     /* 追加新操作而不改变既有编号，避免同版本诊断时出现命令含义漂移。 */
@@ -37,6 +45,8 @@ enum dppd_management_operation {
     /* 启动重放回滚失败后的隔离状态查看与同进程 handle 删除重试。 */
     DPPD_MANAGEMENT_RECOVERY_STATUS,
     DPPD_MANAGEMENT_RECOVERY_RETRY,
+    /* v6：精确 generation 的全有或全无批量删除。 */
+    DPPD_MANAGEMENT_RULE_DELETE_BATCH,
 };
 
 /*
@@ -64,6 +74,27 @@ struct dppd_management_request {
             /* 客户端不负责填写 generation，daemon 在事务提交时分配。 */
             struct dppd_rule rule;
         } apply;
+        /**
+         * 固定小数组：只承载 create，不混入 update/delete。每个 entry 自带 install_port_id
+         * 和 expected_generation；后者必须为 0，daemon 以此拒绝任何可能具有覆盖语义的
+         * 请求，保证整个数组是一组纯新建操作。
+         */
+        struct {
+            uint16_t count;
+            uint8_t reserved[6];
+            struct dppd_control_batch_create_request
+                rules[DPPD_MANAGEMENT_BATCH_CREATE_MAX];
+        } create_batch;
+        /**
+         * 删除批次必须包含 2–4 个不同的 (rule_id, expected_generation) 精确条件；
+         * 不支持 ANY 或“缺失即成功”，以避免误删更新后的规则被当作批量幂等成功。
+         */
+        struct {
+            uint16_t count;
+            uint8_t reserved[6];
+            struct dppd_control_batch_remove_request
+                rules[DPPD_MANAGEMENT_BATCH_REMOVE_MAX];
+        } delete_batch;
         struct {
             /* 稳定规则 ID；0 是无效 ID。 */
             uint64_t rule_id;
@@ -172,6 +203,27 @@ struct dppd_management_response {
         } pong;
         /* 包含创建/更新/幂等结果、最终 generation、事务 ID 和规划决策。 */
         struct dppd_control_apply_result apply;
+        /**
+         * 与请求顺序一一对应的批量创建结果，所有成功条目应共享 transaction_id。任一
+         * 条目失败时 status 为负值且调用方不得把数组中残留字段解释为部分成功结果；
+         * 控制层已将本批 actual/desired 全部回滚或进入 recovery 隔离。
+         */
+        struct {
+            uint16_t count;
+            uint8_t reserved[6];
+            struct dppd_control_apply_result
+                rules[DPPD_MANAGEMENT_BATCH_CREATE_MAX];
+        } create_batch;
+        /**
+         * 与 delete_batch 输入顺序一一对应。仅 response.status 为 0 时才可读取，
+         * generation 是每次 repository 删除后单调递增的全局修订号。
+         */
+        struct {
+            uint16_t count;
+            uint8_t reserved[6];
+            struct dppd_control_batch_remove_result
+                rules[DPPD_MANAGEMENT_BATCH_REMOVE_MAX];
+        } delete_batch;
         /* get 成功时返回 repository 中保存的完整 canonical rule。 */
         struct dppd_rule rule;
         struct {

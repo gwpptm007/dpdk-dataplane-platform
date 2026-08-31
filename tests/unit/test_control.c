@@ -106,6 +106,10 @@ int main(void)
     struct dppd_topology topology;
     struct dppd_control_service service;
     struct dppd_control_apply_result result;
+    struct dppd_control_apply_result batch_results[2];
+    struct dppd_control_batch_create_request batch_requests[2];
+    struct dppd_control_batch_remove_request batch_remove_requests[2];
+    struct dppd_control_batch_remove_result batch_remove_results[2];
     struct dppd_control_count_result count_result;
     struct dppd_control_persistence_status persistence_status;
     struct dppd_control_recovery_status recovery_status;
@@ -181,17 +185,108 @@ int main(void)
                                &generation) == 0);
     assert(!removed && generation == 4);
 
+    /*
+     * 同批规则共享一个 backend transaction，成功后才连续发布两个 desired generation。
+     * 两条规则刻意安装到不同端口，证明批量原子性不依赖“同端口”这个 dppctl 演示层限制，
+     * 而由 control 层的统一事务和 repository 发布顺序保证。
+     */
+    memset(batch_requests, 0, sizeof(batch_requests));
+    batch_requests[0].install_port_id = 5;
+    batch_requests[0].rule = make_rule(1100);
+    batch_requests[1].install_port_id = 6;
+    batch_requests[1].rule = make_rule(1101);
+    assert(dppd_control_create_batch(&service, batch_requests, 2,
+                                     batch_results) == 0);
+    assert(batch_results[0].status == DPPD_RULE_CREATED &&
+           batch_results[0].generation == 5);
+    assert(batch_results[1].status == DPPD_RULE_CREATED &&
+           batch_results[1].generation == 6);
+    assert(batch_results[0].transaction_id == batch_results[1].transaction_id);
+    assert(dppd_rule_repository_count(&service.rules) == 2);
+    assert(dppd_rte_flow_backend_count(&service.rte_flow) == 2);
+
+    /*
+     * 删除也要求整批精确 generation：成功后两个 actual object 都消失，repository
+     * generation 按输入顺序推进。结果不复用单条 delete 的“缺失即成功”语义。
+     */
+    memset(batch_remove_requests, 0, sizeof(batch_remove_requests));
+    batch_remove_requests[0].rule_id = 1100;
+    batch_remove_requests[0].expected_generation = 5;
+    batch_remove_requests[1].rule_id = 1101;
+    batch_remove_requests[1].expected_generation = 6;
+    assert(dppd_control_remove_batch(&service, batch_remove_requests, 2,
+                                     batch_remove_results) == 0);
+    assert(batch_remove_results[0].generation == 7 &&
+           batch_remove_results[1].generation == 8);
+    assert(dppd_rule_repository_count(&service.rules) == 0);
+    assert(dppd_rte_flow_backend_count(&service.rte_flow) == 0);
+
+    /*
+     * 第二条 create 失败时，第一条已创建的 actual object 必须被 transaction 逆序删除。
+     * 同时断言 desired repository 仍为空，避免出现“查询能看到规则、数据面实际没有规则”
+     * 的双写不一致；这正是批量接口不允许逐条 apply 伪装成原子操作的原因。
+     */
+    batch_requests[0].rule = make_rule(1102);
+    batch_requests[1].rule = make_rule(1103);
+    fake.fail_create_at = fake.create_calls + 1;
+    assert(dppd_control_create_batch(&service, batch_requests, 2,
+                                     batch_results) == -EIO);
+    assert(dppd_rule_repository_count(&service.rules) == 0);
+    assert(dppd_rte_flow_backend_count(&service.rte_flow) == 0);
+    fake.fail_create_at = -1;
+
+    /*
+     * 第二条 actual remove 失败时，第一条必须由补偿创建恢复；desired 未被触碰，
+     * 因而清除故障后可用同一组 generation 安全重试整批删除。
+     */
+    batch_requests[0].rule = make_rule(1200);
+    batch_requests[1].rule = make_rule(1201);
+    assert(dppd_control_create_batch(&service, batch_requests, 2,
+                                     batch_results) == 0);
+    batch_remove_requests[0].rule_id = 1200;
+    batch_remove_requests[0].expected_generation = batch_results[0].generation;
+    batch_remove_requests[1].rule_id = 1201;
+    batch_remove_requests[1].expected_generation = batch_results[1].generation;
+    fake.fail_remove_at = fake.remove_calls + 1;
+    assert(dppd_control_remove_batch(&service, batch_remove_requests, 2,
+                                     batch_remove_results) == -EFAULT);
+    assert(dppd_rule_repository_count(&service.rules) == 2);
+    assert(dppd_rte_flow_backend_count(&service.rte_flow) == 2);
+    fake.fail_remove_at = -1;
+    assert(dppd_control_remove_batch(&service, batch_remove_requests, 2,
+                                     batch_remove_results) == 0);
+    assert(dppd_rule_repository_count(&service.rules) == 0);
+
     fake.fail_validate = true;
     rule = make_rule(1001);
-    assert(dppd_control_apply(&service, 5, &rule, 0, &result) == -ENOTSUP);
-    assert(dppd_rule_repository_count(&service.rules) == 0);
+    assert(dppd_control_apply(&service, 5, &rule, 0, &result) == 0);
+    assert(result.plan.backend == DPPD_PLAN_BACKEND_SOFTWARE);
+    assert(result.plan.fallback_used);
+    assert(dppd_software_backend_contains_version(&service.software, 1001,
+                                                   result.generation));
+    assert(dppd_control_remove(&service, 1001, result.generation, &removed,
+                               &generation) == 0);
+    assert(removed);
     assert(dppd_rte_flow_backend_count(&service.rte_flow) == 0);
     fake.fail_validate = false;
 
     rule = make_rule(1002);
     rule.fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
-    assert(dppd_control_apply(&service, 5, &rule, 0, &result) == -ENOTSUP);
-    assert(dppd_rule_repository_count(&service.rules) == 0);
+    rule.nb_actions = 2;
+    rule.actions[0].type = DPPD_ACTION_COUNT;
+    rule.actions[1].type = DPPD_ACTION_DROP;
+    assert(dppd_control_apply(&service, 5, &rule, 0, &result) == 0);
+    assert(result.status == DPPD_RULE_CREATED);
+    assert(result.plan.backend == DPPD_PLAN_BACKEND_SOFTWARE);
+    assert(dppd_software_backend_contains_version(&service.software, 1002,
+                                                   result.generation));
+    assert(dppd_rte_flow_backend_count(&service.rte_flow) == 0);
+    assert(dppd_control_query_count(&service, 1002, result.generation,
+                                    &count_result) == 0);
+    assert(count_result.hits == 0 && count_result.bytes == 0);
+    assert(dppd_control_remove(&service, 1002, result.generation, &removed,
+                               &generation) == 0);
+    assert(removed);
 
     rule = make_rule(1003);
     /* COUNT 必须位于 fate action 之前，和真实 rte_flow action 顺序保持一致。 */

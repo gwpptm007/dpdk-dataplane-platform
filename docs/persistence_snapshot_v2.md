@@ -19,7 +19,7 @@
 - 保存失败后进入 dirty/fail-stop 状态，并以 `-EUCLEAN` 报告“变更可能已生效但未持久化”；
 - dirty 状态下的新写操作必须先成功保存当前 repository，失败则拒绝继续变更；
 - 相同 apply 命令幂等重试时先修复 snapshot，再返回 `UNCHANGED`；
-- management v4 的 `persistence-status` 状态查询和 `persistence-flush` 显式修复；
+- management v5 的 `persistence-status` 状态查询和 `persistence-flush` 显式修复；
 - `--state-path` 显式启用 daemon 持久化；
 - 启动时加载、topology resolve、全量硬件事务重放及 preserved generation 发布；
 - 任一规则重放失败时逆序回滚本轮硬件对象并拒绝启动。

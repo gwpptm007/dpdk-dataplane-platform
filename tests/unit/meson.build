@@ -61,6 +61,13 @@ pipeline_test = executable(
 )
 test('pipeline snapshot', pipeline_test)
 
+software_backend_test = executable(
+  'test_software_backend',
+  'test_software_backend.c',
+  dependencies: dppd_core_dep,
+)
+test('software rule backend', software_backend_test)
+
 management_test = executable(
   'test_management',
   'test_management.c',

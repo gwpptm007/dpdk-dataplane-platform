@@ -91,6 +91,7 @@ v1 没有每条规则的端口信息，多端口旧快照不能安全使用这�
 ./build/dppctl port-show 0
 ./build/dppctl list
 ./build/dppctl apply-drop 100 0 0 10 require
+./build/dppctl apply-drop-batch 0 200 201 202
 ./build/dppctl apply-filter-drop \
   101 0 0 tcp 10.10.0.0/16 192.168.1.10/32 any 443 20 require
 ./build/dppctl apply-filter \
@@ -105,9 +106,11 @@ v1 没有每条规则的端口信息，多端口旧快照不能安全使用这�
 
 `apply-filter-drop` 在上述三个并发参数后增加协议、源/目的 CIDR、源/目的端口。协议支持 `ipv4|udp|tcp`；CIDR 和 L4 端口均可写 `any`。`ipv4` 不包含 L4 item，因此两个端口必须写 `any`，防止参数看似生效却被忽略。地址和端口会转换为 DPDK flow item 要求的网络字节序。
 
-`apply-filter` 使用相同的 pattern 参数，随后指定 fate action：`drop` 或 `queue:N`。可选 modifier 支持 `count`、`mark:N`、`priority:N` 和 `prefer|require`，顺序不限但不能重复。客户端会将动作规范化为 `MARK → COUNT → fate`，因此不同参数排列不会产生不同的 canonical rule。
+`apply-filter` 使用相同的 pattern 参数，随后指定 fate action：`drop` 或 `queue:N`。可选 modifier 支持 `count`、`mark:N`、`priority:N` 和 `prefer|require|software`，顺序不限但不能重复。`software` 显式选择平台软件 backend，仅可用于已实现等价语义的 DROP/MARK/COUNT；QUEUE 与 transfer 不会降级。客户端会将动作规范化为 `MARK → COUNT → fate`，因此不同参数排列不会产生不同的 canonical rule。
 
-`count RULE_ID EXPECTED_GENERATION` 查询已发布 generation 对应的硬件 COUNT。它不会重置 counter；规则不存在、generation 已过期、规则没有 COUNT，以及 PMD 不支持查询会分别返回错误。hits/bytes 的有效性最终由目标 PMD 的 `rte_flow_query()` 决定。
+`apply-drop-batch PORT RULE_ID RULE_ID [RULE_ID [RULE_ID]]` 一次创建 2–4 条此前不存在的 Ethernet ingress DROP 规则。首版统一使用 `prefer`，每条 expected generation 固定为 `0`，并在一个 transaction 内完成全量校验、prepare、commit 和失败回滚；输出中的每条 generation 连续递增，transaction 相同。跨规则更新、删除及复杂 pattern/action 暂不属于该命令的语义范围。
+
+`count RULE_ID EXPECTED_GENERATION` 查询已发布 generation 对应的 COUNT。它不会重置 counter；规则不存在、generation 已过期、规则没有 COUNT，以及当前 backend 不支持查询会分别返回错误。硬件规则的 hits/bytes 由目标 PMD 的 `rte_flow_query()` 决定；软件规则由 classifier 的原子计数器返回。
 
 `list` 每页返回最多 4 条规则摘要，并给出 `repository-generation`、`more` 和下一页命令。例如：
 

@@ -1,4 +1,5 @@
 #include "dppd/runtime.h"
+#include "dppd/software_backend.h"
 
 #include <string.h>
 #include <rte_ethdev.h>
@@ -48,7 +49,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         else if (parse_status == DPPD_PARSE_UNSUPPORTED)
             delta.rx_unsupported++;
 
-        dppd_pipeline_decide(&runtime->snapshot,
+        dppd_pipeline_decide(&runtime->snapshot, runtime->software_backend,
                              ingress->port_id,
                              parse_status,
                              &packet,
@@ -64,6 +65,15 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             delta.policy_drops++;
             rte_pktmbuf_free(rx[i]);
             continue;
+        }
+
+        /*
+         * 复用 DPDK 的 flow mark 元数据约定，令下游观察者无需区分该标记来自
+         * rte_flow 还是软件 classifier。这里不设置 TX offload，只声明 RX 侧标记。
+         */
+        if (decision.has_mark) {
+            rx[i]->hash.fdir.hi = decision.mark_id;
+            rx[i]->ol_flags |= RTE_MBUF_F_RX_FDIR_ID;
         }
 
         if (rx[i]->nb_segs > 1U &&
@@ -106,11 +116,27 @@ int dppd_worker_main(void *arg)
         return -1;
     runtime = worker->runtime;
 
+    /*
+     * queue_id 在 runtime 初始化时连续分配，正好可用作 QSBR reader id。注册必须
+     * 在首次读取 classifier snapshot 前完成，避免控制面提前回收旧版本。
+     * 静默点放在整轮 ingress 扫描之后：process_ingress 的逐包 decide 可能仍保留
+     * snapshot 指针，放得更早会让 QSBR 错误认定旧视图已经无人访问。
+     */
+    if (runtime->software_backend != NULL &&
+        dppd_software_backend_worker_register(runtime->software_backend,
+                                              worker->queue_id) != 0)
+        return -1;
+
     while (!atomic_load_explicit(&runtime->stop_requested, memory_order_acquire)) {
         uint16_t i;
 
         for (i = 0; i < runtime->devices.nb_ports; ++i)
             process_ingress(worker, &runtime->devices.ports[i]);
+        /* 本轮已不再引用先前的 classifier snapshot，可以安全报告静默点。 */
+        dppd_software_backend_worker_quiescent(runtime->software_backend,
+                                                worker->queue_id);
     }
+    dppd_software_backend_worker_unregister(runtime->software_backend,
+                                            worker->queue_id);
     return 0;
 }

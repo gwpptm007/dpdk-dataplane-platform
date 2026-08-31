@@ -26,6 +26,10 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     runtime->config = *cfg;
     atomic_init(&runtime->stop_requested, false);
 
+    /*
+     * queue_id 按 worker_index 连续编号，不直接使用稀疏的 lcore_id。除便于 queue 配置外，
+     * 这也满足软件 backend 对 QSBR reader id 落在 [0, DPPD_MAX_WORKERS) 的要求。
+     */
     RTE_LCORE_FOREACH_WORKER(lcore_id) {
         struct dppd_worker *worker;
 
@@ -65,6 +69,15 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     return 0;
 }
 
+void dppd_runtime_set_software_backend(
+    struct dppd_runtime *runtime,
+    struct dppd_software_backend *software_backend)
+{
+    /* 不加锁是刻意的：调用契约要求只在 runtime_start 前绑定，运行期禁止热替换。 */
+    if (runtime != NULL)
+        runtime->software_backend = software_backend;
+}
+
 int dppd_runtime_start(struct dppd_runtime *runtime)
 {
     uint16_t i;
@@ -74,6 +87,7 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
         return -EINVAL;
 
     atomic_store_explicit(&runtime->stop_requested, false, memory_order_release);
+    /* worker 失败时先置 stop，再 wait 已经启动的 lcore，确保其 QSBR reader 都能注销。 */
     for (i = 0; i < runtime->nb_workers; ++i) {
         struct dppd_worker *worker = &runtime->workers[i];
 
@@ -151,6 +165,7 @@ void dppd_runtime_destroy(struct dppd_runtime *runtime)
 {
     if (runtime == NULL)
         return;
+    /* 先停止 worker，再销毁设备；否则 worker 仍可能访问已停止 port 或软件 backend。 */
     if (runtime->workers_started) {
         dppd_runtime_request_stop(runtime);
         (void)dppd_runtime_wait(runtime);

@@ -62,7 +62,7 @@ COUNT 查询先从 desired repository 读取已发布 generation，再定位完�
 保存网络字节序协议值、按 rule id 排序并用 CRC32 校验；文件通过同目录临时文件、
 `fsync`、原子 `rename` 和父目录 `fsync` 发布。control mutation 已连接完整 snapshot
 保存：落盘失败返回 `EUCLEAN` 并进入 dirty/fail-stop，后续写入先修复当前快照，避免
-磁盘故障期间持续扩大偏差。management v4 可查询 dirty 和两个 generation，也可显式
+磁盘故障期间持续扩大偏差。management v6 可查询 dirty 和两个 generation，也可显式
 flush 当前完整 repository。`--state-path` 启用 v2 snapshot：记录同时保存 canonical
 rule 和 install port，启动时先对全部规则 plan/validate/prepare/commit，任一失败逆序
 回滚并拒绝启动；全部成功后才发布保留的逐规则及全局 generation。若逆序删除本身失败，
@@ -82,7 +82,7 @@ normalize → resolve topology → plan → validate all
           → publish generation → retire old generation
 ```
 
-任一步失败都要区分“不支持、资源不足、规则冲突、设备失联”，并回滚已创建对象。V3 当前实现的是单条规则编译和生命周期原语，批量事务仍在路线图中。
+任一步失败都要区分“不支持、资源不足、规则冲突、设备失联”，并回滚已创建对象。V3 当前已实现受限批量创建和精确批量删除；跨规则更新仍在路线图中。
 
 ## 4. 软件数据面
 
@@ -120,7 +120,7 @@ flowchart LR
 
 主 lcore 负责配置、设备启动、管理请求、telemetry、信号和关闭。worker 仅持有只读 snapshot 指针和自己的统计。关闭时先停止接收管理事务，再请求并等待 worker、回收硬件 flow、关闭 pdump 和 ethdev、释放 mempool，最后执行 EAL cleanup。
 
-未来动态策略更新采用 generation + RCU/QSBR：先构建完整新 snapshot，原子发布，再等待所有 worker quiescent 后回收旧版本。不能在 worker 正在读取时原地修改表。
+动态软件策略更新已采用 generation + DPDK QSBR：控制面复制当前 classifier snapshot、修改副本并原子发布；worker 每轮完整 ingress 扫描后报告 quiescent，控制面以非阻塞方式检查宽限期并回收旧版本。不能在 worker 正在读取时原地修改表；规则 COUNT 计数器独立于 snapshot 数组，克隆规则集不会清空已发布规则的计数。
 
 ## 7. 可观测性
 

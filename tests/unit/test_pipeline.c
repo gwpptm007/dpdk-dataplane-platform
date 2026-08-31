@@ -24,15 +24,15 @@ int main(void)
     assert(dppd_snapshot_lookup_peer(&snapshot, 99, &peer) != 0);
 
     memset(&packet, 0, sizeof(packet));
-    dppd_pipeline_decide(&snapshot, 3, DPPD_PARSE_OK, &packet, &decision);
+    dppd_pipeline_decide(&snapshot, NULL, 3, DPPD_PARSE_OK, &packet, &decision);
     assert(decision.action == DPPD_PACKET_FORWARD);
     assert(decision.egress_port == 7);
 
-    dppd_pipeline_decide(&snapshot, 3, DPPD_PARSE_MALFORMED, &packet, &decision);
+    dppd_pipeline_decide(&snapshot, NULL, 3, DPPD_PARSE_MALFORMED, &packet, &decision);
     assert(decision.action == DPPD_PACKET_DROP);
     assert(decision.drop_reason == DPPD_DROP_MALFORMED);
 
-    dppd_pipeline_decide(&snapshot, 99, DPPD_PARSE_OK, &packet, &decision);
+    dppd_pipeline_decide(&snapshot, NULL, 99, DPPD_PARSE_OK, &packet, &decision);
     assert(decision.action == DPPD_PACKET_DROP);
     assert(decision.drop_reason == DPPD_DROP_NO_ROUTE);
     return 0;

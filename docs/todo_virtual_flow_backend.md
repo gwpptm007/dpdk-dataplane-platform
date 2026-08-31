@@ -1,10 +1,39 @@
 # 待办：虚拟测试端口的规则执行能力
 
-状态：`DEFERRED`
+状态：阶段 1（TAP 基础 flow）、阶段 2 最小 software backend、immutable snapshot + QSBR 回收已完成；QUEUE 语义和规模化仍为 `DEFERRED`
 
 记录日期：2026-07-23
 
 计划归属：M1 software adapter、M2 可组合软件 pipeline
+
+## 0. 2026-08-30 TAP 验证结果
+
+已在测试机的 DPDK 21.11.9 上完成双 TAP 端口的真实 `rte_flow` 闭环。验证使用
+`--no-huge --no-pci -m 64`、两个 `net_tap` vdev、独立 EAL file-prefix 和临时控制
+socket，全程未修改 `ens192`。
+
+- 无规则时，从 `dppdtap0` 注入的标记 Ethernet 帧可由 `dppdtap1` 收到，确认软件
+  port-pair 基线转发；
+- `apply-drop 100 0 0 10 require` 返回真实 backend，随后同类标记帧不能到达
+  `dppdtap1`，确认 DROP 不是 management 层的伪成功；
+- 删除 DROP 后，下发带 IPv4/TCP 五元组匹配的 `queue:0`、`require` 规则成功；匹配
+  TCP 标记帧可到达 `dppdtap1`，证明 TAP PMD 能完成该 flow 的 validate/create 与真实
+  数据路径命中；
+- 删除 QUEUE 规则后 repository 为空，匹配帧恢复由软件 port-pair 转发；daemon 正常
+  退出后控制 socket、两个 TAP 接口和临时日志均已清理。
+
+本轮只证明 TAP 的 ETH/IPv4/TCP、DROP/QUEUE 和 create/destroy 生命周期。TAP 官方能力
+范围不包含可作为验收依据的 MARK/COUNT；也没有 per-queue 可观测指标，因此不能从该结果
+推出硬件队列调度性能或 MARK/COUNT 支持。
+
+软件 backend 随后已完成最小闭环：`net_ring` 上的 `prefer` TCP/DROP 在硬件 validate
+返回 `ENOSYS` 后以 `software-fallback` 发布，`require` 保持 `ENOSYS` 失败；双 TAP 上
+强制 `software` 的 TCP+MARK(42)+COUNT+DROP 规则阻断真实标记帧，`dppctl count` 返回
+`hits=1 bytes=76`。随后已切换到 immutable snapshot + DPDK QSBR：规则更新不再获取报文路径读锁，worker 在完整 ingress 扫描结束处报告静默点，旧 snapshot 在非阻塞宽限期检查通过后释放。
+
+2026-08-30 补充常驻验证：双 `net_ring` worker 启动后连续执行 40 次 software-only
+规则发布/删除，管理 socket 保持可用，daemon 退出后 socket 清理成功。该用例验证了
+QSBR reader 生命周期和反复发布/回收；`net_ring` 本身仍没有可注入的真实 flow 数据面。
 
 ## 1. 背景与结论
 
@@ -102,7 +131,7 @@ rte_flow   software backend
 - immutable classifier snapshot；
 - generation replacement；
 - transaction prepare/commit/rollback adapter；
-- worker quiescent/QSBR 后回收旧 snapshot；
+- worker quiescent/QSBR 后回收旧 snapshot；（已完成）
 - `dppctl count` 对硬件和软件 backend 使用一致的响应语义。
 
 QUEUE 的软件等价语义需要先单独设计。硬件 QUEUE 表示 NIC 在 RX 前选择目标队列，
@@ -176,6 +205,5 @@ core；它可以作为专项实验对象，不作为当前首选 CI backend。
 
 - 需要在 CI 中验证真实软件规则而不依赖物理 NIC；
 - 测试机获得支持 rte_flow 的 PCI passthrough/SR-IOV 设备；
-- 开始实现 M1 software adapter；
-- 开始实现 M2 immutable classifier snapshot；
+- 对 `net_ring` 进行软件 classifier 的真实报文压力与并发更新验证；
 - 需要对 MARK/COUNT 的端到端数据面行为提供正式验收证据。

@@ -317,8 +317,57 @@ int main(void)
     assert(response.payload.persistence.last_error == 0);
 
     /*
+     * 协议 v5 的首版批量创建入口：同一请求创建两条规则并返回同一个 transaction id。这里
+     * 不经真实 UNIX socket，而是直接调用 dispatch，以定位验证“定长 ABI request →
+     * control 批量事务 → 定长 response”的字段映射；socket 边界已在前面的 round-trip
+     * 用例覆盖。generation 继续从已存在的两条规则之后连续分配。
+     */
+    initialize_request(&request, DPPD_MANAGEMENT_RULE_CREATE_BATCH);
+    request.payload.create_batch.count = 2;
+    for (uint16_t i = 0; i < request.payload.create_batch.count; ++i) {
+        struct dppd_control_batch_create_request *entry =
+            &request.payload.create_batch.rules[i];
+
+        entry->install_port_id = 5;
+        entry->expected_generation = 0;
+        entry->rule.id = 200 + i;
+        entry->rule.domain = DPPD_RULE_DOMAIN_INGRESS;
+        entry->rule.fallback = DPPD_FALLBACK_PREFER_HARDWARE;
+        entry->rule.nb_matches = 1;
+        entry->rule.matches[0].type = DPPD_MATCH_ETH;
+        entry->rule.nb_actions = 1;
+        entry->rule.actions[0].type = DPPD_ACTION_DROP;
+    }
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.create_batch.count == 2);
+    assert(response.payload.create_batch.rules[0].generation == 3);
+    assert(response.payload.create_batch.rules[1].generation == 4);
+    assert(response.payload.create_batch.rules[0].transaction_id ==
+           response.payload.create_batch.rules[1].transaction_id);
+
+    /*
+     * v6 删除批次携带每条精确 generation，不能沿用单条 delete 的 any/缺失幂等语义。
+     * 成功响应按输入顺序给出全局 generation 3→5、4→6 的连续删除结果；调用者无需
+     * 依赖 repository 内部槽位顺序，也不需要在两次删除之间重新 list。
+     */
+    initialize_request(&request, DPPD_MANAGEMENT_RULE_DELETE_BATCH);
+    request.payload.delete_batch.count = 2;
+    request.payload.delete_batch.rules[0].rule_id = 200;
+    request.payload.delete_batch.rules[0].expected_generation = 3;
+    request.payload.delete_batch.rules[1].rule_id = 201;
+    request.payload.delete_batch.rules[1].expected_generation = 4;
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.delete_batch.count == 2);
+    assert(response.payload.delete_batch.rules[0].rule_id == 200 &&
+           response.payload.delete_batch.rules[0].generation == 5);
+    assert(response.payload.delete_batch.rules[1].rule_id == 201 &&
+           response.payload.delete_batch.rules[1].generation == 6);
+
+    /*
      * 协议层必须只放行 recovery status/retry。这里直接注入隔离状态，专注验证
      * dispatch 边界；实际 residual handle 的重试行为由 control service 单测覆盖。
+     * 尤其要确认普通 PING 也被拒绝：否则自动化探活可能把“实际对象未对账完成”误判
+     * 为可安全接收新管理请求的实例。
      */
     control.recovery_state =
         DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;

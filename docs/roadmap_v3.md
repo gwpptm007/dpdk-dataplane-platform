@@ -8,7 +8,7 @@
 
 ## M1：能力规划与规则控制面
 
-当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、generation replacement、单规则 control service、本机 management API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；software adapter、批量 API、跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。
+当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除与本机 management API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨规则更新、跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。
 
 持久化方面已完成 [versioned snapshot v2](persistence_snapshot_v2.md)、install port 保存、
 control mutation 后的完整保存、dirty state、管理状态查询、`--state-path` 和全量硬件
@@ -32,7 +32,7 @@ NIC/SmartNIC 验收三个阶段推进。
 
 ## M2：可组合软件 pipeline
 
-交付：exact match、ACL、LPM、rewrite、neighbor、conntrack/NAT 独立 stage；immutable snapshot + QSBR；批量计数；IPv6 和常用 tunnel parser。
+交付：exact match、ACL、LPM、rewrite、neighbor、conntrack/NAT 独立 stage；批量计数；IPv6 和常用 tunnel parser。
 
 其中 software backend 需优先覆盖 Ethernet/IPv4/UDP/TCP、DROP/MARK/COUNT；
 QUEUE 是否存在软件等价语义必须先完成设计，不能静默模拟。

@@ -11,6 +11,12 @@ enum dppd_transaction_state {
     DPPD_TRANSACTION_PREPARING,
     DPPD_TRANSACTION_COMMITTING,
     DPPD_TRANSACTION_COMMITTED,
+    /*
+     * desired repository 已成功发布，backend 可释放仅供 rollback 使用的 prepare token。
+     * 此后不允许再调用 rollback_committed；若之后持久化失败，由控制层以 dirty 状态
+     * 表示“内存 actual/desired 已生效、磁盘快照待补写”，而不是回滚已确认的规则。
+     */
+    DPPD_TRANSACTION_FINALIZED,
     DPPD_TRANSACTION_ROLLING_BACK,
     DPPD_TRANSACTION_ROLLED_BACK,
     DPPD_TRANSACTION_FAILED,
@@ -44,6 +50,12 @@ struct dppd_transaction_backend {
     /* commit 返回失败也可能已部分生效，因此仍必须支持 rollback。 */
     int (*rollback)(void *context, const struct dppd_transaction_item *item,
                     uintptr_t token, bool commit_was_attempted);
+    /*
+     * 成功提交后 token 仍可能被 repository 发布失败路径用于 rollback；只有控制面确认
+     * actual/desired 均已发布后才调用 finalize。无返回值，释放动作不得再产生失败点。
+     */
+    void (*finalize)(void *context, const struct dppd_transaction_item *item,
+                     uintptr_t token);
 };
 
 struct dppd_transaction_backends {
@@ -73,5 +85,14 @@ int dppd_transaction_run(struct dppd_transaction *transaction,
 int dppd_transaction_rollback_committed(
     struct dppd_transaction *transaction,
     const struct dppd_transaction_backends *backends);
+/* 提交后不再需要 rollback 时释放 backend 私有 prepare token。 */
+/**
+ * 确认 actual 和 desired 已一致后，释放仅供失败 rollback 使用的 backend token。
+ * finalize 后事务不可再回滚；调用方必须在 repository 发布成功以后才调用。若
+ * repository 发布或补偿失败，必须先 rollback_committed 或进入 recovery 隔离，绝不能
+ * 先 finalize 再尝试恢复。
+ */
+int dppd_transaction_finalize(struct dppd_transaction *transaction,
+                              const struct dppd_transaction_backends *backends);
 
 #endif

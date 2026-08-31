@@ -84,6 +84,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "[dppd] control service initialization failed\n");
         goto cleanup_runtime;
     }
+    /*
+     * worker 只借用 control 持有的 backend；退出时 main 的清理顺序会先停止并 wait 所有
+     * worker（使其注销 QSBR reader），再调用 control_fini 释放 snapshot/QSBR。这里不能
+     * 绑定临时对象，也不能在 runtime_start 后替换该地址。
+     */
+    dppd_runtime_set_software_backend(&runtime, &control.software);
     if (config.state_path[0] != '\0') {
         int restore_rc = dppd_control_persistence_restore(&control,
                                                           config.state_path);

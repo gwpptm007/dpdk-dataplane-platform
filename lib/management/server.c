@@ -151,6 +151,29 @@ int dppd_management_handle(struct dppd_control_service *control,
                                 request->payload.apply.expected_generation,
                                 &response->payload.apply);
         break;
+    case DPPD_MANAGEMENT_RULE_CREATE_BATCH:
+        /*
+         * 防止本地 ABI 数组越界；这里不逐条验证规则，也不尝试在协议层拼装部分结果。
+         * 规则语义、预检和 actual/desired 的原子边界都属于 control 层，任何错误统一
+         * 写入 response.status，客户端以整个请求为失败处理。
+         */
+        if (request->payload.create_batch.count == 0 ||
+            request->payload.create_batch.count >
+                DPPD_MANAGEMENT_BATCH_CREATE_MAX) {
+            rc = -EINVAL;
+            break;
+        }
+        /*
+         * 预先回显 count 只定义成功响应的数组长度；若 control 返回错误，客户端必须先
+         * 检查 status，不能据此读取任何单项结果。这样未来扩展 per-item 诊断也不会
+         * 改变“批量请求只有一个提交结论”的语义。
+         */
+        response->payload.create_batch.count = request->payload.create_batch.count;
+        rc = dppd_control_create_batch(
+            control, request->payload.create_batch.rules,
+            request->payload.create_batch.count,
+            response->payload.create_batch.rules);
+        break;
     case DPPD_MANAGEMENT_RULE_GET:
         /* get 只读取 desired repository，不通过 rte_flow 反查硬件对象。 */
         rc = dppd_rule_repository_get(&control->rules,
@@ -164,6 +187,23 @@ int dppd_management_handle(struct dppd_control_service *control,
                                  request->payload.delete_rule.expected_generation,
                                  &response->payload.delete_rule.removed,
                                  &response->payload.delete_rule.generation);
+        break;
+    case DPPD_MANAGEMENT_RULE_DELETE_BATCH:
+        /*
+         * 与 create_batch 一样，协议层只防御固定数组边界。控制层负责精确 generation
+         * 预检、actual 删除补偿与 recovery 隔离；不能在此把单条 delete 循环成伪批量。
+         */
+        if (request->payload.delete_batch.count < 2 ||
+            request->payload.delete_batch.count >
+                DPPD_MANAGEMENT_BATCH_REMOVE_MAX) {
+            rc = -EINVAL;
+            break;
+        }
+        response->payload.delete_batch.count = request->payload.delete_batch.count;
+        rc = dppd_control_remove_batch(
+            control, request->payload.delete_batch.rules,
+            request->payload.delete_batch.count,
+            response->payload.delete_batch.rules);
         break;
     case DPPD_MANAGEMENT_PORT_GET:
         /*

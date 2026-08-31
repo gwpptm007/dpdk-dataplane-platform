@@ -8,6 +8,7 @@ struct fake_backend {
     int prepare_calls;
     int commit_calls;
     int rollback_calls;
+    int finalize_calls;
     int fail_validate_at;
     int fail_prepare_at;
     int fail_commit_at;
@@ -60,6 +61,16 @@ static int fake_rollback(void *context, const struct dppd_transaction_item *item
     return call == backend->fail_rollback_at ? -EFAULT : 0;
 }
 
+static void fake_finalize(void *context, const struct dppd_transaction_item *item,
+                          uintptr_t token)
+{
+    struct fake_backend *backend = context;
+
+    (void)item;
+    assert(token != 0);
+    backend->finalize_calls++;
+}
+
 static struct dppd_transaction_backend operations(struct fake_backend *backend)
 {
     struct dppd_transaction_backend result = {
@@ -68,6 +79,7 @@ static struct dppd_transaction_backend operations(struct fake_backend *backend)
         .prepare = fake_prepare,
         .commit = fake_commit,
         .rollback = fake_rollback,
+        .finalize = fake_finalize,
     };
     return result;
 }
@@ -111,6 +123,10 @@ int main(void)
     assert(transaction.state == DPPD_TRANSACTION_COMMITTED);
     assert(fake.validate_calls == 3 && fake.prepare_calls == 3);
     assert(fake.commit_calls == 3 && fake.rollback_calls == 0);
+    assert(dppd_transaction_finalize(&transaction, &backends) == 0);
+    assert(transaction.state == DPPD_TRANSACTION_FINALIZED);
+    assert(fake.finalize_calls == 3);
+    assert(dppd_transaction_rollback_committed(&transaction, &backends) == -EINVAL);
 
     reset_backend(&fake);
     fake.fail_validate_at = 1;

@@ -25,6 +25,7 @@ dppd_sources = files(
   'lib/dataplane/packet.c',
   'lib/dataplane/packet_mbuf.c',
   'lib/dataplane/pipeline.c',
+  'lib/dataplane/software_backend.c',
   'lib/dataplane/worker.c',
   'lib/offload/rte_flow.c',
   'lib/offload/rte_flow_backend.c',
