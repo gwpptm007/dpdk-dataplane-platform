@@ -110,6 +110,14 @@ v1 没有每条规则的端口信息，多端口旧快照不能安全使用这�
 
 `apply-drop-batch PORT RULE_ID RULE_ID [RULE_ID [RULE_ID]]` 一次创建 2–4 条此前不存在的 Ethernet ingress DROP 规则。首版统一使用 `prefer`，每条 expected generation 固定为 `0`，并在一个 transaction 内完成全量校验、prepare、commit 和失败回滚；输出中的每条 generation 连续递增，transaction 相同。跨规则更新、删除及复杂 pattern/action 暂不属于该命令的语义范围。
 
+`update-drop-batch PORT PRIORITY prefer|require|software RULE_ID GENERATION RULE_ID GENERATION [RULE_ID GENERATION [RULE_ID GENERATION]]` 一次完整替换 2–4 条已有规则为 Ethernet ingress DROP；旧 match/action 不会保留。每条必须提供精确非零 generation，不接受 `any`。例如最近 `list` 显示规则 200/201 的版本为 3/4 时：
+
+```bash
+./build/dppctl update-drop-batch 0 20 prefer 200 3 201 4
+```
+
+成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v7，daemon 和 CLI 必须一起更新。
+
 `count RULE_ID EXPECTED_GENERATION` 查询已发布 generation 对应的 COUNT。它不会重置 counter；规则不存在、generation 已过期、规则没有 COUNT，以及当前 backend 不支持查询会分别返回错误。硬件规则的 hits/bytes 由目标 PMD 的 `rte_flow_query()` 决定；软件规则由 classifier 的原子计数器返回。
 
 `list` 每页返回最多 4 条规则摘要，并给出 `repository-generation`、`more` 和下一页命令。例如：

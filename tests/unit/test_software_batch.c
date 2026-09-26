@@ -1,0 +1,218 @@
+#include <assert.h>
+#include <errno.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
+#include "dppd/control.h"
+
+static _Thread_local unsigned int fail_allocation;
+
+void *__real_calloc(size_t count, size_t size);
+void *__wrap_calloc(size_t count, size_t size);
+
+void *__wrap_calloc(size_t count, size_t size)
+{
+    if (fail_allocation != 0 && --fail_allocation == 0)
+        return NULL;
+    return __real_calloc(count, size);
+}
+
+struct reader {
+    struct dppd_software_backend *backend;
+    unsigned int id;
+    atomic_bool stop;
+    atomic_uint samples;
+};
+
+static struct dppd_packet packet(void)
+{
+    const uint8_t frame[42] = {
+        [12] = 0x08, [13] = 0x00, [14] = 0x45, [17] = 28,
+        [23] = 17, [39] = 8,
+    };
+    struct dppd_packet parsed;
+
+    assert(dppd_packet_parse_buffer(frame, sizeof(frame), sizeof(frame), &parsed) == 0);
+    return parsed;
+}
+
+static void *read_packets(void *arg)
+{
+    struct reader *reader = arg;
+    struct dppd_packet parsed = packet();
+
+    assert(dppd_software_backend_worker_register(reader->backend, reader->id) == 0);
+    while (!atomic_load_explicit(&reader->stop, memory_order_acquire)) {
+        struct dppd_software_decision decision;
+
+        dppd_software_backend_decide(reader->backend, (uint16_t)(5 + reader->id),
+                                     &parsed, &decision);
+        assert(decision.matched && decision.drop && decision.has_mark);
+        assert(decision.mark_id == 7);
+        dppd_software_backend_worker_quiescent(reader->backend, reader->id);
+        atomic_fetch_add_explicit(&reader->samples, 1, memory_order_release);
+    }
+    dppd_software_backend_worker_unregister(reader->backend, reader->id);
+    return NULL;
+}
+
+static void setup(struct dppd_control_service *service,
+                  struct dppd_control_batch_update_request requests[4],
+                  struct dppd_topology *topology, uint32_t count)
+{
+    uint32_t i;
+
+    memset(topology, 0, sizeof(*topology));
+    topology->nb_endpoints = 3;
+    for (i = 0; i < 3; ++i)
+        topology->endpoints[i].ethdev_port_id = (uint16_t)(5 + i);
+    assert(dppd_control_init(service, topology, count + 1, NULL) == 0);
+    memset(requests, 0, 4 * sizeof(*requests));
+    for (i = 0; i <= count; ++i) {
+        struct dppd_control_apply_result result;
+        struct dppd_rule rule = {0};
+
+        rule.id = 100 + i;
+        rule.fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
+        rule.priority = i % 2 == 0 ? 10 : 20;
+        rule.nb_matches = 1;
+        rule.matches[0].type = DPPD_MATCH_ETH;
+        rule.nb_actions = 3;
+        rule.actions[0].type = DPPD_ACTION_MARK;
+        rule.actions[0].conf.mark_id = i % 2 == 0 ? 7 : 9;
+        rule.actions[1].type = DPPD_ACTION_COUNT;
+        rule.actions[2].type = DPPD_ACTION_DROP;
+        assert(dppd_control_apply(service, i == count ? 7 : (uint16_t)(5 + i / 2),
+                                  &rule, 0, &result) == 0);
+        if (i < count) {
+            requests[i].rule = rule;
+            requests[i].install_port_id = (uint16_t)(5 + i / 2);
+            requests[i].expected_generation = result.generation;
+        }
+    }
+}
+
+static void toggle(struct dppd_control_batch_update_request requests[4], uint32_t count)
+{
+    uint32_t i;
+
+    for (i = 0; i < count; ++i) {
+        requests[i].rule.priority = requests[i].rule.priority == 10 ? 20 : 10;
+        requests[i].rule.actions[0].conf.mark_id =
+            requests[i].rule.priority == 10 ? 7 : 9;
+    }
+}
+
+static void test_failures(uint32_t count)
+{
+    struct dppd_control_service service;
+    struct dppd_topology topology;
+    struct dppd_control_batch_update_request requests[4];
+    struct dppd_control_apply_result results[4];
+    struct dppd_software_decision decision;
+    struct dppd_packet parsed = packet();
+    struct dppd_software_classifier_snapshot *original;
+    uint64_t hits, bytes;
+    uint32_t i;
+
+    setup(&service, requests, &topology, count);
+    assert(dppd_software_backend_worker_register(&service.software, 0) == 0);
+    dppd_software_backend_decide(&service.software, 5, &parsed, &decision);
+    dppd_software_backend_decide(&service.software, 7, &parsed, &decision);
+    dppd_software_backend_worker_quiescent(&service.software, 0);
+    original = atomic_load(&service.software.active);
+    toggle(requests, count);
+    for (i = 1; i <= count + 2; ++i) {
+        fail_allocation = i;
+        assert(dppd_control_update_batch(&service, requests, count, results) == -ENOMEM);
+        assert(fail_allocation == 0);
+        assert(atomic_load(&service.software.active) == original);
+        assert(service.rules.generation == count + 1);
+        assert(service.recovery_state == DPPD_CONTROL_RECOVERY_READY);
+        assert(dppd_software_backend_count(&service.software) == count + 1);
+        assert(dppd_software_backend_query_count(&service.software, 100, 1,
+                                                  &hits, &bytes) == 0);
+        assert(hits == 1 && bytes == parsed.packet_len);
+        for (uint32_t j = 0; j < count; ++j) {
+            struct dppd_rule stored;
+
+            assert(dppd_rule_repository_get(&service.rules, 100 + j, &stored) == 0);
+            assert(stored.generation == j + 1);
+            assert(dppd_software_backend_contains_version(&service.software,
+                                                           100 + j, j + 1));
+        }
+    }
+    assert(dppd_control_update_batch(&service, requests, count, results) == 0);
+    assert(atomic_load(&service.software.active) != original);
+    assert(service.software.retired != NULL);
+    assert(dppd_software_backend_query_count(&service.software, 100,
+                                              results[0].generation, &hits, &bytes) == 0);
+    assert(hits == 0 && bytes == 0);
+    assert(dppd_software_backend_query_count(&service.software, 100 + count,
+                                              count + 1, &hits, &bytes) == 0);
+    assert(hits == 1 && bytes == parsed.packet_len);
+    assert(dppd_software_backend_query_count(&service.software, 100, 1,
+                                              &hits, &bytes) == -ENOENT);
+    dppd_software_backend_decide(&service.software, 5, &parsed, &decision);
+    assert(decision.drop && decision.mark_id == 7);
+    assert(dppd_software_backend_query_count(&service.software, 101,
+                                              results[1].generation, &hits, &bytes) == 0);
+    assert(hits == 1 && bytes == parsed.packet_len);
+    dppd_software_backend_worker_unregister(&service.software, 0);
+    assert(dppd_software_backend_contains_version(&service.software, 100,
+                                                   results[0].generation));
+    assert(service.software.retired == NULL);
+    assert(dppd_control_fini(&service) == 0);
+}
+
+/** 新旧整表的胜出规则都标记为 7，逐条替换的中间表会出现标记 9，借此检查混合视图 */
+static void test_concurrent(uint32_t count)
+{
+    struct dppd_control_service service;
+    struct dppd_topology topology;
+    struct dppd_control_batch_update_request requests[4];
+    struct dppd_control_apply_result results[4];
+    struct reader readers[2];
+    pthread_t threads[2];
+    uint32_t i, iteration;
+
+    setup(&service, requests, &topology, count);
+    for (i = 0; i < count / 2; ++i) {
+        readers[i].backend = &service.software;
+        readers[i].id = i;
+        atomic_init(&readers[i].stop, false);
+        atomic_init(&readers[i].samples, 0);
+        assert(pthread_create(&threads[i], NULL, read_packets, &readers[i]) == 0);
+    }
+    for (iteration = 0; iteration < 2000; ++iteration) {
+        toggle(requests, count);
+        assert(dppd_control_update_batch(&service, requests, count, results) == 0);
+        for (i = 0; i < count; ++i)
+            requests[i].expected_generation = results[i].generation;
+        for (i = 0; i < count / 2; ++i) {
+            unsigned int sampled = atomic_load_explicit(&readers[i].samples,
+                                                         memory_order_acquire);
+            while (atomic_load_explicit(&readers[i].samples, memory_order_acquire) == sampled)
+                sched_yield();
+        }
+    }
+    for (i = 0; i < count / 2; ++i) {
+        atomic_store_explicit(&readers[i].stop, true, memory_order_release);
+        assert(pthread_join(threads[i], NULL) == 0);
+        assert(atomic_load(&readers[i].samples) >= 2000);
+    }
+    assert(service.rules.generation == count + 1 + 2000 * count);
+    assert(dppd_software_backend_count(&service.software) == count + 1);
+    assert(dppd_control_fini(&service) == 0);
+}
+
+int main(void)
+{
+    test_failures(2);
+    test_failures(4);
+    test_concurrent(2);
+    test_concurrent(4);
+    return 0;
+}

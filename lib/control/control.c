@@ -5,10 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*
- * 保存失败时规则可能已经在硬件和内存中生效，不能假装事务完全回滚。
- * service 进入 dirty/fail-stop 状态并向写请求返回 -EUCLEAN；下一次写入前必须
- * 先成功保存当前完整 repository，防止磁盘持续故障时偏差继续扩大。
+/**
+ * 把当前完整规则账本写入快照，未配置保存路径时直接成功返回
+ * 保存发生在规则生效之后，写磁盘失败不能被解释为已经回滚规则
+ * 此时设置 dirty 并返回 EUCLEAN，后续修改必须先补写成功，避免磁盘与内存越差越远
  */
 static int persist_current_repository(struct dppd_control_service *service)
 {
@@ -29,34 +29,33 @@ static int persist_current_repository(struct dppd_control_service *service)
     return 0;
 }
 
+/** 新修改开始前检查上次保存是否失败，必要时先补写当前已经生效的完整状态 */
 static int persistence_write_preflight(struct dppd_control_service *service)
 {
-    /*
-     * clean 状态不做额外磁盘写；dirty 状态先保存“已经生效的当前状态”。
-     * 成功后本次 mutation 才能继续，失败则保持 fail-stop。
+    /**
+     * clean 状态不重复保存，dirty 状态先修复上次未完成的保存
+     * 修复失败就拒绝本次修改，这里不会通过丢弃内存中的规则来消除 dirty
      */
     return service->persistence_dirty ?
         persist_current_repository(service) : 0;
 }
 
+/** 只有 READY 状态允许普通写入，恢复隔离和等待重启期间都返回 EUCLEAN */
 static int recovery_write_preflight(const struct dppd_control_service *service)
 {
-    /*
-     * 进入恢复隔离模式意味着上一轮启动事务的 actual state 已不可信。此时绝不能
-     * 接受 apply/delete 或重新覆盖 snapshot；只能通过专用 retry 清除遗留 handle。
+    /**
+     * 启动恢复或在线补偿失败后，实际对象与账本可能已经不一致
+     * 此时禁止继续更新、删除或覆盖快照，只允许专用恢复流程清理本进程仍持有的对象
      */
     return service->recovery_state == DPPD_CONTROL_RECOVERY_READY ? 0 :
         -EUCLEAN;
 }
 
-/*
- * desired repository 不保存 backend 类型；删除时以同一 (id,generation) 在两个
- * 实际对象仓库中定位。正常路径只能命中一个，两个都命中代表控制面不变量被破坏。
- */
 /**
- * 找出某个已发布 generation 的唯一 actual 归属。repository 只保存 canonical rule，
- * 故删除和补偿不能根据 fallback 字段猜测 backend：PREFER 规则可能在 validate 失败后
- * 已真实落到 software。两个 backend 都有或都没有该版本均是控制面不变量破坏。
+ * 找出一条已发布规则究竟安装在硬件还是软件中，规则账本本身不记录后端类型
+ * PREFER 只表达“优先硬件”的意图，驱动校验失败后实际规则可能已经落到软件后端
+ * 因此要在两个对象仓库中按同一个 ID 和版本查找，不能只根据策略字段猜测
+ * 正常情况恰好找到一个；两个都有或两个都没有，都说明控制层约定已经被破坏
  */
 static int actual_backend_for(const struct dppd_control_service *service,
                               uint64_t rule_id, uint64_t generation,
@@ -78,6 +77,10 @@ static int actual_backend_for(const struct dppd_control_service *service,
     return 0;
 }
 
+/**
+ * 删除指定版本的实际对象，但不修改规则账本
+ * 上层可先删除整批对象，确认全部成功后再统一发布账本变化
+ */
 static int remove_actual_rule(struct dppd_control_service *service,
                               uint64_t rule_id, uint64_t generation)
 {
@@ -85,7 +88,7 @@ static int remove_actual_rule(struct dppd_control_service *service,
     enum dppd_plan_backend backend_kind;
     int rc;
 
-    /* 先定位再删除，避免将“对象不存在”降格成单条 delete 的幂等 no-op。 */
+    /** 账本认为对象存在时，实际对象缺失就是错误，不能当作“已经删过了”的幂等成功 */
     rc = actual_backend_for(service, rule_id, generation, &backend_kind);
     if (rc != 0)
         return rc;
@@ -98,9 +101,10 @@ static int remove_actual_rule(struct dppd_control_service *service,
 }
 
 /**
- * 恢复批量删除已成功摘除的 actual 对象。desired repository 尚未变更，所以必须用原始
- * rule/generation 重建同一版本；若 PMD 此时已不再接受该版本，宁可进入隔离也不能发布
- * 一个没有实际对象的 desired record。
+ * 恢复批量删除或更新过程中已经删掉的那一部分旧对象
+ * 账本尚未变化，所以要保留原 ID、版本、端口和后端，不能调用普通 apply 分配一个新版本
+ * 这里通过创建事务重建对象，count 为零表示还没有删掉任何旧对象，无需补偿
+ * 恢复失败时把错误交回上层，由上层决定隔离，不能假装账本中的规则已经重新存在
  */
 static int restore_actual_rules(struct dppd_control_service *service,
                                 struct dppd_transaction_item *items,
@@ -143,7 +147,10 @@ int dppd_control_init(struct dppd_control_service *service,
     rc = dppd_rule_repository_init(&service->rules, rule_capacity);
     if (rc != 0)
         return rc;
-    /* 额外槽位用于规则更新时让新旧 generation 短暂共存。 */
+    /**
+     * 后端比规则账本多一个槽位，确保满表时仍可进行一次单规则的先建后删
+     * 批量更新需要同时容纳多条新版本，仅多一个槽位并不保证满表时也能完成批量更新
+     */
     rc = dppd_rte_flow_backend_init(&service->rte_flow,
                                     rule_capacity + 1U, flow_api);
     if (rc != 0) {
@@ -569,11 +576,12 @@ int dppd_control_apply(struct dppd_control_service *service,
 }
 
 /**
- * 批量新建规则的控制面原子边界。
+ * 一次创建一组原先不存在的规则，避免逐条调用单规则接口造成部分创建成功
  *
- * 首版不混入更新和删除：所有输入都必须是不存在的 rule，且 expected_generation 为 0。
- * 这样可在接触 backend 前一次性完成 ID、容量、计划和 fallback 预检；backend 事务成功
- * 后才连续发布 repository。任何 backend 失败都会撤销本批已创建对象。
+ * 每条输入都必须使用新 ID 和 expected_generation=0，不混入更新或删除语义
+ * 先检查容量并逐条形成计划，必要时通过无副作用的驱动校验决定是否走软件后端
+ * 新对象安装由同一事务完成，事务成功后才按请求顺序写入规则账本
+ * 安装失败会尝试撤销本批对象，撤销也失败则进入恢复隔离，不能声称已经全部回滚
  */
 int dppd_control_create_batch(
     struct dppd_control_service *service,
@@ -606,24 +614,26 @@ int dppd_control_create_batch(
     items = calloc(request_count, sizeof(*items));
     if (items == NULL)
         return -ENOMEM;
-    /*
-     * generation 按输入顺序预分配。后续 repository 也必须按同一顺序 apply，才能保证
-     * 每条 actual rule 的 generation 与 desired record 完全一致，并便于调用方按结果数组
-     * 建立稳定映射。
+    /**
+     * 先记下当前全局版本，后续按输入顺序为实际对象预分配连续的新版本
+     * 写入账本时必须保持相同顺序，才能让账本版本与已经安装对象的版本一一对应
      */
     base_generation = dppd_rule_repository_generation(&service->rules);
 
-    /*
-     * 此循环不触碰 backend：先冻结本批输入的唯一性、乐观并发条件、generation 和
-     * 执行计划，确保后续 transaction 不会因本地可预见错误出现半提交。
+    /**
+     * 逐条检查 ID、创建条件和规划结果，暂不安装对象或预留资源
+     * PREFER 条目可能在本循环调用驱动 validate，这只是能力探测，不是安装
+     * 后面的条目即使检查失败，也不应留下前面条目的实际规则
      */
     for (i = 0; i < request_count; ++i) {
         struct dppd_planner_context planner_context;
         struct dppd_rule existing;
         uint32_t previous;
 
-        /* 首版批量接口只表达“新建”：不接受 ANY/指定旧 generation，避免混入更新语义后
-         * 出现部分条目创建、部分条目覆盖的难以补偿状态。 */
+        /**
+         * 新建必须明确声明旧版本为零，不接受 ANY 或具体旧版本
+         * 如果允许混入覆盖已有规则的请求，失败时还要恢复旧对象，不能复用纯创建的回滚逻辑
+         */
         if (requests[i].rule.id == 0 ||
             requests[i].expected_generation != 0) {
             rc = -ESTALE;
@@ -644,7 +654,7 @@ int dppd_control_create_batch(
 
         memset(&results[i], 0, sizeof(results[i]));
         items[i].rule = requests[i].rule;
-        /* install port 与单规则 API 同样由 request 外层字段统一覆盖。 */
+        /** 外层安装端口是本次请求的明确目标，覆盖规则内部字段以保持接口含义一致 */
         items[i].rule.install_port_id = requests[i].install_port_id;
         items[i].rule.generation = base_generation + i + 1U;
         memset(&planner_context, 0, sizeof(planner_context));
@@ -657,10 +667,10 @@ int dppd_control_create_batch(
         if (rc != 0)
             goto cleanup;
 
-        /*
-         * PREFER 的硬件能力探测必须在批量 prepare 前完成。这样一个 net_ring 等
-         * PMD 的 validate 失败只重规划该条 rule 为 software，不会中断同批其余
-         * 硬件规则的原子 transaction；create/rollback 失败绝不走此降级分支。
+        /**
+         * 在事务准备资源之前决定最终后端，这样一批规则可以同时包含硬件和软件条目
+         * 例如 net_ring 的校验不支持 flow，但软件可表达相同规则时，只把这一条改为软件
+         * 创建或回滚阶段的错误不允许走这个分支，防止掩盖已经产生的安装副作用
          */
         if (items[i].plan.backend == DPPD_PLAN_BACKEND_RTE_FLOW &&
             items[i].rule.fallback == DPPD_FALLBACK_PREFER_HARDWARE &&
@@ -686,10 +696,10 @@ int dppd_control_create_batch(
     rc = dppd_transaction_init(&transaction, transaction_id, items, request_count);
     if (rc != 0)
         goto cleanup;
-    /* 此处先让所有 backend 完整提交，再一次性连续发布 desired repository。 */
+    /** 先让本批所有实际对象安装完成，再在同一控制线程中连续发布对应的账本记录 */
     rc = dppd_transaction_run(&transaction, &backends);
     if (rc != 0) {
-        /* rollback 也失败时，无法证明 actual 已恢复；进入隔离而不是继续接受写请求。 */
+        /** 撤销也失败时可能仍有残留对象，记录恢复错误并封锁后续普通写入 */
         if (transaction.rollback_code != 0) {
             service->recovery_state =
                 DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
@@ -699,10 +709,10 @@ int dppd_control_create_batch(
         goto cleanup;
     }
 
-    /*
-     * 上面的全量预检保证这些 apply 只能依次创建，且分配的 generation 恰好等于
-     * 预先写入 actual object 的值。若仍失败，actual/desired 已无法证明一致，先
-     * 回滚整个已提交 transaction，再以 EUCLEAN fail-closed 返回。
+    /**
+     * 全批检查和串行执行保证这里应当只产生 CREATED，且版本与预分配值一致
+     * 如果仍出现异常，撤回已经写入的本批记录并尝试回滚实际对象，统一返回 EUCLEAN
+     * 结果数组只有整个函数成功时才可作为成功回执，不能只看其中已填好的前几项
      */
     for (i = 0; i < request_count; ++i) {
         struct dppd_rule_apply_result repository_result;
@@ -713,10 +723,10 @@ int dppd_control_create_batch(
             repository_result.generation != items[i].rule.generation) {
             int rollback_rc;
 
-            /*
-             * repository 理论上不会失败；防御性地撤回此前已发布条目后再回滚 actual。
-             * remove 会继续推进 repository generation，因此不能把它当作“时间倒流”；
-             * 一旦任一补偿失败即记录 reconciliation_required，拒绝后续写入。
+            /**
+             * published_count 只记录当前批次已经写入账本的条数，逆序移除这部分记录
+             * 删除记录仍会推进全局版本，所以撤回记录不等于把历史版本号恢复到原值
+             * 任一账本撤回或实际对象回滚失败，都要进入恢复隔离
              */
             while (published_count > 0) {
                 bool removed;
@@ -748,7 +758,7 @@ int dppd_control_create_batch(
         results[i].transaction_id = transaction_id;
         results[i].plan = items[i].plan;
     }
-    /* 至此 actual 和 desired 均已发布，才可丢弃所有 backend 的 rollback token。 */
+    /** 实际规则和账本均已写好，不再需要本次回滚凭据，先结束事务临时资源再保存快照 */
     rc = dppd_transaction_finalize(&transaction, &backends);
     if (rc != 0) {
         rc = -EUCLEAN;
@@ -762,10 +772,10 @@ cleanup:
 }
 
 /**
- * 批量删除的原子边界与批量创建相反：desired record 在开始时必须都存在，先删除所有
- * actual 对象，随后才连续发布 repository 删除。没有把 DELETE 接入通用 transaction，
- * 是因为现有 transaction 的 prepare/commit 模型描述“创建对象”；这里显式保存原规则和
- * backend 类型，以便实际删除失败时可用创建事务补偿恢复。
+ * 一次删除一组已经存在且版本精确匹配的规则
+ * 先保存原规则和实际后端，再删除全部实际对象，最后才从账本中连续移除记录
+ * 如果实际删除到一半失败，账本仍保留全部旧记录，可按原版本重建已经删掉的对象
+ * 通用事务接口描述的是对象创建，因此这里使用显式删除循环，并用创建事务完成补偿
  */
 int dppd_control_remove_batch(
     struct dppd_control_service *service,
@@ -790,9 +800,9 @@ int dppd_control_remove_batch(
     if (items == NULL)
         return -ENOMEM;
 
-    /*
-     * 进入数据面前冻结全批前提：不允许 ANY/0、不允许重复 ID，并确认每个 desired
-     * generation 仍对应唯一 actual backend。这样正常删除路径不含可预见失败点。
+    /**
+     * 删除任何实际对象前先检查整批：旧版本必须精确、ID 不重复、对应对象只存在于一个后端
+     * 同时把规则和后端归属保存下来，后续即使对象已删除也知道应该怎样重建
      */
     for (i = 0; i < request_count; ++i) {
         uint32_t previous;
@@ -825,14 +835,15 @@ int dppd_control_remove_batch(
         items[i].plan.install_port_id = items[i].rule.install_port_id;
     }
 
+    /** removed_actual 只在删除成功后增加，失败时只恢复前面确实已经删掉的对象 */
     for (i = 0; i < request_count; ++i) {
         rc = remove_actual_rule(service, items[i].rule.id, items[i].rule.generation);
         if (rc != 0) {
             int restore_rc = restore_actual_rules(service, items, removed_actual);
 
-            /*
-             * 此时 repository 尚完整；补偿成功即可向调用方返回原始 PMD/software 错误。
-             * 只有补偿自身失败才失去 actual/desired 一致性证明，需要覆盖成 EUCLEAN。
+            /**
+             * 账本还没修改，补偿成功后实际对象又与旧账本一致，可以返回最初的删除错误
+             * 补偿也失败时已经不能证明一致性，改为返回 EUCLEAN 并记录具体恢复错误
              */
             if (restore_rc != 0) {
                 service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
@@ -844,10 +855,10 @@ int dppd_control_remove_batch(
         removed_actual++;
     }
 
-    /*
-     * repository remove 理论上不会失败，因为同一 control service 已完成精确预检且
-     * 还未接受其他 mutation。若未来并发模型改变而这里失败，旧 actual 已被删、部分
-     * desired 也可能已删，无法在不篡改 generation 的前提下安全补偿，只能隔离。
+    /**
+     * 实际对象全部删除后才从账本移除记录，每次删除都会推进全局版本
+     * 精确预检和串行调用保证正常情况下不会失败；若仍失败，不能简单重新创建来冒充旧版本
+     * 因为部分账本记录也可能已经消失，此时只能进入隔离，由恢复流程统一处理
      */
     for (i = 0; i < request_count; ++i) {
         bool removed;
@@ -870,6 +881,279 @@ int dppd_control_remove_batch(
 cleanup:
     free(items);
     return rc;
+}
+
+/**
+ * 把一组已有规则作为同一笔更新处理，避免调用方看到只更新了一半的规则清单
+ *
+ * 可以把 repository 理解为“系统希望保留的规则账本”，把 actual 对象理解为
+ * “硬件或软件中已经安装的规则”。只有新规则全部装好、旧规则全部删完之后
+ * 才能整批改写账本。此前任何一步失败，都优先撤销新规则并恢复已删除的旧规则
+ *
+ * 本函数由管理主线程串行调用，旧对象与新计划全为软件时整批只发布一次快照
+ * 涉及硬件时仍采用逐条安装与补偿流程，不保证所有报文在同一时刻切换规则
+ * 返回 EUCLEAN 时要进一步区分恢复隔离和保存失败，不能直接认定本次更新没有生效
+ */
+int dppd_control_update_batch(
+    struct dppd_control_service *service,
+    const struct dppd_control_batch_update_request *requests,
+    uint32_t request_count,
+    struct dppd_control_apply_result *results)
+{
+    /**
+     * items 保存待安装的新版本，old 保存失败补偿所需的旧规则及原后端类型
+     * candidates 是交给规则账本的完整新内容，expected 是用户读取过的精确旧版本
+     * 这些数组使用相同下标，保证请求、安装计划和返回结果始终一一对应
+     */
+    struct dppd_transaction_item items[DPPD_CONTROL_BATCH_UPDATE_MAX] = {0};
+    struct dppd_transaction_item old[DPPD_CONTROL_BATCH_UPDATE_MAX] = {0};
+    struct dppd_rule candidates[DPPD_CONTROL_BATCH_UPDATE_MAX];
+    uint64_t expected[DPPD_CONTROL_BATCH_UPDATE_MAX];
+    bool may_fallback[DPPD_CONTROL_BATCH_UPDATE_MAX] = {false};
+    bool all_old_software = true, atomic_software;
+    struct dppd_transaction transaction;
+    struct dppd_transaction_backends backends = {0};
+    uint32_t hardware_needed = 0, software_needed = 0;
+    uint32_t hardware_count, software_count;
+    uint64_t base_generation;
+    uint32_t i;
+    int rc;
+
+    if (service == NULL || service->topology == NULL || requests == NULL ||
+        results == NULL || request_count < 2 ||
+        request_count > DPPD_CONTROL_BATCH_UPDATE_MAX)
+        return -EINVAL;
+    memset(results, 0, request_count * sizeof(*results));
+    /**
+     * 已在恢复隔离中时禁止继续写入；上次保存失败时先把已生效状态重新写入磁盘
+     * 两个检查都通过后才开始本次更新，防止在已有不一致上继续叠加新修改
+     */
+    rc = recovery_write_preflight(service);
+    if (rc != 0)
+        return rc;
+    rc = persistence_write_preflight(service);
+    if (rc != 0)
+        return rc;
+    base_generation = dppd_rule_repository_generation(&service->rules);
+    /**
+     * 每条规则需要一个连续新版本，版本号不能绕回零或占用 ANY 的特殊值
+     * 事务编号也要保留有效空间，以便后续安装和失败补偿能够被明确识别
+     */
+    if (base_generation >= UINT64_MAX - request_count ||
+        service->next_transaction_id == 0 ||
+        service->next_transaction_id == UINT64_MAX)
+        return -EOVERFLOW;
+
+    /**
+     * 第一轮只做本地检查，不调用网卡驱动 PMD
+     * 例如第二条规则版本过期时，应立即拒绝整批，而不是先为第一条接触硬件
+     * 0 和 ANY 都不代表用户明确确认过的旧版本，因此批量更新不接受这两个值
+     */
+    for (i = 0; i < request_count; ++i) {
+        struct dppd_planner_context context = {0};
+        char validation_error[128];
+        uint32_t j;
+
+        if (requests[i].reserved != 0 || requests[i].rule.id == 0)
+            return -EINVAL;
+        if (requests[i].expected_generation == 0 ||
+            requests[i].expected_generation == DPPD_RULE_GENERATION_ANY)
+            return -ESTALE;
+        for (j = 0; j < i; ++j) {
+            if (requests[j].rule.id == requests[i].rule.id)
+                return -EEXIST;
+        }
+        rc = dppd_rule_repository_get(&service->rules, requests[i].rule.id,
+                                      &old[i].rule);
+        if (rc != 0)
+            return rc;
+        if (old[i].rule.generation != requests[i].expected_generation)
+            return -ESTALE;
+        /**
+         * 旧规则必须恰好存在于一个实际后端中，不能仅根据“优先硬件”策略猜归属
+         * 同时存在于两个后端或两个后端都不存在，说明账本与安装状态已经失配
+         * 此时进入隔离，不能继续更新并掩盖原来的问题
+         */
+        rc = actual_backend_for(service, old[i].rule.id, old[i].rule.generation,
+                                &old[i].plan.backend);
+        if (rc != 0)
+            goto isolate;
+
+        expected[i] = old[i].rule.generation;
+        if (old[i].plan.backend != DPPD_PLAN_BACKEND_SOFTWARE)
+            all_old_software = false;
+        candidates[i] = requests[i].rule;
+        candidates[i].install_port_id = requests[i].install_port_id;
+        candidates[i].generation = base_generation + i + 1U;
+        items[i].rule = candidates[i];
+        /**
+         * 匹配条件和动作来自请求，必须先检查数组长度和规则结构
+         * 后面的软件能力判断会遍历数组，先校验可以避免非法长度导致越界读取
+         */
+        if (dppd_rule_validate(&candidates[i], validation_error,
+                               sizeof(validation_error)) != 0)
+            return -EINVAL;
+        context.topology = service->topology;
+        context.install_port_id = requests[i].install_port_id;
+        context.hardware_available = true;
+        context.software_equivalent =
+            dppd_software_backend_rule_supported(&candidates[i]);
+        rc = dppd_plan_rule(&context, &items[i].rule, &items[i].plan);
+        if (rc != 0)
+            return rc;
+        may_fallback[i] = items[i].plan.backend == DPPD_PLAN_BACKEND_RTE_FLOW &&
+            candidates[i].fallback == DPPD_FALLBACK_PREFER_HARDWARE &&
+            context.software_equivalent;
+        if (items[i].plan.backend == DPPD_PLAN_BACKEND_RTE_FLOW)
+            hardware_needed++;
+        if (items[i].plan.backend == DPPD_PLAN_BACKEND_SOFTWARE || may_fallback[i])
+            software_needed++;
+    }
+
+    /**
+     * 硬件及混合路径需要新旧版本暂时共存，因此预检临时空间
+     * 旧对象全为软件且所有目标都可能走软件时，允许稍后确认能否整表替换
+     * 如果最终规划为混合路径，仍须在安装之前复查软件临时空间
+     * 容量不足不触发降级，硬件目标的本地容量仍在 PMD 校验之前保守检查
+     */
+    hardware_count = dppd_rte_flow_backend_count(&service->rte_flow);
+    software_count = dppd_software_backend_count(&service->software);
+    if (hardware_count > service->rte_flow.capacity ||
+        software_count > service->software.capacity) {
+        rc = -EUCLEAN;
+        goto isolate;
+    }
+    if (hardware_needed > service->rte_flow.capacity - hardware_count ||
+        (software_needed > service->software.capacity - software_count &&
+         !(all_old_software && software_needed == request_count)))
+        return -ENOSPC;
+
+    /**
+     * 到这里整批输入和容量都已通过检查，才允许询问 PMD 是否支持这些规则
+     * 只有尚未安装对象的 validate 失败，并且软件能表达相同语义时，才改走软件
+     * 后面的创建、删除或回滚失败都不能再用软件回退来伪装成成功
+     */
+    for (i = 0; i < request_count; ++i) {
+        if (may_fallback[i]) {
+            struct dppd_flow_error error;
+
+            rc = service->rte_flow.api.validate(items[i].plan.install_port_id,
+                                                &items[i].rule, &error);
+            if (rc != 0) {
+                struct dppd_planner_context context = {0};
+
+                context.topology = service->topology;
+                context.install_port_id = requests[i].install_port_id;
+                context.software_equivalent = true;
+                rc = dppd_plan_rule(&context, &items[i].rule, &items[i].plan);
+                if (rc != 0)
+                    return rc;
+            }
+        }
+    }
+    /**
+     * 确认最终计划是否允许整批软件替换，否则按实际软件目标数复查临时空间
+     * 纯软件路径复用旧槽位，硬件或混合路径继续由事务逐条安装与补偿
+     */
+    atomic_software = all_old_software;
+    software_needed = 0;
+    for (i = 0; i < request_count; ++i) {
+        if (items[i].plan.backend == DPPD_PLAN_BACKEND_SOFTWARE)
+            software_needed++;
+        else
+            atomic_software = false;
+    }
+    if (!atomic_software && software_needed > service->software.capacity - software_count)
+        return -ENOSPC;
+    backends.software = dppd_software_transaction_backend(&service->software);
+    backends.rte_flow = dppd_rte_flow_transaction_backend(&service->rte_flow);
+    rc = dppd_transaction_init(&transaction, service->next_transaction_id++,
+                               items, request_count);
+    if (rc != 0)
+        return rc;
+    if (atomic_software) {
+        rc = dppd_software_backend_update_batch(&service->software, candidates,
+                                                expected, request_count);
+        if (rc != 0)
+            return rc;
+        rc = dppd_rule_repository_update_batch(&service->rules, candidates,
+                                               expected, request_count);
+        if (rc != 0)
+            goto isolate;
+        goto committed;
+    }
+    rc = dppd_transaction_run(&transaction, &backends);
+    if (rc != 0) {
+        if (transaction.rollback_code == 0)
+            return rc;
+        rc = transaction.rollback_code;
+        goto isolate;
+    }
+
+    /**
+     * 全部新对象安装成功后再逐条删除旧对象，这时规则账本仍完整保留旧版本
+     * 删除下标 i 失败，意味着只有前 i 条旧对象已经删除，补偿只恢复这部分
+     */
+    for (i = 0; i < request_count; ++i) {
+        rc = remove_actual_rule(service, old[i].rule.id, old[i].rule.generation);
+        if (rc != 0) {
+            int rollback_rc;
+            int restore_rc;
+
+            /**
+             * 先撤销本批全部新版本，再按原规则、原版本和原后端恢复已删除的旧对象
+             * 即使撤新失败也继续尝试恢复旧对象，以尽量减少缺失的规则
+             * 两种补偿都成功才返回原始删除错误，否则返回 EUCLEAN 并封锁后续更新
+             */
+            rollback_rc = dppd_transaction_rollback_committed(&transaction, &backends);
+            restore_rc = restore_actual_rules(service, old, i);
+            if (rollback_rc == 0 && restore_rc == 0)
+                return rc;
+            rc = rollback_rc != 0 ? rollback_rc : restore_rc;
+            goto isolate;
+        }
+    }
+
+    /**
+     * 新旧对象的切换全部成功后，最后整批改写账本
+     * 仓库接口会先复查所有条件，再执行不分配内存的替换循环
+     * 内容没有变化的规则也获得新版本，这样整批结果始终使用连续的版本号
+     */
+    rc = dppd_rule_repository_update_batch(&service->rules, candidates,
+                                           expected, request_count);
+    if (rc != 0) {
+        /**
+         * 正常串行流程下不应失败；如果复查仍失败，旧实际对象已经被删除
+         * 此时不能靠重新 apply 冒充恢复旧版本，只释放事务临时资源并进入隔离
+         */
+        (void)dppd_transaction_finalize(&transaction, &backends);
+        goto isolate;
+    }
+    rc = dppd_transaction_finalize(&transaction, &backends);
+    if (rc != 0)
+        goto isolate;
+committed:
+    for (i = 0; i < request_count; ++i) {
+        results[i].status = DPPD_RULE_UPDATED;
+        results[i].generation = candidates[i].generation;
+        results[i].transaction_id = transaction.id;
+        results[i].plan = items[i].plan;
+    }
+    /**
+     * 保存失败时整批更新已经在内存和实际后端生效，不能再声称已经回滚
+     * 保存函数会设置 dirty 状态并返回 EUCLEAN，后续写入要先修复持久化状态
+     */
+    return persist_current_repository(service);
+
+isolate:
+    /**
+     * 隔离表示“已经无法证明账本和实际规则一致”，普通管理请求将被拒绝
+     * 主循环随后停止软件工作线程，只保留恢复查询和清理重试入口
+     * 底层错误另存于 recovery_last_error，便于区分创建、删除或补偿失败
+     */
+    service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+    service->recovery_last_error = rc;
+    return -EUCLEAN;
 }
 
 int dppd_control_remove(struct dppd_control_service *service,

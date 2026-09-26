@@ -2,6 +2,12 @@
 
 状态只表示代码是否真实存在，不以目录或占位接口计入完成度。
 
+2026-09-26 跨规则原子更新及 management v7 已通过 Ubuntu 22.04.5 / DPDK 21.11.9 下的 `-Werror` 全量构建、15/15 单测和四组 net_ring 进程间验证。验证了 2/4 条更新、满容量纯软件替换、旧版本拒绝、相同内容更新、混合路径容量拒绝、snapshot 状态和退出清理；新增并发分类及分配故障测试通过，并通过 AddressSanitizer/UBSan 检查；详见 [验证记录](validation_batch_update.md)。实际 RX/TX 验证也已补齐：正式 worker 在 net_ring 上处理 72456 个报文，两条和四条规则各成功更新 1001 次，DROP、COUNT、正常转发、分配失败后重试及 mbuf 回收通过普通和 AddressSanitizer/UBSan 构建验证。下方保留此前 v6 基线的硬件与 TAP 验证记录。
+
+在线恢复隔离另有两组进程级 flow API 故障注入测试通过：确认 worker 停止、普通请求
+阻断、清理重试失败与成功、失败码退出、旧 snapshot 重启恢复。该测试不涉及真实 PMD
+故障；测试共享库独立构建且不链接到生产程序。
+
 | 领域 | 当前状态 | 边界 |
 |---|---|---|
 | 构建 | 已验证 | Ubuntu 22.04、Meson 0.61.2、DPDK 21.11.9 下完成 `-Werror` 全量编译和链接 |
@@ -19,9 +25,9 @@
 | rte_flow | 已实现事务 backend | validate 与 create 分离；对象仓库持有 handle；批量失败逆序 destroy |
 | 等价软件 fallback | 已实现最小集合 | ingress Ethernet/IPv4/UDP/TCP、DROP/MARK/COUNT；`prefer` 仅在 validate 失败时回退，QUEUE/transfer 拒绝降级；immutable snapshot + DPDK QSBR 非阻塞回收已接入 |
 | 虚拟 PMD flow 验证 | TAP 与 net_ring 已验证 | 双 TAP 已验证硬件 DROP/QUEUE；软件 TCP+MARK+COUNT+DROP 有真实报文与计数证据；net_ring 已验证 prefer 回退，见 [待办文档](todo_virtual_flow_backend.md) |
-| 批量事务/回滚 | 已接双 backend | 批量创建采用全量 validate/prepare、顺序 commit、逆序 destroy；批量精确删除先删 actual、失败时以原 generation 重建补偿，补偿失败进入 recovery isolation；软件 backend 同样受 transaction 驱动 |
-| control service | 已实现单规则闭环 | 创建、幂等重放、generation replacement、查询、删除和错误状态保护 |
-| management API | 已实现本机 v6 | `dppctl` 支持 port-show、ping、稳定分页、完整 get、DROP/QUEUE/MARK/COUNT、count query、delete、persistence-status/flush、reconcile-status/retry、2–4 条同端口 Ethernet DROP 的原子 `apply-drop-batch`，以及 2–4 条精确 generation 的原子 `delete-batch` |
+| 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
+| control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
+| management API | 本机 v7 已验证 | 保留 v6 命令并新增 `RULE_UPDATE_BATCH` 和 `update-drop-batch`，支持 2–4 条精确 generation 的完整替换；CLI 构造同端口 ETH/DROP，完整 IR 可通过管理协议提交 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |
 | ACL/LPM/NAT/conntrack | 未实现 | 旧占位实现已删除，需按 stage/snapshot 模型重建 |
 | DPU/SmartNIC 实机 | 未验证 | 需在具体 PMD、固件、representor devargs 上建立能力矩阵 |
@@ -29,7 +35,7 @@
 ## DPDK 21.11 测试机验证
 
 - Ubuntu 22.04、GCC 11.4、Meson 0.61.2、DPDK 21.11.9；
-- DPDK 21.11.9 下 `-Werror` 全量编译和链接通过，12/12 单元测试通过；
+- DPDK 21.11.9 下 `-Werror` 全量编译和链接通过，15/15 单元测试通过（含本次批量更新和 CLI 测试）；
 - 双 `net_ring` 完成 `dppd`/`dppctl` 进程间 smoke test；PMD 返回 `ENOSYS` 时 `prefer` 规则以 software backend 发布，`require` 保持失败，退出后 socket 正常清理；
 - `port-show` 已验证能返回 `net_ring` 的队列与 offload 快照；合法 TCP/CIDR 规则进入 PMD 校验，非法 CIDR 在客户端边界被拒绝；
 - QUEUE/MARK/COUNT 组合规则已通过 CLI 到 PMD 的端到端解析；重复 action modifier 在客户端拒绝；COUNT 查询的成功、无 COUNT、过期 generation 和规则不存在路径由单测覆盖；
@@ -62,6 +68,7 @@
 - 没有查询 `rte_flow` 资源容量或预留规则空间；
 - COUNT id 由 rule id 的低 32 位生成，控制面必须保证其作用域内不冲突。
 - 硬件规则更新采用“先创建新 generation，再删除旧 generation”；若 PMD 拒绝重叠规则，更新失败并保留旧规则，当前不承诺跨 PMD 的无损原子替换。
-- management v6 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
+- management v7 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
+- 批量更新保留 `rule_capacity + 1` 的 backend 容量。纯软件路径整批替换快照、复用旧槽位，满表可更新；每次分类使用完整旧表或新表，新版本 COUNT 归零，未更新规则保留计数。硬件及混合路径仍需要临时容量，只保证账本整批发布；PREFER 可能整表替换但最终成为混合计划时，会在安装前复查软件空间。
 - daemon 为安全起见不会自动删除启动前已存在的 socket 路径；异常退出后需由部署脚本确认没有存活进程再清理残留文件。
 - snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入仅允许 `reconcile-status/reconcile-retry` 的进程内隔离模式；进程终止后的 PMD 专用 residual flow 清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md)。

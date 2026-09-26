@@ -110,6 +110,43 @@ int main(void)
     assert(dppd_rule_repository_list(
                &repository, 20, 3, page, 2, &page_count,
                &has_more, &page_generation) == -ESTALE);
+    /**
+     * 故意让第二条的旧版本或规则内容出错，确认第一条优先级没有提前写入
+     * 全部条件正确后，第二条即使内容不变也必须取得连续的新版本
+     * 最后把全局版本放到边界附近，确认整批无法分配版本时不会改动已有记录
+     */
+    {
+        struct dppd_rule updates[2] = {make_rule(10), make_rule(20)};
+        uint64_t expected[2] = {2, 99};
+
+        updates[0].priority = 42;
+        assert(dppd_rule_repository_update_batch(&repository, updates,
+                                                  expected, 2) == -ESTALE);
+        assert(repository.generation == 4);
+        assert(dppd_rule_repository_get(&repository, 10, &stored) == 0);
+        assert(stored.generation == 2 && stored.priority == 0);
+        expected[1] = 3;
+        updates[1].id = 10;
+        assert(dppd_rule_repository_update_batch(&repository, updates,
+                                                  expected, 2) == -EEXIST);
+        updates[1].id = 20;
+        updates[1].nb_actions = 0;
+        assert(dppd_rule_repository_update_batch(&repository, updates,
+                                                  expected, 2) == -EINVAL);
+        assert(repository.generation == 4);
+        updates[1] = make_rule(20);
+        assert(dppd_rule_repository_update_batch(&repository, updates, expected, 2) == 0);
+        assert(repository.generation == 6);
+        assert(dppd_rule_repository_get(&repository, 20, &stored) == 0);
+        assert(stored.generation == 6);
+        expected[0] = 5;
+        expected[1] = 6;
+        repository.generation = UINT64_MAX - 2;
+        assert(dppd_rule_repository_update_batch(&repository, updates,
+                                                  expected, 2) == -EOVERFLOW);
+        assert(dppd_rule_repository_get(&repository, 10, &stored) == 0);
+        assert(stored.generation == 5);
+    }
     dppd_rule_repository_destroy(&repository);
     return 0;
 }

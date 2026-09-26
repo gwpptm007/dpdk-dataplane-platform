@@ -170,9 +170,14 @@ int main(int argc, char **argv)
     while (!stop_signal) {
         const uint64_t now = rte_get_timer_cycles();
 
-        if (config.duration_s != 0 && now - started_at >= timer_hz * config.duration_s)
+        /**
+         * 进入恢复隔离后，不再按普通运行时长退出，也不继续周期性输出转发统计
+         * 这样用户仍有机会查看残留对象并发起清理，避免定时退出丢失本进程的 handle
+         */
+        if (!recovery_isolation && config.duration_s != 0 &&
+            now - started_at >= timer_hz * config.duration_s)
             break;
-        if (now >= next_stats) {
+        if (!recovery_isolation && now >= next_stats) {
             dppd_runtime_stats_dump(&runtime);
             next_stats = now + (timer_hz * config.stats_period_ms) / 1000U;
         }
@@ -186,6 +191,30 @@ int main(int argc, char **argv)
                     loop_error);
             break;
         }
+        if (control.recovery_state != DPPD_CONTROL_RECOVERY_READY) {
+            if (!recovery_isolation) {
+                /**
+                 * 启动之后发生的补偿失败，也要执行与启动恢复失败相同的隔离约束
+                 * 先发送停止请求，再等待已经启动的工作线程结束，之后才处理清理重试
+                 * 停止软件转发不代表硬件残留规则停止工作，硬件对象仍要单独清理
+                 */
+                dppd_runtime_request_stop(&runtime);
+                if (dppd_runtime_wait(&runtime) != 0) {
+                    loop_error = -EIO;
+                    break;
+                }
+                recovery_isolation = true;
+                fprintf(stderr, "[dppd] rule recovery required; workers stopped\n");
+            }
+            if (control.recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {
+                /**
+                 * 残留对象已清理，不在原进程中直接恢复正常服务
+                 * 用失败码退出，让操作者或服务管理器重启并从旧快照重新建立完整状态
+                 */
+                loop_error = -EUCLEAN;
+                break;
+            }
+        }
         sleep_control_loop();
     }
 
@@ -195,7 +224,8 @@ int main(int argc, char **argv)
     if (dppd_runtime_wait(&runtime) != 0)
         loop_error = -EIO;
     dppd_runtime_stats_dump(&runtime);
-    if (loop_error == 0)
+    /** 隔离期间即使由用户发信号结束，也不能把这次故障退出报告为正常运行成功 */
+    if (loop_error == 0 && !recovery_isolation)
         rc = EXIT_SUCCESS;
 
 cleanup_telemetry:

@@ -200,6 +200,65 @@ int dppd_rule_repository_apply(struct dppd_rule_repository *repository,
     return 0;
 }
 
+/**
+ * 整批替换规则账本中的已有记录，不执行任何硬件或软件安装操作
+ *
+ * 第一轮确认每条规则都合法、ID 不重复、旧版本完全匹配
+ * 第二轮才真正修改记录，所以后一条输入出错不会导致前一条已经写入
+ * 该保证依赖调用方串行访问仓库，不等于提供了多线程并发写入保护
+ */
+int dppd_rule_repository_update_batch(
+    struct dppd_rule_repository *repository, const struct dppd_rule *rules,
+    const uint64_t *expected_generations, uint32_t count)
+{
+    uint32_t i;
+
+    if (repository == NULL || repository->records == NULL || rules == NULL ||
+        expected_generations == NULL || count == 0)
+        return -EINVAL;
+    if (count > repository->count)
+        return -ENOENT;
+    /**
+     * UINT64_MAX 被用来表示“不检查版本”的 ANY 条件，不能分配给真实规则
+     * 这里一次检查整批需要的版本空间，避免写到中途才发现版本号用尽
+     */
+    if (repository->generation >= UINT64_MAX - count)
+        return -EOVERFLOW;
+    for (i = 0; i < count; ++i) {
+        struct dppd_rule_record *record;
+        char error[128];
+        uint32_t j;
+
+        if (rules[i].id == 0 ||
+            dppd_rule_validate(&rules[i], error, sizeof(error)) != 0)
+            return -EINVAL;
+        for (j = 0; j < i; ++j) {
+            if (rules[j].id == rules[i].id)
+                return -EEXIST;
+        }
+        record = find_record(repository, rules[i].id);
+        if (record == NULL)
+            return -ENOENT;
+        if (expected_generations[i] == 0 ||
+            expected_generations[i] == DPPD_RULE_GENERATION_ANY ||
+            expected_generations[i] != record->rule.generation)
+            return -ESTALE;
+    }
+    /**
+     * 全部检查通过后才开始写入，这一阶段不申请内存、不调用后端，也不删除记录
+     * 单条 apply 遇到相同内容会返回 UNCHANGED，无法满足批量更新连续分配新版本的约定
+     * 因此这里直接替换完整规则内容，并按请求顺序推进仓库的全局版本号
+     */
+    for (i = 0; i < count; ++i) {
+        struct dppd_rule_record *record = find_record(repository, rules[i].id);
+
+        /** 同一控制线程中没有增删记录，上面已确认存在的 ID 在这里一定能找到 */
+        record->rule = rules[i];
+        record->rule.generation = ++repository->generation;
+    }
+    return 0;
+}
+
 int dppd_rule_repository_remove(struct dppd_rule_repository *repository,
                                 uint64_t rule_id,
                                 uint64_t expected_generation,

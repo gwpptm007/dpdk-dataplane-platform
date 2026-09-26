@@ -55,6 +55,14 @@ int dppd_rule_repository_apply(struct dppd_rule_repository *repository,
                                const struct dppd_rule *rule,
                                uint64_t expected_generation,
                                struct dppd_rule_apply_result *result);
+/**
+ * 由单个控制线程整批更新规则账本，rules 与 expected_generations 按下标一一对应
+ * 先确认全批规则合法且旧版本匹配，再执行不分配内存的替换，因此输入错误不产生部分写入
+ * 相同内容也分配连续新版本；这个接口只修改账本，调用方必须先完成实际后端的切换
+ */
+int dppd_rule_repository_update_batch(
+    struct dppd_rule_repository *repository, const struct dppd_rule *rules,
+    const uint64_t *expected_generations, uint32_t count);
 int dppd_rule_repository_remove(struct dppd_rule_repository *repository,
                                 uint64_t rule_id,
                                 uint64_t expected_generation,

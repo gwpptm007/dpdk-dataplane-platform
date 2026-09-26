@@ -41,12 +41,17 @@ static void print_usage(const char *program)
                     " [PRIORITY] [prefer|require|software]\n", program);
     fprintf(stderr, "  %s [--socket PATH] apply-drop-batch PORT RULE_ID RULE_ID"
                     " [RULE_ID [RULE_ID]]\n", program);
+    fprintf(stderr, "  %s [--socket PATH] update-drop-batch PORT PRIORITY"
+                    " prefer|require|software RULE_ID GENERATION RULE_ID GENERATION"
+                    " [RULE_ID GENERATION [RULE_ID GENERATION]]\n", program);
     fprintf(stderr,
             "  %s [--socket PATH] apply-filter-drop RULE_ID PORT EXPECTED_GENERATION"
             " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
             " [PRIORITY] [prefer|require|software]\n",
             program);
     fprintf(stderr, "EXPECTED_GENERATION may be 'any'; use 0 when creating a new rule.\n");
+    fprintf(stderr, "Batch update/delete require exact nonzero generations.\n");
+    fprintf(stderr, "update-drop-batch replaces each entire rule with ETH/DROP.\n");
     fprintf(stderr, "CIDR or L4 port may be 'any'; ipv4 requires both ports to be 'any'.\n");
 }
 
@@ -463,6 +468,62 @@ static int build_request(int argc, char **argv,
             return -EINVAL;
         return 0;
     }
+    /**
+     * 批量更新命令前四项是命令名、端口、优先级和后端策略，后面每两项是一组 ID/旧版本
+     * 因此八到十二个参数恰好表达两到四条规则，奇数个尾部参数说明存在不完整的一组
+     * 该命令构造完整的 Ethernet DROP 新规则，不会只改优先级而保留旧匹配条件或动作
+     */
+    if (argc >= 8 && argc <= 12 && (argc - 4) % 2 == 0 &&
+        strcmp(argv[0], "update-drop-batch") == 0) {
+        struct dppd_rule template = {0};
+        uint64_t priority;
+        uint32_t i;
+
+        if (parse_u64(argv[1], 0, UINT16_MAX, &value) != 0 ||
+            parse_u64(argv[2], 0, UINT32_MAX, &priority) != 0)
+            return -EINVAL;
+        if (strcmp(argv[3], "prefer") == 0)
+            template.fallback = DPPD_FALLBACK_PREFER_HARDWARE;
+        else if (strcmp(argv[3], "require") == 0)
+            template.fallback = DPPD_FALLBACK_REQUIRE_HARDWARE;
+        else if (strcmp(argv[3], "software") == 0)
+            template.fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
+        else
+            return -EINVAL;
+        template.domain = DPPD_RULE_DOMAIN_INGRESS;
+        template.priority = (uint32_t)priority;
+        template.nb_matches = 1;
+        template.matches[0].type = DPPD_MATCH_ETH;
+        template.nb_actions = 1;
+        template.actions[0].type = DPPD_ACTION_DROP;
+        /**
+         * 所有条目复用同一份端口外的规则模板，再分别填写稳定 ID 和精确旧版本
+         * 只生成一个批量管理请求，不能在客户端循环发送单规则请求来冒充原子更新
+         */
+        initialize_request(request, DPPD_MANAGEMENT_RULE_UPDATE_BATCH);
+        request->payload.update_batch.count = (uint16_t)((argc - 4) / 2);
+        for (i = 0; i < request->payload.update_batch.count; ++i) {
+            struct dppd_control_batch_update_request *entry =
+                &request->payload.update_batch.rules[i];
+            uint32_t j;
+
+            entry->rule = template;
+            entry->install_port_id = (uint16_t)value;
+            /**
+             * 旧版本必须大于零且不能是保留值 UINT64_MAX，字符串 any 也不会被数字解析接受
+             * 用户应使用最近一次 get/list 读到的版本，避免覆盖其他请求刚刚修改过的规则
+             */
+            if (parse_u64(argv[4 + i * 2], 1, UINT64_MAX, &entry->rule.id) != 0 ||
+                parse_u64(argv[5 + i * 2], 1, UINT64_MAX - 1U,
+                          &entry->expected_generation) != 0)
+                return -EINVAL;
+            for (j = 0; j < i; ++j) {
+                if (request->payload.update_batch.rules[j].rule.id == entry->rule.id)
+                    return -EINVAL;
+            }
+        }
+        return 0;
+    }
     if (argc >= 4 && argc <= 6 && strcmp(argv[0], "apply-drop-batch") == 0) {
         uint32_t i;
 
@@ -767,6 +828,25 @@ static void print_response(const struct dppd_management_response *response)
             printf("  generation=%" PRIu64 " transaction=%" PRIu64
                    " backend=%d reason=%d\n",
                    result->generation, result->transaction_id,
+                   result->plan.backend, result->plan.reason);
+        }
+        break;
+    }
+    case DPPD_MANAGEMENT_RULE_UPDATE_BATCH: {
+        /**
+         * 主程序已确认整个请求成功后才进入此分支，下面的每行结果对应一个输入条目
+         * 同时输出规则 ID、新版本和事务编号，便于核对这一批是否属于同一次完整更新
+         */
+        uint16_t i;
+
+        printf("batch-updated count=%u\n", response->payload.update_batch.count);
+        for (i = 0; i < response->payload.update_batch.count; ++i) {
+            const struct dppd_control_apply_result *result =
+                &response->payload.update_batch.rules[i];
+
+            printf("  rule=%" PRIu64 " generation=%" PRIu64 " transaction=%" PRIu64
+                   " backend=%d reason=%d\n",
+                   result->plan.rule_id, result->generation, result->transaction_id,
                    result->plan.backend, result->plan.reason);
         }
         break;

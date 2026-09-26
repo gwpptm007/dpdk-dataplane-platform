@@ -8,10 +8,13 @@
 #include "dppd/rule_repository.h"
 #include "dppd/software_backend.h"
 
+/** 每批最多处理四条已有规则，限制临时资源需求，也让请求和结果保持固定的小规模 */
+#define DPPD_CONTROL_BATCH_UPDATE_MAX 4U
+
 enum dppd_control_recovery_state {
     /* 正常运行：desired repository 与 backend 的控制面不变量成立。 */
     DPPD_CONTROL_RECOVERY_READY = 0,
-    /* 启动重放的回滚失败，backend 可能仍留有本进程可定位的 flow handle。 */
+    /* 启动重放或在线事务补偿失败，backend 可能仍留有本进程可定位的 flow handle。 */
     DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED,
     /* 残留对象已清除；必须重启后从 snapshot 重新建立完整 desired state。 */
     DPPD_CONTROL_RECOVERY_RESTART_REQUIRED,
@@ -34,7 +37,7 @@ struct dppd_control_service {
     uint64_t persisted_generation;
     int persistence_last_error;
     bool persistence_dirty;
-    /* 仅在启动恢复回滚失败时置位；普通运行路径不能自行清除此状态。 */
+    /* 启动恢复或在线补偿失败时置位；普通 mutation 不能自行清除此状态。 */
     enum dppd_control_recovery_state recovery_state;
     int recovery_last_error;
 };
@@ -47,42 +50,57 @@ struct dppd_control_apply_result {
     struct dppd_execution_plan plan;
 };
 
-/*
- * 批量创建的单条输入。首版刻意只接受 expected_generation=0 的新 rule：这样可以
- * 在进入 backend transaction 前完整验证容量、ID 唯一性和计划，保证同批没有部分
- * desired-state 发布。跨 rule 更新/删除会在后续独立设计 replacement 依赖图后加入。
+/**
+ * 批量创建中的一条请求，只表达新建，不接受覆盖已有规则
+ * rule.id 必须尚不存在，expected_generation 必须为零，更新和删除使用另外的批量接口
+ * 这样失败时只需撤销本批新建对象，不必同时承担恢复被覆盖旧规则的责任
  */
 struct dppd_control_batch_create_request {
+    /** 本条新规则安装的 DPDK 端口，覆盖 rule 内携带的安装端口 */
     uint16_t install_port_id;
+    /** 协议扩展预留字段，调用方按协议约定填写零 */
     uint16_t reserved;
+    /** 只能填写零，明确表示此 ID 之前不应存在 */
     uint64_t expected_generation;
+    /** 完整的新规则内容，generation 由控制层按批次顺序分配 */
     struct dppd_rule rule;
 };
 
 /**
- * 批量删除的单条条件。首版要求精确 generation，不接受 0 或 ANY：删除是不可逆语义，
- * 因而不能把“对象已不存在”或“已被他人更新”静默当作成功。
+ * 批量删除中的一条条件，必须同时指定稳定 ID 和最近读取到的精确版本
+ * 不接受零或 ANY，避免把对象已不存在或已被其他请求更新的情况当作删除成功
+ * 删除失败的补偿会尝试重建原规则，但不承诺恢复被删除对象的历史计数
  */
 struct dppd_control_batch_remove_request {
+    /** 要删除的已有规则 ID，同一批次不能重复 */
     uint64_t rule_id;
+    /** 要删除的精确旧版本，必须与当前账本中的版本相同 */
     uint64_t expected_generation;
 };
 
-/** 每条删除结果按请求顺序返回；generation 是删除后 repository 的全局修订号。 */
+/**
+ * 删除结果按请求顺序返回，rule_id 用来对应原请求
+ * generation 是执行本次账本删除后的全局修订号，不是已经被删除规则的旧版本
+ * 例如全局版本为六时依次删除两条，结果中的 generation 分别为七和八
+ */
 struct dppd_control_batch_remove_result {
     uint64_t rule_id;
     uint64_t generation;
 };
 
 /**
- * 批量更新的单条输入。rule.id 是待替换对象的稳定 ID，expected_generation 必须等于
- * repository 当前旧版本；install_port_id 与单规则 apply 一样覆盖 rule 内携带的值。
- * 新 rule 不填写 generation，control 在整批预检后按输入顺序分配连续新版本。
+ * 批量更新中的一条请求，可理解为“把这个 ID 对应的旧版本替换成下面的完整规则”
+ * expected_generation 必须与仓库当前版本相同，用来证明用户没有基于过期信息修改规则
+ * 新 generation 由控制层按整批输入顺序分配，客户端携带的 generation 不会直接发布
  */
 struct dppd_control_batch_update_request {
+    /** 安装目标是 DPDK 的端口编号，会覆盖 rule 内部的安装端口字段 */
     uint16_t install_port_id;
+    /** 保留字段当前必须填零，避免新旧协议对额外含义产生不同解释 */
     uint16_t reserved;
+    /** 用户上次看到的精确旧版本，只接受非零数值，不接受 ANY */
     uint64_t expected_generation;
+    /** 完整的新规则内容，rule.id 必须保持为要替换的已有规则 ID */
     struct dppd_rule rule;
 };
 
@@ -151,12 +169,12 @@ int dppd_control_apply(struct dppd_control_service *service,
                        const struct dppd_rule *rule,
                        uint64_t expected_generation,
                        struct dppd_control_apply_result *result);
-/*
- * 原子创建一批此前不存在的规则。全部 backend validate/prepare/commit 成功且
- * repository 一次连续发布后才返回成功；任一失败会逆序回滚已创建 actual 对象。
- * results 必须指向 request_count 个元素，输出与输入一一对应的 generation/plan。
- * 成功后每个结果共享一个非零 transaction_id；失败时调用方只能查看返回 errno，
- * 不得把 results 当成部分提交回执。若回滚本身失败，接口返回 -EUCLEAN 并封锁后续写入。
+/**
+ * 创建一批原先不存在的规则，先完成全部实际对象安装，再连续发布规则账本并保存快照
+ * 安装失败会逆序尝试撤销本批资源，撤销失败返回 EUCLEAN 并进入恢复隔离
+ * results 至少容纳 request_count 个元素，成功时结果顺序与请求一致，且共享非零事务编号
+ * 返回错误时不能把数组中已经填写的前几项当作部分成功回执
+ * 还要区分保存失败：此时本批可能已生效，需要查看 dirty 状态而不能认定已经回滚
  */
 int dppd_control_create_batch(
     struct dppd_control_service *service,
@@ -164,9 +182,10 @@ int dppd_control_create_batch(
     uint32_t request_count,
     struct dppd_control_apply_result *results);
 /**
- * 原子删除一批当前存在且 generation 精确匹配的规则。先验证全批并从 actual backend
- * 删除；只有全部删除成功才连续移除 desired records。actual 删除中途失败会尝试重建已删
- * 对象；重建或 repository 补偿无法保证一致时返回 -EUCLEAN 并进入 recovery 隔离。
+ * 删除一批旧版本精确匹配的已有规则，先验证全批，再删除实际对象，最后移除账本记录
+ * 实际删除中途失败时按原版本重建之前已删的对象，账本仍保留完整旧记录
+ * 无法完成补偿或账本状态失配时进入恢复隔离，结果数组仅在整个请求成功时有效
+ * 全部删除生效后仍可能遇到快照保存失败，此时通过 dirty 状态处理，不能假定旧对象还在
  */
 int dppd_control_remove_batch(
     struct dppd_control_service *service,
@@ -174,9 +193,19 @@ int dppd_control_remove_batch(
     uint32_t request_count,
     struct dppd_control_batch_remove_result *results);
 /**
- * 原子替换一批已有规则。新 generation 全部创建成功后才删除全部旧 generation，最后才
- * 连续发布 desired repository；结果数组与输入一一对应并共享同一 transaction ID。
- * 若后端没有足够空间让新旧版本短暂共存，必须在触碰 backend 前返回 -ENOSPC。
+ * 原子替换两到四条已有规则，每条必须提供精确旧版本且不能重复 ID
+ *
+ * 顺序是：检查全批请求、安装全部新版本、删除全部旧版本、整批更新规则账本
+ * 旧对象和新计划全为软件时一次发布整批快照，复用槽位，不需要新旧版本共存空间
+ * 其他路径需要临时空间；可能整表替换的 PREFER 在驱动校验后若变成混合路径还需复查
+ *
+ * results 至少容纳 request_count 个元素，成功时与输入顺序相同且共享一个事务编号
+ * 即使规则内容没有变化，也会分配连续新版本，重放旧请求会返回 ESTALE
+ * 普通失败且补偿成功时保留旧版本，补偿失败会返回 EUCLEAN 并进入恢复隔离
+ * 若只有保存快照失败，整批可能已经生效，需要查看持久化状态，不能直接当作已回滚
+ *
+ * 纯软件路径的每个报文使用完整旧表或新表，不保证多个报文或线程同时切换
+ * 硬件及混合路径只保证规则账本整批发布；新软件版本 COUNT 从零开始
  */
 int dppd_control_update_batch(
     struct dppd_control_service *service,

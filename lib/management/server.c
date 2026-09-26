@@ -174,6 +174,37 @@ int dppd_management_handle(struct dppd_control_service *control,
             request->payload.create_batch.count,
             response->payload.create_batch.rules);
         break;
+    case DPPD_MANAGEMENT_RULE_UPDATE_BATCH: {
+        /**
+         * 固定数组最多容纳四条规则，读取数组前先限制 count 的范围
+         * reserved 是留给将来协议扩展的位置，当前版本只接受全零，避免含糊解释请求
+         * 规则内容、版本冲突和事务回滚交给控制层统一处理，协议层不逐条执行更新
+         */
+        static const uint8_t zero_reserved[6] = {0};
+
+        if (request->payload.update_batch.count < 2 ||
+            request->payload.update_batch.count > DPPD_MANAGEMENT_BATCH_UPDATE_MAX ||
+            memcmp(request->payload.update_batch.reserved, zero_reserved,
+                   sizeof(zero_reserved)) != 0) {
+            rc = -EINVAL;
+            break;
+        }
+        rc = dppd_control_update_batch(
+            control, request->payload.update_batch.rules,
+            request->payload.update_batch.count,
+            response->payload.update_batch.rules);
+        /**
+         * 只在整批成功时返回结果数量，失败时清空整个结果区域
+         * 防止客户端把失败过程中留下的某个 generation 误认为已经成功的单条回执
+         * 是否已经生效但保存失败，要通过持久化或恢复状态接口进一步确认
+         */
+        if (rc == 0)
+            response->payload.update_batch.count = request->payload.update_batch.count;
+        else
+            memset(&response->payload.update_batch, 0,
+                   sizeof(response->payload.update_batch));
+        break;
+    }
     case DPPD_MANAGEMENT_RULE_GET:
         /* get 只读取 desired repository，不通过 rte_flow 反查硬件对象。 */
         rc = dppd_rule_repository_get(&control->rules,
@@ -415,6 +446,13 @@ int dppd_management_poll(struct dppd_management_server *server)
             return error;
         }
         close(client);
+        /**
+         * 发现恢复状态后立即结束本轮请求处理，让主循环先停止软件工作线程
+         * 如果继续处理已排队的清理请求，就可能在线程仍转发报文时提前删除残留对象
+         * 下一轮轮询才接收恢复查询或重试请求，确保生命周期顺序清楚
+         */
+        if (server->control->recovery_state != DPPD_CONTROL_RECOVERY_READY)
+            break;
     }
     return 0;
 }

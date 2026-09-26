@@ -10,10 +10,10 @@
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /*
- * v6 增加受限批量删除；v5 增加受限批量创建；v4 已增加启动恢复隔离模式的状态与重试命令。当前协议直接传输本地 C ABI，
+ * v7 增加原子批量更新；v6 增加批量删除；v5 增加批量创建。当前协议直接传输本地 C ABI，
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 6U
+#define DPPD_MANAGEMENT_VERSION 7U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -26,6 +26,8 @@
  */
 #define DPPD_MANAGEMENT_BATCH_CREATE_MAX 4U
 #define DPPD_MANAGEMENT_BATCH_REMOVE_MAX 4U
+/** 协议数组与控制接口采用相同上限，避免协议允许的条数超过实际处理能力 */
+#define DPPD_MANAGEMENT_BATCH_UPDATE_MAX DPPD_CONTROL_BATCH_UPDATE_MAX
 
 /* 每个连接只承载一个请求和一个响应，operation 决定 payload union 的有效成员。 */
 enum dppd_management_operation {
@@ -47,6 +49,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_RECOVERY_RETRY,
     /* v6：精确 generation 的全有或全无批量删除。 */
     DPPD_MANAGEMENT_RULE_DELETE_BATCH,
+    /** v7 新增的整批更新操作，追加在末尾以保持既有操作编号不变 */
+    DPPD_MANAGEMENT_RULE_UPDATE_BATCH,
 };
 
 /*
@@ -95,6 +99,17 @@ struct dppd_management_request {
             struct dppd_control_batch_remove_request
                 rules[DPPD_MANAGEMENT_BATCH_REMOVE_MAX];
         } delete_batch;
+        /**
+         * 一次请求携带两到四条完整的新规则，而不是对旧规则某个字段做局部修改
+         * 每条独立指定安装端口和精确旧版本；count 表示数组前面实际使用的条数
+         * reserved 必须全零，数组剩余位置不参与本次更新
+         */
+        struct {
+            uint16_t count;
+            uint8_t reserved[6];
+            struct dppd_control_batch_update_request
+                rules[DPPD_MANAGEMENT_BATCH_UPDATE_MAX];
+        } update_batch;
         struct {
             /* 稳定规则 ID；0 是无效 ID。 */
             uint64_t rule_id;
@@ -224,6 +239,17 @@ struct dppd_management_response {
             struct dppd_control_batch_remove_result
                 rules[DPPD_MANAGEMENT_BATCH_REMOVE_MAX];
         } delete_batch;
+        /**
+         * 只有整个响应的 status 为零时，这组结果才有效
+         * 每条结果按请求顺序给出新版本和实际后端，所有结果共享同一个 transaction_id
+         * 失败响应不会提供可当作部分成功使用的回执，客户端应根据错误查询相关状态
+         */
+        struct {
+            uint16_t count;
+            uint8_t reserved[6];
+            struct dppd_control_apply_result
+                rules[DPPD_MANAGEMENT_BATCH_UPDATE_MAX];
+        } update_batch;
         /* get 成功时返回 repository 中保存的完整 canonical rule。 */
         struct dppd_rule rule;
         struct {

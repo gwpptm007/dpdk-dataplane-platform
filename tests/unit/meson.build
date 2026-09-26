@@ -54,6 +54,21 @@ control_test = executable(
 )
 test('control service', control_test)
 
+batch_update_test = executable(
+  'test_batch_update',
+  'test_batch_update.c',
+  dependencies: dppd_core_dep,
+)
+test('atomic batch update', batch_update_test)
+
+software_batch_test = executable(
+  'test_software_batch',
+  'test_software_batch.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'],
+)
+test('software batch snapshot publication', software_batch_test, timeout: 60)
+
 pipeline_test = executable(
   'test_pipeline',
   'test_pipeline.c',
@@ -74,6 +89,13 @@ management_test = executable(
   dependencies: dppd_core_dep,
 )
 test('management protocol and socket', management_test)
+
+dppctl_test = executable(
+  'test_dppctl',
+  'test_dppctl.c',
+  include_directories: dppd_inc,
+)
+test('dppctl batch update arguments', dppctl_test)
 
 persistence_test = executable(
   'test_persistence',

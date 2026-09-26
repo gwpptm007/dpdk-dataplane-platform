@@ -62,7 +62,7 @@ COUNT 查询先从 desired repository 读取已发布 generation，再定位完�
 保存网络字节序协议值、按 rule id 排序并用 CRC32 校验；文件通过同目录临时文件、
 `fsync`、原子 `rename` 和父目录 `fsync` 发布。control mutation 已连接完整 snapshot
 保存：落盘失败返回 `EUCLEAN` 并进入 dirty/fail-stop，后续写入先修复当前快照，避免
-磁盘故障期间持续扩大偏差。management v6 可查询 dirty 和两个 generation，也可显式
+磁盘故障期间持续扩大偏差。management v7 可查询 dirty 和两个 generation，也可显式
 flush 当前完整 repository。`--state-path` 启用 v2 snapshot：记录同时保存 canonical
 rule 和 install port，启动时先对全部规则 plan/validate/prepare/commit，任一失败逆序
 回滚并拒绝启动；全部成功后才发布保留的逐规则及全局 generation。若逆序删除本身失败，
@@ -82,7 +82,7 @@ normalize → resolve topology → plan → validate all
           → publish generation → retire old generation
 ```
 
-任一步失败都要区分“不支持、资源不足、规则冲突、设备失联”，并回滚已创建对象。V3 当前已实现受限批量创建和精确批量删除；跨规则更新仍在路线图中。
+任一步失败都要区分“不支持、资源不足、规则冲突、设备失联”，并回滚已创建对象。V3 当前已实现受限批量创建、精确批量删除及 2–4 条精确 generation 更新。旧规则和新计划全为软件时，在私有副本完成替换后一次发布快照，再整批发布 repository；每次报文分类使用完整旧表或新表，发布前失败保留旧表与计数，新版本计数从零开始。硬件及混合更新仍先创建全部新对象、再删除旧对象，最后发布 repository；删除失败先撤新再恢复已删旧对象，补偿失败进入隔离并停止软件 worker。这条路径仅保证 desired state 的原子发布。详见 [批量更新](todo_batch_update.md)。
 
 ## 4. 软件数据面
 

@@ -5,16 +5,17 @@
 #include <stdint.h>
 #include "dppd/planner.h"
 
+/** 一整批规则的处理进度；COMMITTED 表示后端安装完成，FINALIZED 表示已放弃事务回滚 */
 enum dppd_transaction_state {
     DPPD_TRANSACTION_NEW = 0,
     DPPD_TRANSACTION_VALIDATING,
     DPPD_TRANSACTION_PREPARING,
     DPPD_TRANSACTION_COMMITTING,
     DPPD_TRANSACTION_COMMITTED,
-    /*
-     * desired repository 已成功发布，backend 可释放仅供 rollback 使用的 prepare token。
-     * 此后不允许再调用 rollback_committed；若之后持久化失败，由控制层以 dirty 状态
-     * 表示“内存 actual/desired 已生效、磁盘快照待补写”，而不是回滚已确认的规则。
+    /**
+     * 仅用于回滚的临时资源已释放，此后不能再调用 rollback_committed
+     * 正常流程此时已发布规则账本，随后保存失败交给 dirty 状态处理
+     * 异常流程也可能在决定隔离后收尾，因此不能仅凭 FINALIZED 判断整体业务成功
      */
     DPPD_TRANSACTION_FINALIZED,
     DPPD_TRANSACTION_ROLLING_BACK,
@@ -22,6 +23,7 @@ enum dppd_transaction_state {
     DPPD_TRANSACTION_FAILED,
 };
 
+/** 单条规则的阶段状态，回滚时据此判断该条是否占用过资源 */
 enum dppd_transaction_item_state {
     DPPD_TRANSACTION_ITEM_PENDING = 0,
     DPPD_TRANSACTION_ITEM_VALIDATED,
@@ -32,27 +34,35 @@ enum dppd_transaction_item_state {
 };
 
 struct dppd_transaction_item {
+    /** 要安装的完整规则，版本号由控制层提前分配 */
     struct dppd_rule rule;
+    /** 规划出的目标后端、安装端口及选择原因 */
     struct dppd_execution_plan plan;
+    /** 当前条目是否只校验过、已准备资源或已提交，独立于整批状态 */
     enum dppd_transaction_item_state state;
+    /** 后端交回的资源凭据，事务只保存和转交它，不解释其内部含义 */
     uintptr_t backend_token;
+    /** 当前条目校验、准备或提交时的错误，便于定位哪条规则首先失败 */
     int error_code;
 };
 
 struct dppd_transaction_backend {
+    /** 后端私有上下文，例如硬件对象仓库或软件规则表 */
     void *context;
-    /* validate 不得改变 backend 状态；prepare 只能预留可回滚资源。 */
+    /** 只检查规则是否支持，不安装规则也不改变后端的资源占用 */
     int (*validate)(void *context, const struct dppd_transaction_item *item);
+    /** 预留可撤销资源并返回 token；失败后仍需清理的资源也要留下可识别的 token */
     int (*prepare)(void *context, const struct dppd_transaction_item *item,
                    uintptr_t *token);
+    /** 使用已经准备好的资源正式安装规则，返回失败也可能已经产生部分副作用 */
     int (*commit)(void *context, const struct dppd_transaction_item *item,
                   uintptr_t token);
-    /* commit 返回失败也可能已部分生效，因此仍必须支持 rollback。 */
+    /** 撤销资源和安装副作用，commit_was_attempted 指明是否曾尝试正式提交 */
     int (*rollback)(void *context, const struct dppd_transaction_item *item,
                     uintptr_t token, bool commit_was_attempted);
-    /*
-     * 成功提交后 token 仍可能被 repository 发布失败路径用于 rollback；只有控制面确认
-     * actual/desired 均已发布后才调用 finalize。无返回值，释放动作不得再产生失败点。
+    /**
+     * 控制层确认不再需要回滚时，释放 prepare 创建的额外临时资源
+     * 不删除实际规则，也不再引入可失败操作；没有额外资源的后端可以不提供此回调
      */
     void (*finalize)(void *context, const struct dppd_transaction_item *item,
                      uintptr_t token);
@@ -64,11 +74,15 @@ struct dppd_transaction_backends {
 };
 
 struct dppd_transaction {
+    /** 本批统一的事务编号，用于把多条规则的结果关联起来 */
     uint64_t id;
     enum dppd_transaction_state state;
+    /** 借用调用方的条目数组，不负责分配或释放这块内存 */
     struct dppd_transaction_item *items;
     uint32_t nb_items;
+    /** 原操作失败原因，例如第二条规则创建失败 */
     int failure_code;
+    /** 回滚中的第一个失败原因；非零表示不能宣称已经完整恢复到事务开始前 */
     int rollback_code;
 };
 
@@ -78,19 +92,17 @@ int dppd_transaction_init(struct dppd_transaction *transaction,
                           uint32_t nb_items);
 int dppd_transaction_run(struct dppd_transaction *transaction,
                          const struct dppd_transaction_backends *backends);
-/*
- * 对已经完整 COMMITTED 的事务执行逆序回滚。启动恢复在硬件全部创建后、desired
- * state 发布前若遇到内部错误，可用该接口恢复到“没有本轮对象”的 fail-closed 状态。
+/**
+ * 逆序撤销已经完整提交但尚未 finalize 的事务，例如撤回本次更新中新安装的版本
+ * 返回零才表示全部回滚动作成功，非零时调用方需要进一步处理恢复隔离
  */
 int dppd_transaction_rollback_committed(
     struct dppd_transaction *transaction,
     const struct dppd_transaction_backends *backends);
-/* 提交后不再需要 rollback 时释放 backend 私有 prepare token。 */
 /**
- * 确认 actual 和 desired 已一致后，释放仅供失败 rollback 使用的 backend token。
- * finalize 后事务不可再回滚；调用方必须在 repository 发布成功以后才调用。若
- * repository 发布或补偿失败，必须先 rollback_committed 或进入 recovery 隔离，绝不能
- * 先 finalize 再尝试恢复。
+ * 释放后端临时资源并结束事务，通常在规则账本发布成功后调用
+ * 若已经发生无法补偿的错误，调用方决定进入隔离后也可用它释放不再使用的临时资源
+ * finalize 不等于删除已安装规则，而且调用后不能再尝试 rollback_committed
  */
 int dppd_transaction_finalize(struct dppd_transaction *transaction,
                               const struct dppd_transaction_backends *backends);

@@ -62,22 +62,36 @@ struct dppd_software_decision {
  */
 int dppd_software_backend_init(struct dppd_software_backend *backend,
                                uint32_t capacity);
+/** 所有工作线程退出并注销后释放活跃表、退役表和回收器；此函数不负责停止线程 */
 void dppd_software_backend_fini(struct dppd_software_backend *backend);
 
 /**
- * 仅接受已经实现且与硬件语义等价的 ingress/ETH/IPv4/UDP/TCP + DROP/MARK/COUNT。
- * 它是 PREFER 降级的准入检查，不是“尽力匹配”：包含 QUEUE、transfer 或 represented
- * port 的规则会返回 false，避免软件路径悄悄改变转发语义。
+ * 对已经通过通用校验的规则检查软件能力，支持入口域的 ETH、IPv4、UDP、TCP 匹配
+ * 动作限于 DROP、MARK 和 COUNT；QUEUE、transfer 或 represented port 不支持
+ * 该检查用于判断能否降级到软件执行，不代替规则结构和字段合法性的通用校验
  */
 bool dppd_software_backend_rule_supported(const struct dppd_rule *rule);
+/**
+ * 读取活跃软件规则表的对象数，供控制面估算还剩多少临时安装空间
+ * 退役快照不计入数量；查询使用控制面锁，不在逐包处理路径上调用
+ */
+uint32_t dppd_software_backend_count(const struct dppd_software_backend *backend);
+/** 把软件规则操作包装成事务回调，让上层统一安排准备、提交和失败补偿 */
 struct dppd_transaction_backend dppd_software_transaction_backend(
     struct dppd_software_backend *backend);
+/** 整批替换精确旧版本并只发布一次快照；发布前失败保留旧表和计数，新版本计数从零开始 */
+int dppd_software_backend_update_batch(
+    struct dppd_software_backend *backend, const struct dppd_rule *rules,
+    const uint64_t *expected_generations, uint32_t count);
+/** 删除指定 ID 和 generation 的活跃版本；成功后旧读者仍可能暂时使用退役快照 */
 int dppd_software_backend_remove_version(struct dppd_software_backend *backend,
                                          uint64_t rule_id,
                                          uint64_t generation);
+/** 判断当前活跃表是否存在精确版本，不把尚未回收的旧表算作当前安装结果 */
 bool dppd_software_backend_contains_version(
     const struct dppd_software_backend *backend,
     uint64_t rule_id, uint64_t generation);
+/** 查询指定版本的累计命中数和字节数，不清零；两个数独立采样，并非同一瞬间的快照 */
 int dppd_software_backend_query_count(const struct dppd_software_backend *backend,
                                       uint64_t rule_id, uint64_t generation,
                                       uint64_t *hits, uint64_t *bytes);
@@ -95,10 +109,10 @@ void dppd_software_backend_worker_unregister(
     struct dppd_software_backend *backend, unsigned int worker_id);
 
 /**
- * 对一个已成功解析的 ingress packet 求最高优先级的匹配规则。COUNT 在 snapshot
- * 共享的原子计数器上累加；MARK 只写入 decision，由 worker 映射到 mbuf metadata。
- * 本函数不报告 QSBR 静默点：调用者必须在确认本轮不再持有任何 snapshot 指针时统一
- * 报告，不能在逐包处理中提前报告安全。
+ * 使用已解析的有效字段选择一条匹配规则，调用方必须先排除畸形报文并注册读者
+ * COUNT 在该规则版本的共享计数器上累加，MARK 和 DROP 只记录到输出结果
+ * decision 必须指向有效内存；本函数不发送、不释放报文，也不报告 QSBR 安全点
+ * 调用方在不再持有旧快照指针时报告安全点，本项目统一放在一轮端口扫描结束后
  */
 void dppd_software_backend_decide(struct dppd_software_backend *backend,
                                   uint16_t ingress_port,

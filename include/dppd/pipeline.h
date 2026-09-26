@@ -7,11 +7,13 @@
 
 struct dppd_software_backend;
 
+/** 一条静态端口配对记录：从 ingress_port 收到的报文默认交给 egress_port */
 struct dppd_port_peer {
     uint16_t ingress_port;
     uint16_t egress_port;
 };
 
+/** 保存端口配对关系的转发表，与软件分类器中可更新的规则快照是两种不同的数据 */
 struct dppd_forwarding_snapshot {
     uint64_t generation;
     uint16_t nb_peers;
@@ -30,11 +32,12 @@ enum dppd_drop_reason {
     DPPD_DROP_POLICY,
 };
 
+/** 单个报文的处理结果；只有转发决定中的出口端口和标记才会被工作线程用于发送 */
 struct dppd_pipeline_decision {
     enum dppd_packet_action action;
     enum dppd_drop_reason drop_reason;
     uint16_t egress_port;
-    /*
+    /**
      * 软件 MARK 使用与硬件 flow mark 相同的 mbuf fdir id 槽位。只有 action 为 FORWARD
      * 时 worker 才会把它写入 mbuf；策略 DROP 已经终结报文，保留 mark 没有可观察价值。
      */

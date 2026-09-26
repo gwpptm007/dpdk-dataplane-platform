@@ -345,23 +345,68 @@ int main(void)
     assert(response.payload.create_batch.rules[0].transaction_id ==
            response.payload.create_batch.rules[1].transaction_id);
 
-    /*
-     * v6 删除批次携带每条精确 generation，不能沿用单条 delete 的 any/缺失幂等语义。
-     * 成功响应按输入顺序给出全局 generation 3→5、4→6 的连续删除结果；调用者无需
-     * 依赖 repository 内部槽位顺序，也不需要在两次删除之间重新 list。
+    /**
+     * 复用刚刚创建的两条规则构造一笔更新请求，旧版本从仓库读取而不是随意填写
+     * 下面先验证协议边界，再验证整批成功的结果顺序和事务编号，最后检查旧请求重放
      */
+    initialize_request(&request, DPPD_MANAGEMENT_RULE_UPDATE_BATCH);
+    request.payload.update_batch.count = 2;
+    for (uint16_t i = 0; i < 2; ++i) {
+        struct dppd_control_batch_update_request *entry =
+            &request.payload.update_batch.rules[i];
+
+        assert(dppd_rule_repository_get(&control.rules, 200 + i, &entry->rule) == 0);
+        entry->install_port_id = 5;
+        entry->expected_generation = entry->rule.generation;
+        entry->rule.priority = 20 + i;
+    }
+    /**
+     * v7 服务端不接受 v6 请求，也不能按越界 count 读取固定数组
+     * 保留位非零和旧版本错误都应在修改规则前拒绝，失败响应不携带有效结果数量
+     */
+    request.version = 6;
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == -EPROTO);
+    request.version = DPPD_MANAGEMENT_VERSION;
+    for (uint16_t count = 0; count <= 5; ++count) {
+        if (count >= 2 && count <= 4)
+            continue;
+        request.payload.update_batch.count = count;
+        assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+        assert(response.status == -EINVAL && response.payload.update_batch.count == 0);
+    }
+    request.payload.update_batch.count = 2;
+    request.payload.update_batch.reserved[0] = 1;
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == -EINVAL);
+    request.payload.update_batch.reserved[0] = 0;
+    request.payload.update_batch.rules[1].expected_generation = 0;
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == -ESTALE && control.rules.generation == 4);
+    assert(response.payload.update_batch.count == 0);
+    request.payload.update_batch.rules[1].expected_generation = 4;
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.update_batch.count == 2);
+    assert(response.payload.update_batch.rules[0].generation == 5);
+    assert(response.payload.update_batch.rules[1].generation == 6);
+    assert(response.payload.update_batch.rules[0].transaction_id ==
+           response.payload.update_batch.rules[1].transaction_id);
+    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(response.status == -ESTALE && response.payload.update_batch.count == 0);
+
+    /** 更新成功后精确删除必须使用新版本，不能继续用创建时的旧版本删除已经更新的规则 */
     initialize_request(&request, DPPD_MANAGEMENT_RULE_DELETE_BATCH);
     request.payload.delete_batch.count = 2;
     request.payload.delete_batch.rules[0].rule_id = 200;
-    request.payload.delete_batch.rules[0].expected_generation = 3;
+    request.payload.delete_batch.rules[0].expected_generation = 5;
     request.payload.delete_batch.rules[1].rule_id = 201;
-    request.payload.delete_batch.rules[1].expected_generation = 4;
+    request.payload.delete_batch.rules[1].expected_generation = 6;
     assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
     assert(response.status == 0 && response.payload.delete_batch.count == 2);
     assert(response.payload.delete_batch.rules[0].rule_id == 200 &&
-           response.payload.delete_batch.rules[0].generation == 5);
+           response.payload.delete_batch.rules[0].generation == 7);
     assert(response.payload.delete_batch.rules[1].rule_id == 201 &&
-           response.payload.delete_batch.rules[1].generation == 6);
+           response.payload.delete_batch.rules[1].generation == 8);
 
     /*
      * 协议层必须只放行 recovery status/retry。这里直接注入隔离状态，专注验证

@@ -222,3 +222,9 @@ dppctl reconcile-retry
 机器断电，handle 无法跨进程序列化，当前版本不会尝试猜测或对整个端口执行
 `rte_flow_flush()`；部署方应按目标 PMD 的受支持流程复位/清理设备。跨进程 residual
 flow journal 与 PMD 专用 reconciliation 是后续独立工作。
+
+在线批量更新补偿失败同样进入上述隔离模式：停止软件 worker，保留旧 desired snapshot，
+只接受恢复查询与重试，成功后退出重启。`residual_objects` 统计硬件 backend 对象；软件
+对象在 worker 停止后的进程清理阶段释放。停止软件 worker 不代表硬件残留 flow 停止转发。
+若整批更新成功但 snapshot 保存失败，则进入原有 dirty/fail-stop 状态而非恢复隔离；
+此时内存是整批新版本，磁盘可能仍是旧版本，需使用 persistence 状态与 flush 修复。
