@@ -4,16 +4,17 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dppd/control.h"
+#include "dppd/stats_values.h"
 
 /*
  * 管理协议版本在请求和响应中显式传递。当前实现不做版本协商：版本不一致时
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /*
- * v7 增加原子批量更新；v6 增加批量删除；v5 增加批量创建。当前协议直接传输本地 C ABI，
+ * v8 增加端口和队列统计；v7 增加原子批量更新；v6 增加批量删除；v5 增加批量创建
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 7U
+#define DPPD_MANAGEMENT_VERSION 8U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -51,6 +52,7 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_RULE_DELETE_BATCH,
     /** v7 新增的整批更新操作，追加在末尾以保持既有操作编号不变 */
     DPPD_MANAGEMENT_RULE_UPDATE_BATCH,
+    DPPD_MANAGEMENT_STATS_QUERY,
 };
 
 /*
@@ -65,6 +67,11 @@ struct dppd_management_request {
     uint32_t size;         /* 必须等于发送方 sizeof(*request)。 */
     uint64_t request_id;   /* 客户端生成；响应原样回显，用于请求/响应配对。 */
     union {
+        struct {
+            uint16_t port_id;
+            uint16_t queue_id;
+            uint32_t reserved;
+        } stats_query;
         struct {
             /* 规则安装到哪个 DPDK ethdev port；它不是 PCI BDF 或 Linux ifindex。 */
             uint16_t install_port_id;
@@ -264,10 +271,12 @@ struct dppd_management_response {
         struct dppd_management_rule_page rule_page;
         struct dppd_control_persistence_status persistence;
         struct dppd_control_recovery_status recovery;
+        struct dppd_stats_values stats;
     } payload;
 };
 
 struct dppd_device_set;
+struct dppd_runtime;
 
 struct dppd_management_server {
     int socket_fd;                         /* 非阻塞监听 socket；未启动时为 -1。 */
@@ -275,6 +284,7 @@ struct dppd_management_server {
     struct dppd_control_service *control;
     /* device_set 同样由 runtime 持有，必须比 management server 生命周期更长。 */
     const struct dppd_device_set *devices;
+    const struct dppd_runtime *runtime;
     /* 保存 bind 成功的路径，stop 时只删除本实例创建的 socket。 */
     char socket_path[DPPD_MANAGEMENT_SOCKET_PATH_MAX + 1U];
     bool started;
@@ -286,11 +296,13 @@ struct dppd_management_server {
  */
 int dppd_management_handle(struct dppd_control_service *control,
                            const struct dppd_device_set *devices,
+                           const struct dppd_runtime *runtime,
                            const struct dppd_management_request *request,
                            struct dppd_management_response *response);
 int dppd_management_start(struct dppd_management_server *server,
                           struct dppd_control_service *control,
                           const struct dppd_device_set *devices,
+                          const struct dppd_runtime *runtime,
                           const char *socket_path);
 int dppd_management_poll(struct dppd_management_server *server);
 /* stop 可重复调用；成功启动过时会关闭 fd 并删除对应文件系统路径。 */

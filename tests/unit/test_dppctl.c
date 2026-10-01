@@ -15,6 +15,23 @@
 int main(void)
 {
     struct dppd_management_request request;
+    char *stats[] = {"stats", "all", "2"};
+
+    assert(build_request(1, stats, &request) == 0);
+    assert(request.payload.stats_query.port_id == DPPD_STATS_ALL);
+    assert(request.payload.stats_query.queue_id == DPPD_STATS_ALL);
+    assert(build_request(3, stats, &request) == 0);
+    assert(request.payload.stats_query.queue_id == 2);
+    stats[1] = "5";
+    assert(build_request(2, stats, &request) == 0);
+    assert(request.payload.stats_query.port_id == 5);
+    assert(request.payload.stats_query.queue_id == DPPD_STATS_ALL);
+    stats[1] = "65535";
+    assert(build_request(2, stats, &request) == -EINVAL);
+    stats[1] = "-1";
+    assert(build_request(2, stats, &request) == -EINVAL);
+    stats[1] = "wrong";
+    assert(build_request(2, stats, &request) == -EINVAL);
     char *args[] = {"update-drop-batch", "5", "20", "prefer",
                     "100", "1", "101", "2", "102", "3", "103", "4"};
 

@@ -27,15 +27,10 @@ static int stats_callback(const char *command,
 
     dppd_runtime_stats_read(runtime, &stats);
     rte_tel_data_start_dict(data);
-    if (rte_tel_data_add_dict_u64(data, "rx_packets", stats.rx_packets) != 0 ||
-        rte_tel_data_add_dict_u64(data, "rx_bytes", stats.rx_bytes) != 0 ||
-        rte_tel_data_add_dict_u64(data, "tx_packets", stats.tx_packets) != 0 ||
-        rte_tel_data_add_dict_u64(data, "tx_bytes", stats.tx_bytes) != 0 ||
-        rte_tel_data_add_dict_u64(data, "rx_malformed", stats.rx_malformed) != 0 ||
-        rte_tel_data_add_dict_u64(data, "rx_unsupported", stats.rx_unsupported) != 0 ||
-        rte_tel_data_add_dict_u64(data, "policy_drops", stats.policy_drops) != 0 ||
-        rte_tel_data_add_dict_u64(data, "tx_drops", stats.tx_drops) != 0)
-        return -ENOSPC;
+#define ADD_TELEMETRY_FIELD(field) \
+    if (rte_tel_data_add_dict_u64(data, #field, stats.field) != 0) return -ENOSPC;
+    DPPD_STATS_FIELDS(ADD_TELEMETRY_FIELD)
+#undef ADD_TELEMETRY_FIELD
     return 0;
 }
 

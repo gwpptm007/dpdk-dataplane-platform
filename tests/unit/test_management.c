@@ -100,7 +100,7 @@ static void test_socket_round_trip(struct dppd_management_server *server,
 
     /* PID 隔离并行测试实例，stop 后再断言路径确实被回收。 */
     snprintf(path, sizeof(path), "/tmp/dppd-management-%ld.sock", (long)getpid());
-    assert(dppd_management_start(server, control, devices, path) == 0);
+    assert(dppd_management_start(server, control, devices, NULL, path) == 0);
     assert(stat(path, &metadata) == 0);
     assert((metadata.st_mode & 0777) == 0600);
 
@@ -189,7 +189,7 @@ int main(void)
 
     initialize_request(&request, DPPD_MANAGEMENT_PING);
     request.version++;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -EPROTO);
 
     /*
@@ -197,13 +197,13 @@ int main(void)
      * 这样部署脚本可以区分“功能未启用”和“已启用但落盘失败”。
      */
     initialize_request(&request, DPPD_MANAGEMENT_PERSISTENCE_STATUS);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(!response.payload.persistence.enabled);
     assert(!response.payload.persistence.dirty);
     assert(response.payload.persistence.current_generation == 0);
     initialize_request(&request, DPPD_MANAGEMENT_PERSISTENCE_FLUSH);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -EINVAL);
 
     /*
@@ -218,7 +218,7 @@ int main(void)
     assert(mkdir(state_directory, 0700) == 0);
     assert(dppd_control_persistence_attach(&control, state_path) == 0);
     initialize_request(&request, DPPD_MANAGEMENT_PERSISTENCE_STATUS);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.persistence.enabled);
     assert(!response.payload.persistence.dirty);
@@ -227,14 +227,14 @@ int main(void)
 
     /* 正常模式也可查询恢复状态；此时没有 residual backend 对象。 */
     initialize_request(&request, DPPD_MANAGEMENT_RECOVERY_STATUS);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.recovery.state == DPPD_CONTROL_RECOVERY_READY);
     assert(response.payload.recovery.residual_objects == 0);
 
     /* apply 成功后 desired generation 从 0 发布为 1。 */
     make_drop_request(&request);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.apply.status == DPPD_RULE_CREATED);
     assert(response.payload.apply.generation == 1);
@@ -242,7 +242,7 @@ int main(void)
     initialize_request(&request, DPPD_MANAGEMENT_RULE_LIST);
     request.payload.list.expected_repository_generation =
         DPPD_RULE_GENERATION_ANY;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.rule_page.repository_generation == 1);
     assert(response.payload.rule_page.total_count == 1);
@@ -254,12 +254,12 @@ int main(void)
             (1U << DPPD_ACTION_COUNT)) != 0);
 
     request.payload.list.expected_repository_generation = 0;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -ESTALE);
 
     initialize_request(&request, DPPD_MANAGEMENT_RULE_GET);
     request.payload.get.rule_id = 100;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.rule.id == 100 && response.payload.rule.generation == 1);
     assert(response.payload.rule.install_port_id == 5);
@@ -267,7 +267,7 @@ int main(void)
     initialize_request(&request, DPPD_MANAGEMENT_RULE_COUNT_QUERY);
     request.payload.count_query.rule_id = 100;
     request.payload.count_query.expected_generation = 1;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.count.rule_id == 100);
     assert(response.payload.count.generation == 1);
@@ -278,14 +278,14 @@ int main(void)
     initialize_request(&request, DPPD_MANAGEMENT_RULE_DELETE);
     request.payload.delete_rule.rule_id = 100;
     request.payload.delete_rule.expected_generation = 1;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0 && response.payload.delete_rule.removed);
     assert(response.payload.delete_rule.generation == 2);
 
     /* port-show 合并 device 能力与 topology 身份，并保持协议结构不含进程内指针。 */
     initialize_request(&request, DPPD_MANAGEMENT_PORT_GET);
     request.payload.port_get.port_id = 5;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.port.port_id == 5);
     assert(response.payload.port.peer_port_id == 6);
@@ -300,7 +300,7 @@ int main(void)
     assert(strcmp(response.payload.port.driver_name, "fake_pmd") == 0);
 
     request.payload.port_get.port_id = 99;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -ENOENT);
 
     /*
@@ -308,7 +308,7 @@ int main(void)
      * EUCLEAN 后显式确认持久化；成功响应直接返回刷新后的状态。
      */
     initialize_request(&request, DPPD_MANAGEMENT_PERSISTENCE_FLUSH);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.persistence.enabled);
     assert(!response.payload.persistence.dirty);
@@ -338,7 +338,7 @@ int main(void)
         entry->rule.nb_actions = 1;
         entry->rule.actions[0].type = DPPD_ACTION_DROP;
     }
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0 && response.payload.create_batch.count == 2);
     assert(response.payload.create_batch.rules[0].generation == 3);
     assert(response.payload.create_batch.rules[1].generation == 4);
@@ -365,33 +365,33 @@ int main(void)
      * 保留位非零和旧版本错误都应在修改规则前拒绝，失败响应不携带有效结果数量
      */
     request.version = 6;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -EPROTO);
     request.version = DPPD_MANAGEMENT_VERSION;
     for (uint16_t count = 0; count <= 5; ++count) {
         if (count >= 2 && count <= 4)
             continue;
         request.payload.update_batch.count = count;
-        assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+        assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
         assert(response.status == -EINVAL && response.payload.update_batch.count == 0);
     }
     request.payload.update_batch.count = 2;
     request.payload.update_batch.reserved[0] = 1;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -EINVAL);
     request.payload.update_batch.reserved[0] = 0;
     request.payload.update_batch.rules[1].expected_generation = 0;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -ESTALE && control.rules.generation == 4);
     assert(response.payload.update_batch.count == 0);
     request.payload.update_batch.rules[1].expected_generation = 4;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0 && response.payload.update_batch.count == 2);
     assert(response.payload.update_batch.rules[0].generation == 5);
     assert(response.payload.update_batch.rules[1].generation == 6);
     assert(response.payload.update_batch.rules[0].transaction_id ==
            response.payload.update_batch.rules[1].transaction_id);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -ESTALE && response.payload.update_batch.count == 0);
 
     /** 更新成功后精确删除必须使用新版本，不能继续用创建时的旧版本删除已经更新的规则 */
@@ -401,7 +401,7 @@ int main(void)
     request.payload.delete_batch.rules[0].expected_generation = 5;
     request.payload.delete_batch.rules[1].rule_id = 201;
     request.payload.delete_batch.rules[1].expected_generation = 6;
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0 && response.payload.delete_batch.count == 2);
     assert(response.payload.delete_batch.rules[0].rule_id == 200 &&
            response.payload.delete_batch.rules[0].generation == 7);
@@ -418,16 +418,16 @@ int main(void)
         DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
     control.recovery_last_error = -EFAULT;
     initialize_request(&request, DPPD_MANAGEMENT_PING);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == -EUCLEAN);
     initialize_request(&request, DPPD_MANAGEMENT_RECOVERY_STATUS);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.recovery.state ==
            DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED);
     assert(response.payload.recovery.last_error == -EFAULT);
     initialize_request(&request, DPPD_MANAGEMENT_RECOVERY_RETRY);
-    assert(dppd_management_handle(&control, &devices, &request, &response) == 0);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
     assert(response.status == 0);
     assert(response.payload.recovery.state ==
            DPPD_CONTROL_RECOVERY_RESTART_REQUIRED);

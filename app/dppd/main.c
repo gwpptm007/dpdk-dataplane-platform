@@ -124,6 +124,7 @@ int main(int argc, char **argv)
                    dppd_rule_repository_count(&control.rules));
     }
     if (dppd_management_start(&management, &control, &runtime.devices,
+                               &runtime,
                               config.control_socket) != 0) {
         fprintf(stderr, "[dppd] management socket initialization failed: %s\n",
                 config.control_socket);

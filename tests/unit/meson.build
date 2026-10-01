@@ -12,6 +12,9 @@ config_test = executable(
 )
 test('runtime configuration', config_test)
 
+stats_test = executable('test_stats', 'test_stats.c', dependencies: dppd_core_dep)
+test('port and queue statistics', stats_test)
+
 rule_test = executable(
   'test_rule',
   'test_rule.c',

@@ -25,6 +25,28 @@ meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
+## 端口和队列统计
+
+```bash
+./build/dppctl stats          # 全部端口、全部队列
+./build/dppctl stats 0        # 端口 0 的全部队列
+./build/dppctl stats 0 1      # 端口 0、队列 1
+./build/dppctl stats all 1    # 全部端口的队列 1
+```
+
+管理协议为 v8，daemon 和 CLI 必须一起更新，v7 客户端返回 EPROTO。不存在的端口或
+队列返回 ENOENT。队列编号是运行配置中的 RX/TX queue id，不是物理 CPU/lcore id。
+这些计数记录本项目软件工作线程实际处理的报文，不是网卡硬件计数；硬件卸载后未进入
+CPU 的报文不会计入。运行时初始化后从零开始，不跨进程重启保存，不提供清零操作。
+
+接收包数、字节、畸形报文及策略丢弃归入口端口；发送和发送失败归出口端口。
+`policy_drops` 分为 `rule_drops`、`no_route_drops`、`egress_drops`；`tx_drops` 分为
+`tx_linearize_drops` 和 `tx_queue_drops`。畸形报文单独记录为 `rx_malformed`。
+`rx_unsupported` 是协议未深入解析的数量，不代表报文一定被丢弃。
+控制台和 telemetry `/dppd/stats` 保留整体统计，telemetry 同时返回新增丢弃原因。
+各字段独立原子采样，运行中不同字段及多次查询可能处于不同瞬间；停止收包后可核对
+端口、队列汇总与整体值。热路径不获取管理锁，按收包批次累计后更新计数器。
+
 ## 普通双端口运行
 
 ```bash
@@ -116,7 +138,7 @@ v1 没有每条规则的端口信息，多端口旧快照不能安全使用这�
 ./build/dppctl update-drop-batch 0 20 prefer 200 3 201 4
 ```
 
-成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v7，daemon 和 CLI 必须一起更新。
+成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v8，daemon 和 CLI 必须一起更新。
 
 `count RULE_ID EXPECTED_GENERATION` 查询已发布 generation 对应的 COUNT。它不会重置 counter；规则不存在、generation 已过期、规则没有 COUNT，以及当前 backend 不支持查询会分别返回错误。硬件规则的 hits/bytes 由目标 PMD 的 `rte_flow_query()` 决定；软件规则由 classifier 的原子计数器返回。
 

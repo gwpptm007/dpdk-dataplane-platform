@@ -40,6 +40,8 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         worker->lcore_id = lcore_id;
         worker->queue_id = worker_index;
         dppd_stats_init(&worker->stats);
+        for (uint16_t port_index = 0; port_index < cfg->nb_ports; ++port_index)
+            dppd_stats_init(&worker->port_stats[port_index]);
         worker_index++;
     }
     if (worker_index != cfg->nb_queues) {
@@ -147,6 +149,40 @@ void dppd_runtime_stats_read(const struct dppd_runtime *runtime,
         dppd_stats_read(&runtime->workers[i].stats, &values);
         dppd_stats_accumulate(total, &values);
     }
+}
+
+int dppd_runtime_stats_query(const struct dppd_runtime *runtime,
+                              uint16_t port_id, uint16_t queue_id,
+                              struct dppd_stats_values *total)
+{
+    uint16_t i, j;
+    bool has_port = port_id == DPPD_STATS_ALL;
+    bool has_queue = queue_id == DPPD_STATS_ALL;
+
+    if (runtime == NULL || total == NULL)
+        return -EINVAL;
+    memset(total, 0, sizeof(*total));
+    for (j = 0; j < runtime->devices.nb_ports; ++j)
+        has_port |= runtime->devices.ports[j].port_id == port_id;
+    for (i = 0; i < runtime->nb_workers; ++i)
+        has_queue |= runtime->workers[i].queue_id == queue_id;
+    if (!has_port || !has_queue)
+        return -ENOENT;
+    for (i = 0; i < runtime->nb_workers; ++i) {
+        const struct dppd_worker *worker = &runtime->workers[i];
+
+        if (queue_id != DPPD_STATS_ALL && worker->queue_id != queue_id)
+            continue;
+        for (j = 0; j < runtime->devices.nb_ports; ++j) {
+            struct dppd_stats_values values;
+
+            if (port_id != DPPD_STATS_ALL && runtime->devices.ports[j].port_id != port_id)
+                continue;
+            dppd_stats_read(&worker->port_stats[j], &values);
+            dppd_stats_accumulate(total, &values);
+        }
+    }
+    return 0;
 }
 
 void dppd_runtime_stats_dump(const struct dppd_runtime *runtime)

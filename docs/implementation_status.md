@@ -16,7 +16,7 @@
 | 软件 worker | 已实现 | 每 queue 一个 lcore，所有端口 burst RX/TX，mbuf ownership 完整 |
 | parser | 已实现 baseline | 双 VLAN、ARP、IPv4、fragment、UDP/TCP；IPv6/tunnel 未实现 |
 | 软件策略 | 已实现最小闭环 | malformed drop，其余受支持/未知协议按静态端口对转发 |
-| stats/telemetry | 已实现 baseline | 聚合计数与 `/dppd/stats`；尚无 port/queue/rule 维度 |
+| stats/telemetry | 已实现 baseline | 工作线程、端口、队列统计及丢弃原因；v8 stats 查询；telemetry 保留聚合；规则 COUNT 独立查询 |
 | topology | 已实现发现 | ethdev/representor、driver、switch domain/port；尚无角色解析 |
 | rule IR | 已实现第一版 | 有序 match/action、domain/fallback、持久化 install port 和语义校验 |
 | rule repository | 已实现内存版和可选写路径 | 稳定 ID、单调 generation、幂等 CRUD、乐观并发、按 ID 稳定分页；control 可在 mutation 后保存完整 snapshot |
@@ -27,10 +27,12 @@
 | 虚拟 PMD flow 验证 | TAP 与 net_ring 已验证 | 双 TAP 已验证硬件 DROP/QUEUE；软件 TCP+MARK+COUNT+DROP 有真实报文与计数证据；net_ring 已验证 prefer 回退，见 [待办文档](todo_virtual_flow_backend.md) |
 | 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
 | control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
-| management API | 本机 v7 已验证 | 保留 v6 命令并新增 `RULE_UPDATE_BATCH` 和 `update-drop-batch`，支持 2–4 条精确 generation 的完整替换；CLI 构造同端口 ETH/DROP，完整 IR 可通过管理协议提交 |
+| management API | 本机 v8 已验证 | 保留 v6 命令并新增 `RULE_UPDATE_BATCH` 和 `update-drop-batch`，支持 2–4 条精确 generation 的完整替换；CLI 构造同端口 ETH/DROP，完整 IR 可通过管理协议提交 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |
 | ACL/LPM/NAT/conntrack | 未实现 | 旧占位实现已删除，需按 stage/snapshot 模型重建 |
 | DPU/SmartNIC 实机 | 未验证 | 需在具体 PMD、固件、representor devargs 上建立能力矩阵 |
+
+2026-10-01 新增端口/队列统计、丢弃原因与 management v8，16/16 单测通过；实际收发核对入口 RX、出口 TX 及端口/队列汇总，并覆盖畸形、无路由、出口异常与 TX 队列满。详见验证记录中的统计验证。
 
 ## DPDK 21.11 测试机验证
 
@@ -63,7 +65,7 @@
 - 启动后端口集合和 port-pair snapshot 不动态更新；
 - 没有 link-status change、device removal 和热重配处理；
 - TX 发送不足时立即丢弃，没有软件重试队列；这是可预测的 baseline 策略；
-- 统计为 worker 聚合维度，无法直接定位某个 port/queue；
+- 统计支持 worker、port、queue 维度；独立原子采样不承诺逐字段一致时刻，硬件卸载报文不计入软件 worker；
 - RSS key 和 RETA 使用 PMD 默认值；
 - 没有查询 `rte_flow` 资源容量或预留规则空间；
 - COUNT id 由 rule id 的低 32 位生成，控制面必须保证其作用域内不冲突。

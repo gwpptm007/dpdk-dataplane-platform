@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "dppd/management.h"
 #include "dppd/device.h"
+#include "dppd/runtime.h"
 
 #include <errno.h>
 #include <stddef.h>
@@ -103,6 +104,7 @@ static void build_rule_summary(const struct dppd_rule *rule,
 
 int dppd_management_handle(struct dppd_control_service *control,
                            const struct dppd_device_set *devices,
+                           const struct dppd_runtime *runtime,
                            const struct dppd_management_request *request,
                            struct dppd_management_response *response)
 {
@@ -132,6 +134,16 @@ int dppd_management_handle(struct dppd_control_service *control,
     }
 
     switch (request->operation) {
+    case DPPD_MANAGEMENT_STATS_QUERY:
+        if (request->payload.stats_query.reserved != 0)
+            rc = -EINVAL;
+        else if (runtime == NULL)
+            rc = -ENODEV;
+        else
+            rc = dppd_runtime_stats_query(runtime, request->payload.stats_query.port_id,
+                                          request->payload.stats_query.queue_id,
+                                          &response->payload.stats);
+        break;
     case DPPD_MANAGEMENT_PING:
         /* ping 不触碰硬件，仅返回 desired state 的轻量健康信息。 */
         response->payload.pong.repository_generation =
@@ -322,6 +334,7 @@ int dppd_management_handle(struct dppd_control_service *control,
 int dppd_management_start(struct dppd_management_server *server,
                           struct dppd_control_service *control,
                           const struct dppd_device_set *devices,
+                          const struct dppd_runtime *runtime,
                           const char *socket_path)
 {
     struct sockaddr_un address;
@@ -337,6 +350,7 @@ int dppd_management_start(struct dppd_management_server *server,
     /* 先建立明确的未启动状态，保证后续任一步失败都不会留下可误关闭的 fd。 */
     memset(server, 0, sizeof(*server));
     server->socket_fd = -1;
+    server->runtime = runtime;
 
     /*
      * SOCK_SEQPACKET 让一次 send 对应一次 recv，避免自行设计流式 framing；
@@ -428,6 +442,7 @@ int dppd_management_poll(struct dppd_management_server *server)
         received = recv(client, &request, sizeof(request), MSG_TRUNC);
         if (received == (ssize_t)sizeof(request)) {
             (void)dppd_management_handle(server->control, server->devices,
+                                         server->runtime,
                                          &request, &response);
         } else {
             memset(&response, 0, sizeof(response));

@@ -22,6 +22,7 @@ struct dppd_worker {
     uint16_t queue_id;
     bool launched;
     struct dppd_worker_stats stats;
+    struct dppd_worker_stats port_stats[DPPD_MAX_PORTS];
 };
 
 struct dppd_runtime {
@@ -51,6 +52,9 @@ void dppd_runtime_request_stop(struct dppd_runtime *runtime);
 int dppd_runtime_wait(struct dppd_runtime *runtime);
 void dppd_runtime_stats_read(const struct dppd_runtime *runtime,
                              struct dppd_stats_values *total);
+int dppd_runtime_stats_query(const struct dppd_runtime *runtime,
+                              uint16_t port_id, uint16_t queue_id,
+                              struct dppd_stats_values *total);
 void dppd_runtime_stats_dump(const struct dppd_runtime *runtime);
 void dppd_runtime_destroy(struct dppd_runtime *runtime);
 /** 工作线程入口，负责登记规则读者、处理收发循环，并在返回前注销读者身份 */

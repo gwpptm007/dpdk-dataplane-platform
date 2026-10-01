@@ -50,6 +50,11 @@ def run_case(build, count, policy):
             try:
                 wait_for(daemon, sock.exists, "management socket", seconds=15)
                 ctl("ping")
+                counters = fields(ctl("stats"))
+                check(all(value == "0" for value in counters.values()), str(counters))
+                check(fields(ctl("stats", 0, 0)) == counters, "queue stats mismatch")
+                ctl("stats", 9, error=errno.ENOENT)
+                ctl("stats", "all", 1, error=errno.ENOENT)
                 if stage == 0:
                     ctl("apply-drop-batch", 0, *ids)
                     initial = [value for pair in zip(ids, range(1, count + 1)) for value in pair]

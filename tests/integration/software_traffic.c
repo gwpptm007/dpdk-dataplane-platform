@@ -12,6 +12,7 @@
 #include <rte_mbuf.h>
 #include "dppd/control.h"
 #include "dppd/runtime.h"
+#include "dppd/management.h"
 
 #define PACKETS_PER_PORT 24U
 #define ROUNDS 1000U
@@ -187,6 +188,101 @@ static void run_updates(struct fixture *fixture)
     }
 }
 
+static void verify_stats(struct fixture *fixture)
+{
+    struct dppd_stats_values total, sum = {0}, queue;
+    uint64_t per_port_rx = fixture->received / (fixture->count / 2);
+
+    for (uint16_t i = 0; i < 2; ++i) {
+        struct dppd_stats_values port;
+        struct dppd_management_request request = {0};
+        struct dppd_management_response response;
+        uint16_t id = fixture->runtime.devices.ports[i].port_id;
+        uint64_t expected_rx = i < fixture->count / 2 ? per_port_rx : 0;
+        uint64_t expected_tx = 1U - i < fixture->count / 2 ? per_port_rx / 3 : 0;
+
+        assert(dppd_runtime_stats_query(&fixture->runtime, id, 0, &port) == 0);
+        assert(port.rx_packets == expected_rx && port.tx_packets == expected_tx);
+        assert(port.rx_bytes == expected_rx * 64 && port.tx_bytes == expected_tx * 64);
+        assert(port.policy_drops == expected_rx * 2 / 3 && port.rule_drops == port.policy_drops);
+        assert(port.no_route_drops == 0 && port.egress_drops == 0 && port.tx_drops == 0);
+        request.version = DPPD_MANAGEMENT_VERSION;
+        request.size = sizeof(request);
+        request.operation = DPPD_MANAGEMENT_STATS_QUERY;
+        request.payload.stats_query.port_id = id;
+        request.payload.stats_query.queue_id = 0;
+        assert(dppd_management_handle(&fixture->control, &fixture->runtime.devices,
+                                      &fixture->runtime, &request, &response) == 0);
+        assert(response.status == 0 && memcmp(&response.payload.stats, &port, sizeof(port)) == 0);
+        dppd_stats_accumulate(&sum, &port);
+    }
+    dppd_runtime_stats_read(&fixture->runtime, &total);
+    assert(memcmp(&sum, &total, sizeof(total)) == 0);
+    assert(dppd_runtime_stats_query(&fixture->runtime, DPPD_STATS_ALL, 0, &queue) == 0);
+    assert(memcmp(&queue, &total, sizeof(total)) == 0);
+}
+
+static void verify_drop_reasons(struct fixture *fixture)
+{
+    for (uint16_t scenario = 0; scenario < 4; ++scenario) {
+        struct dppd_stats_values before, after, ingress, egress;
+        struct dppd_forwarding_snapshot snapshot = fixture->runtime.snapshot;
+        uint16_t peer = fixture->runtime.devices.ports[0].peer_port_id;
+        struct rte_mbuf *mbuf = make_packet(fixture, 10000, 0);
+        const uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
+
+        dppd_runtime_stats_read(&fixture->runtime, &before);
+        assert(dppd_runtime_stats_query(&fixture->runtime,
+            fixture->runtime.devices.ports[0].port_id, 0, &ingress) == 0);
+        assert(dppd_runtime_stats_query(&fixture->runtime,
+            fixture->runtime.devices.ports[1].port_id, 0, &egress) == 0);
+        if (scenario == 0)
+            assert(rte_pktmbuf_trim(mbuf, 54) == 0);
+        else if (scenario == 1)
+            fixture->runtime.snapshot.nb_peers = 0;
+        else if (scenario == 2)
+            fixture->runtime.devices.ports[0].peer_port_id = UINT16_MAX;
+        else {
+            unsigned int slots = rte_ring_free_count(fixture->tx[1]);
+            for (unsigned int i = 0; i < slots; ++i) {
+                struct rte_mbuf *filler = make_packet(fixture, 10000, 0);
+                assert(rte_ring_enqueue(fixture->tx[1], filler) == 0);
+            }
+        }
+        assert(rte_ring_enqueue(fixture->rx[0], mbuf) == 0);
+        assert(dppd_runtime_start(&fixture->runtime) == 0);
+        do {
+            dppd_runtime_stats_read(&fixture->runtime, &after);
+            assert(rte_get_timer_cycles() < deadline);
+        } while (after.rx_packets != before.rx_packets + 1);
+        dppd_runtime_request_stop(&fixture->runtime);
+        assert(dppd_runtime_wait(&fixture->runtime) == 0);
+        dppd_runtime_stats_read(&fixture->runtime, &after);
+        assert(after.tx_packets == before.tx_packets);
+        assert(after.rx_malformed - before.rx_malformed == (scenario == 0 ? 1U : 0U));
+        assert(after.no_route_drops - before.no_route_drops == (scenario == 1 ? 1U : 0U));
+        assert(after.egress_drops - before.egress_drops == (scenario == 2 ? 1U : 0U));
+        assert(after.tx_queue_drops - before.tx_queue_drops == (scenario == 3 ? 1U : 0U));
+        {
+            struct dppd_stats_values current;
+            assert(dppd_runtime_stats_query(&fixture->runtime,
+                fixture->runtime.devices.ports[0].port_id, 0, &current) == 0);
+            assert(current.rx_packets == ingress.rx_packets + 1);
+            assert(current.tx_drops == ingress.tx_drops);
+            assert(dppd_runtime_stats_query(&fixture->runtime,
+                fixture->runtime.devices.ports[1].port_id, 0, &current) == 0);
+            assert(current.tx_queue_drops == egress.tx_queue_drops + (scenario == 3 ? 1U : 0U));
+        }
+        fixture->runtime.snapshot = snapshot;
+        fixture->runtime.devices.ports[0].peer_port_id = peer;
+        if (scenario == 3) {
+            void *object;
+            while (rte_ring_dequeue(fixture->tx[1], &object) == 0)
+                rte_pktmbuf_free(object);
+        }
+    }
+}
+
 static void run_case(uint32_t count)
 {
     struct fixture fixture = {0};
@@ -292,6 +388,8 @@ static void run_case(uint32_t count)
                 &hits, &bytes) == 0);
             assert(hits == PACKETS_PER_PORT / 3 && bytes == hits * 64);
         }
+        verify_stats(&fixture);
+        verify_drop_reasons(&fixture);
         assert(dppd_control_fini(&fixture.control) == 0);
         assert(unlink(path) == 0 && rmdir(directory) == 0);
     }
@@ -304,7 +402,8 @@ static void run_case(uint32_t count)
         rte_ring_free(fixture.tx[i]);
     }
     printf("PASS rules=%u updates=%u rx=%" PRIu64 " forwarded=%" PRIu64
-           " dropped=%" PRIu64 " allocation-failures=%u replay=passed mbuf-leaks=0\n",
+           " dropped=%" PRIu64 " allocation-failures=%u replay=passed stats=passed"
+           " drop-reasons=passed mbuf-leaks=0\n",
            count, ROUNDS + 1, fixture.received, fixture.forwarded,
            fixture.received - fixture.forwarded, count + 2);
 }

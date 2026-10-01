@@ -21,6 +21,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] reconcile-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-retry\n", program);
     fprintf(stderr, "  %s [--socket PATH] port-show PORT\n", program);
+    fprintf(stderr, "  %s [--socket PATH] stats [PORT|all [QUEUE|all]]\n", program);
     fprintf(stderr,
             "  %s [--socket PATH] list [AFTER_RULE_ID [REPOSITORY_GENERATION]]\n",
             program);
@@ -382,6 +383,24 @@ static int build_request(int argc, char **argv,
     uint64_t value;
 
     /* 每个分支同时校验命令名和精确参数数量，拒绝被静默忽略的多余参数。 */
+    if (argc >= 1 && argc <= 3 && strcmp(argv[0], "stats") == 0) {
+        uint64_t selector;
+
+        initialize_request(request, DPPD_MANAGEMENT_STATS_QUERY);
+        request->payload.stats_query.port_id = DPPD_STATS_ALL;
+        request->payload.stats_query.queue_id = DPPD_STATS_ALL;
+        for (int index = 1; index < argc; ++index) {
+            if (strcmp(argv[index], "all") == 0)
+                continue;
+            if (parse_u64(argv[index], 0, UINT16_MAX - 1, &selector) != 0)
+                return -EINVAL;
+            if (index == 1)
+                request->payload.stats_query.port_id = (uint16_t)selector;
+            else
+                request->payload.stats_query.queue_id = (uint16_t)selector;
+        }
+        return 0;
+    }
     if (argc == 1 && strcmp(argv[0], "ping") == 0) {
         initialize_request(request, DPPD_MANAGEMENT_PING);
         return 0;
@@ -766,6 +785,12 @@ static void print_response(const struct dppd_management_response *response)
 {
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释。 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_STATS_QUERY:
+#define PRINT_STATS_FIELD(field) printf(#field "=%" PRIu64 " ", response->payload.stats.field);
+        DPPD_STATS_FIELDS(PRINT_STATS_FIELD)
+#undef PRINT_STATS_FIELD
+        printf("\n");
+        break;
     case DPPD_MANAGEMENT_PING:
         printf("pong version=%u generation=%" PRIu64 " rules=%u\n",
                response->version,

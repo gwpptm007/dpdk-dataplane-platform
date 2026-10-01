@@ -64,6 +64,10 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         if (decision.action != DPPD_PACKET_FORWARD) {
             if (decision.drop_reason != DPPD_DROP_MALFORMED)
                 delta.policy_drops++;
+            if (decision.drop_reason == DPPD_DROP_POLICY)
+                delta.rule_drops++;
+            else if (decision.drop_reason == DPPD_DROP_NO_ROUTE)
+                delta.no_route_drops++;
             rte_pktmbuf_free(rx[i]);
             continue;
         }
@@ -71,6 +75,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         /** 配对出口必须存在且与决策一致，不能把报文交给另一端口的发送队列 */
         if (egress == NULL || decision.egress_port != egress->port_id) {
             delta.policy_drops++;
+            delta.egress_drops++;
             rte_pktmbuf_free(rx[i]);
             continue;
         }
@@ -89,6 +94,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0) {
             if (rte_pktmbuf_linearize(rx[i]) != 0) {
                 delta.tx_drops++;
+                delta.tx_linearize_drops++;
                 rte_pktmbuf_free(rx[i]);
                 continue;
             }
@@ -111,11 +117,29 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         /** 本轮不重试未被队列接收的尾部报文，它们仍归本线程所有，必须主动释放 */
         if (sent < nb_tx) {
             delta.tx_drops += (uint64_t)(nb_tx - sent);
+            delta.tx_queue_drops += (uint64_t)(nb_tx - sent);
             free_packets(&tx[sent], (uint16_t)(nb_tx - sent));
         }
     }
 
     dppd_stats_add(&worker->stats, &delta);
+    {
+        struct dppd_stats_values tx_delta = {0};
+        uint16_t ingress_index = (uint16_t)(ingress - runtime->devices.ports);
+
+        tx_delta.tx_packets = delta.tx_packets;
+        tx_delta.tx_bytes = delta.tx_bytes;
+        tx_delta.tx_drops = delta.tx_drops;
+        tx_delta.tx_linearize_drops = delta.tx_linearize_drops;
+        tx_delta.tx_queue_drops = delta.tx_queue_drops;
+        delta.tx_packets = delta.tx_bytes = delta.tx_drops = 0;
+        delta.tx_linearize_drops = delta.tx_queue_drops = 0;
+        dppd_stats_add(&worker->port_stats[ingress_index], &delta);
+        if (egress != NULL) {
+            uint16_t egress_index = (uint16_t)(egress - runtime->devices.ports);
+            dppd_stats_add(&worker->port_stats[egress_index], &tx_delta);
+        }
+    }
 }
 
 /** 工作线程先登记为规则读者，再循环处理端口；收到停止请求后注销并返回 */
