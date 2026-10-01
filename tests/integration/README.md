@@ -77,6 +77,21 @@ mbuf 解析、软件分类和控制服务，生产代码不替换。两个目标
 故障注入只链接到测试程序，不进入 daemon。这是虚拟 PMD 实际收发测试，不是吞吐基准
 或物理硬件卸载验证；命中软件规则的终止动作仍为 DROP，不宣称验证 MARK 报文转发。
 
+## 非空软件快照：daemon 重启恢复
+
+```bash
+python3 tests/integration/software_replay.py --build-dir build
+```
+
+覆盖 2/4 条规则和 software/prefer 四种组合。每组在满容量下批量更新到端口 1，
+实际停止并重新启动 daemon 两次，核对规则内容、版本、全局版本、安装端口和 clean
+持久化状态；随后检查旧请求 ESTALE，以及重启后仍可批量更新。损坏快照 CRC 时必须
+拒绝启动、不开放管理 socket，也不覆盖文件。此脚本不使用 flow 故障共享库。
+
+`software_traffic` 另在停止 worker 后保存非空快照，销毁并重建控制服务，再启动
+正式 worker 发包，确认恢复后的 DROP、COUNT、转发和 mbuf 回收。该收发部分是同一
+EAL 进程内的控制服务恢复，实际进程重启由上述脚本单独验证。
+
 ## 在线恢复隔离：进程级故障注入
 
 ```bash

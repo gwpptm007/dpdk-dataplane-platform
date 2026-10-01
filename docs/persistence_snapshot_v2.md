@@ -21,8 +21,8 @@
 - 相同 apply 命令幂等重试时先修复 snapshot，再返回 `UNCHANGED`；
 - management v5 的 `persistence-status` 状态查询和 `persistence-flush` 显式修复；
 - `--state-path` 显式启用 daemon 持久化；
-- 启动时加载、topology resolve、全量硬件事务重放及 preserved generation 发布；
-- 任一规则重放失败时逆序回滚本轮硬件对象并拒绝启动。
+- 启动时加载、topology resolve、按策略选择硬件或软件的全量事务重放及 preserved generation 发布；
+- 任一规则重放失败时逆序回滚本轮对象并拒绝启动。
 - v1 到 v2 的离线迁移工具；迁移时显式指定统一的安装端口。
 
 尚未实现：
@@ -173,16 +173,22 @@ preflight 完成一次完整保存。调用方必须先完成启动恢复/reconc
 load + validate snapshot
     → resolve current topology
     → plan every rule
-    → validate/prepare hardware
-    → commit hardware
+    → validate/prepare selected backends
+    → commit selected backends
     → publish preserved generations
     → restore repository global generation
 ```
 
-任一规则无法在当前硬件/PMD 上恢复时，默认应 fail closed 并回滚本次已创建 flow；
-只有全部硬件对象提交成功后，才一次性发布 snapshot 中保留的逐规则 generation 和
+`software` 规则恢复到软件后端；`prefer` 仅在 PMD validate 失败且软件语义等价时回退；
+`require` 不允许软件回退。任一规则无法在当前环境恢复时，默认 fail closed 并回滚
+本次已创建对象；只有全部对象提交成功后，才一次性发布 snapshot 中保留的逐规则 generation 和
 repository global generation。文件不存在时会原子创建一个空 v2 snapshot；目录不可写
 或空快照创建失败时同样拒绝启动，不会静默退化为内存模式。
+
+恢复入口仅接受全新空服务：规则账本、硬件和软件后端都必须为空，已有实际软件对象
+但账本为空时也返回 `EBUSY`。恢复保留规则内容、安装端口和版本，COUNT 不存入快照，
+软件计数器从零开始。2026-10-01 已验证非空软件快照的两次 daemon 重启、恢复后的
+批量更新、损坏快照拒绝启动，以及恢复后实际 RX/TX，见 [验证记录](validation_batch_update.md)。
 
 v1 记录没有 `install_port_id`，无法判断 ingress/egress 规则应重放到哪个 ethdev。
 daemon 加载器因此对 v1 返回 `EPROTONOSUPPORT`，不使用 port 0 或第一个端口进行猜测。

@@ -237,7 +237,8 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
     if (service->persistence_path != NULL ||
         dppd_rule_repository_count(&service->rules) != 0 ||
         dppd_rule_repository_generation(&service->rules) != 0 ||
-        dppd_rte_flow_backend_count(&service->rte_flow) != 0)
+        dppd_rte_flow_backend_count(&service->rte_flow) != 0 ||
+        dppd_software_backend_count(&service->software) != 0)
         return -EBUSY;
 
     rc = dppd_persistence_load(path, &snapshot);

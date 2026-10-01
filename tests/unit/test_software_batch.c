@@ -3,8 +3,10 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "dppd/control.h"
 
 static _Thread_local unsigned int fail_allocation;
@@ -208,11 +210,70 @@ static void test_concurrent(uint32_t count)
     assert(dppd_control_fini(&service) == 0);
 }
 
+static void test_replay(uint32_t count)
+{
+    struct dppd_control_service source, restored;
+    struct dppd_topology topology;
+    struct dppd_control_batch_update_request requests[4];
+    char directory[] = "/tmp/dppd-software-replay-XXXXXX";
+    char path[128];
+    uint32_t i, failure;
+
+    assert(mkdtemp(directory) != NULL);
+    snprintf(path, sizeof(path), "%s/state.bin", directory);
+    setup(&source, requests, &topology, count);
+    assert(dppd_control_persistence_attach(&source, path) == 0);
+    assert(dppd_control_persistence_flush(&source) == 0);
+    assert(dppd_control_fini(&source) == 0);
+    for (failure = 1; failure <= 2 + 4 * (count + 1); ++failure) {
+        assert(dppd_control_init(&restored, &topology, count + 1, NULL) == 0);
+        fail_allocation = failure;
+        assert(dppd_control_persistence_restore(&restored, path) == -ENOMEM);
+        assert(fail_allocation == 0);
+        assert(restored.rules.count == 0 && restored.rules.generation == 0);
+        assert(dppd_software_backend_count(&restored.software) == 0);
+        assert(restored.persistence_path == NULL);
+        assert(restored.recovery_state == DPPD_CONTROL_RECOVERY_READY);
+        assert(dppd_control_fini(&restored) == 0);
+    }
+    assert(dppd_control_init(&restored, &topology, count + 1, NULL) == 0);
+    assert(dppd_control_persistence_restore(&restored, path) == 0);
+    assert(restored.rules.generation == count + 1 && restored.rules.count == count + 1);
+    for (i = 0; i <= count; ++i)
+        assert(dppd_software_backend_contains_version(&restored.software, 100 + i, i + 1));
+    assert(dppd_control_fini(&restored) == 0);
+    {
+        struct dppd_transaction_item item = {0};
+        struct dppd_transaction transaction;
+        struct dppd_transaction_backends backends = {0};
+
+        assert(dppd_control_init(&restored, &topology, count + 1, NULL) == 0);
+        item.rule = requests[0].rule;
+        item.rule.install_port_id = 5;
+        item.rule.generation = 1;
+        item.plan.backend = DPPD_PLAN_BACKEND_SOFTWARE;
+        item.plan.rule_id = item.rule.id;
+        item.plan.rule_generation = 1;
+        item.plan.install_port_id = 5;
+        backends.software = dppd_software_transaction_backend(&restored.software);
+        assert(dppd_transaction_init(&transaction, 1, &item, 1) == 0);
+        assert(dppd_transaction_run(&transaction, &backends) == 0);
+        assert(dppd_transaction_finalize(&transaction, &backends) == 0);
+        assert(dppd_control_persistence_restore(&restored, path) == -EBUSY);
+        assert(restored.rules.count == 0 && restored.persistence_path == NULL);
+        assert(dppd_software_backend_count(&restored.software) == 1);
+        assert(dppd_control_fini(&restored) == 0);
+    }
+    assert(unlink(path) == 0 && rmdir(directory) == 0);
+}
+
 int main(void)
 {
     test_failures(2);
     test_failures(4);
     test_concurrent(2);
     test_concurrent(4);
+    test_replay(2);
+    test_replay(4);
     return 0;
 }

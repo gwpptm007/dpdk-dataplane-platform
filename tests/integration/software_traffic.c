@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <rte_byteorder.h>
 #include <rte_cycles.h>
 #include <rte_eal.h>
@@ -248,17 +249,62 @@ static void run_case(uint32_t count)
     run_updates(&fixture);
     dppd_runtime_request_stop(&fixture.runtime);
     assert(dppd_runtime_wait(&fixture.runtime) == 0);
+    {
+        char directory[] = "/tmp/dppd-traffic-replay-XXXXXX";
+        char path[128];
+        const uint64_t generation = fixture.control.rules.generation;
+
+        assert(mkdtemp(directory) != NULL);
+        snprintf(path, sizeof(path), "%s/state.bin", directory);
+        assert(dppd_control_persistence_attach(&fixture.control, path) == 0);
+        assert(dppd_control_persistence_flush(&fixture.control) == 0);
+        assert(dppd_control_fini(&fixture.control) == 0);
+        assert(dppd_control_init(&fixture.control, &fixture.runtime.devices.topology,
+                                  count, NULL) == 0);
+        assert(dppd_control_persistence_restore(&fixture.control, path) == 0);
+        assert(fixture.control.rules.generation == generation);
+        for (i = 0; i < count; ++i) {
+            struct dppd_rule stored;
+            struct dppd_rule expected = fixture.requests[i].rule;
+            uint64_t hits, bytes;
+
+            assert(dppd_rule_repository_get(&fixture.control.rules,
+                fixture.requests[i].rule.id, &stored) == 0);
+            assert(stored.generation == fixture.requests[i].expected_generation);
+            assert(stored.install_port_id == fixture.requests[i].install_port_id);
+            expected.install_port_id = fixture.requests[i].install_port_id;
+            assert(dppd_rule_equal(&stored, &expected));
+            assert(dppd_software_backend_query_count(&fixture.control.software,
+                stored.id, stored.generation, &hits, &bytes) == 0);
+            assert(hits == 0 && bytes == 0);
+        }
+        dppd_runtime_set_software_backend(&fixture.runtime, &fixture.control.software);
+        assert(dppd_runtime_start(&fixture.runtime) == 0);
+        enqueue_round(&fixture);
+        drain_round(&fixture);
+        dppd_runtime_request_stop(&fixture.runtime);
+        assert(dppd_runtime_wait(&fixture.runtime) == 0);
+        for (i = 0; i < count; ++i) {
+            uint64_t hits, bytes;
+
+            assert(dppd_software_backend_query_count(&fixture.control.software,
+                fixture.requests[i].rule.id, fixture.requests[i].expected_generation,
+                &hits, &bytes) == 0);
+            assert(hits == PACKETS_PER_PORT / 3 && bytes == hits * 64);
+        }
+        assert(dppd_control_fini(&fixture.control) == 0);
+        assert(unlink(path) == 0 && rmdir(directory) == 0);
+    }
     assert(rte_mempool_avail_count(fixture.pool) == available);
     for (i = 0; i < 2; ++i)
         assert(rte_ring_empty(fixture.rx[i]) && rte_ring_empty(fixture.tx[i]));
-    assert(dppd_control_fini(&fixture.control) == 0);
     dppd_runtime_destroy(&fixture.runtime);
     for (i = 0; i < 2; ++i) {
         rte_ring_free(fixture.rx[i]);
         rte_ring_free(fixture.tx[i]);
     }
     printf("PASS rules=%u updates=%u rx=%" PRIu64 " forwarded=%" PRIu64
-           " dropped=%" PRIu64 " allocation-failures=%u mbuf-leaks=0\n",
+           " dropped=%" PRIu64 " allocation-failures=%u replay=passed mbuf-leaks=0\n",
            count, ROUNDS + 1, fixture.received, fixture.forwarded,
            fixture.received - fixture.forwarded, count + 2);
 }
