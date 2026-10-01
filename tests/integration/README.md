@@ -60,10 +60,13 @@ net_ring 管理闭环本身没有注入报文，不作为实际收发或物理�
 ```bash
 meson compile -C build
 python3 tests/integration/software_traffic.py --build-dir build
+# 默认验证单队列基线与双队列，需要三个可用 CPU（主线程加两个 worker）
+# 只有两个可用 CPU 时可单独运行基线：
+python3 tests/integration/software_traffic.py --build-dir build --queues 1
 ```
 
-需要 DPDK 的 `rte_net_ring` 开发库和两个可用 CPU。构建时找不到该库则跳过此测试程序，
-不影响其他目标；启动脚本会明确报告缺少程序。脚本自动从 CPU affinity 选择两个 CPU，
+需要 DPDK 的 `rte_net_ring` 开发库，默认三个可用 CPU。构建时找不到该库则跳过此测试程序，
+不影响其他目标；启动脚本会明确报告缺少程序。脚本自动从 CPU affinity 选择 CPU，
 使用独立 file-prefix、`--no-huge --no-pci`，单次运行限时 60 秒，不绑定物理网卡。
 
 测试通过 `rte_eth_from_rings()` 创建独立 RX/TX 队列，使用正式 runtime、worker、
@@ -76,6 +79,17 @@ mbuf 解析、软件分类和控制服务，生产代码不替换。两个目标
 计数归零，再发包验证 COUNT。停止线程后检查 RX/TX 队列清空、mbuf 池空闲数恢复。
 统计部分还核对端口/队列 RX、TX、字节、丢弃原因和管理查询；额外触发畸形、无路由、出口异常及发送环满，各原因归属正确。故障注入只链接到测试程序，不进入 daemon。这是虚拟 PMD 实际收发测试，不是吞吐基准
 或物理硬件卸载验证；命中软件规则的终止动作仍为 DROP，不宣称验证 MARK 报文转发。
+
+双队列测试在每端口创建两个独立 RX/TX ring，分别由两个正式 worker 处理。队列 0
+每轮 24 包、队列 1 每轮 48 包，核对每个端口和队列、各队列合计及整体统计。
+报文负载包含入口、队列和序号，出口逐包检查，检测串队列、错误出口、重复和遗漏。
+更新失败后每条规则每轮准确新增 24 hits/1536 bytes；恢复后的计数也从零重新验证。
+停止两个 worker 后确认 QSBR 退役链表回收，所有队列清空且 mbuf 池恢复。
+
+`net_ring` 不提供 RSS，而生产设备初始化要求多队列端口具备 RSS。因此测试先完成
+单队列 runtime 初始化，再仅在测试程序中以 mq_mode=NONE 显式配置虚拟 PMD 的两队列，
+绑定第二个正式 worker；生产代码不修改。这验证独立队列上的 worker、分类、统计及
+生命周期，不证明 `dppd --queues 2` 可直接用于 net_ring，也不验证硬件 RSS 分流。
 
 ## 非空软件快照：daemon 重启恢复
 

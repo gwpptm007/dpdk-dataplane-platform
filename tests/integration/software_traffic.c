@@ -9,6 +9,8 @@
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_eth_ring.h>
+#include <rte_ethdev.h>
+#include <rte_lcore.h>
 #include <rte_mbuf.h>
 #include "dppd/control.h"
 #include "dppd/runtime.h"
@@ -16,6 +18,7 @@
 
 #define PACKETS_PER_PORT 24U
 #define ROUNDS 1000U
+#define MAX_QUEUES 2U
 
 static _Thread_local unsigned int fail_allocation;
 void *__real_calloc(size_t count, size_t size);
@@ -32,14 +35,16 @@ struct fixture {
     struct dppd_runtime runtime;
     struct dppd_control_service control;
     struct dppd_control_batch_update_request requests[4];
-    struct rte_ring *rx[2], *tx[2];
+    struct rte_ring *rx[2][MAX_QUEUES], *tx[2][MAX_QUEUES];
     struct rte_mempool *pool;
     uint32_t count;
+    uint16_t queues;
     uint64_t sent, received, forwarded;
+    uint64_t queue_sent[2][MAX_QUEUES], queue_forwarded[2][MAX_QUEUES];
 };
 
 static struct rte_mbuf *make_packet(struct fixture *fixture, uint16_t destination,
-                                    uint16_t ingress)
+                                    uint16_t ingress, uint16_t queue)
 {
     struct rte_mbuf *mbuf = rte_pktmbuf_alloc(fixture->pool);
     uint8_t *data;
@@ -59,6 +64,8 @@ static struct rte_mbuf *make_packet(struct fixture *fixture, uint16_t destinatio
     data[37] = (uint8_t)destination;
     data[39] = 30;
     data[42] = (uint8_t)ingress;
+    data[43] = (uint8_t)queue;
+    memcpy(data + 44, &fixture->queue_sent[ingress][queue], sizeof(uint64_t));
     return mbuf;
 }
 
@@ -67,11 +74,14 @@ static void enqueue_round(struct fixture *fixture)
     uint32_t port, i;
 
     for (port = 0; port < fixture->count / 2; ++port) {
-        for (i = 0; i < PACKETS_PER_PORT; ++i) {
-            struct rte_mbuf *mbuf = make_packet(fixture, (uint16_t)(8000 + i % 3 * 1000),
-                                                (uint16_t)port);
-            assert(rte_ring_enqueue(fixture->rx[port], mbuf) == 0);
-            fixture->sent++;
+        for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+            for (i = 0; i < PACKETS_PER_PORT * (queue + 1U); ++i) {
+                struct rte_mbuf *mbuf = make_packet(fixture, (uint16_t)(8000 + i % 3 * 1000),
+                                                    (uint16_t)port, queue);
+                assert(rte_ring_enqueue(fixture->rx[port][queue], mbuf) == 0);
+                fixture->sent++;
+                fixture->queue_sent[port][queue]++;
+            }
         }
     }
 }
@@ -86,19 +96,26 @@ static void drain_round(struct fixture *fixture)
         uint32_t port;
 
         for (port = 0; port < 2; ++port) {
-            void *object;
+            for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+                void *object;
 
-            while (rte_ring_dequeue(fixture->tx[port], &object) == 0) {
-                struct rte_mbuf *mbuf = object;
-                struct dppd_packet packet;
-                const uint8_t *data = rte_pktmbuf_mtod(mbuf, const uint8_t *);
+                while (rte_ring_dequeue(fixture->tx[port][queue], &object) == 0) {
+                    struct rte_mbuf *mbuf = object;
+                    struct dppd_packet packet;
+                    const uint8_t *data = rte_pktmbuf_mtod(mbuf, const uint8_t *);
+                    uint64_t sequence;
 
-                assert(dppd_packet_parse_mbuf(mbuf, &packet) == DPPD_PARSE_OK);
-                assert(packet.l4_dst_port_be == rte_cpu_to_be_16(10000));
-                assert(packet.packet_len == 64 && data[42] == 1 - port);
-                assert((mbuf->ol_flags & RTE_MBUF_F_RX_FDIR_ID) == 0);
-                fixture->forwarded++;
-                rte_pktmbuf_free(mbuf);
+                    assert(dppd_packet_parse_mbuf(mbuf, &packet) == DPPD_PARSE_OK);
+                    assert(packet.l4_dst_port_be == rte_cpu_to_be_16(10000));
+                    assert(packet.packet_len == 64 && data[42] == 1 - port);
+                    assert(data[43] == queue);
+                    memcpy(&sequence, data + 44, sizeof(sequence));
+                    assert(sequence == fixture->queue_forwarded[1 - port][queue] * 3 + 2);
+                    assert((mbuf->ol_flags & RTE_MBUF_F_RX_FDIR_ID) == 0);
+                    fixture->forwarded++;
+                    fixture->queue_forwarded[1 - port][queue]++;
+                    rte_pktmbuf_free(mbuf);
+                }
             }
         }
         dppd_runtime_stats_read(&fixture->runtime, &stats);
@@ -125,6 +142,11 @@ static void toggle(struct fixture *fixture)
         *destination = *destination == rte_cpu_to_be_16(8000) ?
             rte_cpu_to_be_16(9000) : rte_cpu_to_be_16(8000);
     }
+}
+
+static uint64_t hits_per_round(const struct fixture *fixture)
+{
+    return PACKETS_PER_PORT / 3 * fixture->queues * (fixture->queues + 1U) / 2;
 }
 
 static void run_updates(struct fixture *fixture)
@@ -162,7 +184,7 @@ static void run_updates(struct fixture *fixture)
             assert(dppd_software_backend_query_count(&fixture->control.software,
                 fixture->requests[i].rule.id, fixture->requests[i].expected_generation,
                 &hits, &bytes) == 0);
-            assert(hits == before[i] + PACKETS_PER_PORT / 3);
+            assert(hits == before[i] + hits_per_round(fixture));
             assert(bytes == hits * 64);
         }
     }
@@ -184,42 +206,55 @@ static void run_updates(struct fixture *fixture)
 
         assert(dppd_software_backend_query_count(&fixture->control.software,
             fixture->requests[i].rule.id, results[i].generation, &hits, &bytes) == 0);
-        assert(hits == PACKETS_PER_PORT / 3 && bytes == hits * 64);
+        assert(hits == hits_per_round(fixture) && bytes == hits * 64);
     }
 }
 
 static void verify_stats(struct fixture *fixture)
 {
-    struct dppd_stats_values total, sum = {0}, queue;
-    uint64_t per_port_rx = fixture->received / (fixture->count / 2);
+    struct dppd_stats_values total, sum = {0};
 
     for (uint16_t i = 0; i < 2; ++i) {
-        struct dppd_stats_values port;
+        struct dppd_stats_values port, port_sum = {0};
         struct dppd_management_request request = {0};
         struct dppd_management_response response;
         uint16_t id = fixture->runtime.devices.ports[i].port_id;
-        uint64_t expected_rx = i < fixture->count / 2 ? per_port_rx : 0;
-        uint64_t expected_tx = 1U - i < fixture->count / 2 ? per_port_rx / 3 : 0;
-
-        assert(dppd_runtime_stats_query(&fixture->runtime, id, 0, &port) == 0);
-        assert(port.rx_packets == expected_rx && port.tx_packets == expected_tx);
-        assert(port.rx_bytes == expected_rx * 64 && port.tx_bytes == expected_tx * 64);
-        assert(port.policy_drops == expected_rx * 2 / 3 && port.rule_drops == port.policy_drops);
-        assert(port.no_route_drops == 0 && port.egress_drops == 0 && port.tx_drops == 0);
         request.version = DPPD_MANAGEMENT_VERSION;
         request.size = sizeof(request);
         request.operation = DPPD_MANAGEMENT_STATS_QUERY;
         request.payload.stats_query.port_id = id;
-        request.payload.stats_query.queue_id = 0;
-        assert(dppd_management_handle(&fixture->control, &fixture->runtime.devices,
-                                      &fixture->runtime, &request, &response) == 0);
-        assert(response.status == 0 && memcmp(&response.payload.stats, &port, sizeof(port)) == 0);
-        dppd_stats_accumulate(&sum, &port);
+        for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+            uint64_t expected_rx = fixture->queue_sent[i][queue];
+            uint64_t expected_tx = fixture->queue_forwarded[1 - i][queue];
+
+            assert(dppd_runtime_stats_query(&fixture->runtime, id, queue, &port) == 0);
+            assert(port.rx_packets == expected_rx && port.tx_packets == expected_tx);
+            assert(port.rx_bytes == expected_rx * 64 && port.tx_bytes == expected_tx * 64);
+            assert(port.policy_drops == expected_rx * 2 / 3 && port.rule_drops == port.policy_drops);
+            assert(port.no_route_drops == 0 && port.egress_drops == 0 && port.tx_drops == 0);
+            request.payload.stats_query.queue_id = queue;
+            assert(dppd_management_handle(&fixture->control, &fixture->runtime.devices,
+                                          &fixture->runtime, &request, &response) == 0);
+            assert(response.status == 0 && memcmp(&response.payload.stats, &port, sizeof(port)) == 0);
+            dppd_stats_accumulate(&port_sum, &port);
+        }
+        assert(dppd_runtime_stats_query(&fixture->runtime, id, DPPD_STATS_ALL, &port) == 0);
+        assert(memcmp(&port_sum, &port, sizeof(port)) == 0);
+        dppd_stats_accumulate(&sum, &port_sum);
     }
     dppd_runtime_stats_read(&fixture->runtime, &total);
     assert(memcmp(&sum, &total, sizeof(total)) == 0);
-    assert(dppd_runtime_stats_query(&fixture->runtime, DPPD_STATS_ALL, 0, &queue) == 0);
-    assert(memcmp(&queue, &total, sizeof(total)) == 0);
+    memset(&sum, 0, sizeof(sum));
+    for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+        struct dppd_stats_values values;
+        uint64_t rx = fixture->queue_sent[0][queue] + fixture->queue_sent[1][queue];
+
+        assert(dppd_runtime_stats_query(&fixture->runtime, DPPD_STATS_ALL, queue, &values) == 0);
+        assert(values.rx_packets == rx && values.tx_packets == rx / 3);
+        assert(values.policy_drops == rx * 2 / 3);
+        dppd_stats_accumulate(&sum, &values);
+    }
+    assert(memcmp(&sum, &total, sizeof(total)) == 0);
 }
 
 static void verify_drop_reasons(struct fixture *fixture)
@@ -228,7 +263,7 @@ static void verify_drop_reasons(struct fixture *fixture)
         struct dppd_stats_values before, after, ingress, egress;
         struct dppd_forwarding_snapshot snapshot = fixture->runtime.snapshot;
         uint16_t peer = fixture->runtime.devices.ports[0].peer_port_id;
-        struct rte_mbuf *mbuf = make_packet(fixture, 10000, 0);
+        struct rte_mbuf *mbuf = make_packet(fixture, 10000, 0, 0);
         const uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
 
         dppd_runtime_stats_read(&fixture->runtime, &before);
@@ -243,13 +278,13 @@ static void verify_drop_reasons(struct fixture *fixture)
         else if (scenario == 2)
             fixture->runtime.devices.ports[0].peer_port_id = UINT16_MAX;
         else {
-            unsigned int slots = rte_ring_free_count(fixture->tx[1]);
+            unsigned int slots = rte_ring_free_count(fixture->tx[1][0]);
             for (unsigned int i = 0; i < slots; ++i) {
-                struct rte_mbuf *filler = make_packet(fixture, 10000, 0);
-                assert(rte_ring_enqueue(fixture->tx[1], filler) == 0);
+                struct rte_mbuf *filler = make_packet(fixture, 10000, 0, 0);
+                assert(rte_ring_enqueue(fixture->tx[1][0], filler) == 0);
             }
         }
-        assert(rte_ring_enqueue(fixture->rx[0], mbuf) == 0);
+        assert(rte_ring_enqueue(fixture->rx[0][0], mbuf) == 0);
         assert(dppd_runtime_start(&fixture->runtime) == 0);
         do {
             dppd_runtime_stats_read(&fixture->runtime, &after);
@@ -277,13 +312,54 @@ static void verify_drop_reasons(struct fixture *fixture)
         fixture->runtime.devices.ports[0].peer_port_id = peer;
         if (scenario == 3) {
             void *object;
-            while (rte_ring_dequeue(fixture->tx[1], &object) == 0)
+            while (rte_ring_dequeue(fixture->tx[1][0], &object) == 0)
                 rte_pktmbuf_free(object);
         }
     }
 }
 
-static void run_case(uint32_t count)
+static void configure_test_queues(struct fixture *fixture)
+{
+    unsigned int lcore;
+
+    if (fixture->queues == 1)
+        return;
+    for (uint16_t i = 0; i < 2; ++i) {
+        struct dppd_port *port = &fixture->runtime.devices.ports[i];
+        struct rte_eth_conf config = {0};
+        struct rte_eth_dev_info info;
+
+        assert(rte_eth_dev_stop(port->port_id) == 0);
+        config.txmode.offloads = port->configured_tx_offloads;
+        assert(rte_eth_dev_info_get(port->port_id, &info) == 0);
+        assert(rte_eth_dev_configure(port->port_id, fixture->queues, fixture->queues, &config) == 0);
+        for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+            assert(rte_eth_rx_queue_setup(port->port_id, queue, 128, port->socket_id,
+                &info.default_rxconf, fixture->pool) == 0);
+            assert(rte_eth_tx_queue_setup(port->port_id, queue, 128, port->socket_id,
+                &info.default_txconf) == 0);
+        }
+        assert(rte_eth_dev_start(port->port_id) == 0);
+    }
+    RTE_LCORE_FOREACH_WORKER(lcore) {
+        struct dppd_worker *worker = &fixture->runtime.workers[1];
+
+        if (lcore == fixture->runtime.workers[0].lcore_id)
+            continue;
+        worker->runtime = &fixture->runtime;
+        worker->lcore_id = lcore;
+        worker->queue_id = 1;
+        dppd_stats_init(&worker->stats);
+        for (uint16_t port = 0; port < 2; ++port)
+            dppd_stats_init(&worker->port_stats[port]);
+        fixture->runtime.nb_workers = fixture->queues;
+        fixture->runtime.config.nb_queues = fixture->queues;
+        return;
+    }
+    assert(false);
+}
+
+static void run_case(uint32_t count, uint16_t queues)
 {
     struct fixture fixture = {0};
     struct dppd_config config;
@@ -291,6 +367,7 @@ static void run_case(uint32_t count)
     unsigned int available;
 
     fixture.count = count;
+    fixture.queues = queues;
     dppd_config_defaults(&config);
     config.nb_ports = 2;
     config.nb_queues = 1;
@@ -303,21 +380,24 @@ static void run_case(uint32_t count)
         char name[32];
         int port;
 
-        snprintf(name, sizeof(name), "traffic_rx_%u_%u", count, i);
-        fixture.rx[i] = rte_ring_create(name, 1024, rte_socket_id(),
-                                         RING_F_SP_ENQ | RING_F_SC_DEQ);
-        snprintf(name, sizeof(name), "traffic_tx_%u_%u", count, i);
-        fixture.tx[i] = rte_ring_create(name, 1024, rte_socket_id(),
-                                         RING_F_SP_ENQ | RING_F_SC_DEQ);
-        assert(fixture.rx[i] != NULL && fixture.tx[i] != NULL);
-        snprintf(name, sizeof(name), "traffic_port_%u_%u", count, i);
-        port = rte_eth_from_rings(name, &fixture.rx[i], 1, &fixture.tx[i], 1,
+        for (uint16_t queue = 0; queue < queues; ++queue) {
+            snprintf(name, sizeof(name), "rx_%u_%u_%u_%u", count, queues, i, queue);
+            fixture.rx[i][queue] = rte_ring_create(name, 1024, rte_socket_id(),
+                                                    RING_F_SP_ENQ | RING_F_SC_DEQ);
+            snprintf(name, sizeof(name), "tx_%u_%u_%u_%u", count, queues, i, queue);
+            fixture.tx[i][queue] = rte_ring_create(name, 1024, rte_socket_id(),
+                                                    RING_F_SP_ENQ | RING_F_SC_DEQ);
+            assert(fixture.rx[i][queue] != NULL && fixture.tx[i][queue] != NULL);
+        }
+        snprintf(name, sizeof(name), "traffic_port_%u_%u_%u", count, queues, i);
+        port = rte_eth_from_rings(name, fixture.rx[i], queues, fixture.tx[i], queues,
                                    rte_socket_id());
         assert(port >= 0);
         config.ports[i] = (uint16_t)port;
     }
     assert(dppd_runtime_init(&fixture.runtime, &config) == 0);
     fixture.pool = fixture.runtime.devices.pools[fixture.runtime.devices.ports[0].socket_id];
+    configure_test_queues(&fixture);
     available = rte_mempool_avail_count(fixture.pool);
     assert(dppd_control_init(&fixture.control, &fixture.runtime.devices.topology, count, NULL) == 0);
     for (i = 0; i < count; ++i) {
@@ -345,6 +425,9 @@ static void run_case(uint32_t count)
     run_updates(&fixture);
     dppd_runtime_request_stop(&fixture.runtime);
     assert(dppd_runtime_wait(&fixture.runtime) == 0);
+    assert(dppd_software_backend_contains_version(&fixture.control.software,
+        fixture.requests[0].rule.id, fixture.requests[0].expected_generation));
+    assert(fixture.control.software.retired == NULL);
     {
         char directory[] = "/tmp/dppd-traffic-replay-XXXXXX";
         char path[128];
@@ -380,13 +463,16 @@ static void run_case(uint32_t count)
         drain_round(&fixture);
         dppd_runtime_request_stop(&fixture.runtime);
         assert(dppd_runtime_wait(&fixture.runtime) == 0);
+        assert(dppd_software_backend_contains_version(&fixture.control.software,
+            fixture.requests[0].rule.id, fixture.requests[0].expected_generation));
+        assert(fixture.control.software.retired == NULL);
         for (i = 0; i < count; ++i) {
             uint64_t hits, bytes;
 
             assert(dppd_software_backend_query_count(&fixture.control.software,
                 fixture.requests[i].rule.id, fixture.requests[i].expected_generation,
                 &hits, &bytes) == 0);
-            assert(hits == PACKETS_PER_PORT / 3 && bytes == hits * 64);
+            assert(hits == hits_per_round(&fixture) && bytes == hits * 64);
         }
         verify_stats(&fixture);
         verify_drop_reasons(&fixture);
@@ -395,24 +481,32 @@ static void run_case(uint32_t count)
     }
     assert(rte_mempool_avail_count(fixture.pool) == available);
     for (i = 0; i < 2; ++i)
-        assert(rte_ring_empty(fixture.rx[i]) && rte_ring_empty(fixture.tx[i]));
+        for (uint16_t queue = 0; queue < queues; ++queue)
+            assert(rte_ring_empty(fixture.rx[i][queue]) && rte_ring_empty(fixture.tx[i][queue]));
     dppd_runtime_destroy(&fixture.runtime);
     for (i = 0; i < 2; ++i) {
-        rte_ring_free(fixture.rx[i]);
-        rte_ring_free(fixture.tx[i]);
+        for (uint16_t queue = 0; queue < queues; ++queue) {
+            rte_ring_free(fixture.rx[i][queue]);
+            rte_ring_free(fixture.tx[i][queue]);
+        }
     }
-    printf("PASS rules=%u updates=%u rx=%" PRIu64 " forwarded=%" PRIu64
+    printf("PASS rules=%u queues=%u updates=%u rx=%" PRIu64 " forwarded=%" PRIu64
            " dropped=%" PRIu64 " allocation-failures=%u replay=passed stats=passed"
            " drop-reasons=passed mbuf-leaks=0\n",
-           count, ROUNDS + 1, fixture.received, fixture.forwarded,
+           count, queues, ROUNDS + 1, fixture.received, fixture.forwarded,
            fixture.received - fixture.forwarded, count + 2);
 }
 
 int main(int argc, char **argv)
 {
     assert(rte_eal_init(argc, argv) >= 0);
-    run_case(2);
-    run_case(4);
+    assert(rte_lcore_count() >= 2);
+    run_case(2, 1);
+    run_case(4, 1);
+    if (rte_lcore_count() >= 3) {
+        run_case(2, 2);
+        run_case(4, 2);
+    }
     assert(rte_eal_cleanup() == 0);
     return 0;
 }
