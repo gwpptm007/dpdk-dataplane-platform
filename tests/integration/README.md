@@ -196,6 +196,38 @@ RSS 验收失败，程序返回非零；`errors=4096` 来自每包缺少 RSS has
 接收端日志为 `/tmp/dppd-rss-validation/rss-uio-tcp.log`、
 `rss-vfio-tcp-without-checksum.log` 和 `rss-vfio-tcp-with-checksum.log`。
 
+### Linux 原生驱动对照：缩小 RSS 问题范围
+
+`rss_kernel_probe.py` 不需要 root，不切换驱动，也不修改网卡配置；使用正常
+TCP socket 建立 64 个连接，每个连接传输 64 条带流编号及序号的数据记录。
+接收端逐字节核对内容，并比较 vmxnet3 的逐队列单播 RX 计数。队列计数包含
+TCP 握手、ACK 等网络报文，不等于应用数据记录数；其他同时运行的流量也可能
+影响计数，测试时应保持数据网段空闲。只有一个队列收到流量时返回非零。
+
+```bash
+# 接收端：出现 KERNEL_TCP_READY 后再启动发送端
+python3 tests/integration/rss_kernel_probe.py receive --interface ens192
+# 发送端
+python3 tests/integration/rss_kernel_probe.py send
+```
+
+2026-10-02 对照结果：Linux `ethtool` 显示 Combined=8、receive-hashing=on、
+Toeplitz 和覆盖 8 个队列的 RETA，但实际流量仍只有队列 0 收包。
+先用构造的 TCP 报文测试，队列 0 单播计数增加 4098（包含额外 ARP 等包），
+其余 7 个队列均为 0；再使用正常 TCP 连接，64 个连接和 4096 条数据记录全部
+核对通过，队列 0 增加 320 个单播报文，其余队列均为 0。保存后的对照脚本
+使用端口 10002 复跑，结果相同，按预期返回 1；日志为
+`/tmp/dppd-rss-validation/kernel-probe.log`。
+
+这将问题范围缩小到当前 Workstation/VMnet3 数据路径，说明现象并非只存在于
+DPDK 测试程序或构造报文中；尚未证明当前产品版本普遍不支持 RSS，具体宿主
+实现原因仍未确定。生产 RSS 配置保持原样，本环境继续以单队列进行真实 PMD
+验收；多队列 RSS 验收需要经过对照验证能够实际分流的环境。
+资料中的 `ethernetX.pnicFeatures=4` 来自
+[VMware/Intel DPDK Summit 2014，第 22 页](https://www.dpdk.org/wp-content/uploads/sites/23/2014/09/DPDK-SFSummit2014-VMwareIntelVirtualization.pdf)，
+针对 ESXi 物理网卡 RSS，不据此推断它能修复本次 Workstation VMnet3 问题，
+本轮未添加该设置、未重启虚拟机、未修改生产代码或两端网络配置。
+
 ## 非空软件快照：daemon 重启恢复
 
 ```bash
