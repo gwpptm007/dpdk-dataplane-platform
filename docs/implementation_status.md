@@ -51,7 +51,10 @@
 - 双 `net_null` 完成 worker、统计、telemetry 和退出生命周期 smoke test；
 - VMware `vmxnet3` 数据口 `ens192`（PCI `0000:0b:00.0`）通过真实 PMD probe、能力读取、queue setup、start/stop；
 - 测试后已恢复 `vmxnet3`、`192.168.100.1/24` 和初始大页配置；
-- 当前缺少连接到 `192.168.100.0/24` 的外部发包端，尚未形成真实 RX/TX 内容证据。
+- 2026-10-02 已将外部发包机 `.134` 的数据口接到 `VMnet3` 并设置
+  `192.168.100.2/24`；指定接收端数据 MAC 的定向 ARP、ping 3/3 和 Linux UDP
+  实际收包 256 包/64 流通过，序号及负载完整。发送端配置已保存但未重启验证。
+  此证据来自 Linux 内核网络路径，DPDK PMD 收包、RSS 分流和转发仍待验证。
 - 双 TAP 上的 software-only TCP+MARK+COUNT+DROP 规则已验证真实报文阻断和 `hits=1/bytes=76`；该证明来自平台软件路径，不把 TAP 误当成 MARK/COUNT 硬件验收。
 - 软件 classifier 已从 rwlock 规则表切换为不可变 snapshot：worker 注册 QSBR reader、每轮完整 ingress 扫描报告静默点；控制面仅在所有 reader 越过发布 token 后回收旧 snapshot。
 - 测试机以双 `net_ring` 常驻运行 worker，连续完成 40 次 software-only 规则发布/删除；管理 socket 仍可响应、daemon 正常退出且 socket 清理成功，覆盖了 QSBR reader 注册、静默点与旧 snapshot 回收路径。
