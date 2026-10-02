@@ -22,6 +22,7 @@ int main(int argc, char **argv)
 {
     struct rte_eth_dev_info info;
     struct rte_eth_conf conf = {0};
+    struct rte_eth_rxconf rx_conf;
     struct rte_mempool *pool = NULL;
     struct rte_mbuf *burst[32];
     unsigned char seen[PACKETS] = {0};
@@ -55,8 +56,8 @@ int main(int argc, char **argv)
            info.driver_name, info.max_rx_queues, info.max_tx_queues,
            info.flow_type_rss_offloads);
     if (info.max_rx_queues < QUEUES || info.max_tx_queues < QUEUES ||
-        !(info.flow_type_rss_offloads & RTE_ETH_RSS_NONFRAG_IPV4_UDP)) {
-        fprintf(stderr, "two queues and IPv4 UDP RSS are required\n");
+        !(info.flow_type_rss_offloads & RTE_ETH_RSS_IPV4)) {
+        fprintf(stderr, "two queues and IPv4 RSS are required\n");
         goto cleanup;
     }
     pool = rte_pktmbuf_pool_create("rss_receive_pool", 8191, 0, 0,
@@ -64,17 +65,22 @@ int main(int argc, char **argv)
     if (pool == NULL)
         goto cleanup;
     conf.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
+    conf.intr_conf.rxq = 1;
+    conf.rxmode.offloads = info.rx_offload_capa &
+        (RTE_ETH_RX_OFFLOAD_RSS_HASH | RTE_ETH_RX_OFFLOAD_CHECKSUM);
     conf.rx_adv_conf.rss_conf.rss_hf =
         (RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP | RTE_ETH_RSS_TCP) &
         info.flow_type_rss_offloads;
     if (rte_eth_dev_configure(port, QUEUES, QUEUES, &conf) != 0)
         goto cleanup;
     configured = 1;
+    rx_conf = info.default_rxconf;
+    rx_conf.offloads = conf.rxmode.offloads;
     if (rte_eth_dev_adjust_nb_rx_tx_desc(port, &rx_desc, &tx_desc) != 0)
         goto cleanup;
     for (uint16_t q = 0; q < QUEUES; ++q) {
         if (rte_eth_rx_queue_setup(port, q, rx_desc, rte_socket_id(),
-                                  &info.default_rxconf, pool) != 0 ||
+                                  &rx_conf, pool) != 0 ||
             rte_eth_tx_queue_setup(port, q, tx_desc, rte_socket_id(),
                                   &info.default_txconf) != 0)
             goto cleanup;
@@ -82,7 +88,7 @@ int main(int argc, char **argv)
     if (rte_eth_dev_start(port) != 0)
         goto cleanup;
     started = 1;
-    printf("RSS_RECEIVER_READY packets=%u flows=%u queues=%u rss=0x%" PRIx64 "\n",
+    printf("RSS_RECEIVER_READY packets=%u flows=%u queues=%u rss=0x%" PRIx64 " source_ip=per-flow\n",
            PACKETS, FLOWS, QUEUES, conf.rx_adv_conf.rss_conf.rss_hf);
     fflush(stdout);
     deadline = rte_get_timer_cycles() + 60 * rte_get_timer_hz();
@@ -90,16 +96,23 @@ int main(int argc, char **argv)
         for (uint16_t q = 0; q < QUEUES; ++q) {
             uint16_t count = rte_eth_rx_burst(port, q, burst, 32);
             for (uint16_t i = 0; i < count; ++i) {
-                unsigned char buffer[62];
-                const unsigned char *data = rte_pktmbuf_read(burst[i], 0, sizeof(buffer), buffer);
-                if (data != NULL && memcmp(data + 42, "DPPRSS01", 8) == 0) {
-                    uint64_t flow = read_be(data + 50, 4);
-                    uint64_t sequence = read_be(data + 54, 8);
-                    if (rte_pktmbuf_pkt_len(burst[i]) < sizeof(buffer) ||
+                unsigned char buffer[74];
+                const unsigned char *data = rte_pktmbuf_read(burst[i], 0, 62, buffer);
+                unsigned int payload_offset = 42;
+                if (data != NULL && data[23] == 6) {
+                    data = rte_pktmbuf_read(burst[i], 0, 74, buffer);
+                    payload_offset = 54;
+                }
+                if (data != NULL && memcmp(data + payload_offset, "DPPRSS01", 8) == 0) {
+                    uint64_t flow = read_be(data + payload_offset + 8, 4);
+                    uint64_t sequence = read_be(data + payload_offset + 12, 8);
+                    if (rte_pktmbuf_pkt_len(burst[i]) < payload_offset + 20 ||
                         read_be(data + 12, 2) != 0x0800 || data[14] != 0x45 ||
-                        data[23] != 17 || read_be(data + 16, 2) != 48 ||
-                        read_be(data + 38, 2) != 28 ||
-                        read_be(data + 26, 4) != 0xc0a86402 ||
+                        (data[23] != 17 && data[23] != 6) ||
+                        read_be(data + 16, 2) != payload_offset + 6 ||
+                        (data[23] == 17 && read_be(data + 38, 2) != 28) ||
+                        (data[23] == 6 && (data[46] != 0x50 || data[47] != 0x10)) ||
+                        read_be(data + 26, 4) != 0xc0a86402 + flow ||
                         read_be(data + 30, 4) != 0xc0a86401 ||
                         flow >= FLOWS || sequence >= PACKETS ||
                         flow != sequence % FLOWS ||

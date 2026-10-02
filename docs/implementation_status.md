@@ -54,7 +54,12 @@
 - 2026-10-02 已将外部发包机 `.134` 的数据口接到 `VMnet3` 并设置
   `192.168.100.2/24`；指定接收端数据 MAC 的定向 ARP、ping 3/3 和 Linux UDP
   实际收包 256 包/64 流通过，序号及负载完整。发送端配置已保存但未重启验证。
-  此证据来自 Linux 内核网络路径，DPDK PMD 收包、RSS 分流和转发仍待验证。
+  后续独立真实 PMD 测试通过 `net_vmxnet3` 接收各轮 4096 个 UDP/TCP 包，
+  64 条流的地址、端口、序号及负载匹配，无重复或遗漏。UIO 和 VFIO 配置下
+  均为队列 0 收到全部报文、队列 1 为零、无 RSS hash；双队列 RSS 验收未通过，
+  原因尚待定位。未运行平台 worker，不作为平台转发或硬件卸载证明。
+  测试后数据口驱动、地址、路由、大页数量和 VFIO No-IOMMU 参数已恢复；
+  定向 ARP 与 ping 3/3 通过。详见集成测试说明的真实 PMD 收包结果。
 - 双 TAP 上的 software-only TCP+MARK+COUNT+DROP 规则已验证真实报文阻断和 `hits=1/bytes=76`；该证明来自平台软件路径，不把 TAP 误当成 MARK/COUNT 硬件验收。
 - 软件 classifier 已从 rwlock 规则表切换为不可变 snapshot：worker 注册 QSBR reader、每轮完整 ingress 扫描报告静默点；控制面仅在所有 reader 越过发布 token 后回收旧 snapshot。
 - 测试机以双 `net_ring` 常驻运行 worker，连续完成 40 次 software-only 规则发布/删除；管理 socket 仍可响应、daemon 正常退出且 socket 清理成功，覆盖了 QSBR reader 注册、静默点与旧 snapshot 回收路径。

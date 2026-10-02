@@ -91,11 +91,13 @@ mbuf 解析、软件分类和控制服务，生产代码不替换。两个目标
 绑定第二个正式 worker；生产代码不修改。这验证独立队列上的 worker、分类、统计及
 生命周期，不证明 `dppd --queues 2` 可直接用于 net_ring，也不验证硬件 RSS 分流。
 
-## 外部 UDP 发包端与 RSS 验收准备
+## 外部 UDP/TCP 发包端与 RSS 验收
 
 `rss_sender.py` 使用 Linux 自带 Python 的原始以太网 socket，无需安装 Scapy 或
 tcpreplay。默认发送 4096 包、64 个不同 UDP 源端口的流，每秒 1000 包，负载含流
-编号和序号。IPv4/UDP 校验和完整，不修改网卡地址或路由，不绑定接收端网卡。
+编号和序号。`--protocol tcp` 可构造带相同负载的 TCP ACK 测试报文，不建立 TCP
+连接；`--vary-source-ip` 按流编号递增源 IPv4，不给网卡添加这些地址。
+IPv4/UDP/TCP 校验和完整，不修改网卡地址或路由，不绑定接收端网卡。
 
 先在接收端仍由 Linux 管理数据口时确认二层连接，明确指定数据口 MAC：
 
@@ -138,8 +140,10 @@ IPv4/UDP 校验和、端口和负载检查通过；不连通时探测明确失�
 
 `test_rss_receive` 是独立的真实 PMD 双队列验收程序，随 `-Dtests=true` 构建。
 仅允许一个 ethdev，必须用 EAL `-a` 指定数据口；管理口不得绑定给 DPDK。
-测试要求 IPv4 UDP RSS，采用与平台设备初始化相同的 IP/UDP/TCP 能力交集，
-使用 PMD 默认 RSS key/RETA，轮询两个 RX 队列。它不运行平台 worker 或转发。
+测试要求 IPv4 RSS，采用与平台设备初始化相同的 IP/UDP/TCP 能力交集，
+使用 PMD 默认 RSS key/RETA，轮询两个 RX 队列。测试程序额外启用 PMD 支持的
+接收校验和、RSS hash offload 和 RX 队列中断；它不运行平台 worker 或转发。
+期望源 IP 从 `192.168.100.2` 按流编号递增，发送端必须指定 `--vary-source-ip`。
 
 在管理员完成数据口绑定、准备内存并安排退出后恢复原驱动及地址后，启动：
 
@@ -153,7 +157,7 @@ sudo ./build/tests/integration/test_rss_receive -l 0 -a 0000:0b:00.0 \
 ```bash
 sudo python3 tests/integration/rss_sender.py --interface ens160 \
   --destination-mac 00:0c:29:f8:f6:82 --receiver-dpdk \
-  --packets 4096 --flows 64 --rate 1000
+  --vary-source-ip --protocol tcp --packets 4096 --flows 64 --rate 1000
 ```
 
 验收限时 60 秒，要求全部 4096 包、两个队列均非空、RSS hash 标记齐全，且
@@ -161,7 +165,36 @@ sudo python3 tests/integration/rss_sender.py --interface ens160 \
 2026-10-02 接收程序在 `.135` 的 DPDK 21.11.9 上通过 `-Wall -Wextra -Werror`
 编译；独立目录 `/tmp/dppd-rss-validation/source` 内全项目 Meson `-Dwerror=true`
 构建及 16/16 单测通过。无网卡启动确认返回 1 并报告 `no data NIC`。
-接收端 sudo 需要尚未提供的管理员密码，未切换数据口驱动；RSS 实际收包待验证。
+UDP/TCP 报文长度、校验和及负载边界检查也通过。
+
+### 2026-10-02 真实 PMD 收包结果
+
+接收端数据口 PCI `0000:0b:00.0`、PMD `net_vmxnet3`，报告最大 RX 16 / TX 8
+队列和 `rss_capa=0x514`（IPv4、IPv4 TCP、IPv6、IPv6 TCP，不含 UDP RSS）。
+最初只要求 UDP RSS 的测试因此明确拒绝配置；后续改为支持的 IPv4 能力交集，
+使用不同源 IP，并分别发送 UDP 和 TCP 流量。
+
+| 配置 | 报文 | 实际接收 | 遗漏 | 队列 0 | 队列 1 | RSS hash 标记 |
+|---|---|---:|---:|---:|---:|---:|
+| UIO | UDP，64 条流 | 4096 | 0 | 4096 | 0 | 0 |
+| UIO，显式 RSS hash offload | UDP，64 条流 | 4096 | 0 | 4096 | 0 | 0 |
+| UIO，显式 RSS hash offload | TCP，64 条流 | 4096 | 0 | 4096 | 0 | 0 |
+| VFIO No-IOMMU，RX 队列中断 | TCP，64 条流 | 4096 | 0 | 4096 | 0 | 0 |
+| VFIO No-IOMMU，RX 队列中断及接收校验和 | TCP，64 条流 | 4096 | 0 | 4096 | 0 | 0 |
+
+各轮有效报文的地址、端口、流编号、负载和序号匹配，无重复或遗漏，但双队列
+RSS 验收失败，程序返回非零；`errors=4096` 来自每包缺少 RSS hash 标记。
+当前结果只确认真实 PMD 数据口 RX，不证明 RSS 分流、平台 worker 转发或硬件
+规则卸载。VMware、PMD 与设备配置的具体根因尚未确定，不据此修改生产初始化。
+对照 [DPDK 21.11 vmxnet3 实现](https://github.com/DPDK/dpdk/blob/v21.11/drivers/net/vmxnet3/vmxnet3_ethdev.c)
+检查了 RSS hash offload、队列中断及接收校验和相关配置。
+
+测试期间临时配置 128 个 2 MB 大页；VFIO No-IOMMU 模式仅在相关测试期间启用。
+结束后确认数据口回到 `vmxnet3`、`192.168.100.1/24` 和原路由，管理口可用，
+大页数量恢复为 0，VFIO `enable_unsafe_noiommu_mode` 恢复为 `N`。
+恢复后定向 ARP 成功，数据口 ping 3/3、零丢包。未重启虚拟机。
+接收端日志为 `/tmp/dppd-rss-validation/rss-uio-tcp.log`、
+`rss-vfio-tcp-without-checksum.log` 和 `rss-vfio-tcp-with-checksum.log`。
 
 ## 非空软件快照：daemon 重启恢复
 
