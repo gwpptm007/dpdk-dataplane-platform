@@ -481,6 +481,15 @@ static void run_case(uint32_t count, uint16_t queues)
         }
         verify_stats(&fixture);
         verify_drop_reasons(&fixture);
+        assert(dppd_runtime_start(&fixture.runtime) == 0);
+        atomic_store_explicit(&fixture.runtime.devices.ports[1].removed, true,
+                              memory_order_release);
+        atomic_store_explicit(&fixture.runtime.devices.removal_requested, true,
+                              memory_order_release);
+        assert(!atomic_load(&fixture.runtime.stop_requested));
+        assert(dppd_runtime_wait(&fixture.runtime) == 0);
+        assert(!atomic_load(&fixture.runtime.stop_requested));
+        assert(dppd_runtime_start(&fixture.runtime) == -ENODEV);
         assert(dppd_control_fini(&fixture.control) == 0);
         assert(unlink(path) == 0 && rmdir(directory) == 0);
     }
@@ -488,7 +497,7 @@ static void run_case(uint32_t count, uint16_t queues)
     for (i = 0; i < 2; ++i)
         for (uint16_t queue = 0; queue < queues; ++queue)
             assert(rte_ring_empty(fixture.rx[i][queue]) && rte_ring_empty(fixture.tx[i][queue]));
-    dppd_runtime_destroy(&fixture.runtime);
+    assert(dppd_runtime_destroy(&fixture.runtime) == 0);
     for (i = 0; i < 2; ++i) {
         for (uint16_t queue = 0; queue < queues; ++queue) {
             rte_ring_free(fixture.rx[i][queue]);
@@ -497,7 +506,7 @@ static void run_case(uint32_t count, uint16_t queues)
     }
     printf("PASS rules=%u queues=%u updates=%u rx=%" PRIu64 " forwarded=%" PRIu64
            " dropped=%" PRIu64 " allocation-failures=%u replay=passed stats=passed"
-           " drop-reasons=passed mbuf-leaks=0\n",
+           " drop-reasons=passed removal-stop=passed mbuf-leaks=0\n",
            count, queues, ROUNDS + 1, fixture.received, fixture.forwarded,
            fixture.received - fixture.forwarded, count + 2);
 }

@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <rte_errno.h>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
@@ -11,6 +12,30 @@
 
 #define DPPD_DEFAULT_RX_DESC 1024U
 #define DPPD_DEFAULT_TX_DESC 1024U
+
+static void request_removal(struct dppd_device_set *devices, struct dppd_port *port)
+{
+    atomic_store_explicit(&port->removed, true, memory_order_release);
+    atomic_store_explicit(&port->link_state, DPPD_LINK_DOWN, memory_order_release);
+    atomic_store_explicit(&devices->removal_requested, true, memory_order_release);
+}
+
+static int handle_removal(uint16_t port_id, enum rte_eth_event_type event,
+                          void *context, void *ret_param)
+{
+    struct dppd_device_set *devices = context;
+
+    (void)ret_param;
+    if (devices == NULL || event != RTE_ETH_EVENT_INTR_RMV)
+        return 0;
+    for (uint16_t i = 0; i < devices->nb_ports; ++i) {
+        if (devices->ports[i].port_id == port_id) {
+            request_removal(devices, &devices->ports[i]);
+            break;
+        }
+    }
+    return 0;
+}
 
 static int port_socket(uint16_t port_id)
 {
@@ -79,6 +104,8 @@ static int configure_port(struct dppd_port *port,
     port->capabilities.rx_offloads = info.rx_offload_capa;
     port->capabilities.tx_offloads = info.tx_offload_capa;
     port->capabilities.device_capabilities = info.dev_capa;
+    port_conf.intr_conf.rmv = info.dev_flags != NULL &&
+        (*info.dev_flags & RTE_ETH_DEV_INTR_RMV) != 0;
     if (cfg->nb_queues > port->capabilities.max_rx_queues ||
         cfg->nb_queues > port->capabilities.max_tx_queues) {
         fprintf(stderr,
@@ -172,6 +199,7 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
     if (devices == NULL || cfg == NULL)
         return -EINVAL;
     memset(devices, 0, sizeof(*devices));
+    atomic_init(&devices->removal_requested, false);
 
     for (i = 0; i < cfg->nb_ports; ++i) {
         if (!rte_eth_dev_is_valid_port(cfg->ports[i])) {
@@ -180,19 +208,37 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
         }
     }
 
-    rc = create_socket_pools(devices, cfg);
-    if (rc != 0)
-        goto fail;
-
     devices->nb_ports = cfg->nb_ports;
     for (i = 0; i < cfg->nb_ports; ++i) {
         struct dppd_port *port = &devices->ports[i];
         const uint16_t pair_base = (uint16_t)(i & ~1U);
 
         port->port_id = cfg->ports[i];
+        atomic_init(&port->removed, false);
         atomic_init(&port->link_state, DPPD_LINK_UNKNOWN);
         port->peer_port_id = cfg->ports[pair_base + (i % 2U == 0 ? 1U : 0U)];
         port->socket_id = port_socket(port->port_id);
+    }
+
+    rc = create_socket_pools(devices, cfg);
+    if (rc != 0)
+        goto fail;
+
+    for (i = 0; i < cfg->nb_ports; ++i) {
+        struct dppd_port *port = &devices->ports[i];
+
+        rc = rte_eth_dev_callback_register(port->port_id, RTE_ETH_EVENT_INTR_RMV,
+                                            handle_removal, devices);
+        if (rc != 0) {
+            fprintf(stderr, "[dppd] port=%u removal callback registration failed: %d\n",
+                    port->port_id, rc);
+            goto fail;
+        }
+        port->removal_callback_registered = true;
+        if (dppd_devices_removal_requested(devices)) {
+            rc = -ENODEV;
+            goto fail;
+        }
         rc = configure_port(port, cfg, devices->pools[port->socket_id]);
         if (rc != 0) {
             fprintf(stderr, "[dppd] failed to configure port %u: %s (%d)\n",
@@ -211,7 +257,7 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
     return 0;
 
 fail:
-    dppd_devices_stop(devices);
+    (void)dppd_devices_stop(devices);
     return rc;
 }
 
@@ -227,6 +273,13 @@ int dppd_devices_poll_links(struct dppd_device_set *devices)
 
         if (!port->started)
             continue;
+        if (atomic_load_explicit(&port->removed, memory_order_acquire) ||
+            !rte_eth_dev_is_valid_port(port->port_id) ||
+            rte_eth_dev_is_removed(port->port_id)) {
+            request_removal(devices, port);
+            fprintf(stderr, "[dppd] port=%u device removal detected\n", port->port_id);
+            return -ENODEV;
+        }
         previous = atomic_load_explicit(&port->link_state, memory_order_acquire);
         if (previous == DPPD_LINK_UNSUPPORTED)
             continue;
@@ -245,25 +298,69 @@ int dppd_devices_poll_links(struct dppd_device_set *devices)
             fprintf(stderr, "[dppd] port=%u link=%s\n",
                     port->port_id, dppd_link_state_name(next));
     }
-    return 0;
+    return dppd_devices_removal_requested(devices) ? -ENODEV : 0;
 }
 
-void dppd_devices_stop(struct dppd_device_set *devices)
+int dppd_devices_stop(struct dppd_device_set *devices)
 {
     uint16_t i;
     int socket_id;
+    int result = 0;
+    bool all_closed = true;
 
     if (devices == NULL)
-        return;
+        return -EINVAL;
     for (i = 0; i < devices->nb_ports; ++i) {
         struct dppd_port *port = &devices->ports[i];
-        if (port->started)
-            rte_eth_dev_stop(port->port_id);
-        if (port->configured)
-            rte_eth_dev_close(port->port_id);
+        int rc;
+
+        if (!port->removal_callback_registered)
+            continue;
+        do {
+            rc = rte_eth_dev_callback_unregister(port->port_id, RTE_ETH_EVENT_INTR_RMV,
+                                                  handle_removal, devices);
+            if (rc == -EAGAIN) {
+                struct timespec remaining = {.tv_nsec = 1000000L};
+
+                while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR)
+                    ;
+            }
+        } while (rc == -EAGAIN);
+        if (rc != 0) {
+            fprintf(stderr, "[dppd] port=%u removal callback unregister failed: %d\n",
+                    port->port_id, rc);
+            return rc;
+        }
+        port->removal_callback_registered = false;
+    }
+    for (i = 0; i < devices->nb_ports; ++i) {
+        struct dppd_port *port = &devices->ports[i];
+        int rc;
+
+        if (port->started) {
+            rc = rte_eth_dev_stop(port->port_id);
+            if (rc != 0) {
+                fprintf(stderr, "[dppd] port=%u device stop failed: %d\n", port->port_id, rc);
+                if (result == 0)
+                    result = rc;
+            }
+        }
+        if (port->configured) {
+            rc = rte_eth_dev_close(port->port_id);
+            if (rc != 0) {
+                fprintf(stderr, "[dppd] port=%u device close failed: %d; retaining mbuf pools\n",
+                        port->port_id, rc);
+                if (result == 0)
+                    result = rc;
+                all_closed = false;
+                continue;
+            }
+        }
         port->started = false;
         port->configured = false;
     }
+    if (!all_closed)
+        return result;
     for (socket_id = 0; socket_id < RTE_MAX_NUMA_NODES; ++socket_id) {
         if (devices->pools[socket_id] != NULL) {
             const struct rte_mempool *pool = devices->pools[socket_id];
@@ -276,6 +373,7 @@ void dppd_devices_stop(struct dppd_device_set *devices)
         }
     }
     devices->nb_ports = 0;
+    return result;
 }
 
 const struct dppd_port *dppd_devices_find(const struct dppd_device_set *devices,

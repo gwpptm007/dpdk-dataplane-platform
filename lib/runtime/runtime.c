@@ -87,6 +87,8 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
 
     if (runtime == NULL || runtime->workers_started)
         return -EINVAL;
+    if (dppd_devices_removal_requested(&runtime->devices))
+        return -ENODEV;
 
     atomic_store_explicit(&runtime->stop_requested, false, memory_order_release);
     /* worker 失败时先置 stop，再 wait 已经启动的 lcore，确保其 QSBR reader 都能注销。 */
@@ -197,10 +199,10 @@ void dppd_runtime_stats_dump(const struct dppd_runtime *runtime)
            total.rx_malformed, total.rx_unsupported, total.policy_drops, total.tx_drops);
 }
 
-void dppd_runtime_destroy(struct dppd_runtime *runtime)
+int dppd_runtime_destroy(struct dppd_runtime *runtime)
 {
     if (runtime == NULL)
-        return;
+        return -EINVAL;
     /* 先停止 worker，再销毁设备；否则 worker 仍可能访问已停止 port 或软件 backend。 */
     if (runtime->workers_started) {
         dppd_runtime_request_stop(runtime);
@@ -210,5 +212,5 @@ void dppd_runtime_destroy(struct dppd_runtime *runtime)
         (void)rte_pdump_uninit();
         runtime->pdump_initialized = false;
     }
-    dppd_devices_stop(&runtime->devices);
+    return dppd_devices_stop(&runtime->devices);
 }

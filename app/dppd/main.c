@@ -138,6 +138,11 @@ int main(int argc, char **argv)
          * 唯一允许的状态转换是 reconcile-retry 成功后进入 RESTART_REQUIRED。
          */
         while (!stop_signal) {
+            loop_error = dppd_devices_poll_links(&runtime.devices);
+            if (loop_error != 0) {
+                fprintf(stderr, "[dppd] device monitoring failed during recovery isolation\n");
+                break;
+            }
             loop_error = dppd_management_poll(&management);
             if (loop_error != 0) {
                 fprintf(stderr,
@@ -178,12 +183,10 @@ int main(int argc, char **argv)
         if (!recovery_isolation && config.duration_s != 0 &&
             now - started_at >= timer_hz * config.duration_s)
             break;
-        if (!recovery_isolation) {
-            loop_error = dppd_devices_poll_links(&runtime.devices);
-            if (loop_error != 0) {
-                fprintf(stderr, "[dppd] device monitoring failed; stopping workers\n");
-                break;
-            }
+        loop_error = dppd_devices_poll_links(&runtime.devices);
+        if (loop_error != 0) {
+            fprintf(stderr, "[dppd] device monitoring failed; stopping workers\n");
+            break;
         }
         if (!recovery_isolation && now >= next_stats) {
             dppd_runtime_stats_dump(&runtime);
@@ -246,7 +249,9 @@ cleanup_control:
     if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)
         rc = EXIT_FAILURE;
 cleanup_runtime:
-    dppd_runtime_destroy(&runtime);
+    if (dppd_runtime_destroy(&runtime) != 0 ||
+        dppd_devices_removal_requested(&runtime.devices))
+        rc = EXIT_FAILURE;
 cleanup_eal:
     if (rte_eal_cleanup() != 0 && rc == EXIT_SUCCESS)
         rc = EXIT_FAILURE;

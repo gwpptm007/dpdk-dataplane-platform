@@ -409,7 +409,7 @@ python3 tests/integration/link_failure.py --build-dir build
 两组 net_ring 进程测试在保存非空软件规则后，显式触发 ENODEV/EIO 查询错误；
 确认 daemon 失败码 1 退出、worker 和 socket 清理、1024 个 mbuf 全部归还、快照
 字节不变。卸载测试库重新启动后，规则、generation 和 clean 状态恢复，正常退出。
-测试库只覆盖 API 报错路径，不证明设备真的拔除；热拔插和重新枚举尚未实现。
+测试库只覆盖 API 报错路径，不证明设备真的拔除；物理热拔插未验收，进程内重新枚举未实现。
 初始 ENOTSUP 标记 unsupported 并保持原转发，无法提供链路保护；已监控端口后来
 报错则退出。约 100 ms 主循环不是检测延迟的硬上限，切换前在途报文不承诺无损。
 软件出口保护不控制硬件 flow。严格构建、17/17 单测、四组普通 net_ring 收发均通过；
@@ -576,3 +576,80 @@ snapshot 重启，检查旧 rule/generation/priority 全部恢复，并正常退
 
 2026-09-26 两组用例已通过。此重启测试使用模拟 flow handle，不能作为非空 software
 snapshot 或真实硬件的恢复证据。脚本支持 `--lcores`，无需 sudo，临时进程与目录自行清理。
+
+## 设备移除通知、回调生命周期与重启
+
+```bash
+meson setup build --reconfigure -Dtests=true -Dwerror=true
+meson compile -C build
+python3 tests/integration/removal_failure.py --build-dir build
+```
+
+`removal_faults.c` 是显式 LD_PRELOAD 的独立测试库，不安装且不链接生产程序。
+事件用例通过 DPDK 自己的 ethdev 回调分发器调用生产移除回调；测试代理在回调
+返回后暂留 500 ms，真实 `rte_eth_dev_callback_unregister` 返回 EAGAIN，验证
+主线程等待回调结束后再关闭端口。测试库使用 DPDK 21.11 的 INTERNAL 分发符号，
+只用于已验证的测试环境；生产代码只使用公开 ethdev API。
+相关语义见 [DPDK 21.11 ethdev API](https://doc.dpdk.org/api-21.11/rte__ethdev_8h.html)
+及 [回调实现](https://github.com/DPDK/dpdk/blob/v21.11/lib/ethdev/rte_ethdev.c)。
+
+2026-10-03 在 Ubuntu 22.04.5 / DPDK 21.11.9 上通过 8 组用例：
+
+| 用例 | 触发位置 | 检查 |
+|---|---|---|
+| callback | port 0、port 1 各一组 | 实际 ethdev 事件分发，在途回调注销等待 |
+| callback-no-link | port 1 | 初始 link ENOTSUP 仍接收移除通知 |
+| probe | port 1 | 链路查询正常，is_removed 单独触发停机 |
+| probe-no-link | port 1 | 初始 link ENOTSUP 仍轮询移除状态 |
+| startup-event | port 0、port 1 各一组 | 配置前收到通知，不启动 worker 或开放管理入口 |
+| register-error | port 1 | 第二端口注册失败，注销第一端口回调并清理 |
+
+运行期用例先保存两条不同安装端口的非空软件规则，触发后确认失败码 1、socket
+清理、1024 个 mbuf 全部归还和快照字节不变。使用未加载测试库的 daemon 重启，
+两条规则内容、安装端口和 generation 恢复，clean generation 2、COUNT 从零开始，
+正常退出后再次检查 socket 和缓冲池。启动故障用例确认没有生成快照或管理入口，
+随后正常启动空表。各用例都不能通过链路查询报错来代替移除检测。
+
+四组 `test_software_traffic` 同时检查：运行中的正式 worker 在未设置普通停止
+标记时响应移除标记退出，注销 QSBR 后可清理软件规则；本进程再次启动返回 ENODEV，
+缓冲池与 ring 中无遗漏对象。该验证不声称中途移除时持续流量无损。
+
+18/18 单测通过，新增设备清理失败测试覆盖：stop 失败但 close 成功仍回传错误，
+close 失败继续清理其他端口且保留共享缓冲池，注销失败不继续关闭端口，以及注销
+EAGAIN 重试成功后正常回收。正常路径只有所有端口 close 成功才释放 mbuf pool。
+
+这些测试验证应用处理逻辑和回调生命周期，不改变真实设备状态；没有证明物理
+热拔插、SIGBUS 访问保护、运行中重新枚举或硬件 flow 的故障恢复。
+
+### 真实 vmxnet3 路径的通知注入与恢复
+
+同日在 `.134` 外部发包 → `.135` vmxnet3 port 0 → 正式 worker → TAP port 1 上
+完成一次通知故障退出及一次未加载测试库的快照重启。故障进程单独加载上述库，
+使用 `DPPD_TEST_REMOVAL_MODE=callback`、`DPPD_TEST_REMOVAL_PORT=0` 和独立的
+`DPPD_TEST_REMOVAL_FILE`；在完成初始 TCP/UDP 收发验证后创建触发文件。数据口的
+绑定、原驱动/地址/路由恢复由外层脚本负责，管理口保持可用。
+
+| 通过阶段 | 协议 | 入口 RX | 逐字节转发 | 规则丢弃 |
+|---|---|---:|---:|---:|
+| initial-tcp | TCP | 64 | 0 | 64 |
+| initial-udp | UDP | 64 | 64 | 0 |
+| restored-tcp | TCP | 64 | 0 | 64 |
+| restored-udp | UDP | 64 | 64 | 0 |
+| released-tcp | TCP | 64 | 64 | 0 |
+
+通过阶段共 320 包、22144 bytes，192 包完整帧一致、无重复或遗漏，128 包规则丢弃。
+rule 15003 的 TCP COUNT+DROP 在退出前为 generation 1、64 hits/4736 bytes；
+注入真实 ethdev 分发后观察到回调注销 busy 重试、故障进程退出码 1、socket/TAP
+清理和 8191 个 mbuf 全部归还。快照 SHA-256 不变。重启后规则内容、安装端口和
+generation 保持，COUNT 归零；TCP 仍被阻断并重新计数到 64/4736，UDP 正常转发。
+删除规则后 TCP 恢复，最终空表、clean generation 2，正常退出码 0，8191 个 mbuf
+再次全部归还。
+
+首次 UDP 捕获窗口错过发包，额外 64 包仅有收发计数，没有完整帧捕获，因此排除于
+通过阶段；重新同步后该阶段通过。两个进程另有 TAP 背景 28/25 包、3343/3059 bytes，
+单独核对。包含这些额外流量的两个进程最终分别 RX 220/217、TX 156/153，规则
+丢弃各 64、TX 丢弃为 0。测试后 vmxnet3、数据地址和路由、大页 0、VFIO 参数 N
+恢复，socket/TAP 不存在，定向 ARP 和 ping 3/3 通过。通知由测试库注入，网卡本身
+始终存在；不作为物理热拔插、持续流量中途移除或硬件 flow 恢复验收。
+日志和逐阶段统计在 `/tmp/dppd-rss-validation/pmd-removal-*.log`、
+`pmd-removal-verification.json`。

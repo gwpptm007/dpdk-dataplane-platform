@@ -56,7 +56,7 @@ int dppd_runtime_stats_query(const struct dppd_runtime *runtime,
                               uint16_t port_id, uint16_t queue_id,
                               struct dppd_stats_values *total);
 void dppd_runtime_stats_dump(const struct dppd_runtime *runtime);
-void dppd_runtime_destroy(struct dppd_runtime *runtime);
+int dppd_runtime_destroy(struct dppd_runtime *runtime);
 /** 工作线程入口，负责登记规则读者、处理收发循环，并在返回前注销读者身份 */
 int dppd_worker_main(void *arg);
 

@@ -1,5 +1,12 @@
 # Explicit LD_PRELOAD fixture, never linked into dppd or installed.
 shared_library(
+  'dppd_removal_faults',
+  'removal_faults.c',
+  dependencies: [dpdk, dependency('threads'), meson.get_compiler('c').find_library('dl')],
+  install: false,
+)
+
+shared_library(
   'dppd_link_faults',
   'link_faults.c',
   dependencies: [dpdk, meson.get_compiler('c').find_library('dl')],

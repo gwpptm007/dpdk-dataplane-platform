@@ -32,11 +32,14 @@ struct dppd_port {
     struct rte_ether_addr mac;
     bool configured;
     bool started;
+    bool removal_callback_registered;
+    atomic_bool removed;
     atomic_uint link_state;
 };
 
 struct dppd_device_set {
     uint16_t nb_ports;
+    atomic_bool removal_requested;
     struct dppd_port ports[DPPD_MAX_PORTS];
     struct rte_mempool *pools[RTE_MAX_NUMA_NODES];
     struct dppd_topology topology;
@@ -44,13 +47,18 @@ struct dppd_device_set {
 
 int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config *cfg);
 int dppd_devices_poll_links(struct dppd_device_set *devices);
+static inline bool dppd_devices_removal_requested(const struct dppd_device_set *devices)
+{
+    return atomic_load_explicit(&devices->removal_requested, memory_order_acquire);
+}
 static inline bool dppd_port_tx_available(const struct dppd_port *port)
 {
     const unsigned int state = atomic_load_explicit(&port->link_state, memory_order_acquire);
 
-    return state == DPPD_LINK_UP || state == DPPD_LINK_UNSUPPORTED;
+    return !atomic_load_explicit(&port->removed, memory_order_acquire) &&
+           (state == DPPD_LINK_UP || state == DPPD_LINK_UNSUPPORTED);
 }
-void dppd_devices_stop(struct dppd_device_set *devices);
+int dppd_devices_stop(struct dppd_device_set *devices);
 const struct dppd_port *dppd_devices_find(const struct dppd_device_set *devices,
                                           uint16_t port_id);
 

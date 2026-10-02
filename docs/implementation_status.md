@@ -12,7 +12,7 @@
 |---|---|---|
 | 构建 | 已验证 | Ubuntu 22.04、Meson 0.61.2、DPDK 21.11.9 下完成 `-Werror` 全量编译和链接 |
 | 配置 | 已实现最小 CLI | 端口对、队列、burst、mbuf、统计、duration、promisc、pdump、管理 socket、规则容量 |
-| ethdev | 已实现 baseline 与链路恢复 | capability 交集、RSS、per-socket pool、queue setup、start/stop；链路轮询、出口 down 丢弃、up 自动恢复；查询失败退出重启；热拔插未实现 |
+| ethdev | 已实现 baseline、链路恢复与移除保护 | capability 交集、RSS、per-socket pool、queue setup、start/stop；链路轮询、down 丢弃、up 恢复；移除通知/状态停止 worker，等待回调后退出重启；重新枚举、热重配与物理热拔插验收未完成 |
 | 软件 worker | 已实现 | 每 queue 一个 lcore，所有端口 burst RX/TX，mbuf ownership 完整 |
 | parser | 已实现 baseline | 双 VLAN、ARP、IPv4、fragment、UDP/TCP；IPv6/tunnel 未实现 |
 | 软件策略 | 已实现最小闭环 | malformed drop，其余受支持/未知协议按静态端口对转发 |
@@ -87,6 +87,17 @@
   在恢复期间保持，随后增加至 128/9472，rule generation 和快照字节不变。
   ENODEV/EIO 查询失败的独立进程注入验证退出码 1、快照不变和正常重启恢复；
   这是查询错误路径验证，不证明物理设备热拔插。17/17 单测、四组 net_ring 收发通过。
+  随后接入设备移除回调及状态查询；8 组 net_ring 进程测试覆盖两端口事件、初始
+  link ENOTSUP 下的事件/查询、启动期间事件与第二端口注册失败。实际 DPDK 回调
+  分发和在途回调注销 EAGAIN 重试通过，失败码 1、1024 个 mbuf 归还、旧快照不变，
+  非空两端口规则恢复且 COUNT 重置。四组正式 worker 测试确认移除标记直接结束
+  收发、QSBR 注销和进程内再次启动 ENODEV。补齐 stop/close 失败回传与 close 失败
+  保留缓冲池的回归，18/18 单测及既有故障恢复回归通过。
+  在真实 vmxnet3 → worker → TAP 上注入移除通知，故障退出码 1、8191 个 mbuf
+  归还、快照不变；未加载测试库重启后规则/版本恢复、COUNT 重置、TCP 继续阻断、
+  UDP 转发及删除后的 TCP 转发通过。五个通过阶段 320 包，192 逐字节转发、128
+  规则丢弃；错过捕获窗口的额外 64 UDP 包和 TAP 背景流量单独排除。两次退出
+  资源回收、数据口恢复及 ARP/ping 通过；通知注入不证明物理热拔插。
   这不作为双物理端口、RSS、硬件卸载或吞吐证明。
   测试后数据口驱动、地址、路由、大页数量和 VFIO No-IOMMU 参数已恢复；
   定向 ARP 与 ping 3/3 通过。详见集成测试说明的真实 PMD 收包结果。
@@ -101,7 +112,8 @@
 ## 已知工程限制
 
 - 启动后端口集合和 port-pair snapshot 不动态更新；
-- 已有链路轮询、down 出口保护及 up 自动恢复；device removal 与热重配尚未实现；
+- 已有链路轮询、down 出口保护及 up 自动恢复；移除通知与状态触发失败退出，
+  依赖 PMD 的报告能力；总线访问保护、进程内重新枚举与热重配未实现，物理热拔插未验收；
 - TX 发送不足时立即丢弃，没有软件重试队列；这是可预测的 baseline 策略；
 - 统计支持 worker、port、queue 维度；独立原子采样不承诺逐字段一致时刻，硬件卸载报文不计入软件 worker；
 - RSS key 和 RETA 使用 PMD 默认值；

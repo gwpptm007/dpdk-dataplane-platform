@@ -17,8 +17,16 @@ test('port and queue statistics', stats_test)
 
 device_link_test = executable('test_device_link', 'test_device_link.c',
   dependencies: dppd_core_dep,
-  link_args: ['-Wl,--wrap=rte_eth_link_get_nowait'])
+  link_args: ['-Wl,--wrap=rte_eth_link_get_nowait',
+              '-Wl,--wrap=rte_eth_dev_is_valid_port', '-Wl,--wrap=rte_eth_dev_is_removed'])
 test('device link monitoring', device_link_test)
+
+device_cleanup_test = executable('test_device_cleanup', 'test_device_cleanup.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_eth_dev_stop', '-Wl,--wrap=rte_eth_dev_close',
+              '-Wl,--wrap=rte_eth_dev_callback_unregister',
+              '-Wl,--wrap=rte_mempool_avail_count', '-Wl,--wrap=rte_mempool_free'])
+test('device cleanup failures', device_cleanup_test)
 
 rule_test = executable(
   'test_rule',

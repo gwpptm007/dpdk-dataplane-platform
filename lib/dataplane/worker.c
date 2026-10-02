@@ -31,6 +31,8 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
     uint16_t nb_tx = 0;
     uint16_t i;
 
+    if (dppd_devices_removal_requested(&runtime->devices))
+        return;
     nb_rx = rte_eth_rx_burst(ingress->port_id,
                              worker->queue_id,
                              rx,
@@ -106,7 +108,8 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         tx[nb_tx++] = rx[i];
     }
 
-    if (nb_tx != 0 && !dppd_port_tx_available(egress)) {
+    if (nb_tx != 0 && (dppd_devices_removal_requested(&runtime->devices) ||
+                       !dppd_port_tx_available(egress))) {
         delta.policy_drops += nb_tx;
         delta.egress_drops += nb_tx;
         free_packets(tx, nb_tx);
@@ -169,7 +172,8 @@ int dppd_worker_main(void *arg)
                                               worker->queue_id) != 0)
         return -1;
 
-    while (!atomic_load_explicit(&runtime->stop_requested, memory_order_acquire)) {
+    while (!atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) &&
+           !dppd_devices_removal_requested(&runtime->devices)) {
         uint16_t i;
 
         for (i = 0; i < runtime->devices.nb_ports; ++i)
