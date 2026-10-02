@@ -88,7 +88,8 @@ static int configure_port(struct dppd_port *port,
     }
 
     requested_rss = RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP | RTE_ETH_RSS_TCP;
-    port->configured_rss_hf = requested_rss & port->capabilities.rss_offloads;
+    port->configured_rss_hf = cfg->nb_queues > 1U ?
+        requested_rss & port->capabilities.rss_offloads : 0;
     if (cfg->nb_queues > 1U && port->configured_rss_hf == 0) {
         fprintf(stderr, "[dppd] port %u cannot provide RSS for multiple queues\n",
                 port->port_id);

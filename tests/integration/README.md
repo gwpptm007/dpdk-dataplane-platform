@@ -228,6 +228,77 @@ DPDK 测试程序或构造报文中；尚未证明当前产品版本普遍不支
 针对 ESXi 物理网卡 RSS，不据此推断它能修复本次 Workstation VMnet3 问题，
 本轮未添加该设置、未重启虚拟机、未修改生产代码或两端网络配置。
 
+## 单队列真实 PMD → 正式 worker → TAP 验收
+
+2026-10-02 已在 `.135` 使用正式 `dppd/dppctl`，将真实 `net_vmxnet3` 数据口
+与临时 `net_tap` 出口组成单队列 port-pair。外部 `.134` 从 VMnet3 发包；
+`pmd_traffic_capture.py` 在接收端 TAP 上用原始 socket 捕获完整 Ethernet 帧，
+逐字节比较 MAC、IPv4/UDP 头、校验和、流编号和序号，检测重复、遗漏及丢弃漏包。
+它与 `rss_sender.py` 同目录，无需 Scapy，但捕获需要 root。
+
+管理员准备数据口、内存及退出恢复后，daemon 的本轮启动参数为：
+
+```bash
+sudo ./build/dppd -l 0-1 -a 0000:0b:00.0 \
+  --vdev=net_tap_sq,iface=dppdsqout --iova-mode=pa -m 128 --no-telemetry \
+  --file-prefix=dppd-singlequeue-check -- --ports 0,1 --queues 1 \
+  --mbufs 8191 --cache 0 --control-socket /tmp/dppd-rss-validation/singlequeue.sock \
+  --state-path /tmp/dppd-rss-validation/singlequeue.state --promisc
+```
+
+本轮 `port-show` 确认真实入口为端口 0、TAP 为端口 1；其他环境不能假定编号，
+应先核对 driver/MAC。临时 TAP 的 IPv6 在本轮捕获前禁用，以减少背景流量。
+发送前启动捕获，确认 `CAPTURE_READY`，在捕获窗口内完成发包：
+
+```bash
+sudo python3 tests/integration/pmd_traffic_capture.py --interface dppdsqout \
+  --source-mac 00:0c:29:68:de:da --destination-mac 00:0c:29:f8:f6:82 \
+  --packets 256 --duration 30
+# 发包端另一个终端执行
+sudo python3 tests/integration/rss_sender.py --interface ens160 \
+  --destination-mac 00:0c:29:f8:f6:82 --receiver-dpdk --packets 256
+```
+
+本轮创建的软件规则及 COUNT 查询使用：
+
+```bash
+sudo ./build/dppctl --socket /tmp/dppd-rss-validation/singlequeue.sock \
+  apply-filter 9001 0 0 udp 192.168.100.2/32 192.168.100.1/32 any 10000 drop count software
+sudo ./build/dppctl --socket /tmp/dppd-rss-validation/singlequeue.sock count 9001 1
+sudo ./build/dppctl --socket /tmp/dppd-rss-validation/singlequeue.sock delete 9001 1
+```
+
+实际 generation 必须读取 apply 结果，不能直接复制本轮值。
+DROP 验证使用 `--packets 64 --expect-drop --duration 30`，发包端也发送 64 包。
+仅捕获到零包不能单独证明丢弃，必须同时确认入口 RX、规则 COUNT 及
+`rule_drops` 增量，并保证发包发生在捕获窗口内。本轮复验满足这些条件。
+
+- 初始 256 包全部转发并逐字节匹配，无重复或遗漏。
+- 两次 DROP+COUNT 创建分别得到 generation 1 和 3；每次发 64 包，COUNT
+  均为 `hits=64 bytes=3968`，重新创建后的计数重新开始。generation 3 的
+  发包期间同步捕获，出口没有匹配报文。删除分别推进到 generation 2 和 4。
+- 删除后最终一组 64 包全部转发并逐字节匹配；中间另一组 64 包由出口统计
+  确认转发，因捕获窗口结束未逐包核对，不将其作为内容完整性的证据。
+- 首轮总计入口 `RX=512/31744 bytes`，规则丢弃 128 包，TAP 出口
+  `TX=384/23808 bytes`；无入口畸形、无路由、出口异常或 TX 丢弃。
+  TAP 初始化另有 23 个 IPv6 背景包进入反向路径，整体统计为 RX 535 / TX 407，
+  不将其算入测试 UDP 流量；端口/队列查询可明确区分。
+- 快照 enabled/clean，最终 persisted/current generation 均为 4，repository 为空。
+  修正显示问题后重新启动恢复这一空快照，随后额外 64 包转发及逐字节核对通过。
+
+验收发现单队列 `mq_mode=NONE` 时仍把 RSS 能力交集写入 `configured_rss_hf`，
+导致 `port-show` 错报 `rss-enabled`。已修正为单队列配置值 0；capability 不变，
+多队列逻辑保持原样。严格构建、16/16 单测和真实 daemon 查询通过：入口
+`rss-cap=0x514 rss-enabled=0x0`，TAP `rss-cap=0x3afbc rss-enabled=0x0`。
+
+这是 VMware 虚拟网卡真实 PMD、正式 worker、CLI 软件规则和 TAP 出口的验证，
+不代表双物理端口、双向报文内容、硬件 flow offload、RSS 或吞吐验收。
+两次启动结束后 daemon 正常退出，管理 socket 与临时 TAP 清理，数据口驱动、
+地址和路由恢复；大页回到 0，VFIO No-IOMMU 参数回到 N。
+日志在 `/tmp/dppd-rss-validation/`：`sq-baseline-capture.log`、
+`sq-drop-live-capture.log`、`sq-resume-live-capture.log`、`sq-final-stats.log`、
+`sq-fixed-capture.log` 和 `sq-rss-disabled-port-info.log`。
+
 ## 非空软件快照：daemon 重启恢复
 
 ```bash
