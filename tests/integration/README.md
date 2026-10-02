@@ -352,6 +352,55 @@ control-socket；先保存非空规则，再正常停止进程，以同一 state
 `pmd-replay-final-state.log`、`pmd-replay-stale.log`、三个
 `pmd-replay-*-capture.log` 及 `pmd-replay-verification.log`。
 
+## 真实 PMD：TCP 过滤、UDP 放行与删除恢复
+
+2026-10-02 使用 `.134` 外部发包和 `.135` 单队列 vmxnet3 → 正式 worker → TAP，
+完成 TCP 报文逐字节转发、软件 TCP COUNT+DROP、UDP 不受影响、快照恢复及删除后
+TCP 转发恢复验证。`pmd_traffic_capture.py` 新增 `--protocol tcp`，识别 TCP 的
+测试负载位置，并核对完整帧；默认 UDP 用法保持一致。
+
+```bash
+# 独立 daemon 已启用 snapshot，入口 port 0，出口 TAP dppdsqout
+sudo build/dppctl --socket /tmp/pmd-tcp.sock apply-filter 13001 0 0 tcp \
+  192.168.100.2/32 192.168.100.1/32 any 10000 drop count software
+
+# 接收端：确认 CAPTURE_READY 后立即从发送端发包
+sudo python3 tests/integration/pmd_traffic_capture.py --interface dppdsqout \
+  --source-mac 00:0c:29:68:de:da --destination-mac 00:0c:29:f8:f6:82 \
+  --protocol tcp --expect-drop --packets 64 --duration 15
+
+# 外部发送端：此前已完成数据口定向 ARP，接收端 DPDK 已接管
+sudo python3 tests/integration/rss_sender.py --interface ens160 \
+  --destination-mac 00:0c:29:f8:f6:82 --receiver-dpdk \
+  --protocol tcp --packets 64 --rate 64
+```
+
+源端口通配使用 `any`；`0` 是精确端口 0，并不会匹配发送器的 20000–20063。
+TCP 测试帧为 74 bytes，UDP 为 62 bytes。UDP 放行时两端改用 `--protocol udp`，
+捕获端去掉 `--expect-drop`；TCP 删除恢复同样去掉该选项。先读取实际 generation，
+再以精确版本查询 COUNT 或删除规则。
+
+| 验收阶段 | 入口 RX 增量 | TAP 出口 TX 增量 | 规则丢弃 | 捕获结果 |
+|---|---:|---:|---:|---|
+| 无规则 TCP | 64 | 64 | 0 | 64 包逐字节一致 |
+| TCP 规则下 UDP | 64 | 64 | 0 | 64 包逐字节一致，TCP COUNT 保持 0 |
+| 快照恢复后 TCP | 64 | 0 | 64 | 无泄漏，COUNT 64 hits/4736 bytes |
+| 删除规则后 TCP | 64 | 64 | 0 | 64 包逐字节一致 |
+
+四个通过阶段合计 256 包、192 转发、64 丢弃，分别按阶段统计增量核对，
+并非某一个进程的总计。规则 13001 在修正源端口后为 generation 2，重启恢复内容
+完全一致且 COUNT 为零；删除后最终 generation 3、空账本、clean snapshot。
+初轮错误源端口配置、捕获窗口错过发包及超时退出前的重复发包不计入上表。
+首个进程达到预设 240 秒测试时限后退出并恢复网卡，随后提高至 600 秒重启，
+重新完成有同步捕获和统计的 TCP DROP 验收。初轮抓到的 TCP 转发来自规则未匹配，
+不作为匹配规则泄漏的证据。
+
+TCP 是有效校验和的原始 ACK 测试帧，不建立 TCP 会话；本轮证明解析、过滤和转发，
+不证明 TCP 连接、RSS、硬件卸载或吞吐。最终 daemon 正常退出，socket/TAP 清理，
+数据口驱动、地址、路由、大页及 VFIO 参数恢复，定向 ARP 和 ping 3/3 通过。
+证据保存在 `/tmp/dppd-rss-validation/pmd-tcp-*.log`，
+`pmd-tcp-verification.log` 自动核对四个阶段的计数、字节、捕获和最终状态。
+
 ## 真实 PMD：满表软件更新与外部连续收包
 
 `pmd_batch_traffic.py` 连接已经启动的独立 daemon；需要 root 捕获 TAP，初始

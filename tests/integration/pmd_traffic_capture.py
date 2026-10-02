@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify unchanged UDP frames at the TAP peer of an external PMD ingress."""
+"""Verify unchanged UDP/TCP frames at the TAP peer of an external PMD ingress."""
 
 import argparse
 import socket
@@ -16,12 +16,15 @@ def main():
     parser.add_argument("--destination-mac", required=True, type=mac_address)
     parser.add_argument("--packets", type=int, default=256)
     parser.add_argument("--flows", type=int, default=64)
+    parser.add_argument("--protocol", choices=("udp", "tcp"), default="udp")
     parser.add_argument("--duration", type=float, default=6)
     parser.add_argument("--expect-drop", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.packets <= 1000000 or not 1 <= args.flows <= 4096 or not 1 <= args.duration <= 60:
         parser.error("invalid packet count, flow count or capture duration")
     seen = set()
+    payload_offset = 54 if args.protocol == "tcp" else 42
+    protocol_number = 6 if args.protocol == "tcp" else 17
     try:
         with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as capture:
             capture.bind((args.interface, 0))
@@ -33,16 +36,19 @@ def main():
                     packet = capture.recv(65535)
                 except socket.timeout:
                     continue
-                if len(packet) < 62 or packet[42:50] != b"DPPRSS01":
+                if (len(packet) < payload_offset + 20 or packet[12:14] != b"\x08\x00" or
+                        packet[23] != protocol_number or
+                        packet[payload_offset:payload_offset + 8] != b"DPPRSS01"):
                     continue
-                flow, sequence = struct.unpack("!IQ", packet[50:62])
+                flow, sequence = struct.unpack("!IQ", packet[payload_offset + 8:payload_offset + 20])
                 if args.expect_drop:
                     raise RuntimeError(f"dropped traffic leaked to TAP: sequence={sequence}")
                 if sequence >= args.packets or flow != sequence % args.flows or sequence in seen:
                     raise RuntimeError(f"unexpected or duplicate sequence={sequence} flow={flow}")
                 expected = frame(args.source_mac, args.destination_mac,
                                  socket.inet_aton("192.168.100.2"),
-                                 socket.inet_aton("192.168.100.1"), flow, sequence)
+                                 socket.inet_aton("192.168.100.1"), flow, sequence,
+                                 args.protocol)
                 if packet != expected:
                     raise RuntimeError(f"frame changed: sequence={sequence}")
                 seen.add(sequence)
