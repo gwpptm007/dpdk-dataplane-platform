@@ -136,6 +136,33 @@ IPv4/UDP 校验和、端口和负载检查通过；不连通时探测明确失�
 该收包证据来自 Linux 内核网络路径；尚未验证 DPDK RSS 分流。配置已保存，
 本轮未重启虚拟机验证重启恢复。
 
+`test_rss_receive` 是独立的真实 PMD 双队列验收程序，随 `-Dtests=true` 构建。
+仅允许一个 ethdev，必须用 EAL `-a` 指定数据口；管理口不得绑定给 DPDK。
+测试要求 IPv4 UDP RSS，采用与平台设备初始化相同的 IP/UDP/TCP 能力交集，
+使用 PMD 默认 RSS key/RETA，轮询两个 RX 队列。它不运行平台 worker 或转发。
+
+在管理员完成数据口绑定、准备内存并安排退出后恢复原驱动及地址后，启动：
+
+```bash
+sudo ./build/tests/integration/test_rss_receive -l 0 -a 0000:0b:00.0 \
+  --file-prefix=dppd-rss-check
+```
+
+看到 `RSS_RECEIVER_READY` 后，在已通过数据 MAC 探测的发送端执行：
+
+```bash
+sudo python3 tests/integration/rss_sender.py --interface ens160 \
+  --destination-mac 00:0c:29:f8:f6:82 --receiver-dpdk \
+  --packets 4096 --flows 64 --rate 1000
+```
+
+验收限时 60 秒，要求全部 4096 包、两个队列均非空、RSS hash 标记齐全，且
+每条流的队列及 hash 稳定。检查地址、端口、负载及序号，无重复或遗漏才成功。
+2026-10-02 接收程序在 `.135` 的 DPDK 21.11.9 上通过 `-Wall -Wextra -Werror`
+编译；独立目录 `/tmp/dppd-rss-validation/source` 内全项目 Meson `-Dwerror=true`
+构建及 16/16 单测通过。无网卡启动确认返回 1 并报告 `no data NIC`。
+接收端 sudo 需要尚未提供的管理员密码，未切换数据口驱动；RSS 实际收包待验证。
+
 ## 非空软件快照：daemon 重启恢复
 
 ```bash

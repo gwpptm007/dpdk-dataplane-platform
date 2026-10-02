@@ -1,4 +1,11 @@
 # Explicit LD_PRELOAD fixture, never linked into dppd or installed.
+executable(
+  'test_rss_receive',
+  'rss_receive.c',
+  dependencies: dpdk,
+  install: false,
+)
+
 shared_library(
   'dppd_flow_faults',
   'flow_faults.c',
