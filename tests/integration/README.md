@@ -91,6 +91,43 @@ mbuf 解析、软件分类和控制服务，生产代码不替换。两个目标
 绑定第二个正式 worker；生产代码不修改。这验证独立队列上的 worker、分类、统计及
 生命周期，不证明 `dppd --queues 2` 可直接用于 net_ring，也不验证硬件 RSS 分流。
 
+## 外部 UDP 发包端与 RSS 验收准备
+
+`rss_sender.py` 使用 Linux 自带 Python 的原始以太网 socket，无需安装 Scapy 或
+tcpreplay。默认发送 4096 包、64 个不同 UDP 源端口的流，每秒 1000 包，负载含流
+编号和序号。IPv4/UDP 校验和完整，不修改网卡地址或路由，不绑定接收端网卡。
+
+先在接收端仍由 Linux 管理数据口时确认二层连接，明确指定数据口 MAC：
+
+```bash
+sudo python3 tests/integration/rss_sender.py --interface ens160 \
+  --destination-mac 00:0c:29:f8:f6:82 --probe-only
+```
+
+定向 ARP 必须收到指定 MAC 的响应；Linux 可能从管理口回答其他接口的 IP，
+仅 ping 通目标 IP 或收到广播 ARP 响应不足以证明数据口可达。
+完成探测并让 DPDK 接管接收端数据口后，才使用：
+
+```bash
+sudo python3 tests/integration/rss_sender.py --interface ens160 \
+  --destination-mac 00:0c:29:f8:f6:82 --receiver-dpdk
+```
+
+`--receiver-dpdk` 跳过 ARP，因为 DPDK 收包程序可能不回答 ARP；该参数不是连通性
+证明。`--dry-run` 只构造报文，不打开原始 socket、不发包。`SENT` 仅表示发送端
+提交成功，RSS 验收还需接收端逐队列统计、序号和丢包证据。上述 MAC 是本次
+VMware 测试环境数据口，其他环境必须替换。多流并不保证 PMD 将包分到不同队列。
+
+2026-10-02：已登录 `.134` 并取得管理员权限，发送工具放在
+`/tmp/dppd-rss-sender.py`。数据口 `ens160` 当前为 `192.168.1.5/24`；接收端
+`.135` 数据口为 `ens192` / `192.168.100.1/24`。从发送端 `ens160` 和 `ens33`
+向接收端数据 MAC 的定向 ARP 均未获得响应。广播探测在 `ens33` 收到的是接收端
+管理 MAC `00:0c:29:f8:f6:6e`，不能作为数据口连通证据。需将发送端数据网卡与
+接收端数据网卡接到同一个 VMware 网络，再继续实际 RSS 收包验收。
+发送端已通过 dry-run，以及流编号 0/63/4095、序号 0/65535/65536 的报文长度、
+IPv4/UDP 校验和、端口和负载检查；指定数据 MAC 的 `--probe-only` 明确失败退出，
+未发送 UDP 数据。尚未验证实际 UDP 接收或 RSS 分流。
+
 ## 非空软件快照：daemon 重启恢复
 
 ```bash
