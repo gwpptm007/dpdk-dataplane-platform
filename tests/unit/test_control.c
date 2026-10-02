@@ -95,6 +95,56 @@ static struct dppd_rule make_rule(uint64_t id)
     return rule;
 }
 
+static void test_full_capacity_apply(const struct dppd_topology *topology,
+                                     const struct dppd_flow_api *api)
+{
+    for (unsigned int software = 0; software < 2; ++software) {
+        struct dppd_control_service service;
+        struct dppd_control_apply_result result;
+        struct dppd_rule rule = make_rule(9000);
+        struct dppd_rule stored;
+        uint64_t next_transaction;
+        int validate_calls, create_calls, remove_calls;
+
+        memset(&fake, 0, sizeof(fake));
+        fake.fail_create_at = -1;
+        fake.fail_remove_at = -1;
+        if (software)
+            rule.fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
+        assert(dppd_control_init(&service, topology, 1, api) == 0);
+        assert(dppd_control_apply(&service, 5, &rule, 0, &result) == 0);
+        next_transaction = service.next_transaction_id;
+        validate_calls = fake.validate_calls;
+        create_calls = fake.create_calls;
+        remove_calls = fake.remove_calls;
+
+        rule.id = 9001;
+        assert(dppd_control_apply(&service, 5, &rule, 0, &result) == -ENOSPC);
+        assert(result.transaction_id == 0);
+        assert(service.next_transaction_id == next_transaction);
+        assert(fake.validate_calls == validate_calls);
+        assert(fake.create_calls == create_calls);
+        assert(fake.remove_calls == remove_calls);
+        assert(dppd_rule_repository_count(&service.rules) == 1);
+        assert(dppd_rule_repository_generation(&service.rules) == 1);
+        assert(dppd_rule_repository_get(&service.rules, 9001, &stored) == -ENOENT);
+        assert(dppd_rte_flow_backend_count(&service.rte_flow) == (software ? 0U : 1U));
+        assert(dppd_software_backend_count(&service.software) == (software ? 1U : 0U));
+        assert(dppd_control_apply(&service, 5, &rule, 1, &result) == -ESTALE);
+
+        rule.id = 9000;
+        rule.priority = 10;
+        assert(dppd_control_apply(&service, 5, &rule, 1, &result) == 0);
+        assert(result.generation == 2);
+        assert(dppd_rule_repository_get(&service.rules, 9000, &stored) == 0);
+        assert(stored.priority == 10 && stored.generation == 2);
+        assert(dppd_rule_repository_count(&service.rules) == 1);
+        assert(dppd_rte_flow_backend_count(&service.rte_flow) == (software ? 0U : 1U));
+        assert(dppd_software_backend_count(&service.software) == (software ? 1U : 0U));
+        assert(dppd_control_fini(&service) == 0);
+    }
+}
+
 int main(void)
 {
     const struct dppd_flow_api api = {
@@ -132,6 +182,10 @@ int main(void)
     topology.nb_endpoints = 2;
     topology.endpoints[0].ethdev_port_id = 5;
     topology.endpoints[1].ethdev_port_id = 6;
+    test_full_capacity_apply(&topology, &api);
+    memset(&fake, 0, sizeof(fake));
+    fake.fail_create_at = -1;
+    fake.fail_remove_at = -1;
     assert(dppd_control_init(&service, &topology, 4, &api) == 0);
 
     rule = make_rule(1000);

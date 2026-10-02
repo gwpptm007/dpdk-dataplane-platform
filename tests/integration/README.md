@@ -352,6 +352,37 @@ control-socket；先保存非空规则，再正常停止进程，以同一 state
 `pmd-replay-final-state.log`、`pmd-replay-stale.log`、三个
 `pmd-replay-*-capture.log` 及 `pmd-replay-verification.log`。
 
+## 真实 PMD：满表软件更新与外部连续收包
+
+`pmd_batch_traffic.py` 连接已经启动的独立 daemon；需要 root 捕获 TAP，初始
+账本为空且 snapshot 已启用。先完成数据口定向 ARP 验证，再把数据口交给 DPDK。
+daemon 使用单队列真实入口 port 0、TAP peer port 1，容量与 `--rules` 相同。
+外部发送端沿用 `rss_sender.py`，固定源/目标 IPv4、UDP 和 1000 pps，不修改测试
+流的端口或负载。可先关闭临时 TAP 的 IPv6，减少反向初始化背景流量。
+
+```bash
+# 接收端：先启动测试，看到 BATCH_TRAFFIC_READY 后再发送
+sudo python3 tests/integration/pmd_batch_traffic.py \
+  --ctl build/dppctl --socket /tmp/pmd-batch.sock \
+  --state-path /tmp/pmd-batch.state --interface dppdsqout --rules 2
+
+# 独立发送端：仅在数据口连通性已确认且接收端 DPDK 接管后使用
+sudo python3 tests/integration/rss_sender.py --interface ens160 \
+  --destination-mac 00:0c:29:f8:f6:82 --receiver-dpdk --packets 10000 --rate 1000
+```
+
+测试不会绑定网卡或启动 daemon，需要调用方负责启动和退出恢复。默认等待首次
+收包及全部收包的总时间最多 45 秒；创建满表规则后验证新增 ENOSPC，随后连续
+50 次更新，检查共享事务与连续版本、收包重叠、全部规则丢弃、出口零泄漏，
+再验证旧版本 ESTALE 和快照不变，最后整批删除到空账本和 clean snapshot。
+每组使用新 state-path 和匹配容量，以 `--rules 4` 重复四规则组。
+
+2026-10-02 两组已在 vmxnet3 上通过，各接收/丢弃 10000 包、50 次批量更新，
+各 23 个更新区间观察到收包增长，最终持久版本 104/208。测试同时发现并修复
+单规则满表新增的 backend/账本不一致问题，容量预检及软硬件回归通过。
+旧新表规则均为 DROP，因此本测试不独立证明逐包完整表切换；也不验证 RSS、
+硬件 flow 或吞吐。具体证据与边界见 [批量更新记录](../../docs/validation_batch_update.md)。
+
 ## 在线恢复隔离：进程级故障注入
 
 ```bash

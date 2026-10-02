@@ -182,6 +182,42 @@ worker 和持久化逻辑照常运行。测试库同样通过 `-Werror` 编译�
 随后使用正式 worker、runtime start/wait、解析、分类、控制和统计代码。
 本轮没有修改生产初始化要求，不验证 daemon 的 net_ring 双队列启动或硬件 RSS。
 
+## 2026-10-02：真实 PMD 收包期间的满容量更新
+
+Ubuntu 22.04.5 / DPDK 21.11.9，以 `.134` 为外部发包端，`.135` 的真实
+vmxnet3 port 0 → 正式单队列 worker → TAP port 1 为接收路径。
+分别以 rule-capacity 2/4 启动独立 daemon，启用独立 snapshot；使用
+`pmd_batch_traffic.py` 经管理 socket 创建满表软件 ETH/DROP，再进行连续更新。
+
+| 规则数/容量 | 成功批次 | 收包增长覆盖的更新区间 | RX/规则丢弃 | TAP TX 增量 | 最后更新版本 | 删除后版本 |
+|---|---:|---:|---:|---:|---|---:|
+| 2/2 | 50 | 23 | 10000/10000 | 0 | 101/102 | 104 |
+| 4/4 | 50 | 23 | 10000/10000 | 0 | 201/202/203/204 | 208 |
+
+每组外部发送 64 流、10000 个 62-byte UDP 测试帧，限速 1000 pps；接收
+RX bytes 增量 620000。同步 AF_PACKET 捕获没有发现测试标记报文泄漏。
+两组另有 19/20 个 TAP 初始化背景包进入反向路径，分别从真实入口发出；
+不计入表中的入口 RX 和 TAP 出口 TX 增量，daemon 全局统计包含这些背景包。
+每批结果均为软件 backend、共享 transaction、按输入顺序推进连续 generation。
+额外新增返回 ENOSPC，旧 generation 批量更新返回 ESTALE，两次拒绝前后
+规则列表及快照 SHA-256 均不变。最终整批删除，账本为空、快照 clean。
+
+首次未修复运行发现单规则新增没有容量预检：先创建第三个软件 backend 对象，
+随后 repository 满表返回错误，被映射成 EUCLEAN，造成 backend 与账本不一致。
+已在控制层新增规则路径中检查容量，保留已有 ID 满表更新及 ESTALE 优先语义。
+新增回归对旧实现明确失败，修复后严格构建及 16/16 单测通过；覆盖硬件 fake
+backend 和软件 backend，拒绝时验证 backend 调用/对象数、账本版本和事务序号
+均不变，满表已有规则仍可更新。首次失败运行不计入上表成功验收。
+
+两组进程正常退出，socket/TAP 清理；数据口恢复 vmxnet3、原 IPv4 地址和数据
+路由，大页恢复 0、VFIO No-IOMMU 参数恢复 N；定向 ARP 和 ping 3/3 通过。
+日志在 `/tmp/dppd-rss-validation/` 的 `pmd-batch-{2,4}-fixed-test.log`、
+`pmd-batch-{2,4}-fixed-final.log` 和对应 daemon/wrapper 日志。
+
+本轮更新前后所有规则均为 DROP，证明真实 PMD 收包期间的 CLI 更新、持续丢弃及
+持久化闭环，不能独立区分每个报文看到完整旧表还是新表；该性质由已有并发快照
+测试验证。也不作为 RSS、物理网卡、硬件批量原子更新或吞吐验收。
+
 ## 证据边界
 
 - net_ring 验证真实 daemon/CLI、软件规则生命周期和 snapshot 写路径，没有注入报文，

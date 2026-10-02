@@ -499,6 +499,8 @@ int dppd_control_apply(struct dppd_control_service *service,
         if (expected_generation != DPPD_RULE_GENERATION_ANY &&
             expected_generation != 0)
             return -ESTALE;
+        if (dppd_rule_repository_count(&service->rules) >= service->rules.capacity)
+            return -ENOSPC;
     }
 
     candidate.generation = dppd_rule_repository_generation(&service->rules) + 1U;
