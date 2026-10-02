@@ -314,6 +314,44 @@ python3 tests/integration/software_replay.py --build-dir build
 正式 worker 发包，确认恢复后的 DROP、COUNT、转发和 mbuf 回收。该收发部分是同一
 EAL 进程内的控制服务恢复，实际进程重启由上述脚本单独验证。
 
+### 真实 vmxnet3 入口：非空快照重启与收包
+
+2026-10-02 在 `.135` 使用单队列真实 vmxnet3 → 正式 worker → TAP port-pair，
+启用独立 `pmd-replay.state`，完成一次真正的 daemon 停止和重新启动。期间每次
+退出均把数据口交还 Linux；再次启动重新绑定数据口，管理口保持可用。
+
+1. 首个进程创建 rule 9101、generation 1、install-port 0，匹配源
+   `192.168.100.2/32`、目标 `192.168.100.1/32`、UDP 目标端口 10000，
+   software-only 的 COUNT+DROP。外部发 64 包，入口 RX、policy/rule drops
+   均为 64，COUNT 为 64 hits/3968 bytes，发包期间 TAP 捕获无匹配报文。
+   快照 enabled/clean，persisted/current generation 均为 1。
+2. 停止首个进程并启动新进程，没有重新 apply 规则。查询确认完整规则内容、
+   generation 1 和安装端口 0 保持一致，COUNT 为 0 hits/0 bytes；快照 SHA-256
+   与启动前一致。过期 generation 0 的 COUNT 查询返回 ESTALE，CLI 退出码 1。
+3. 重启后外部再次发 64 包，COUNT 重新准确增加到 64 hits/3968 bytes，入口
+   RX 和 policy/rule drops 均为 64，TAP 同步捕获无漏包。
+4. 按 generation 1 删除规则，repository generation 推进到 2；再发 64 包，
+   TAP 捕获全部 64 个 byte-identical 报文，无重复或遗漏。新进程的测试流量
+   统计为入口 RX 128/7936 bytes、规则丢弃 64、出口 TX 64/3968 bytes。
+   最终 repository 为空，快照 clean，persisted/current generation 均为 2。
+
+三段外部测试共 192 包：128 软件策略丢弃、64 逐字节验证转发；两个进程另有
+21/25 个 TAP 初始化背景包进入反向路径，不混入测试流量统计。证据日志自动
+核对规则内容、计数、统计、捕获结果、过期版本及最终持久化状态，通过。
+这证明一次正常进程重启后，真实 PMD 入口的软件规则恢复及实际执行；不证明
+重启期间持续流量无损，也不把 COUNT 当作跨重启持久计数，不涉及硬件 flow 重放。
+
+操作复现时沿用前一节的 daemon/捕获/发送参数，使用独立的 state-path 和
+control-socket；先保存非空规则，再正常停止进程，以同一 state-path 启动，
+确认恢复后的规则及零计数后开始发包。发包应发生在捕获窗口内。
+最终两个进程正常退出，管理 socket 和临时 TAP 清理，数据口驱动、地址和
+数据路由恢复，大页数量 0、VFIO No-IOMMU 参数 N；恢复后定向 ARP 与 ping 3/3 通过。
+
+日志位于 `/tmp/dppd-rss-validation/`：`pmd-replay-before-state.log`、
+`pmd-replay-restored-state.log`、`pmd-replay-after-state.log`、
+`pmd-replay-final-state.log`、`pmd-replay-stale.log`、三个
+`pmd-replay-*-capture.log` 及 `pmd-replay-verification.log`。
+
 ## 在线恢复隔离：进程级故障注入
 
 ```bash
