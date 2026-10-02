@@ -798,7 +798,7 @@ static void print_response(const struct dppd_management_response *response)
                response->payload.pong.rule_count);
         break;
     case DPPD_MANAGEMENT_PORT_GET:
-        printf("port=%u peer=%u kind=%s driver=%s socket=%d state=%s/%s "
+        printf("port=%u peer=%u kind=%s driver=%s socket=%d state=%s/%s link=%s "
                "queues(rx=%u,tx=%u) reta=%u mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
                response->payload.port.port_id,
                response->payload.port.peer_port_id,
@@ -808,6 +808,7 @@ static void print_response(const struct dppd_management_response *response)
                response->payload.port.socket_id,
                response->payload.port.configured ? "configured" : "unconfigured",
                response->payload.port.started ? "started" : "stopped",
+               dppd_link_state_name(response->payload.port.link_state),
                response->payload.port.max_rx_queues,
                response->payload.port.max_tx_queues,
                response->payload.port.reta_size,

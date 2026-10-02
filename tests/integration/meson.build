@@ -1,4 +1,11 @@
 # Explicit LD_PRELOAD fixture, never linked into dppd or installed.
+shared_library(
+  'dppd_link_faults',
+  'link_faults.c',
+  dependencies: [dpdk, meson.get_compiler('c').find_library('dl')],
+  install: false,
+)
+
 executable(
   'test_rss_receive',
   'rss_receive.c',

@@ -259,7 +259,7 @@ static void verify_stats(struct fixture *fixture)
 
 static void verify_drop_reasons(struct fixture *fixture)
 {
-    for (uint16_t scenario = 0; scenario < 4; ++scenario) {
+    for (uint16_t scenario = 0; scenario < 5; ++scenario) {
         struct dppd_stats_values before, after, ingress, egress;
         struct dppd_forwarding_snapshot snapshot = fixture->runtime.snapshot;
         uint16_t peer = fixture->runtime.devices.ports[0].peer_port_id;
@@ -277,12 +277,14 @@ static void verify_drop_reasons(struct fixture *fixture)
             fixture->runtime.snapshot.nb_peers = 0;
         else if (scenario == 2)
             fixture->runtime.devices.ports[0].peer_port_id = UINT16_MAX;
-        else {
+        else if (scenario == 3) {
             unsigned int slots = rte_ring_free_count(fixture->tx[1][0]);
             for (unsigned int i = 0; i < slots; ++i) {
                 struct rte_mbuf *filler = make_packet(fixture, 10000, 0, 0);
                 assert(rte_ring_enqueue(fixture->tx[1][0], filler) == 0);
             }
+        } else {
+            atomic_store(&fixture->runtime.devices.ports[1].link_state, DPPD_LINK_DOWN);
         }
         assert(rte_ring_enqueue(fixture->rx[0][0], mbuf) == 0);
         assert(dppd_runtime_start(&fixture->runtime) == 0);
@@ -296,7 +298,8 @@ static void verify_drop_reasons(struct fixture *fixture)
         assert(after.tx_packets == before.tx_packets);
         assert(after.rx_malformed - before.rx_malformed == (scenario == 0 ? 1U : 0U));
         assert(after.no_route_drops - before.no_route_drops == (scenario == 1 ? 1U : 0U));
-        assert(after.egress_drops - before.egress_drops == (scenario == 2 ? 1U : 0U));
+        assert(after.egress_drops - before.egress_drops ==
+               (scenario == 2 || scenario == 4 ? 1U : 0U));
         assert(after.tx_queue_drops - before.tx_queue_drops == (scenario == 3 ? 1U : 0U));
         {
             struct dppd_stats_values current;
@@ -310,6 +313,8 @@ static void verify_drop_reasons(struct fixture *fixture)
         }
         fixture->runtime.snapshot = snapshot;
         fixture->runtime.devices.ports[0].peer_port_id = peer;
+        if (scenario == 4)
+            atomic_store(&fixture->runtime.devices.ports[1].link_state, DPPD_LINK_UP);
         if (scenario == 3) {
             void *object;
             while (rte_ring_dequeue(fixture->tx[1][0], &object) == 0)

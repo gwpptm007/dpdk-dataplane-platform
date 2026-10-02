@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dppd/control.h"
+#include "dppd/link.h"
 #include "dppd/stats_values.h"
 
 /*
@@ -11,10 +12,10 @@
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /*
- * v8 增加端口和队列统计；v7 增加原子批量更新；v6 增加批量删除；v5 增加批量创建
+ * v9 增加端口链路状态；v8 增加端口和队列统计；v7 增加原子批量更新
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 8U
+#define DPPD_MANAGEMENT_VERSION 9U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -175,6 +176,7 @@ struct dppd_management_port_info {
     uint64_t device_capabilities;
     uint64_t configured_rss_hf;
     uint64_t configured_tx_offloads;
+    uint8_t link_state;
     char switch_name[64];
     char driver_name[64];
 };

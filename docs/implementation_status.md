@@ -12,7 +12,7 @@
 |---|---|---|
 | 构建 | 已验证 | Ubuntu 22.04、Meson 0.61.2、DPDK 21.11.9 下完成 `-Werror` 全量编译和链接 |
 | 配置 | 已实现最小 CLI | 端口对、队列、burst、mbuf、统计、duration、promisc、pdump、管理 socket、规则容量 |
-| ethdev | 已实现 baseline | capability 交集、RSS、per-socket pool、queue setup、start/stop |
+| ethdev | 已实现 baseline 与链路恢复 | capability 交集、RSS、per-socket pool、queue setup、start/stop；链路轮询、出口 down 丢弃、up 自动恢复；查询失败退出重启；热拔插未实现 |
 | 软件 worker | 已实现 | 每 queue 一个 lcore，所有端口 burst RX/TX，mbuf ownership 完整 |
 | parser | 已实现 baseline | 双 VLAN、ARP、IPv4、fragment、UDP/TCP；IPv6/tunnel 未实现 |
 | 软件策略 | 已实现最小闭环 | malformed drop，其余受支持/未知协议按静态端口对转发 |
@@ -27,7 +27,7 @@
 | 虚拟 PMD flow 验证 | TAP 与 net_ring 已验证 | 双 TAP 已验证硬件 DROP/QUEUE；软件 TCP+MARK+COUNT+DROP 有真实报文与计数证据；net_ring 已验证 prefer 回退，见 [待办文档](todo_virtual_flow_backend.md) |
 | 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
 | control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
-| management API | 本机 v8 已验证 | 保留 v6 命令并新增 `RULE_UPDATE_BATCH` 和 `update-drop-batch`，支持 2–4 条精确 generation 的完整替换；CLI 构造同端口 ETH/DROP，完整 IR 可通过管理协议提交 |
+| management API | 本机 v9 已验证 | 保留既有命令；v9 port-show 增加链路状态；v8 stats 及 v7 RULE_UPDATE_BATCH 保留；旧版本客户端被拒绝 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |
 | ACL/LPM/NAT/conntrack | 未实现 | 旧占位实现已删除，需按 stage/snapshot 模型重建 |
 | DPU/SmartNIC 实机 | 未验证 | 需在具体 PMD、固件、representor devargs 上建立能力矩阵 |
@@ -82,6 +82,11 @@
   2026-10-03 补齐真实网卡 ↔ TAP 同时双向转发：UDP/TCP 各方向 30000 包，
   共 120000 包逐字节一致、无重复或遗漏；收发统计交叉匹配，背景流量单独核对。
   退出时缓冲池 8191/8191 全部归还、in-use 0；严格构建和 16/16 单测通过。
+  同日增加链路轮询及出口保护，两次真实 TAP 断开/恢复期间外部 PMD 收到 448 包：
+  192 包逐字节转发、128 包出口断开丢弃、128 包规则丢弃；已有 COUNT 64/4736
+  在恢复期间保持，随后增加至 128/9472，rule generation 和快照字节不变。
+  ENODEV/EIO 查询失败的独立进程注入验证退出码 1、快照不变和正常重启恢复；
+  这是查询错误路径验证，不证明物理设备热拔插。17/17 单测、四组 net_ring 收发通过。
   这不作为双物理端口、RSS、硬件卸载或吞吐证明。
   测试后数据口驱动、地址、路由、大页数量和 VFIO No-IOMMU 参数已恢复；
   定向 ARP 与 ping 3/3 通过。详见集成测试说明的真实 PMD 收包结果。
@@ -96,7 +101,7 @@
 ## 已知工程限制
 
 - 启动后端口集合和 port-pair snapshot 不动态更新；
-- 没有 link-status change、device removal 和热重配处理；
+- 已有链路轮询、down 出口保护及 up 自动恢复；device removal 与热重配尚未实现；
 - TX 发送不足时立即丢弃，没有软件重试队列；这是可预测的 baseline 策略；
 - 统计支持 worker、port、queue 维度；独立原子采样不承诺逐字段一致时刻，硬件卸载报文不计入软件 worker；
 - RSS key 和 RETA 使用 PMD 默认值；

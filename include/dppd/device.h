@@ -2,10 +2,12 @@
 #define DPPD_DEVICE_H
 
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <rte_config.h>
 #include <rte_ether.h>
 #include "dppd/config.h"
+#include "dppd/link.h"
 #include "dppd/topology.h"
 
 struct rte_mempool;
@@ -30,6 +32,7 @@ struct dppd_port {
     struct rte_ether_addr mac;
     bool configured;
     bool started;
+    atomic_uint link_state;
 };
 
 struct dppd_device_set {
@@ -40,6 +43,13 @@ struct dppd_device_set {
 };
 
 int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config *cfg);
+int dppd_devices_poll_links(struct dppd_device_set *devices);
+static inline bool dppd_port_tx_available(const struct dppd_port *port)
+{
+    const unsigned int state = atomic_load_explicit(&port->link_state, memory_order_acquire);
+
+    return state == DPPD_LINK_UP || state == DPPD_LINK_UNSUPPORTED;
+}
 void dppd_devices_stop(struct dppd_device_set *devices);
 const struct dppd_port *dppd_devices_find(const struct dppd_device_set *devices,
                                           uint16_t port_id);

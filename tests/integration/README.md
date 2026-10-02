@@ -352,6 +352,69 @@ control-socket；先保存非空规则，再正常停止进程，以同一 state
 `pmd-replay-final-state.log`、`pmd-replay-stale.log`、三个
 `pmd-replay-*-capture.log` 及 `pmd-replay-verification.log`。
 
+## 链路断开、自动恢复与查询失败
+
+2026-10-03 daemon 主循环接入 `rte_eth_link_get_nowait`，使用原子状态通知 worker，
+管理协议 v9 的 `port-show` 返回链路状态。API 的状态和错误语义见
+[DPDK 21.11 ethdev 文档](https://doc.dpdk.org/api-21.11/rte__ethdev_8h.html)。
+设备启动后先查询一次，随后在主循环查询；PMD 支持时 down/up 更新软件出口保护。
+断开期间入口仍可收包和执行策略，需要转发的报文按 egress drop 释放。
+恢复不重启 worker、不重建规则或计数器，也不改写 snapshot。
+
+`pmd_link_recovery.py` 连接已启动的独立 daemon，入口 port 0、TAP peer port 1、
+空账本、启用 snapshot，两个端口最初均 up。脚本需要 root，操作指定临时 TAP 的
+up/down；不操作管理口。两端先完成定向 ARP，再由 DPDK 接管真实数据口。
+
+```bash
+sudo python3 tests/integration/pmd_link_recovery.py --ctl build/dppctl \
+  --socket /tmp/pmd-link.sock --state-path /tmp/pmd-link.state \
+  --source-mac 00:0c:29:68:de:da --destination-mac 00:0c:29:f8:f6:82
+```
+
+每个 `LINK_READY phase=... protocol=...` 出现后，外部端发送指定协议的 64 包，
+流数保持 64。沿用 `rss_sender.py --receiver-dpdk --packets 64 --rate 1000`，
+根据 phase 选择 `--protocol udp/tcp`；每阶段最多等 45 秒，收齐后观察 1 秒。
+脚本在 down/up 操作后等待 `port-show` 确认状态，再接收该阶段流量。
+
+| 阶段 | 协议 | RX | 转发 | 出口断开丢弃 | 规则丢弃 |
+|---|---|---:|---:|---:|---:|
+| initial-policy | TCP | 64 | 0 | 0 | 64 |
+| baseline | UDP | 64 | 64 | 0 | 0 |
+| down1 | UDP | 64 | 0 | 64 | 0 |
+| up1 | UDP | 64 | 64 | 0 | 0 |
+| down2 | UDP | 64 | 0 | 64 | 0 |
+| up2 | UDP | 64 | 64 | 0 | 0 |
+| policy | TCP | 64 | 0 | 0 | 64 |
+
+真实 vmxnet3 → 正式单队列 worker → TAP 的完整七阶段已通过。测试合计 448 包、
+29312 bytes，192 个 UDP 报文逐字节一致，128 个出口断开丢弃、128 个规则丢弃，
+TX 丢弃为 0。rule 14001、generation 1 的 TCP COUNT+DROP 在两次链路恢复后保持
+内容和版本，快照 SHA-256 不变；已有 COUNT 64 hits/4736 bytes 保持，最终增加到
+128 hits/9472 bytes。删除后空表、clean generation 2。另有 23 个 TAP 初始化背景包、
+2882 bytes 单独核对，不计入表格。
+
+断开时 AF_PACKET 捕获可返回 ENETDOWN，脚本仅在出口 down 的阶段把它视为无可读
+报文，必须同时核对实际入口 RX、egress drops 和出口 TX 增量为 0；恢复后仍逐包
+捕获并检查重复、遗漏和内容。首轮脚本未处理 ENETDOWN 而提前结束，未计入验收。
+最后进程正常退出，8191 个 mbuf 全部归还，socket/TAP 清理；数据口驱动、地址、
+路由、大页 0 和 VFIO 参数 N 恢复，定向 ARP 和 ping 3/3 通过。
+日志在 `/tmp/dppd-rss-validation/pmd-link-final-*.log`。
+
+查询失败使用独立、不可安装且不链接生产程序的 `link_faults.c` 测试库：
+
+```bash
+python3 tests/integration/link_failure.py --build-dir build
+```
+
+两组 net_ring 进程测试在保存非空软件规则后，显式触发 ENODEV/EIO 查询错误；
+确认 daemon 失败码 1 退出、worker 和 socket 清理、1024 个 mbuf 全部归还、快照
+字节不变。卸载测试库重新启动后，规则、generation 和 clean 状态恢复，正常退出。
+测试库只覆盖 API 报错路径，不证明设备真的拔除；热拔插和重新枚举尚未实现。
+初始 ENOTSUP 标记 unsupported 并保持原转发，无法提供链路保护；已监控端口后来
+报错则退出。约 100 ms 主循环不是检测延迟的硬上限，切换前在途报文不承诺无损。
+软件出口保护不控制硬件 flow。严格构建、17/17 单测、四组普通 net_ring 收发均通过；
+新增真实 worker 出口 down 测试验证 egress drop、无 TX 和 mbuf 回收。
+
 ## 真实 PMD 与 TAP：同时双向转发
 
 `pmd_duplex_traffic.py` 在一个接口上同时发送和捕获另一端流量；两端各运行一个

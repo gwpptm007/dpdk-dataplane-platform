@@ -15,6 +15,11 @@ test('runtime configuration', config_test)
 stats_test = executable('test_stats', 'test_stats.c', dependencies: dppd_core_dep)
 test('port and queue statistics', stats_test)
 
+device_link_test = executable('test_device_link', 'test_device_link.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_eth_link_get_nowait'])
+test('device link monitoring', device_link_test)
+
 rule_test = executable(
   'test_rule',
   'test_rule.c',

@@ -178,6 +178,13 @@ int main(int argc, char **argv)
         if (!recovery_isolation && config.duration_s != 0 &&
             now - started_at >= timer_hz * config.duration_s)
             break;
+        if (!recovery_isolation) {
+            loop_error = dppd_devices_poll_links(&runtime.devices);
+            if (loop_error != 0) {
+                fprintf(stderr, "[dppd] device monitoring failed; stopping workers\n");
+                break;
+            }
+        }
         if (!recovery_isolation && now >= next_stats) {
             dppd_runtime_stats_dump(&runtime);
             next_stats = now + (timer_hz * config.stats_period_ms) / 1000U;

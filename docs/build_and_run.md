@@ -34,7 +34,7 @@ meson test -C build --print-errorlogs
 ./build/dppctl stats all 1    # 全部端口的队列 1
 ```
 
-管理协议为 v8，daemon 和 CLI 必须一起更新，v7 客户端返回 EPROTO。不存在的端口或
+管理协议为 v9，daemon 和 CLI 必须一起更新，v8 及更旧客户端返回 EPROTO。不存在的端口或
 队列返回 ENOENT。队列编号是运行配置中的 RX/TX queue id，不是物理 CPU/lcore id。
 这些计数记录本项目软件工作线程实际处理的报文，不是网卡硬件计数；硬件卸载后未进入
 CPU 的报文不会计入。运行时初始化后从零开始，不跨进程重启保存，不提供清零操作。
@@ -48,6 +48,18 @@ CPU 的报文不会计入。运行时初始化后从零开始，不跨进程重�
 端口、队列汇总与整体值。热路径不获取管理锁，按收包批次累计后更新计数器。
 
 ## 普通双端口运行
+
+daemon 启动时和主循环持续查询端口链路；`dppctl port-show PORT` 的 `link` 为
+`up/down/unknown/unsupported`。观察到出口 down 后，worker 继续处理入口规则，
+需要转发到该出口的报文释放并计入入口的 `policy_drops/egress_drops`；恢复 up 后
+自动继续转发，规则、版本、COUNT 和 snapshot 不重建。主循环通常约 100 ms 一轮，
+管理请求与系统调度会影响检测延迟；切换时已进入发送调用的报文仍可能完成。
+
+初次查询返回 ENOTSUP 的 PMD 标记 unsupported，保留既有转发且不再监控该端口。
+其他查询错误或已监控端口后来返回 ENOTSUP 时，daemon 停止并等待 worker，清理后
+以失败码退出；修复设备问题后，从同一 snapshot 重启恢复。链路恢复不等同于设备
+热拔插、重新枚举或队列重建；这些流程尚未实现。软件 worker 的出口保护不约束
+已经硬件卸载的规则。
 
 退出时 daemon 会在停止、关闭所有端口后，释放缓冲池前记录各 NUMA socket 的
 `mbuf pool ... available=... capacity=... in-use=...`。在 PMD 已归还全部描述符

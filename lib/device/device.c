@@ -190,6 +190,7 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
         const uint16_t pair_base = (uint16_t)(i & ~1U);
 
         port->port_id = cfg->ports[i];
+        atomic_init(&port->link_state, DPPD_LINK_UNKNOWN);
         port->peer_port_id = cfg->ports[pair_base + (i % 2U == 0 ? 1U : 0U)];
         port->socket_id = port_socket(port->port_id);
         rc = configure_port(port, cfg, devices->pools[port->socket_id]);
@@ -200,6 +201,9 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
         }
     }
 
+    rc = dppd_devices_poll_links(devices);
+    if (rc != 0)
+        goto fail;
     rc = dppd_topology_discover(cfg, &devices->topology);
     if (rc != 0)
         goto fail;
@@ -209,6 +213,39 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
 fail:
     dppd_devices_stop(devices);
     return rc;
+}
+
+int dppd_devices_poll_links(struct dppd_device_set *devices)
+{
+    if (devices == NULL)
+        return -EINVAL;
+    for (uint16_t i = 0; i < devices->nb_ports; ++i) {
+        struct dppd_port *port = &devices->ports[i];
+        struct rte_eth_link link = {0};
+        unsigned int previous, next;
+        int rc;
+
+        if (!port->started)
+            continue;
+        previous = atomic_load_explicit(&port->link_state, memory_order_acquire);
+        if (previous == DPPD_LINK_UNSUPPORTED)
+            continue;
+        rc = rte_eth_link_get_nowait(port->port_id, &link);
+        if (rc == -ENOTSUP && previous == DPPD_LINK_UNKNOWN) {
+            next = DPPD_LINK_UNSUPPORTED;
+        } else if (rc != 0) {
+            atomic_store_explicit(&port->link_state, DPPD_LINK_DOWN, memory_order_release);
+            fprintf(stderr, "[dppd] port=%u link query failed: %d\n", port->port_id, rc);
+            return rc;
+        } else {
+            next = link.link_status == RTE_ETH_LINK_UP ? DPPD_LINK_UP : DPPD_LINK_DOWN;
+        }
+        atomic_store_explicit(&port->link_state, next, memory_order_release);
+        if (previous != next)
+            fprintf(stderr, "[dppd] port=%u link=%s\n",
+                    port->port_id, dppd_link_state_name(next));
+    }
+    return 0;
 }
 
 void dppd_devices_stop(struct dppd_device_set *devices)

@@ -177,6 +177,7 @@ int main(void)
     devices.ports[0].socket_id = 1;
     devices.ports[0].configured = true;
     devices.ports[0].started = true;
+    atomic_init(&devices.ports[0].link_state, DPPD_LINK_UP);
     devices.ports[0].capabilities.max_rx_queues = 8;
     devices.ports[0].capabilities.max_tx_queues = 4;
     devices.ports[0].capabilities.reta_size = 128;
@@ -298,6 +299,14 @@ int main(void)
     assert(response.payload.port.rss_offloads == 0x11);
     assert(response.payload.port.configured_rss_hf == 0x1);
     assert(strcmp(response.payload.port.driver_name, "fake_pmd") == 0);
+    assert(response.payload.port.link_state == DPPD_LINK_UP);
+    atomic_store(&devices.ports[0].link_state, DPPD_LINK_DOWN);
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.port.link_state == DPPD_LINK_DOWN);
+    request.version = 8;
+    assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);
+    assert(response.status == -EPROTO);
+    request.version = DPPD_MANAGEMENT_VERSION;
 
     request.payload.port_get.port_id = 99;
     assert(dppd_management_handle(&control, &devices, NULL, &request, &response) == 0);

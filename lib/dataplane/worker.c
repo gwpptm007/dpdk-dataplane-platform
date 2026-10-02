@@ -73,7 +73,8 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         }
 
         /** 配对出口必须存在且与决策一致，不能把报文交给另一端口的发送队列 */
-        if (egress == NULL || decision.egress_port != egress->port_id) {
+        if (egress == NULL || decision.egress_port != egress->port_id ||
+            !dppd_port_tx_available(egress)) {
             delta.policy_drops++;
             delta.egress_drops++;
             rte_pktmbuf_free(rx[i]);
@@ -105,6 +106,12 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         tx[nb_tx++] = rx[i];
     }
 
+    if (nb_tx != 0 && !dppd_port_tx_available(egress)) {
+        delta.policy_drops += nb_tx;
+        delta.egress_drops += nb_tx;
+        free_packets(tx, nb_tx);
+        nb_tx = 0;
+    }
     if (nb_tx != 0) {
         const uint16_t sent = rte_eth_tx_burst(egress->port_id,
                                                worker->queue_id,

@@ -71,6 +71,7 @@ static int build_port_info(const struct dppd_device_set *devices,
     output->device_capabilities = port->capabilities.device_capabilities;
     output->configured_rss_hf = port->configured_rss_hf;
     output->configured_tx_offloads = port->configured_tx_offloads;
+    output->link_state = (uint8_t)atomic_load_explicit(&port->link_state, memory_order_acquire);
     memcpy(output->switch_name, endpoint->switch_name,
            sizeof(output->switch_name));
     memcpy(output->driver_name, endpoint->driver_name,
