@@ -352,6 +352,62 @@ control-socket；先保存非空规则，再正常停止进程，以同一 state
 `pmd-replay-final-state.log`、`pmd-replay-stale.log`、三个
 `pmd-replay-*-capture.log` 及 `pmd-replay-verification.log`。
 
+## 真实 PMD 与 TAP：同时双向转发
+
+`pmd_duplex_traffic.py` 在一个接口上同时发送和捕获另一端流量；两端各运行一个
+实例，共用同目录的 `rss_sender.py`。需要 root、已启动的独立 daemon 和已验证
+的实际端口/MAC。先完成数据口 ARP 验证，再把网卡交给 DPDK；测试脚本不绑定网卡
+或修改网络。默认各发送 30000 包、64 流、1000 pps，捕获先启动，5 秒后开始发送，
+接收截止为延迟加发送时长再加 15 秒。最多发送 120 秒、1000000 包。
+
+捕获排除本地 `PACKET_OUTGOING`，逐包核对完整 MAC、IPv4、UDP/TCP 头、校验和、
+流号和序号，并检查重复和遗漏；收齐后仍保留到本地发送完成，再观察 1 秒。
+两端的发送和预期接收参数必须互相对应。下面沿用当前测试机端口与 MAC：
+
+```bash
+# .135：TAP 端，真实网卡 port 0 ↔ TAP port 1 的单队列 daemon 已启动
+sudo python3 tests/integration/pmd_duplex_traffic.py --interface dppdsqout \
+  --tx-destination-mac 00:0c:29:68:de:da \
+  --tx-source-ip 192.168.100.1 --tx-destination-ip 192.168.100.254 \
+  --rx-source-mac 00:0c:29:68:de:da --rx-destination-mac 00:0c:29:f8:f6:82 \
+  --rx-source-ip 192.168.100.2 --rx-destination-ip 192.168.100.1 --protocol udp
+
+# .134：外部端，TAP_MAC 填 .135 本次启动后的 /sys/class/net/dppdsqout/address
+sudo python3 tests/integration/pmd_duplex_traffic.py --interface ens160 \
+  --tx-destination-mac 00:0c:29:f8:f6:82 \
+  --tx-source-ip 192.168.100.2 --tx-destination-ip 192.168.100.1 \
+  --rx-source-mac "$TAP_MAC" --rx-destination-mac 00:0c:29:68:de:da \
+  --rx-source-ip 192.168.100.1 --rx-destination-ip 192.168.100.254 --protocol udp
+```
+
+两端尽量同时启动；分别出现 `DUPLEX_READY` 后自动发送，成功输出 `DUPLEX_PASS`。
+以 `--protocol tcp` 在两端重复。反向目标 IP `.254` 不配置到任何接口，使用明确
+的外部 MAC 投递，供原始 socket 捕获，避免 Linux 为测试 UDP/TCP 生成 ICMP/RST
+干扰统计；不修改主机原有地址、路由或防火墙。TCP 仍是原始 ACK 帧，不建立会话。
+此拓扑验证真实 PMD 和 TAP 的两个转发方向，不是双物理网卡验收。
+
+2026-10-03 在 Ubuntu 22.04.5 / DPDK 21.11.9、正式 daemon 单队列 worker 上通过：
+
+| 协议 | 真实网卡 → TAP | TAP → 真实网卡 | 每方向测试字节 | 捕获结果 |
+|---|---:|---:|---:|---|
+| UDP | 30000 | 30000 | 1860000 | 两端逐字节一致，无重复或遗漏 |
+| TCP | 30000 | 30000 | 2220000 | 两端逐字节一致，无重复或遗漏 |
+
+两轮各约 30 秒同时双向发送，共 120000 个测试报文、8160000 bytes。
+入口 RX 与对端出口 TX 的计数和字节匹配，端口/队列汇总与整体统计一致，畸形、
+策略和发送丢弃均为 0。23 个 TAP 初始化背景包共 2882 bytes，在测试前已进入
+反向路径；TCP 期间另有 1 个 87-byte 背景包经过正向路径，单独核对并排除于上表。
+daemon 最终整体 RX/TX 均为 120024 包、8162969 bytes。
+
+退出时端口关闭后的 socket 0 缓冲池 `available=8191 capacity=8191 in-use=0`，
+证明本次测试的 mbuf 全部归还，不作为其他堆内存或长期运行泄漏的证明。
+快照保持空表、clean generation 0；退出后 socket/TAP 清理，数据口驱动、
+地址、数据路由、大页 0、VFIO No-IOMMU 参数 N 全部恢复，定向 ARP 和 ping 3/3 通过。
+严格构建和 16/16 单测通过。流量限速 1000 pps，不作为吞吐、RSS、硬件卸载或
+TCP 会话验收。接收端证据在 `/tmp/dppd-rss-validation/pmd-duplex-*.log`，
+发送端在 `/tmp/pmd-duplex-{udp,tcp}-external.log`；统计与缓冲池自动核对记录为
+`pmd-duplex-verification.log`。
+
 ## 真实 PMD：TCP 过滤、UDP 放行与删除恢复
 
 2026-10-02 使用 `.134` 外部发包和 `.135` 单队列 vmxnet3 → 正式 worker → TAP，

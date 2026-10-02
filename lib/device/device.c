@@ -229,6 +229,11 @@ void dppd_devices_stop(struct dppd_device_set *devices)
     }
     for (socket_id = 0; socket_id < RTE_MAX_NUMA_NODES; ++socket_id) {
         if (devices->pools[socket_id] != NULL) {
+            const struct rte_mempool *pool = devices->pools[socket_id];
+            const unsigned int available = rte_mempool_avail_count(pool);
+
+            printf("[dppd] mbuf pool socket=%d available=%u capacity=%u in-use=%u\n",
+                   socket_id, available, pool->size, pool->size - available);
             rte_mempool_free(devices->pools[socket_id]);
             devices->pools[socket_id] = NULL;
         }

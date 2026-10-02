@@ -49,6 +49,11 @@ CPU 的报文不会计入。运行时初始化后从零开始，不跨进程重�
 
 ## 普通双端口运行
 
+退出时 daemon 会在停止、关闭所有端口后，释放缓冲池前记录各 NUMA socket 的
+`mbuf pool ... available=... capacity=... in-use=...`。在 PMD 已归还全部描述符
+和缓存对象后，`available` 应等于 `capacity`、`in-use` 应为 0；这可用于核对
+本次进程的 mbuf 回收，不是运行中的空闲容量或全部进程内存泄漏检查。
+
 ```bash
 sudo ./build/dppd \
   -l 0-4 -n 4 \
