@@ -149,6 +149,9 @@ int dppd_control_fini(struct dppd_control_service *service);
 /** 只复制已完成请求的累计值和最近失败，不校验驱动、不查询 COUNT、不修改快照 */
 void dppd_control_rule_metrics(const struct dppd_control_service *service,
                                 struct dppd_rule_metrics *metrics);
+/** 读取本进程成功提交的历史耗时分布，已删除或回滚的样本保留，隔离期间也可查询 */
+void dppd_control_rule_latency(const struct dppd_control_service *service,
+    struct dppd_rule_latency_report *report);
 /**
  * 不安装规则的完整规则探测，允许 ID 尚不存在，探测也不会分配 generation 或事务编号
  * 同时给出驱动校验和已实现的软件等价能力，缓存仅用于诊断，正式 apply 仍重新校验

@@ -1,7 +1,8 @@
 # 本机健康与就绪查询
 
-2026-10-03 最初随管理协议 v10 实现。当前协议为 v13，支持 [规则安装状态](rule_status.md)、
-[能力画像与探测](capability_probe.md) 和 [规则失败与 Telemetry](rule_telemetry.md)。daemon 与 CLI 必须来自同一次构建，v12 及更旧版本返回 `EPROTO`。
+2026-10-03 最初随管理协议 v10 实现。当前协议为 v14，支持 [规则安装状态](rule_status.md)、
+[能力画像与探测](capability_probe.md)、[规则失败与 Telemetry](rule_telemetry.md) 和
+[历史耗时分布](rule_latency.md)。daemon 与 CLI 必须来自同一次构建，v13 及更旧版本返回 `EPROTO`。
 仍采用同机 C 结构体协议，不提供 HTTP 或远程健康接口。
 
 ## 使用方式

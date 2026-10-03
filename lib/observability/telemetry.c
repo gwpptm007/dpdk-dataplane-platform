@@ -28,6 +28,7 @@ struct telemetry_rule {
 /** 一个发布时刻的整体规则信息，与同次发布的规则数组配对 */
 struct telemetry_rules {
     struct dppd_rule_metrics metrics;
+    struct dppd_rule_latency_report latency;
     struct dppd_control_persistence_status persistence;
     uint64_t generation;
     uint32_t count;
@@ -106,6 +107,7 @@ static int build_snapshot(const struct dppd_control_service *control,
 
     memset(summary, 0, sizeof(*summary));
     dppd_control_rule_metrics(control, &summary->metrics);
+    dppd_control_rule_latency(control, &summary->latency);
     dppd_control_persistence_status(control, &summary->persistence);
     summary->generation = control->rules.generation;
     summary->count = control->rules.count;
@@ -351,6 +353,91 @@ static int failures_callback(const char *command, const char *parameters, struct
     return 0;
 }
 
+/**
+ * 每组字段使用独立前缀，区间计数保持互斥，不需要动态分配子容器
+ * 全部三组和十六个上界仍在 DPDK 字典容量内，字段构造失败直接回传错误
+ */
+static int add_latency_scope(struct rte_tel_data *data, enum dppd_rule_latency_scope scope,
+    const struct dppd_rule_latency_summary *summary)
+{
+    const struct dppd_rule_latency_histogram *histogram = &summary->histogram;
+    const char *prefix = dppd_rule_latency_scope_name(scope);
+    char name[64];
+
+#define ADD_HISTOGRAM(field) do { \
+    snprintf(name, sizeof(name), "%s_" #field, prefix); \
+    ADD_U64(name, histogram->field); \
+} while (0)
+    ADD_HISTOGRAM(samples); ADD_HISTOGRAM(unavailable); ADD_HISTOGRAM(rules);
+    ADD_HISTOGRAM(total_ns); ADD_HISTOGRAM(min_ns); ADD_HISTOGRAM(max_ns);
+#undef ADD_HISTOGRAM
+#define ADD_SUMMARY(field) do { \
+    snprintf(name, sizeof(name), "%s_" #field, prefix); \
+    ADD_U64(name, summary->field); \
+} while (0)
+    ADD_SUMMARY(mean_ns); ADD_SUMMARY(p50_upper_ns); ADD_SUMMARY(p95_upper_ns); ADD_SUMMARY(p99_upper_ns);
+#undef ADD_SUMMARY
+    snprintf(name, sizeof(name), "%s_mean_available", prefix);
+    ADD_INT(name, summary->mean_available);
+    snprintf(name, sizeof(name), "%s_quantiles_available", prefix);
+    ADD_INT(name, summary->quantiles_available);
+    snprintf(name, sizeof(name), "%s_total_saturated", prefix);
+    ADD_INT(name, histogram->total_saturated);
+    snprintf(name, sizeof(name), "%s_counters_saturated", prefix);
+    ADD_INT(name, histogram->counters_saturated);
+    for (unsigned int bucket = 0; bucket < DPPD_RULE_LATENCY_BUCKETS; ++bucket) {
+        snprintf(name, sizeof(name), "%s_bucket_%u", prefix, bucket);
+        ADD_U64(name, histogram->buckets[bucket]);
+    }
+    return 0;
+}
+
+/** 从完整发布副本读取历史，过滤只选分组，不触发后端访问或新的计时 */
+static int latency_callback(const char *command, const char *parameters, struct rte_tel_data *data)
+{
+    struct dppd_rule_latency_report report;
+    unsigned int selected = DPPD_RULE_LATENCY_SCOPE_COUNT;
+    uint64_t publication;
+
+    (void)command;
+    if (parameters != NULL && parameters[0] != '\0') {
+        for (unsigned int scope = 0; scope < DPPD_RULE_LATENCY_SCOPE_COUNT; ++scope) {
+            if (strcmp(parameters, dppd_rule_latency_scope_name(scope)) == 0)
+                selected = scope;
+        }
+        if (selected == DPPD_RULE_LATENCY_SCOPE_COUNT)
+            return -EINVAL;
+    }
+    pthread_mutex_lock(&active.lock);
+    if (active.runtime == NULL) {
+        pthread_mutex_unlock(&active.lock);
+        return -EAGAIN;
+    }
+    report = active.summary.latency;
+    publication = active.publication;
+    pthread_mutex_unlock(&active.lock);
+    START_DICT();
+    ADD_U64("publication", publication);
+    ADD_STRING("scope", selected == DPPD_RULE_LATENCY_SCOPE_COUNT ? "all" : dppd_rule_latency_scope_name(selected));
+    ADD_U64("bucket_count", DPPD_RULE_LATENCY_BUCKETS);
+    for (unsigned int bucket = 0; bucket < DPPD_RULE_LATENCY_BUCKETS; ++bucket) {
+        char name[64];
+
+        snprintf(name, sizeof(name), "bucket_%u_upper_ns", bucket);
+        ADD_U64(name, dppd_rule_latency_bucket_upper(bucket));
+    }
+    for (unsigned int scope = 0; scope < DPPD_RULE_LATENCY_SCOPE_COUNT; ++scope) {
+        int rc;
+
+        if (selected != DPPD_RULE_LATENCY_SCOPE_COUNT && selected != scope)
+            continue;
+        rc = add_latency_scope(data, scope, &report.scopes[scope]);
+        if (rc != 0)
+            return rc;
+    }
+    return 0;
+}
+
 /** 注册失败时保留已完成的进度，重试只补剩余命令，所有回调在绑定前都返回不可用 */
 int dppd_telemetry_register(const struct dppd_runtime *runtime,
                             const struct dppd_control_service *control)
@@ -364,6 +451,7 @@ int dppd_telemetry_register(const struct dppd_runtime *runtime,
         {"/dppd/rules", rules_callback, "Rule summary and 64 IDs. Optional: after_id,repository_generation."},
         {"/dppd/rule", rule_callback, "Installed rule snapshot. Required: rule_id."},
         {"/dppd/rule_failures", failures_callback, "Control outcomes and last failure. No parameters."},
+        {"/dppd/rule_latency", latency_callback, "Successful commit history. Optional: software, software_batch or rte_flow."},
     };
     struct telemetry_rule *rows, *work;
     struct telemetry_rules summary;
@@ -412,6 +500,7 @@ int dppd_telemetry_register(const struct dppd_runtime *runtime,
 int dppd_telemetry_publish_rules(const struct dppd_control_service *control)
 {
     struct telemetry_rules summary, previous;
+    struct dppd_rule_latency_report latency;
     struct telemetry_rule *work, *old;
     uint32_t capacity;
     int rc;
@@ -427,6 +516,8 @@ int dppd_telemetry_publish_rules(const struct dppd_control_service *control)
     capacity = active.capacity;
     previous = active.summary;
     pthread_mutex_unlock(&active.lock);
+    /** 后端自身的成功提交也可能没有改变账本，显式对比历史，避免副本漏掉这类变化 */
+    dppd_control_rule_latency(control, &latency);
     if (previous.metrics.operations == control->observation.metrics.operations &&
         previous.generation == control->rules.generation &&
         previous.recovery == control->recovery_state &&
@@ -434,7 +525,8 @@ int dppd_telemetry_publish_rules(const struct dppd_control_service *control)
         previous.persistence.enabled == (control->persistence_path != NULL) &&
         previous.persistence.dirty == control->persistence_dirty &&
         previous.persistence.last_error == control->persistence_last_error &&
-        previous.persistence.persisted_generation == control->persisted_generation)
+        previous.persistence.persisted_generation == control->persisted_generation &&
+        memcmp(&previous.latency, &latency, sizeof(latency)) == 0)
         return 0;
     rc = build_snapshot(control, work, capacity, &summary);
     pthread_mutex_lock(&active.lock);

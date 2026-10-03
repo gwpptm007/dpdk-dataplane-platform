@@ -13,7 +13,7 @@
 #include "dppd/telemetry.h"
 
 /** 保存生产代码实际注册的回调，用真实 DPDK 数据容器验证输出，不启动额外服务进程 */
-static telemetry_cb callbacks[4];
+static telemetry_cb callbacks[5];
 static unsigned int registrations, register_calls, fail_register = 2;
 static _Thread_local unsigned int fail_allocation, fail_field;
 static _Thread_local struct {
@@ -21,6 +21,8 @@ static _Thread_local struct {
     uint64_t total, returned, ids[64];
     unsigned int id_count;
     int more;
+    uint64_t software_samples, software_batch_samples, software_batch_rules, rte_flow_samples;
+    uint64_t software_batch_buckets;
     struct rte_tel_data *container;
 } output;
 static pthread_mutex_t barrier_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -56,9 +58,10 @@ void *__wrap_calloc(size_t count, size_t size)
 /** 第三条命令首次注册失败，用来证明重试不会重复注册前两条已经成功的命令 */
 int __wrap_rte_telemetry_register_cmd(const char *name, telemetry_cb callback, const char *help)
 {
-    static const char *const names[] = {"/dppd/stats", "/dppd/rules", "/dppd/rule", "/dppd/rule_failures"};
+    static const char *const names[] = {"/dppd/stats", "/dppd/rules", "/dppd/rule", "/dppd/rule_failures",
+        "/dppd/rule_latency"};
 
-    assert(registrations < 4 && strcmp(name, names[registrations]) == 0 && help != NULL);
+    assert(registrations < 5 && strcmp(name, names[registrations]) == 0 && help != NULL);
     if (register_calls++ == fail_register)
         return -ENOMEM;
     callbacks[registrations++] = callback;
@@ -73,7 +76,10 @@ int __wrap_rte_tel_data_add_dict_u64(struct rte_tel_data *data, const char *name
 #define CAPTURE(field) if (strcmp(name, #field) == 0) output.field = value;
     CAPTURE(publication) CAPTURE(repository_generation) CAPTURE(generation)
     CAPTURE(operations) CAPTURE(succeeded) CAPTURE(failed) CAPTURE(total) CAPTURE(returned)
+    CAPTURE(software_samples) CAPTURE(software_batch_samples) CAPTURE(software_batch_rules) CAPTURE(rte_flow_samples)
 #undef CAPTURE
+    if (strncmp(name, "software_batch_bucket_", strlen("software_batch_bucket_")) == 0)
+        output.software_batch_buckets += value;
     return __real_rte_tel_data_add_dict_u64(data, name, value);
 }
 
@@ -190,6 +196,10 @@ static void *read_snapshots(void *unused)
         assert(output.generation <= output.repository_generation && output.publication > 0);
         assert(query(1, NULL) == 0);
         assert(output.returned == 64 && output.total == 70 && output.more);
+        /** 同一回应里的历史样本、涉及规则数和互斥区间必须属于同一次完整发布 */
+        assert(query(4, NULL) == 0);
+        assert(output.software_samples == 70 && output.software_batch_rules == 2 * output.software_batch_samples);
+        assert(output.software_batch_buckets == output.software_batch_samples);
         atomic_fetch_add(&samples, 1);
     } while (!atomic_load(&stop_reader));
     return NULL;
@@ -249,7 +259,7 @@ int main(void)
     }
     assert(dppd_telemetry_register(&runtime, &control) == -ENOMEM);
     assert(registrations == 2 && query(1, NULL) == -EAGAIN);
-    assert(dppd_telemetry_register(&runtime, &control) == 0 && registrations == 4 && register_calls == 5);
+    assert(dppd_telemetry_register(&runtime, &control) == 0 && registrations == 5 && register_calls == 6);
     assert(dppd_telemetry_register(&runtime, &control) == -EALREADY);
     assert(query(1, NULL) == 0 && output.id_count == 64 && output.ids[63] == 64 && output.more);
     publication = output.publication;
@@ -262,8 +272,15 @@ int main(void)
     assert(query(1, "64,69") == -ESTALE);
     assert(query(2, NULL) == -EINVAL && query(2, "0") == -EINVAL && query(2, "1,2") == -EINVAL);
     assert(query(2, "999") == -ENOENT && query(3, "1") == -EINVAL && query(0, "1") == -EINVAL);
+    assert(query(4, NULL) == 0 && output.software_samples == 70 && output.rte_flow_samples == 0);
+    assert(query(4, "software") == 0 && output.software_samples == 70);
+    assert(query(4, "software_batch") == 0 && output.software_samples == 0);
+    assert(query(4, "rte_flow") == 0 && output.rte_flow_samples == 0);
+    assert(query(4, "software,1") == -EINVAL && query(4, "wrong") == -EINVAL);
     fail_field = 1;
     assert(query(1, NULL) == -E2BIG);
+    fail_field = 25;
+    assert(query(4, NULL) == -E2BIG);
     fail_allocation = 1;
     assert(dppd_telemetry_publish_rules(&control) == 0 && fail_allocation == 1);
     fail_allocation = 0;
@@ -301,12 +318,18 @@ int main(void)
     assert(query(3, NULL) == 0 && output.operations == operations);
     assert(query(1, NULL) == 0 && output.total == 70);
     assert(query(2, "500") == -ENOENT);
+    assert(query(4, NULL) == 0 && output.rte_flow_samples == 0 && output.software_batch_samples == 300);
     pthread_mutex_lock(&barrier_lock);
     release_create = true;
     pthread_cond_broadcast(&barrier_condition);
     pthread_mutex_unlock(&barrier_lock);
     assert(pthread_join(writer, NULL) == 0);
     assert(query(2, "500") == 0 && query(3, NULL) == 0 && output.operations == operations + 1);
+    assert(query(4, NULL) == 0 && output.rte_flow_samples == 1);
+    /** 即使没有新的账本请求，后端历史变化也必须使显式发布得到新副本 */
+    dppd_rule_latency_record(&control.rte_flow.latency, true, 100, 1);
+    assert(dppd_telemetry_publish_rules(&control) == 0);
+    assert(query(4, NULL) == 0 && output.rte_flow_samples == 2);
 
     /** 退出解绑必须等正在借用 runtime 的统计查询离开，随后所有回调只能报告不可用 */
     block_stats = true;
@@ -324,7 +347,7 @@ int main(void)
     pthread_cond_broadcast(&barrier_condition);
     pthread_mutex_unlock(&barrier_lock);
     assert(pthread_join(reader, NULL) == 0 && pthread_join(detacher, NULL) == 0);
-    for (unsigned int callback = 0; callback < 4; ++callback)
+    for (unsigned int callback = 0; callback < 5; ++callback)
         assert(query(callback, callback == 2 ? "1" : NULL) == -EAGAIN);
     dppd_telemetry_unregister_runtime();
     assert(dppd_control_fini(&control) == 0);

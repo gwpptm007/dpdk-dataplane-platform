@@ -20,15 +20,16 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - 版本化 Unix `SOCK_SEQPACKET` 管理接口和 `dppctl`，支持端口能力查询、generation 稳定分页、完整规则详情、单规则 apply/delete 及硬件 COUNT 查询；
 - DPDK telemetry 的报文统计、完整规则副本、规则安装状态与失败分类，以及可选 pdump 服务；
 - 本机 `rule-metrics` 保留原始错误、补偿错误、失败阶段与已生效标志，详见 [规则失败与 Telemetry](docs/rule_telemetry.md)；
+- 本机 `rule-latency` 和 telemetry 汇总历史成功提交耗时，分别统计软件单条、软件整批与驱动创建，详见 [历史耗时分布](docs/rule_latency.md)；
 - 本机网卡能力画像、完整规则探测和五秒诊断缓存，正式安装仍重新校验，详见 [能力画像与探测](docs/capability_probe.md)；
 - 本机 `rule-status` 查询实际后端、安装端口、COUNT 配置和后端提交耗时，详见 [规则安装状态](docs/rule_status.md)；
 - 本机 `health/ready`、全部未就绪原因、工作线程实际状态和异常结束监控，详见 [健康与就绪](docs/health_readiness.md)。
 
-当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v13）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。跨进程 reconciliation、degraded recovery 和 flow template 是下一阶段工作，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
+当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v14）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。跨进程 reconciliation、degraded recovery 和 flow template 是下一阶段工作，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
 
 ## 快速开始
 
-管理协议 v13 增加 `rule-metrics`，保留 `capability-show`、`probe-drop/probe-filter` 和 `probe-cache-clear`，
+管理协议 v14 增加 `rule-latency`，保留 `rule-metrics`、`capability-show`、`probe-drop/probe-filter` 和 `probe-cache-clear`，
 保留 `rule-status` 的实际后端与提交耗时、`health/ready` 的线程状态和 `port-show` 的链路状态。
 daemon 持续检测链路，出口断开时释放
 需要转发的报文并记录 egress drops，恢复后沿用原规则、COUNT 和 snapshot 自动
@@ -39,6 +40,8 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 通过 `dppctl rule-metrics` 可查询最近失败和本进程累计结果。Telemetry 提供
 `/dppd/rule_failures`、`/dppd/rules` 和 `/dppd/rule,ID`，按完整副本发布规则状态，
 驱动或保存操作尚未完成时仍可读取上一份完整状态。启动重放失败进入隔离时也可查询。
+`dppctl rule-latency` 与 `/dppd/rule_latency[,software|software_batch|rte_flow]` 提供本进程
+成功提交的次数、均值、区间和 P50/P95/P99 上界；删除或回滚保留历史，重启重新累计。
 
 ```bash
 bash scripts/build.sh

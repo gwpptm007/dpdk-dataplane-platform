@@ -230,6 +230,9 @@ static int transaction_commit(void *context,
         object->installation.timing_available = dppd_install_timer_finish(
             &timer, &object->installation.install_duration_ns);
         object->installed = true;
+        /** 复用刚完成的测量，不额外读时钟，也不因之后的事务回滚扣除这次成功创建 */
+        dppd_rule_latency_record(&backend->latency, object->installation.timing_available,
+            object->installation.install_duration_ns, 1);
     }
     return rc;
 }

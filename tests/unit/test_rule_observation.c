@@ -88,6 +88,16 @@ static struct dppd_rule rule(uint64_t id, enum dppd_fallback_policy policy)
     return value;
 }
 
+/** 历史只数成功的后端提交，时钟不可用也算提交，但不能作为零耗时测量 */
+static uint64_t successful_commits(const struct dppd_control_service *control,
+                                 enum dppd_rule_latency_scope scope)
+{
+    struct dppd_rule_latency_report report;
+
+    dppd_control_rule_latency(control, &report);
+    return report.scopes[scope].histogram.samples + report.scopes[scope].histogram.unavailable;
+}
+
 /** 错误分类依赖原始 errno，保存与隔离阶段优先表达业务原因 */
 static void classify_errors(void)
 {
@@ -179,9 +189,10 @@ static void partial_create_isolation(void)
     assert(metrics.last.rule_id == 20 && metrics.last.compensation_rule_id == 20);
     assert(control.recovery_state == DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED);
     assert(dppd_rte_flow_backend_count(&control.rte_flow) == 1 && control.rules.count == 0);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_RTE_FLOW) == 0);
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0);
     assert(response.status == 0 && memcmp(&response.payload.rule_metrics, &metrics, sizeof(metrics)) == 0);
-    request.version = 12;
+    request.version = DPPD_MANAGEMENT_VERSION - 1;
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0);
     assert(response.status == -EPROTO && control.observation.metrics.operations == 1);
     request.version = DPPD_MANAGEMENT_VERSION;
@@ -222,7 +233,9 @@ static void batch_compensation(void)
     assert(last.stage == DPPD_RULE_STAGE_COMMIT && last.cause_code == -EIO);
     assert(last.compensation_rule_id == 30 && last.compensation_code == -EFAULT);
     assert(control.observation.metrics.operations == 1 && control.observation.metrics.failed == 1);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_RTE_FLOW) == 1);
     assert(dppd_control_reconciliation_retry(&control) == 0);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_RTE_FLOW) == 1);
     assert(dppd_control_fini(&control) == 0);
 
     /** 删除第二条失败后重建第一条也失败，仍须保留删除错误和重建错误各自的身份 */
@@ -239,7 +252,27 @@ static void batch_compensation(void)
     assert(last.port_known && last.install_port_id == 5 && last.backend_known);
     assert(last.compensation_rule_id == 30 && last.compensation_code == -EIO);
     assert(control.observation.metrics.operations == 2 && control.observation.metrics.failed == 1);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_RTE_FLOW) == 2);
     assert(dppd_control_reconciliation_retry(&control) == 0);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_RTE_FLOW) == 2);
+    assert(dppd_control_fini(&control) == 0);
+
+    /** 回滚成功时账本仍为空，已经成功创建再删除的第一条必须保留历史样本 */
+    setup(&control, 4);
+    driver.fail_create = 1;
+    assert(dppd_control_create_batch(&control, requests, 2, results) == -EIO);
+    assert(control.rules.count == 0 && dppd_rte_flow_backend_count(&control.rte_flow) == 0);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_RTE_FLOW) == 1);
+    assert(dppd_control_fini(&control) == 0);
+
+    /** 第二条删除失败后成功恢复第一条，恢复的真实创建也属于新的安装历史 */
+    setup(&control, 4);
+    assert(dppd_control_create_batch(&control, requests, 2, results) == 0);
+    driver.fail_remove = 1;
+    assert(dppd_control_remove_batch(&control, deletes, 2, removed) == -EFAULT);
+    assert(control.rules.count == 2 && dppd_rte_flow_backend_count(&control.rte_flow) == 2);
+    assert(control.recovery_state == DPPD_CONTROL_RECOVERY_READY);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_RTE_FLOW) == 3);
     assert(dppd_control_fini(&control) == 0);
 }
 
@@ -269,6 +302,7 @@ static void persistence_failure(void)
     assert(last.stage == DPPD_RULE_STAGE_PERSIST && last.kind == DPPD_RULE_FAILURE_PERSISTENCE);
     assert(last.cause_code == -ENOTDIR && last.response_code == -EUCLEAN && last.applied);
     assert(control.observation.metrics.failed_after_apply == 1 && control.observation.metrics.applied == 1);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_SOFTWARE) == 1);
     value.id = 41;
     assert(dppd_control_apply(&control, 5, &value, 0, &result) == -EUCLEAN);
     assert(!control.observation.metrics.last.applied && control.rules.count == 1);
@@ -279,6 +313,7 @@ static void persistence_failure(void)
     assert(dppd_control_persistence_flush(&control) == 0);
     assert(memcmp(&last, &control.observation.metrics.last, sizeof(last)) == 0);
     assert(!control.persistence_dirty && control.persisted_generation == 1);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_SOFTWARE) == 1);
     assert(dppd_control_fini(&control) == 0);
     assert(unlink(state) == 0 && rmdir(path) == 0);
 }
@@ -304,8 +339,10 @@ static void software_publication_failure(void)
     assert(control.observation.metrics.last.rule_id == 0 && control.observation.metrics.last.rule_count == 2);
     assert(control.observation.metrics.last.stage == DPPD_RULE_STAGE_COMMIT);
     assert(control.observation.metrics.last.backend == DPPD_PLAN_BACKEND_SOFTWARE);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_SOFTWARE_BATCH) == 0);
     assert(dppd_control_update_batch(&control, requests, 2, results) == 0);
     assert(control.rules.generation == 4 && control.observation.metrics.operations == 4);
+    assert(successful_commits(&control, DPPD_RULE_LATENCY_SOFTWARE_BATCH) == 1);
     assert(dppd_control_fini(&control) == 0);
 }
 

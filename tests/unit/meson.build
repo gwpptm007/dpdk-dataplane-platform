@@ -136,6 +136,12 @@ rule_telemetry_test = executable('test_rule_telemetry', 'test_rule_telemetry.c',
               '-Wl,--wrap=dppd_runtime_stats_read'])
 test('rule telemetry publication and lifetime', rule_telemetry_test, timeout: 30)
 
+# 固定区间、分位数与溢出边界，并检查提交计时复用和失败后的历史保留
+rule_latency_test = executable('test_rule_latency', 'test_rule_latency.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=clock_gettime', '-Wl,--wrap=calloc'])
+test('rule commit latency history', rule_latency_test)
+
 dppctl_test = executable(
   'test_dppctl',
   'test_dppctl.c',

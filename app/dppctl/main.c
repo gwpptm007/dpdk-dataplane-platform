@@ -26,6 +26,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] capability-show PORT\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-cache-clear PORT\n", program);
     fprintf(stderr, "  %s [--socket PATH] rule-metrics\n", program);
+    fprintf(stderr, "  %s [--socket PATH] rule-latency\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-drop RULE_ID PORT [PRIORITY] [refresh]\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-filter RULE_ID PORT"
                     " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
@@ -394,8 +395,9 @@ static int build_request(int argc, char **argv,
     uint64_t value;
 
     /** 请求指标不接受额外参数，避免用户误以为能按某个 ID 筛选累计值 */
-    if (argc == 1 && strcmp(argv[0], "rule-metrics") == 0) {
-        initialize_request(request, DPPD_MANAGEMENT_RULE_METRICS);
+    if (argc == 1 && (strcmp(argv[0], "rule-metrics") == 0 || strcmp(argv[0], "rule-latency") == 0)) {
+        initialize_request(request, strcmp(argv[0], "rule-metrics") == 0 ?
+            DPPD_MANAGEMENT_RULE_METRICS : DPPD_MANAGEMENT_RULE_LATENCY);
         return 0;
     }
     /**
@@ -962,6 +964,30 @@ static void print_response(const struct dppd_management_response *response)
 {
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释。 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_RULE_LATENCY:
+        /** 均值和分位数的可用性单独展示，未知时钟不能被当作零耗时样本 */
+        for (unsigned int scope = 0; scope < DPPD_RULE_LATENCY_SCOPE_COUNT; ++scope) {
+            const struct dppd_rule_latency_summary *summary = &response->payload.rule_latency.scopes[scope];
+            const struct dppd_rule_latency_histogram *histogram = &summary->histogram;
+
+            printf("rule-latency scope=%s samples=%" PRIu64 " unavailable=%" PRIu64
+                   " rules=%" PRIu64 " total-ns=%" PRIu64 " min-ns=%" PRIu64 " max-ns=%" PRIu64
+                   " mean-available=%s mean-ns=%" PRIu64 " quantiles-available=%s"
+                   " p50-upper-ns=%" PRIu64 " p95-upper-ns=%" PRIu64 " p99-upper-ns=%" PRIu64
+                   " total-saturated=%s counters-saturated=%s\n",
+                   dppd_rule_latency_scope_name(scope), histogram->samples, histogram->unavailable,
+                   histogram->rules, histogram->total_ns, histogram->min_ns, histogram->max_ns,
+                   summary->mean_available ? "yes" : "no", summary->mean_ns,
+                   summary->quantiles_available ? "yes" : "no", summary->p50_upper_ns,
+                   summary->p95_upper_ns, summary->p99_upper_ns,
+                   histogram->total_saturated ? "yes" : "no", histogram->counters_saturated ? "yes" : "no");
+            /** 区间采用左开右闭，第一段包含零，最后一段的最大整数表示开放上界 */
+            for (unsigned int bucket = 0; bucket < DPPD_RULE_LATENCY_BUCKETS; ++bucket)
+                printf("  bucket scope=%s index=%u upper-ns=%" PRIu64 " samples=%" PRIu64 "\n",
+                       dppd_rule_latency_scope_name(scope), bucket,
+                       dppd_rule_latency_bucket_upper(bucket), histogram->buckets[bucket]);
+        }
+        break;
     case DPPD_MANAGEMENT_RULE_METRICS: {
         const struct dppd_rule_metrics *metrics = &response->payload.rule_metrics;
         const struct dppd_rule_failure_event *last = &metrics->last;

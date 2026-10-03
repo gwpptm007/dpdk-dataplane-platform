@@ -9,6 +9,7 @@
 #include "dppd/packet.h"
 #include "dppd/transaction.h"
 #include "dppd/install_info.h"
+#include "dppd/rule_latency.h"
 
 struct dppd_software_classifier_snapshot;
 struct dppd_software_retired_snapshot;
@@ -43,6 +44,9 @@ struct dppd_software_backend {
     uint32_t capacity;
     bool lock_initialized;
     bool qsbr_initialized;
+    /** 两组历史都由 writer_lock 保护，worker 不读取或更新，整批提交只记录一次 */
+    struct dppd_rule_latency_histogram latency_single;
+    struct dppd_rule_latency_histogram latency_batch;
 };
 
 /** 单个报文命中软件规则后得到的执行结果；pipeline 据此决定丢弃或写 MARK 元数据。 */
@@ -77,6 +81,9 @@ bool dppd_software_backend_rule_supported(const struct dppd_rule *rule);
  * 退役快照不计入数量；查询使用控制面锁，不在逐包处理路径上调用
  */
 uint32_t dppd_software_backend_count(const struct dppd_software_backend *backend);
+/** 在控制面锁内复制两组耗时历史，不回收快照、不读取 COUNT、不访问时钟 */
+void dppd_software_backend_latency(const struct dppd_software_backend *backend,
+    struct dppd_rule_latency_histogram *single, struct dppd_rule_latency_histogram *batch);
 /** 把软件规则操作包装成事务回调，让上层统一安排准备、提交和失败补偿 */
 struct dppd_transaction_backend dppd_software_transaction_backend(
     struct dppd_software_backend *backend);

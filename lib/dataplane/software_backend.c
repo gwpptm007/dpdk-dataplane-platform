@@ -465,6 +465,9 @@ static int transaction_commit(void *context,
     metrics->timing_available = dppd_install_timer_finish(
         &timer, &metrics->install_duration_ns);
     metrics->commit_rule_count = 1;
+    /** 历史在已有控制面锁内更新，零纳秒是有效测量，时钟未知单独计数 */
+    dppd_rule_latency_record(&backend->latency_single, metrics->timing_available,
+        metrics->install_duration_ns, 1);
     pending->published = true;
     (void)pthread_mutex_unlock(&backend->writer_lock);
     return 0;
@@ -603,6 +606,9 @@ int dppd_software_backend_update_batch(
         uint64_t duration_ns;
         bool timing_available = dppd_install_timer_finish(&timer, &duration_ns);
 
+        /** 整批只有一次指针发布，因此只增加一个样本，同时记下这一批涉及的规则数 */
+        dppd_rule_latency_record(&backend->latency_batch, timing_available, duration_ns, count);
+
         /**
          * 一次发布同时替换整个批次，因此各新版本共享整批耗时，不能伪装成各自的单条耗时
          * 这里只修改新分配的记录，未更新版本仍共享原来的记录，失败路径完全不改旧表
@@ -622,6 +628,22 @@ out:
     snapshot_destroy(next, backend->capacity);
     (void)pthread_mutex_unlock(&backend->writer_lock);
     return rc;
+}
+
+/** 只复制历史计数，和已有控制面写者串行，逐包读者无需参与此锁 */
+void dppd_software_backend_latency(const struct dppd_software_backend *backend,
+    struct dppd_rule_latency_histogram *single, struct dppd_rule_latency_histogram *batch)
+{
+    if (single == NULL || batch == NULL)
+        return;
+    memset(single, 0, sizeof(*single));
+    memset(batch, 0, sizeof(*batch));
+    if (backend == NULL || !backend->lock_initialized)
+        return;
+    (void)pthread_mutex_lock((pthread_mutex_t *)&backend->writer_lock);
+    *single = backend->latency_single;
+    *batch = backend->latency_batch;
+    (void)pthread_mutex_unlock((pthread_mutex_t *)&backend->writer_lock);
 }
 
 /** 按 ID 和 generation 精确删除；新表不再包含该版本，旧读者可继续使用退役快照 */

@@ -11,7 +11,7 @@ import tempfile
 import time
 
 from batch_update import check, fields
-from telemetry_client import Telemetry
+from telemetry_client import Telemetry, check_latency_commits, read_latency
 
 
 def wait_for(daemon, predicate, label, seconds=10):
@@ -77,6 +77,7 @@ def run_case(build, library, lcores, fault):
                         check(rule["generation"] == str(generation) and rule["priority"] == "0",
                               str(rule))
                     check(fields(ctl("reconcile-status"))["state"] == "ready", "replay not ready")
+                    check_latency_commits(read_latency(ctl, telemetry), 0, 0, 2)
                     stop(daemon)
                     check(daemon.returncode == 0, log.read_text())
                 else:
@@ -110,6 +111,9 @@ def run_case(build, library, lcores, fault):
                           page["hardware_objects"] == int(status["residual-objects"]), str(page))
                     row = telemetry.query("/dppd/rule", 700)
                     check(row["status_error"] == -errno.EUCLEAN and row["backend"] == "unknown", str(row))
+                    # 未发布或随后被撤销的成功创建仍保留，失败的创建与失败恢复不产生样本
+                    history = read_latency(ctl, telemetry)
+                    check_latency_commits(history, 0, 0, 3 if fault == "create-rollback" else 4)
                     # 隔离仍可证明管理线程存活，但停止的转发线程不能被报告为已就绪
                     health = fields(ctl("health"))
                     check(health["live"] == "yes" and health["ready"] == "no", str(health))
@@ -133,6 +137,7 @@ def run_case(build, library, lcores, fault):
                     check(fields(ctl("rule-metrics")) == observed and
                           telemetry.query("/dppd/rule_failures") == report,
                           "rejected protocol requests changed completed control metrics")
+                    check(read_latency(ctl, telemetry) == history, "isolated read changed installation history")
                     ctl("reconcile-retry", error=errno.EUCLEAN)
                     telemetry.wait(lambda: telemetry.query("/dppd/rule_failures")["operations"] ==
                                    report["operations"] + 1)
@@ -142,6 +147,7 @@ def run_case(build, library, lcores, fault):
                     status = fields(ctl("reconcile-status"))
                     check(status["state"] == "reconciliation-required" and
                           status["residual-objects"] == "1", str(status))
+                    check(read_latency(ctl, telemetry) == history, "retry deleted installation history")
                     ctl("ping", error=errno.EUCLEAN)
                     telemetry.close()
                     retried = fields(ctl("reconcile-retry"))
@@ -224,6 +230,8 @@ def run_startup_case(build, library, lcores):
             check(page["total"] == 0 and page["hardware_objects"] == 1 and page["recovery_state"] != 0,
                   str(page))
             check(telemetry.query("/dppd/rule", 700) is None, "unpublished actual object became desired state")
+            history = read_latency(ctl, telemetry)
+            check_latency_commits(history, 0, 0, 1)
             ctl("apply-drop", 702, 0, 0, error=errno.EUCLEAN)
             check(fields(ctl("rule-metrics")) == observed and state.read_bytes() == saved,
                   "blocked write changed snapshot")
@@ -231,6 +239,7 @@ def run_startup_case(build, library, lcores):
             telemetry.wait(lambda: telemetry.query("/dppd/rule_failures")["operations"] == 2)
             report = telemetry.query("/dppd/rule_failures")
             check(report["stage"] == "reconcile" and report["cause_error"] == -errno.EFAULT, str(report))
+            check(read_latency(ctl, telemetry) == history, "startup retry changed installation history")
             telemetry.close()
             ctl("reconcile-retry")
             daemon.wait(timeout=10)
@@ -251,6 +260,11 @@ def run_startup_case(build, library, lcores):
             check(fields(ctl("list"))["total"] == "2" and state.read_bytes() == saved,
                   "successful restart changed original snapshot")
             check(fields(ctl("rule-metrics"))["operations"] == "1", "restart reused failed epoch")
+            restarted = Telemetry(daemon, log)
+            try:
+                check_latency_commits(read_latency(ctl, restarted), 0, 0, 2)
+            finally:
+                restarted.close()
         finally:
             stop(daemon)
         check(daemon.returncode == 0 and "live-flows=0" in log.read_text(), log.read_text())

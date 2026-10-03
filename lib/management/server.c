@@ -226,19 +226,25 @@ int dppd_management_handle(struct dppd_control_service *control,
     }
     /**
      * 回滚失败时 repository 从未发布，但 backend 可能还有实际 flow
-     * 只允许恢复状态、重试、只读健康、能力画像与失败指标，防止空账本被误认为可以正常运行
+     * 只允许恢复状态、重试、只读健康、能力画像、失败指标与耗时历史，防止空账本被误认为可以正常运行
      */
     if (control->recovery_state != DPPD_CONTROL_RECOVERY_READY &&
         request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS &&
         request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY &&
         request->operation != DPPD_MANAGEMENT_HEALTH_GET &&
         request->operation != DPPD_MANAGEMENT_CAPABILITY_GET &&
-        request->operation != DPPD_MANAGEMENT_RULE_METRICS) {
+        request->operation != DPPD_MANAGEMENT_RULE_METRICS &&
+        request->operation != DPPD_MANAGEMENT_RULE_LATENCY) {
         response->status = -EUCLEAN;
         return 0;
     }
 
     switch (request->operation) {
+    case DPPD_MANAGEMENT_RULE_LATENCY:
+        /** 耗时历史独立于当前账本，已删除或被撤销的成功提交仍然保留 */
+        dppd_control_rule_latency(control, &response->payload.rule_latency);
+        rc = 0;
+        break;
     case DPPD_MANAGEMENT_RULE_METRICS:
         /** 完成态的值复制，不发起事务或驱动访问，也不清除失败历史 */
         dppd_control_rule_metrics(control, &response->payload.rule_metrics);

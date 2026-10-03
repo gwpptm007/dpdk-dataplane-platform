@@ -34,6 +34,7 @@ dppd_sources = files(
   'lib/observability/stats.c',
   'lib/observability/telemetry.c',
   'lib/observability/rule_observation.c',
+  'lib/observability/rule_latency.c',
 )
 
 dppd_core = static_library(

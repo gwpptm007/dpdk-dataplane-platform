@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dppd/install_info.h"
+#include "dppd/rule_latency.h"
 #include "dppd/capability.h"
 #include "dppd/offload.h"
 #include "dppd/transaction.h"
@@ -43,6 +44,8 @@ struct dppd_rte_flow_backend {
     struct dppd_flow_api api;
     /** 本进程的端口校验统计和短期诊断缓存，不拥有任何网卡规则 */
     struct dppd_flow_probe_cache *probes;
+    /** 只由控制面记录成功 create 的历史，后续删除和回滚不抹掉已经发生的安装 */
+    struct dppd_rule_latency_histogram latency;
 };
 
 /**

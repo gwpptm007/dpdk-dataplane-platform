@@ -116,7 +116,12 @@ int main(void)
 
     assert(build_request(1, metrics_args, &metrics_request) == 0);
     assert(metrics_request.operation == DPPD_MANAGEMENT_RULE_METRICS);
-    assert(metrics_request.version == 13);
+    assert(metrics_request.version == DPPD_MANAGEMENT_VERSION);
+    assert(build_request(2, metrics_args, &metrics_request) == -EINVAL);
+    /** 历史查询也是独立只读操作，必须拒绝没有定义的额外参数 */
+    metrics_args[0] = "rule-latency";
+    assert(build_request(1, metrics_args, &metrics_request) == 0);
+    assert(metrics_request.operation == DPPD_MANAGEMENT_RULE_LATENCY);
     assert(build_request(2, metrics_args, &metrics_request) == -EINVAL);
     struct dppd_management_request request;
     char *probe[] = {"health", "unexpected"};

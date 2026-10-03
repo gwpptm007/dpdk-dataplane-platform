@@ -1647,3 +1647,20 @@ void dppd_control_rule_metrics(const struct dppd_control_service *service,
     if (service != NULL)
         *metrics = service->observation.metrics;
 }
+
+/** 查询只从后端历史值生成摘要，不校验驱动、读取 COUNT、保存文件或重新安装规则 */
+void dppd_control_rule_latency(const struct dppd_control_service *service,
+    struct dppd_rule_latency_report *report)
+{
+    struct dppd_rule_latency_histogram single, batch;
+
+    if (report == NULL)
+        return;
+    memset(report, 0, sizeof(*report));
+    if (service == NULL)
+        return;
+    dppd_software_backend_latency(&service->software, &single, &batch);
+    dppd_rule_latency_summarize(&single, &report->scopes[DPPD_RULE_LATENCY_SOFTWARE]);
+    dppd_rule_latency_summarize(&batch, &report->scopes[DPPD_RULE_LATENCY_SOFTWARE_BATCH]);
+    dppd_rule_latency_summarize(&service->rte_flow.latency, &report->scopes[DPPD_RULE_LATENCY_RTE_FLOW]);
+}
