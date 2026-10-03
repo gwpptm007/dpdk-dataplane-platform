@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dppd/install_info.h"
+#include "dppd/capability.h"
 #include "dppd/offload.h"
 #include "dppd/transaction.h"
 
@@ -40,6 +41,8 @@ struct dppd_rte_flow_backend {
     uint32_t count;
     /** 操作入口的副本，普通运行使用真实驱动调用 */
     struct dppd_flow_api api;
+    /** 本进程的端口校验统计和短期诊断缓存，不拥有任何网卡规则 */
+    struct dppd_flow_probe_cache *probes;
 };
 
 /**
@@ -52,6 +55,9 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend,
                                const struct dppd_flow_api *api);
 /** 删除已标记安装成功的对象并释放仓库，删除失败时返回错误且保留剩余清理线索 */
 int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend);
+/** 正式安装始终重新校验，不用探测缓存跳过驱动，也不把探测成功当成安装成功 */
+int dppd_rte_flow_backend_validate_rule(struct dppd_rte_flow_backend *backend,
+    uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error);
 struct dppd_transaction_backend dppd_rte_flow_transaction_backend(
     struct dppd_rte_flow_backend *backend);
 uint32_t dppd_rte_flow_backend_count(const struct dppd_rte_flow_backend *backend);

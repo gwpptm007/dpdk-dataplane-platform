@@ -116,6 +116,12 @@ rule_status_test = executable('test_rule_status', 'test_rule_status.c',
   link_args: ['-Wl,--wrap=clock_gettime'])
 test('rule installation status', rule_status_test)
 
+# 控制时钟而不等待实际过期，并验证缓存初始化失败时没有残留分配
+capability_test = executable('test_capability', 'test_capability.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=clock_gettime', '-Wl,--wrap=calloc'])
+test('capability profile and probe cache', capability_test)
+
 dppctl_test = executable(
   'test_dppctl',
   'test_dppctl.c',

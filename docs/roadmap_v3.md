@@ -13,7 +13,7 @@
 
 ## M1：能力规划与规则控制面
 
-当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v11 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
+当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v12 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
 
 持久化方面已完成 [versioned snapshot v2](persistence_snapshot_v2.md)、install port 保存、
 control mutation 后的完整保存、dirty state、管理状态查询、`--state-path` 和全量硬件
@@ -29,11 +29,18 @@ NIC/SmartNIC 验收三个阶段推进。
 配置和提交耗时；纯软件批量更新报告共享的整批耗时，查询只读，重放重新计时。
 20/20 单测、两组 ring 状态场景、TAP 的真实 rte_flow 生命周期、四组 worker 收发及
 隔离/健康回归通过，见 [规则安装状态](rule_status.md)。规则 telemetry、失败分类和历史
-耗时分布仍待实现，capability profile 与 PMD probe cache 继续列为下一项。
+耗时分布仍待实现。
+
+2026-10-03 已补齐 management v12 的设备/固件/DPDK 画像、描述符信息和完整规则诊断
+缓存，64 个共享槽位、五秒有效期、强制刷新、临时错误不缓存；正式安装仍新校验，
+创建/删除尝试使全端口旧结果失效。21/21 单测、ring/TAP 进程、隔离/健康、四组
+worker 收发与三个相关单测的 AddressSanitizer/UBSan 通过，见 [能力画像与探测](capability_probe.md)。
+资源容量、任意 flow 组合矩阵、AGE/indirect/template/async 探测未完成。
+下一项推进规则失败分类与规则 telemetry，同时保留跨进程 reconciliation 待办。
 
 交付：
 
-- capability profile 与 PMD probe cache；
+- capability profile 与 PMD probe cache（本机诊断基础已完成）；
 - rule repository、稳定 ID、generation 与幂等增删改查；
 - hardware/software plan 和可解释 fallback reason；
 - 多规则 validate/prepare/commit/rollback；

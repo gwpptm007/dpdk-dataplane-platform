@@ -131,6 +131,33 @@ static void release_object(struct dppd_rte_flow_backend *backend,
     backend->count--;
 }
 
+/** 删除尝试可能影响共享资源，先清空所有探测结果，再保留原有驱动删除和失败重试语义 */
+static int remove_object(struct dppd_rte_flow_backend *backend,
+                          struct dppd_rte_flow_object *object,
+                          struct dppd_flow_error *error)
+{
+    dppd_flow_probe_cache_invalidate_all(backend->probes);
+    return backend->api.remove(&object->handle, error);
+}
+
+/**
+ * 正式事务的校验必须访问驱动，哪怕刚才的探测缓存记录了成功或不支持
+ * 同一端口的旧诊断先失效，避免一次新的校验答复与旧缓存互相矛盾
+ */
+int dppd_rte_flow_backend_validate_rule(struct dppd_rte_flow_backend *backend,
+    uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error)
+{
+    int rc;
+
+    if (backend == NULL || backend->objects == NULL || backend->api.validate == NULL ||
+        rule == NULL)
+        return -EINVAL;
+    (void)dppd_flow_probe_cache_clear(backend->probes, port_id);
+    rc = backend->api.validate(port_id, rule, error);
+    dppd_flow_probe_cache_observe(backend->probes, port_id, rule, rc);
+    return rc;
+}
+
 /** 先确认规划选择了硬件后端，再调用驱动检查规则能力，这一步不预留槽位也不创建对象 */
 static int transaction_validate(void *context,
                                 const struct dppd_transaction_item *item)
@@ -140,7 +167,8 @@ static int transaction_validate(void *context,
 
     if (item->plan.backend != DPPD_PLAN_BACKEND_RTE_FLOW)
         return -EINVAL;
-    return backend->api.validate(item->plan.install_port_id, &item->rule, &error);
+    return dppd_rte_flow_backend_validate_rule(backend, item->plan.install_port_id,
+                                               &item->rule, &error);
 }
 
 /**
@@ -192,6 +220,8 @@ static int transaction_commit(void *context,
 
     if (object == NULL || !object->occupied || object->installed)
         return -EINVAL;
+    /** 即使创建报错，也可能改变部分资源，不能继续沿用此前的探测答复 */
+    dppd_flow_probe_cache_invalidate_all(backend->probes);
     /** 只测量驱动创建调用，校验、事务准备和之后的规则账本保存不算在内 */
     dppd_install_timer_start(&timer);
     rc = backend->api.create(item->plan.install_port_id, &item->rule,
@@ -224,7 +254,7 @@ static int transaction_rollback(void *context,
     if (object == NULL || !object->occupied)
         return -EINVAL;
     if (object->installed || object->handle.flow != NULL)
-        rc = backend->api.remove(&object->handle, &error);
+        rc = remove_object(backend, object, &error);
     if (rc == 0)
         release_object(backend, object);
     return rc;
@@ -244,6 +274,7 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend,
         .remove = dppd_flow_remove,
         .query_count = dppd_flow_query_count,
     };
+    int rc;
 
     if (backend == NULL || capacity == 0)
         return -EINVAL;
@@ -258,6 +289,12 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend,
         free(backend->objects);
         memset(backend, 0, sizeof(*backend));
         return -EINVAL;
+    }
+    rc = dppd_flow_probe_cache_init(&backend->probes);
+    if (rc != 0) {
+        free(backend->objects);
+        memset(backend, 0, sizeof(*backend));
+        return rc;
     }
     return 0;
 }
@@ -281,7 +318,7 @@ int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
 
         if (!object->occupied || !object->installed)
             continue;
-        rc = backend->api.remove(&object->handle, &error);
+        rc = remove_object(backend, object, &error);
         if (rc == 0)
             release_object(backend, object);
         else if (result == 0)
@@ -290,6 +327,7 @@ int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
     if (result != 0)
         return result;
     free(backend->objects);
+    dppd_flow_probe_cache_destroy(backend->probes);
     memset(backend, 0, sizeof(*backend));
     return result;
 }
@@ -390,7 +428,7 @@ int dppd_rte_flow_backend_remove(struct dppd_rte_flow_backend *backend,
     object = find_latest_object(backend, rule_id);
     if (object == NULL || !object->installed)
         return -ENOENT;
-    rc = backend->api.remove(&object->handle, error);
+    rc = remove_object(backend, object, error);
     if (rc == 0)
         release_object(backend, object);
     return rc;
@@ -415,7 +453,7 @@ int dppd_rte_flow_backend_remove_version(struct dppd_rte_flow_backend *backend,
     object = find_object(backend, rule_id, generation);
     if (object == NULL || !object->installed)
         return -ENOENT;
-    rc = backend->api.remove(&object->handle, error);
+    rc = remove_object(backend, object, error);
     if (rc == 0)
         release_object(backend, object);
     return rc;
@@ -448,7 +486,7 @@ int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend,
         if (!object->occupied)
             continue;
         if (object->installed || object->handle.flow != NULL)
-            rc = backend->api.remove(&object->handle, &error);
+            rc = remove_object(backend, object, &error);
         if (rc == 0)
             release_object(backend, object);
         else if (first_error == 0)

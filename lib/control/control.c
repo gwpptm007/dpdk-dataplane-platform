@@ -141,7 +141,8 @@ int dppd_control_init(struct dppd_control_service *service,
     int rc;
 
     if (service == NULL || topology == NULL ||
-        rule_capacity == 0 || rule_capacity == UINT32_MAX)
+        rule_capacity == 0 || rule_capacity == UINT32_MAX ||
+        topology->nb_endpoints > DPPD_MAX_PORTS)
         return -EINVAL;
     memset(service, 0, sizeof(*service));
     rc = dppd_rule_repository_init(&service->rules, rule_capacity);
@@ -157,6 +158,16 @@ int dppd_control_init(struct dppd_control_service *service,
         dppd_rule_repository_destroy(&service->rules);
         return rc;
     }
+    /** 启动时登记拓扑内的全部端口，画像查询即使尚无规则也能显示空的校验记录 */
+    for (uint16_t i = 0; i < topology->nb_endpoints; ++i) {
+        rc = dppd_flow_probe_cache_register(service->rte_flow.probes,
+                                            topology->endpoints[i].ethdev_port_id);
+        if (rc != 0) {
+            (void)dppd_rte_flow_backend_fini(&service->rte_flow);
+            dppd_rule_repository_destroy(&service->rules);
+            return rc;
+        }
+    }
     rc = dppd_software_backend_init(&service->software, rule_capacity + 1U);
     if (rc != 0) {
         (void)dppd_rte_flow_backend_fini(&service->rte_flow);
@@ -166,6 +177,43 @@ int dppd_control_init(struct dppd_control_service *service,
     service->topology = topology;
     service->next_transaction_id = 1;
     return 0;
+}
+
+/**
+ * 先检查完整规则和端口拓扑，再做无安装副作用的驱动探测
+ * 硬件探测会忽略用户的后端偏好，因此 software 规则也能询问相同内容的驱动支持情况
+ */
+int dppd_control_probe_rule(struct dppd_control_service *service, uint16_t install_port_id,
+    const struct dppd_rule *rule, bool refresh, struct dppd_flow_probe_result *result)
+{
+    struct dppd_planner_context context = {0};
+    struct dppd_execution_plan plan;
+    struct dppd_rule candidate;
+    char error[128];
+    int rc;
+
+    if (service == NULL || rule == NULL || result == NULL)
+        return -EINVAL;
+    memset(result, 0, sizeof(*result));
+    if (recovery_write_preflight(service) != 0)
+        return -EUCLEAN;
+    if (rule->id == 0 || dppd_rule_validate(rule, error, sizeof(error)) != 0)
+        return -EINVAL;
+    candidate = *rule;
+    candidate.install_port_id = install_port_id;
+    candidate.generation = 0;
+    candidate.fallback = DPPD_FALLBACK_REQUIRE_HARDWARE;
+    context.topology = service->topology;
+    context.install_port_id = install_port_id;
+    context.hardware_available = true;
+    rc = dppd_plan_rule(&context, &candidate, &plan);
+    if (rc != 0)
+        return rc;
+    rc = dppd_flow_probe_cache_query(service->rte_flow.probes, install_port_id,
+        &candidate, refresh, service->rte_flow.api.validate, result);
+    if (rc == 0)
+        result->software_equivalent = dppd_software_backend_rule_supported(&candidate);
+    return rc;
 }
 
 int dppd_control_fini(struct dppd_control_service *service)
@@ -297,7 +345,7 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
              * 这里额外 validate 一次仅作无副作用的能力探测；失败后整个批次仍可
              * 与其他硬件规则一起原子提交，不会因为 net_ring 等 PMD 而拒绝启动。
              */
-            rc = service->rte_flow.api.validate(
+            rc = dppd_rte_flow_backend_validate_rule(&service->rte_flow,
                 items[i].plan.install_port_id, &items[i].rule, &flow_error);
             if (rc != 0) {
                 planner_context.hardware_available = false;
@@ -680,7 +728,7 @@ int dppd_control_create_batch(
             planner_context.software_equivalent) {
             struct dppd_flow_error flow_error;
 
-            rc = service->rte_flow.api.validate(items[i].plan.install_port_id,
+            rc = dppd_rte_flow_backend_validate_rule(&service->rte_flow, items[i].plan.install_port_id,
                                                 &items[i].rule, &flow_error);
             if (rc != 0) {
                 planner_context.hardware_available = false;
@@ -1040,7 +1088,7 @@ int dppd_control_update_batch(
         if (may_fallback[i]) {
             struct dppd_flow_error error;
 
-            rc = service->rte_flow.api.validate(items[i].plan.install_port_id,
+            rc = dppd_rte_flow_backend_validate_rule(&service->rte_flow, items[i].plan.install_port_id,
                                                 &items[i].rule, &error);
             if (rc != 0) {
                 struct dppd_planner_context context = {0};

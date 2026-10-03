@@ -144,6 +144,12 @@ int dppd_control_init(struct dppd_control_service *service,
                       uint32_t rule_capacity,
                       const struct dppd_flow_api *flow_api);
 int dppd_control_fini(struct dppd_control_service *service);
+/**
+ * 不安装规则的完整规则探测，允许 ID 尚不存在，探测也不会分配 generation 或事务编号
+ * 同时给出驱动校验和已实现的软件等价能力，缓存仅用于诊断，正式 apply 仍重新校验
+ */
+int dppd_control_probe_rule(struct dppd_control_service *service, uint16_t install_port_id,
+    const struct dppd_rule *rule, bool refresh, struct dppd_flow_probe_result *result);
 /*
  * attach 只建立后续 mutation 的保存关系，不读取也不覆盖文件。
  * 非零 repository generation 会被保守标记为 dirty，直到 flush/preflight 完整保存；

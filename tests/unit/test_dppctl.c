@@ -39,6 +39,71 @@ static void test_status_arguments(void)
     assert(build_request(2, args, &request) == -EINVAL);
 }
 
+/** 探测必须生成独立的诊断请求，不能因复用规则构造器而变成真正的安装命令 */
+static void test_probe_arguments(void)
+{
+    struct dppd_management_request request;
+    char *profile[] = {"capability-show", "5", "extra"};
+    char *drop[] = {"probe-drop", "100", "5", "17", "refresh", "extra"};
+    char *filter[] = {"probe-filter", "101", "6", "tcp", "192.0.2.0/24",
+                      "any", "any", "80", "queue:1", "count", "mark:7",
+                      "priority:19", "refresh"};
+
+    assert(build_request(2, profile, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_CAPABILITY_GET);
+    assert(request.payload.capability.port_id == 5);
+    assert(build_request(1, profile, &request) == -EINVAL);
+    assert(build_request(3, profile, &request) == -EINVAL);
+    profile[0] = "probe-cache-clear";
+    assert(build_request(2, profile, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_CAPABILITY_CLEAR);
+    profile[1] = "65536";
+    assert(build_request(2, profile, &request) == -EINVAL);
+    profile[1] = "-1";
+    assert(build_request(2, profile, &request) == -EINVAL);
+
+    assert(build_request(3, drop, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_CAPABILITY_PROBE);
+    assert(request.payload.probe.rule.id == 100 && request.payload.probe.install_port_id == 5);
+    assert(!request.payload.probe.refresh && request.payload.probe.rule.generation == 0);
+    assert(build_request(4, drop, &request) == 0);
+    assert(request.payload.probe.rule.priority == 17);
+    assert(build_request(5, drop, &request) == 0 && request.payload.probe.refresh);
+    assert(build_request(2, drop, &request) == -EINVAL);
+    assert(build_request(6, drop, &request) == -EINVAL);
+    drop[3] = "refresh";
+    assert(build_request(4, drop, &request) == 0 && request.payload.probe.refresh);
+    assert(build_request(5, drop, &request) == -EINVAL);
+    drop[1] = "0";
+    assert(build_request(3, drop, &request) == -EINVAL);
+    drop[1] = "100";
+    drop[2] = "-1";
+    assert(build_request(3, drop, &request) == -EINVAL);
+
+    /** 掩码和队列参数沿用正式规则语义，动作顺序稳定为 MARK、COUNT、QUEUE */
+    assert(build_request(13, filter, &request) == 0);
+    assert(request.version == DPPD_MANAGEMENT_VERSION);
+    assert(request.operation == DPPD_MANAGEMENT_CAPABILITY_PROBE && request.payload.probe.refresh);
+    assert(request.payload.probe.install_port_id == 6 && request.payload.probe.rule.id == 101);
+    assert(request.payload.probe.rule.nb_matches == 3 && request.payload.probe.rule.priority == 19);
+    assert(request.payload.probe.rule.nb_actions == 3);
+    assert(request.payload.probe.rule.actions[0].type == DPPD_ACTION_MARK);
+    assert(request.payload.probe.rule.actions[0].conf.mark_id == 7);
+    assert(request.payload.probe.rule.actions[1].type == DPPD_ACTION_COUNT);
+    assert(request.payload.probe.rule.actions[2].type == DPPD_ACTION_QUEUE);
+    assert(request.payload.probe.rule.actions[2].conf.queue_id == 1);
+    assert(build_request(12, filter, &request) == 0 && !request.payload.probe.refresh);
+    assert(build_request(8, filter, &request) == -EINVAL);
+    filter[10] = "count";
+    assert(build_request(13, filter, &request) == -EINVAL);
+    filter[10] = "mark:7";
+    filter[9] = "refresh";
+    assert(build_request(13, filter, &request) == -EINVAL);
+    filter[9] = "count";
+    filter[4] = "192.0.2.0/33";
+    assert(build_request(13, filter, &request) == -EINVAL);
+}
+
 /**
  * 前半部分确认两到四条规则都能正确映射到请求字段
  * 后半部分逐项替换参数，确认不完整分组、无效旧版本、重复 ID 和越界数值都被拒绝
@@ -50,6 +115,7 @@ int main(void)
     char *stats[] = {"stats", "all", "2"};
 
     test_status_arguments();
+    test_probe_arguments();
 
     /** 健康与就绪命令都使用无参数的状态查询，额外参数必须明确拒绝 */
     assert(build_request(1, probe, &request) == 0);

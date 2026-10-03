@@ -79,6 +79,24 @@ static int build_port_info(const struct dppd_device_set *devices,
     return 0;
 }
 
+/** 合并启动设备信息和内存校验记录，画像查询不会触发新的网卡访问或探测 */
+static int build_capability_profile(const struct dppd_control_service *control,
+    const struct dppd_device_set *devices, uint16_t port_id,
+    struct dppd_management_capability_profile *output)
+{
+    const struct dppd_port *port;
+    int rc;
+
+    rc = build_port_info(devices, port_id, &output->port);
+    if (rc != 0)
+        return rc;
+    port = dppd_devices_find(devices, port_id);
+    /** identity 本身是协议定义的无指针值结构，不复制设备内部结构或驱动对象 */
+    output->identity = port->identity;
+    output->cache_ttl_ns = DPPD_FLOW_PROBE_CACHE_TTL_NS;
+    return dppd_flow_probe_cache_statistics(control->rte_flow.probes, port_id, &output->probes);
+}
+
 /**
  * 健康查询只读取已发布的状态，不调用 PMD，也不读取或修复快照文件
  * 因此恢复隔离期间仍可安全响应，部署脚本能区分主线程存活与转发服务已就绪
@@ -206,14 +224,15 @@ int dppd_management_handle(struct dppd_control_service *control,
         response->status = -EPROTO;
         return 0;
     }
-    /*
-     * 回滚失败时 repository 从未发布，但 backend 可能还有实际 flow。除恢复状态和
-     * retry 和只读健康快照外一律拒绝，防止空 desired state 被误认为可以正常运行
+    /**
+     * 回滚失败时 repository 从未发布，但 backend 可能还有实际 flow
+     * 只允许恢复状态、重试、只读健康与能力画像，防止空账本被误认为可以正常运行
      */
     if (control->recovery_state != DPPD_CONTROL_RECOVERY_READY &&
         request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS &&
         request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY &&
-        request->operation != DPPD_MANAGEMENT_HEALTH_GET) {
+        request->operation != DPPD_MANAGEMENT_HEALTH_GET &&
+        request->operation != DPPD_MANAGEMENT_CAPABILITY_GET) {
         response->status = -EUCLEAN;
         return 0;
     }
@@ -346,6 +365,43 @@ int dppd_management_handle(struct dppd_control_service *control,
         rc = build_port_info(devices, request->payload.port_get.port_id,
                              &response->payload.port);
         break;
+    case DPPD_MANAGEMENT_CAPABILITY_GET:
+    case DPPD_MANAGEMENT_CAPABILITY_CLEAR: {
+        const uint8_t empty[6] = {0};
+
+        if (memcmp(request->payload.capability.reserved, empty, sizeof(empty)) != 0) {
+            rc = -EINVAL;
+            break;
+        }
+        rc = build_capability_profile(control, devices, request->payload.capability.port_id,
+                                       &response->payload.capability);
+        if (rc == 0 && request->operation == DPPD_MANAGEMENT_CAPABILITY_CLEAR) {
+            rc = dppd_flow_probe_cache_clear(control->rte_flow.probes,
+                                             request->payload.capability.port_id);
+            if (rc == 0)
+                rc = build_capability_profile(control, devices, request->payload.capability.port_id,
+                                               &response->payload.capability);
+        }
+        break;
+    }
+    case DPPD_MANAGEMENT_CAPABILITY_PROBE: {
+        const uint8_t empty[5] = {0};
+        const struct dppd_port *port = devices == NULL ? NULL :
+            dppd_devices_find(devices, request->payload.probe.install_port_id);
+
+        if (memcmp(request->payload.probe.reserved, empty, sizeof(empty)) != 0)
+            rc = -EINVAL;
+        else if (port == NULL)
+            rc = -ENOENT;
+        /** 已知停止或移除的设备不得再发起驱动探测，画像查询仍只读缓存 */
+        else if (!port->started || dppd_devices_removal_requested(devices) ||
+                 atomic_load_explicit(&port->removed, memory_order_acquire))
+            rc = -ENODEV;
+        else
+            rc = dppd_control_probe_rule(control, request->payload.probe.install_port_id,
+                &request->payload.probe.rule, request->payload.probe.refresh, &response->payload.probe);
+        break;
+    }
     case DPPD_MANAGEMENT_RULE_STATUS:
         /** 只复制控制面安装记录，隔离检查沿用普通规则查询的入口限制 */
         rc = dppd_control_rule_status(

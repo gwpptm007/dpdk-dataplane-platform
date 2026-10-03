@@ -97,7 +97,13 @@ def run_case(build, library, lcores, fault):
                                                env=client_env, capture_output=True, text=True, timeout=5)
                     check(readiness.returncode == 1 and fields(readiness.stdout)["ready"] == "no",
                           readiness.stdout + readiness.stderr)
+                    # 隔离期间只允许读取已有画像，不能重新探测驱动或改变缓存版本
+                    profile = ctl("capability-show", 0)
+                    check(fields(profile)["started"] == "yes" and
+                          int(fields(profile)["validations"]) > 0, profile)
+                    check(ctl("capability-show", 0) == profile, "profile changed cached observations")
                     for request in [("ping",), ("list",), ("get", 700), ("rule-status", 700),
+                                    ("probe-drop", 702, 0), ("probe-cache-clear", 0),
                                     ("persistence-flush",),
                                     ("update-drop-batch", 0, 30, "require", 700, 1, 701, 2)]:
                         ctl(*request, error=errno.EUCLEAN)

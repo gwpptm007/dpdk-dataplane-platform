@@ -23,6 +23,12 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] reconcile-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-retry\n", program);
     fprintf(stderr, "  %s [--socket PATH] port-show PORT\n", program);
+    fprintf(stderr, "  %s [--socket PATH] capability-show PORT\n", program);
+    fprintf(stderr, "  %s [--socket PATH] probe-cache-clear PORT\n", program);
+    fprintf(stderr, "  %s [--socket PATH] probe-drop RULE_ID PORT [PRIORITY] [refresh]\n", program);
+    fprintf(stderr, "  %s [--socket PATH] probe-filter RULE_ID PORT"
+                    " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
+                    " drop|queue:N [count] [mark:N] [priority:N] [refresh]\n", program);
     fprintf(stderr, "  %s [--socket PATH] stats [PORT|all [QUEUE|all]]\n", program);
     fprintf(stderr,
             "  %s [--socket PATH] list [AFTER_RULE_ID [REPOSITORY_GENERATION]]\n",
@@ -386,6 +392,46 @@ static int build_request(int argc, char **argv,
 {
     uint64_t value;
 
+    /**
+     * 探测复用正式 apply 的规则构造器，只在临时参数中补上新建版本零
+     * 递归只发生一层，返回后改成独立的探测操作，发送到服务端时绝不会成为安装请求
+     * refresh 必须在最后，参数数组有固定上限，重复或拼错的动作仍由原构造器拒绝
+     */
+    if (argc >= 1 && (strcmp(argv[0], "probe-drop") == 0 ||
+                      strcmp(argv[0], "probe-filter") == 0)) {
+        struct dppd_management_request built;
+        char *apply_args[16];
+        bool refresh = argc > 1 && strcmp(argv[argc - 1], "refresh") == 0;
+        int rule_argc = argc - (refresh ? 1 : 0);
+        int rc;
+
+        if (rule_argc < 3 || rule_argc + 1 > (int)(sizeof(apply_args) / sizeof(apply_args[0])))
+            return -EINVAL;
+        apply_args[0] = strcmp(argv[0], "probe-drop") == 0 ? "apply-drop" : "apply-filter";
+        apply_args[1] = argv[1];
+        apply_args[2] = argv[2];
+        apply_args[3] = "0";
+        for (int index = 3; index < rule_argc; ++index)
+            apply_args[index + 1] = argv[index];
+        rc = build_request(rule_argc + 1, apply_args, &built);
+        if (rc != 0)
+            return rc;
+        initialize_request(request, DPPD_MANAGEMENT_CAPABILITY_PROBE);
+        request->payload.probe.install_port_id = built.payload.apply.install_port_id;
+        request->payload.probe.rule = built.payload.apply.rule;
+        request->payload.probe.refresh = refresh;
+        return 0;
+    }
+    /** 画像查询与清缓存都只选择端口，不接受被忽略的额外参数 */
+    if (argc == 2 && (strcmp(argv[0], "capability-show") == 0 ||
+                      strcmp(argv[0], "probe-cache-clear") == 0)) {
+        initialize_request(request, strcmp(argv[0], "capability-show") == 0 ?
+            DPPD_MANAGEMENT_CAPABILITY_GET : DPPD_MANAGEMENT_CAPABILITY_CLEAR);
+        if (parse_u64(argv[1], 0, UINT16_MAX, &value) != 0)
+            return -EINVAL;
+        request->payload.capability.port_id = (uint16_t)value;
+        return 0;
+    }
     /* 每个分支同时校验命令名和精确参数数量，拒绝被静默忽略的多余参数。 */
     if (argc >= 1 && argc <= 3 && strcmp(argv[0], "stats") == 0) {
         uint64_t selector;
@@ -855,10 +901,81 @@ static void print_rule_detail(const struct dppd_rule *rule)
     }
 }
 
+/** 探测回答的是当前能否校验完整规则，校验失败本身仍是一份成功取得的诊断结果 */
+static const char *probe_status_name(enum dppd_flow_probe_status status)
+{
+    switch (status) {
+    case DPPD_FLOW_PROBE_SUPPORTED:
+        return "supported";
+    case DPPD_FLOW_PROBE_UNSUPPORTED:
+        return "unsupported";
+    case DPPD_FLOW_PROBE_REJECTED:
+        return "rejected";
+    case DPPD_FLOW_PROBE_UNAVAILABLE:
+        return "unavailable";
+    }
+    return "unknown";
+}
+
+/** 启动能力与历史校验分行显示，不把观察过的元素集合当成任意组合的支持承诺 */
+static void print_capability(const struct dppd_management_capability_profile *profile)
+{
+    const struct dppd_management_port_info *port = &profile->port;
+    const struct dppd_capability_identity *identity = &profile->identity;
+    const struct dppd_flow_probe_statistics *probes = &profile->probes;
+
+    printf("capability port=%u device=%s driver=%s dpdk=%s firmware=%s firmware-error=%d"
+           " socket=%d kind=%s configured=%s started=%s\n",
+           port->port_id, identity->device_name_known ? identity->device_name : "unknown",
+           port->driver_name, identity->dpdk_version[0] != '\0' ? identity->dpdk_version : "unknown",
+           identity->firmware_known ? identity->firmware_version : "unknown", identity->firmware_error,
+           port->socket_id, port->endpoint_kind == DPPD_ENDPOINT_REPRESENTOR ? "representor" : "ethdev",
+           port->configured ? "yes" : "no", port->started ? "yes" : "no");
+    printf("  queues=%u max-rx=%u max-tx=%u rx-desc=%u rx-desc-min=%u rx-desc-max=%u"
+           " rx-desc-align=%u tx-desc=%u tx-desc-min=%u tx-desc-max=%u tx-desc-align=%u"
+           " rss-capabilities=0x%" PRIx64 " rss-configured=0x%" PRIx64
+           " rx-offloads=0x%" PRIx64 " tx-offloads=0x%" PRIx64
+           " tx-configured=0x%" PRIx64 " device-capabilities=0x%" PRIx64 "\n",
+           identity->configured_queues, port->max_rx_queues, port->max_tx_queues,
+           identity->configured_rx_desc, identity->rx_desc_min, identity->rx_desc_max,
+           identity->rx_desc_align, identity->configured_tx_desc, identity->tx_desc_min,
+           identity->tx_desc_max, identity->tx_desc_align, port->rss_offloads,
+           port->configured_rss_hf, port->rx_offloads, port->tx_offloads,
+           port->configured_tx_offloads, port->device_capabilities);
+    printf("  flow-probes epoch=%" PRIu64 " validations=%" PRIu64 " supported=%" PRIu64
+           " unsupported=%" PRIu64 " failed=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64
+           " invalidations=%" PRIu64 " cache-entries=%u cache-capacity=%u ttl-ms=%" PRIu64
+           " observed-domains=0x%x observed-items=0x%x observed-actions=0x%x\n",
+           probes->epoch, probes->validations, probes->supported, probes->unsupported, probes->failed,
+           probes->cache_hits, probes->cache_misses, probes->invalidations, probes->cache_entries,
+           probes->cache_capacity, profile->cache_ttl_ns / UINT64_C(1000000),
+           probes->observed_domains, probes->observed_items, probes->observed_actions);
+}
+
 static void print_response(const struct dppd_management_response *response)
 {
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释。 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_CAPABILITY_GET:
+    case DPPD_MANAGEMENT_CAPABILITY_CLEAR:
+        print_capability(&response->payload.capability);
+        break;
+    case DPPD_MANAGEMENT_CAPABILITY_PROBE: {
+        const struct dppd_flow_probe_result *probe = &response->payload.probe;
+
+        printf("flow-probe rule=%" PRIu64 " port=%u hardware=%s software=%s cached=%s"
+               " hardware-error=%d epoch=%" PRIu64 " age-ms=",
+               probe->rule_id, probe->install_port_id, probe_status_name(probe->status),
+               probe->software_equivalent ? "yes" : "no", probe->cached ? "yes" : "no",
+               probe->validation_code, probe->epoch);
+        if (probe->age_available)
+            printf("%" PRIu64 "\n", probe->age_ns / UINT64_C(1000000));
+        else
+            printf("unknown\n");
+        if (probe->validation_code != 0 && probe->message[0] != '\0')
+            printf("  detail: %s\n", probe->message);
+        break;
+    }
     case DPPD_MANAGEMENT_HEALTH_GET:
         print_health(&response->payload.health);
         break;

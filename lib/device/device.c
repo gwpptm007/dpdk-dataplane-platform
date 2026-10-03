@@ -9,9 +9,43 @@
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
+#include <rte_version.h>
 
 #define DPPD_DEFAULT_RX_DESC 1024U
 #define DPPD_DEFAULT_TX_DESC 1024U
+
+/** 设备名称查询要求缓冲区至少达到 DPDK 规定的长度，编译时检查未来版本的变化 */
+_Static_assert(DPPD_CAPABILITY_NAME_SIZE >= RTE_ETH_NAME_MAX_LEN,
+               "capability device name buffer is too small");
+
+/**
+ * 保存本次启动环境的设备身份与描述符上限，固件查询不支持时保留未知状态
+ * 它只补充观测信息，不改变端口能力选择，不根据厂商或固件字符串猜测规则支持情况
+ */
+static void capture_identity(struct dppd_port *port, const struct rte_eth_dev_info *info)
+{
+    struct dppd_capability_identity *identity = &port->identity;
+    int rc;
+
+    memset(identity, 0, sizeof(*identity));
+    identity->device_name_known =
+        rte_eth_dev_get_name_by_port(port->port_id, identity->device_name) == 0;
+    if (!identity->device_name_known)
+        identity->device_name[0] = '\0';
+    snprintf(identity->dpdk_version, sizeof(identity->dpdk_version), "%s", rte_version());
+    rc = rte_eth_dev_fw_version_get(port->port_id, identity->firmware_version,
+                                    sizeof(identity->firmware_version));
+    identity->firmware_known = rc == 0 && identity->firmware_version[0] != '\0';
+    identity->firmware_error = rc > 0 ? -ENOSPC : rc;
+    if (!identity->firmware_known)
+        identity->firmware_version[0] = '\0';
+    identity->rx_desc_min = info->rx_desc_lim.nb_min;
+    identity->rx_desc_max = info->rx_desc_lim.nb_max;
+    identity->rx_desc_align = info->rx_desc_lim.nb_align;
+    identity->tx_desc_min = info->tx_desc_lim.nb_min;
+    identity->tx_desc_max = info->tx_desc_lim.nb_max;
+    identity->tx_desc_align = info->tx_desc_lim.nb_align;
+}
 
 /**
  * 先封住被移除端口，再发布整个设备组的退出请求，工作线程只需读取原子状态
@@ -106,6 +140,7 @@ static int configure_port(struct dppd_port *port,
     rc = rte_eth_dev_info_get(port->port_id, &info);
     if (rc != 0)
         return rc;
+    capture_identity(port, &info);
     port->capabilities.max_rx_queues = info.max_rx_queues;
     port->capabilities.max_tx_queues = info.max_tx_queues;
     port->capabilities.reta_size = info.reta_size;
@@ -147,10 +182,13 @@ static int configure_port(struct dppd_port *port,
     if (rc != 0)
         return rc;
     port->configured = true;
+    port->identity.configured_queues = cfg->nb_queues;
 
     rc = rte_eth_dev_adjust_nb_rx_tx_desc(port->port_id, &rx_desc, &tx_desc);
     if (rc != 0)
         return rc;
+    port->identity.configured_rx_desc = rx_desc;
+    port->identity.configured_tx_desc = tx_desc;
 
     rx_conf = info.default_rxconf;
     rx_conf.offloads = port_conf.rxmode.offloads;

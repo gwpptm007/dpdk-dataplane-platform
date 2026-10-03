@@ -11,11 +11,11 @@
  * 管理协议版本在请求和响应中显式传递。当前实现不做版本协商：版本不一致时
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
-/*
- * v11 增加规则安装状态与提交耗时；v10 增加健康与就绪查询；v9 增加端口链路状态
+/**
+ * v12 增加能力画像与规则探测；v11 增加规则安装状态；v10 增加健康与就绪查询
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 11U
+#define DPPD_MANAGEMENT_VERSION 12U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -58,6 +58,12 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_HEALTH_GET,
     /** 按当前版本读取实际后端和安装记录，追加编号以保留旧操作的含义 */
     DPPD_MANAGEMENT_RULE_STATUS,
+    /** 只读取设备启动信息和累计校验记录，恢复隔离期间也可使用 */
+    DPPD_MANAGEMENT_CAPABILITY_GET,
+    /** 校验完整规则而不安装，探测缓存只服务此诊断操作 */
+    DPPD_MANAGEMENT_CAPABILITY_PROBE,
+    /** 显式放弃某个端口的旧探测结果，不删除网卡规则或账本记录 */
+    DPPD_MANAGEMENT_CAPABILITY_CLEAR,
 };
 
 /*
@@ -136,6 +142,18 @@ struct dppd_management_request {
             uint16_t port_id;
             uint8_t reserved[6];
         } port_get;
+        /** 画像查询和清缓存共用端口选择，保留字节必须为零 */
+        struct {
+            uint16_t port_id;
+            uint8_t reserved[6];
+        } capability;
+        /** 不要求规则已经存在，generation 不参与探测，refresh 可强制重新询问驱动 */
+        struct {
+            uint16_t install_port_id;
+            bool refresh;
+            uint8_t reserved[5];
+            struct dppd_rule rule;
+        } probe;
         struct {
             uint64_t rule_id;
             /* 查询也检查 generation，防止把更新后新规则的计数返回给旧客户端。 */
@@ -264,6 +282,14 @@ struct dppd_management_health {
     int32_t recovery_last_error;
 };
 
+/** 将启动快照与本进程的规则校验记录一起呈现，未知能力不能伪装成驱动已经支持 */
+struct dppd_management_capability_profile {
+    struct dppd_management_port_info port;
+    struct dppd_capability_identity identity;
+    struct dppd_flow_probe_statistics probes;
+    uint64_t cache_ttl_ns;
+};
+
 struct dppd_management_response {
     uint16_t version;      /* daemon 实际使用的协议版本。 */
     uint16_t operation;    /* 回显请求 operation。 */
@@ -331,6 +357,8 @@ struct dppd_management_response {
         struct dppd_stats_values stats;
         struct dppd_management_health health;
         struct dppd_control_rule_status rule_status;
+        struct dppd_management_capability_profile capability;
+        struct dppd_flow_probe_result probe;
     } payload;
 };
 

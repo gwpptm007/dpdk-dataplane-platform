@@ -7,6 +7,7 @@
 #include <rte_config.h>
 #include <rte_ether.h>
 #include "dppd/config.h"
+#include "dppd/capability.h"
 #include "dppd/link.h"
 #include "dppd/topology.h"
 
@@ -27,6 +28,8 @@ struct dppd_port {
     uint16_t peer_port_id;
     int socket_id;
     struct dppd_port_capabilities capabilities;
+    /** 启动时捕获的设备身份、固件和描述符信息，管理查询不重复访问驱动 */
+    struct dppd_capability_identity identity;
     uint64_t configured_rss_hf;
     uint64_t configured_tx_offloads;
     struct rte_ether_addr mac;
