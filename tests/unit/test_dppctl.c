@@ -15,8 +15,17 @@
 int main(void)
 {
     struct dppd_management_request request;
+    char *probe[] = {"health", "unexpected"};
     char *stats[] = {"stats", "all", "2"};
 
+    /** 健康与就绪命令都使用无参数的状态查询，额外参数必须明确拒绝 */
+    assert(build_request(1, probe, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_HEALTH_GET);
+    assert(build_request(2, probe, &request) == -EINVAL);
+    probe[0] = "ready";
+    assert(build_request(1, probe, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_HEALTH_GET);
+    assert(build_request(2, probe, &request) == -EINVAL);
     assert(build_request(1, stats, &request) == 0);
     assert(request.payload.stats_query.port_id == DPPD_STATS_ALL);
     assert(request.payload.stats_query.queue_id == DPPD_STATS_ALL);

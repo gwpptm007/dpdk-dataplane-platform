@@ -323,6 +323,25 @@ static void verify_drop_reasons(struct fixture *fixture)
     }
 }
 
+/** 用真实协议检查实际 worker 状态，收发完成后应就绪，停止并等待后应明确未就绪 */
+static void verify_health(struct fixture *fixture, bool ready)
+{
+    const struct dppd_management_request request = {
+        .version = DPPD_MANAGEMENT_VERSION,
+        .size = sizeof(request),
+        .operation = DPPD_MANAGEMENT_HEALTH_GET,
+    };
+    struct dppd_management_response response;
+
+    assert(dppd_management_handle(&fixture->control, &fixture->runtime.devices,
+                                  &fixture->runtime, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.health.ready == ready);
+    assert(response.payload.health.workers_expected == fixture->queues);
+    assert(response.payload.health.workers_running == (ready ? fixture->queues : 0));
+    assert(response.payload.health.workers_failed == 0);
+    assert(dppd_runtime_check_workers(&fixture->runtime) == 0);
+}
+
 static void configure_test_queues(struct fixture *fixture)
 {
     unsigned int lcore;
@@ -354,6 +373,8 @@ static void configure_test_queues(struct fixture *fixture)
         worker->runtime = &fixture->runtime;
         worker->lcore_id = lcore;
         worker->queue_id = 1;
+        /** 第二个 worker 由测试单独配置，同样必须先初始化供健康查询读取的原子状态 */
+        atomic_init(&worker->state, DPPD_WORKER_IDLE);
         dppd_stats_init(&worker->stats);
         for (uint16_t port = 0; port < 2; ++port)
             dppd_stats_init(&worker->port_stats[port]);
@@ -428,8 +449,10 @@ static void run_case(uint32_t count, uint16_t queues)
     dppd_runtime_set_software_backend(&fixture.runtime, &fixture.control.software);
     assert(dppd_runtime_start(&fixture.runtime) == 0);
     run_updates(&fixture);
+    verify_health(&fixture, true);
     dppd_runtime_request_stop(&fixture.runtime);
     assert(dppd_runtime_wait(&fixture.runtime) == 0);
+    verify_health(&fixture, false);
     assert(dppd_software_backend_contains_version(&fixture.control.software,
         fixture.requests[0].rule.id, fixture.requests[0].expected_generation));
     assert(fixture.control.software.retired == NULL);
@@ -466,8 +489,10 @@ static void run_case(uint32_t count, uint16_t queues)
         assert(dppd_runtime_start(&fixture.runtime) == 0);
         enqueue_round(&fixture);
         drain_round(&fixture);
+        verify_health(&fixture, true);
         dppd_runtime_request_stop(&fixture.runtime);
         assert(dppd_runtime_wait(&fixture.runtime) == 0);
+        verify_health(&fixture, false);
         assert(dppd_software_backend_contains_version(&fixture.control.software,
             fixture.requests[0].rule.id, fixture.requests[0].expected_generation));
         assert(fixture.control.software.retired == NULL);
@@ -481,6 +506,11 @@ static void run_case(uint32_t count, uint16_t queues)
         }
         verify_stats(&fixture);
         verify_drop_reasons(&fixture);
+        /**
+         * 不设置普通停止请求，单独发布设备移除标记，验证正式 worker 会自行结束
+         * 等待所有线程和 QSBR 读者退出后，再次启动必须被 ENODEV 拒绝
+         * 随后仍按正常所有权顺序回收规则、端口、环和缓冲池，检查没有遗留报文
+         */
         assert(dppd_runtime_start(&fixture.runtime) == 0);
         atomic_store_explicit(&fixture.runtime.devices.ports[1].removed, true,
                               memory_order_release);
@@ -506,7 +536,7 @@ static void run_case(uint32_t count, uint16_t queues)
     }
     printf("PASS rules=%u queues=%u updates=%u rx=%" PRIu64 " forwarded=%" PRIu64
            " dropped=%" PRIu64 " allocation-failures=%u replay=passed stats=passed"
-           " drop-reasons=passed removal-stop=passed mbuf-leaks=0\n",
+           " drop-reasons=passed removal-stop=passed health=passed mbuf-leaks=0\n",
            count, queues, ROUNDS + 1, fixture.received, fixture.forwarded,
            fixture.received - fixture.forwarded, count + 2);
 }

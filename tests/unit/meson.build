@@ -106,6 +106,10 @@ management_test = executable(
 )
 test('management protocol and socket', management_test)
 
+# 健康状态测试不访问网卡，覆盖就绪条件和正式 worker 初始化失败的状态发布
+health_test = executable('test_health', 'test_health.c', dependencies: dppd_core_dep)
+test('health and worker readiness', health_test)
+
 dppctl_test = executable(
   'test_dppctl',
   'test_dppctl.c',

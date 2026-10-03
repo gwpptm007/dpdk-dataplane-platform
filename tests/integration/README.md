@@ -1,5 +1,23 @@
 # 集成验收
 
+## 健康与就绪
+
+```bash
+python3 tests/integration/health_readiness.py --build-dir build
+sudo python3 tests/integration/health_readiness.py --build-dir build --tap
+```
+
+管理协议 v10。自动检查 `health/ready` 的输出与退出码、实际 worker 状态、只读查询、
+快照写入失败与 flush 修复、非空两规则重启，以及注册失败后的主线程故障监控。
+单队列使用 `net_ring`，双线程使用支持正式配置要求的 `net_null`；TAP 模式只操作
+测试自己创建的两个临时接口，验证 down/up 的未就绪与恢复、快照不变和退出清理。
+TAP 预分配接收队列，因此池容量为 8191，其余虚拟端口场景为 1024。
+
+2026-10-03 三组状态/存储恢复和两组线程注册故障通过，19/19 单测、四组 worker
+收发和既有隔离/移除/链路错误回归通过。测试包装函数不链接到正式 daemon，所有
+故障环境限定于独立测试进程。该结果不证明卡死检测、物理 RSS、端到端可达或物理
+热拔插，详见 [健康与就绪验证](../../docs/health_readiness.md)。
+
 ## 双端口软件路径
 
 测试拓扑需要一台流量发生主机的两个接口分别连接 dppd 的端口 0 和 1。DPDK 端口已绑定给用户态后，不能在同一端口上直接用 Scapy 发包。

@@ -16,6 +16,8 @@ static void print_usage(const char *program)
 {
     fprintf(stderr, "usage:\n");
     fprintf(stderr, "  %s [--socket PATH] ping\n", program);
+    fprintf(stderr, "  %s [--socket PATH] health\n", program);
+    fprintf(stderr, "  %s [--socket PATH] ready\n", program);
     fprintf(stderr, "  %s [--socket PATH] persistence-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] persistence-flush\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-status\n", program);
@@ -401,6 +403,11 @@ static int build_request(int argc, char **argv,
         }
         return 0;
     }
+    /** 两个命令读取同一个快照，ready 额外把未就绪结果转换成脚本可检查的失败退出码 */
+    if (argc == 1 && (strcmp(argv[0], "health") == 0 || strcmp(argv[0], "ready") == 0)) {
+        initialize_request(request, DPPD_MANAGEMENT_HEALTH_GET);
+        return 0;
+    }
     if (argc == 1 && strcmp(argv[0], "ping") == 0) {
         initialize_request(request, DPPD_MANAGEMENT_PING);
         return 0;
@@ -682,6 +689,54 @@ static const char *recovery_state_name(
     return "unknown";
 }
 
+/**
+ * 在一行中输出所有未就绪原因和关键计数，便于人工查看和部署脚本读取
+ * live=yes 只说明管理主线程成功响应，ready 则需要线程、端口和规则状态共同满足条件
+ */
+static void print_health(const struct dppd_management_health *health)
+{
+    static const struct {
+        uint32_t mask;
+        const char *name;
+    } reasons[] = {
+        {DPPD_HEALTH_NO_RUNTIME, "no-runtime"},
+        {DPPD_HEALTH_STOP_REQUESTED, "stop-requested"},
+        {DPPD_HEALTH_DEVICE_REMOVED, "device-removed"},
+        {DPPD_HEALTH_WORKERS_NOT_RUNNING, "workers-not-running"},
+        {DPPD_HEALTH_PORTS_NOT_STARTED, "ports-not-started"},
+        {DPPD_HEALTH_LINK_DOWN, "link-down"},
+        {DPPD_HEALTH_LINK_UNKNOWN, "link-unknown"},
+        {DPPD_HEALTH_RECOVERY_REQUIRED, "recovery-required"},
+        {DPPD_HEALTH_PERSISTENCE_DIRTY, "persistence-dirty"},
+        {DPPD_HEALTH_WORKER_FAILED, "worker-failed"},
+    };
+    bool first = true;
+
+    printf("health live=yes ready=%s blockers=0x%x reasons=",
+           health->ready ? "yes" : "no", health->blockers);
+    for (size_t i = 0; i < sizeof(reasons) / sizeof(reasons[0]); ++i) {
+        if ((health->blockers & reasons[i].mask) != 0) {
+            printf("%s%s", first ? "" : ",", reasons[i].name);
+            first = false;
+        }
+    }
+    if (first)
+        printf("%s", health->blockers == 0 ? "none" : "unknown");
+    printf(" workers=%u/%u workers-failed=%u ports=%u/%u"
+           " links-up=%u links-down=%u links-unknown=%u links-unsupported=%u"
+           " recovery=%s persistence-enabled=%s persistence-dirty=%s"
+           " persisted-generation=%" PRIu64 " current-generation=%" PRIu64
+           " rules=%u persistence-error=%d recovery-error=%d\n",
+           health->workers_running, health->workers_expected, health->workers_failed,
+           health->ports_started, health->ports_expected, health->links_up,
+           health->links_down, health->links_unknown, health->links_unsupported,
+           recovery_state_name((enum dppd_control_recovery_state)health->recovery_state),
+           health->persistence_enabled ? "yes" : "no",
+           health->persistence_dirty ? "yes" : "no", health->persisted_generation,
+           health->repository_generation, health->rule_count,
+           health->persistence_last_error, health->recovery_last_error);
+}
+
 static void print_ipv4_value(const char *label, uint32_t address_be,
                              uint32_t mask_be)
 {
@@ -785,6 +840,9 @@ static void print_response(const struct dppd_management_response *response)
 {
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释。 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_HEALTH_GET:
+        print_health(&response->payload.health);
+        break;
     case DPPD_MANAGEMENT_STATS_QUERY:
 #define PRINT_STATS_FIELD(field) printf(#field "=%" PRIu64 " ", response->payload.stats.field);
         DPPD_STATS_FIELDS(PRINT_STATS_FIELD)
@@ -956,6 +1014,7 @@ int main(int argc, char **argv)
     const char *socket_path = DPPD_MANAGEMENT_DEFAULT_SOCKET;
     struct dppd_management_request request;
     struct dppd_management_response response;
+    bool require_ready;
     int argument = 1;
     int rc;
 
@@ -969,6 +1028,9 @@ int main(int argc, char **argv)
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
+    /** 参数校验已通过，此时可以安全读取命令名，health 查询不会因 ready=no 自行失败 */
+    require_ready = request.operation == DPPD_MANAGEMENT_HEALTH_GET &&
+                    strcmp(argv[argument], "ready") == 0;
     rc = exchange(socket_path, &request, &response);
     if (rc != 0) {
         fprintf(stderr, "dppctl: transport failed: %s (%d)\n", strerror(-rc), rc);
@@ -1004,5 +1066,8 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     print_response(&response);
+    /** 先打印明确原因，再给就绪探针返回非零，避免脚本只能得到一个没有解释的失败码 */
+    if (require_ready && !response.payload.health.ready)
+        return EXIT_FAILURE;
     return EXIT_SUCCESS;
 }

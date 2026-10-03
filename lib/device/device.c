@@ -13,6 +13,10 @@
 #define DPPD_DEFAULT_RX_DESC 1024U
 #define DPPD_DEFAULT_TX_DESC 1024U
 
+/**
+ * 先封住被移除端口，再发布整个设备组的退出请求，工作线程只需读取原子状态
+ * 移除标记不会在当前进程中复位，它与可以恢复的普通链路 down 状态具有不同含义
+ */
 static void request_removal(struct dppd_device_set *devices, struct dppd_port *port)
 {
     atomic_store_explicit(&port->removed, true, memory_order_release);
@@ -20,6 +24,11 @@ static void request_removal(struct dppd_device_set *devices, struct dppd_port *p
     atomic_store_explicit(&devices->removal_requested, true, memory_order_release);
 }
 
+/**
+ * DPDK 可能在后台线程调用此函数，因此这里只发布移除状态
+ * 不在回调中停止设备、等待工作线程或释放内存，实际清理由主线程按顺序完成
+ * 端口编号和数量在注册回调前初始化，并保持到全部回调成功注销之后
+ */
 static int handle_removal(uint16_t port_id, enum rte_eth_event_type event,
                           void *context, void *ret_param)
 {
@@ -104,6 +113,7 @@ static int configure_port(struct dppd_port *port,
     port->capabilities.rx_offloads = info.rx_offload_capa;
     port->capabilities.tx_offloads = info.tx_offload_capa;
     port->capabilities.device_capabilities = info.dev_capa;
+    /** 仅在驱动明确支持移除中断时启用，避免不支持该能力的虚拟端口配置失败 */
     port_conf.intr_conf.rmv = info.dev_flags != NULL &&
         (*info.dev_flags & RTE_ETH_DEV_INTR_RMV) != 0;
     if (cfg->nb_queues > port->capabilities.max_rx_queues ||
@@ -208,6 +218,10 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
         }
     }
 
+    /**
+     * 一次性初始化所有端口元数据，再开始注册回调
+     * 注册过程中就可能收到移除事件，回调不能读取尚未初始化的其他端口状态
+     */
     devices->nb_ports = cfg->nb_ports;
     for (i = 0; i < cfg->nb_ports; ++i) {
         struct dppd_port *port = &devices->ports[i];
@@ -235,6 +249,7 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
             goto fail;
         }
         port->removal_callback_registered = true;
+        /** 注册调用返回前也可能已触发移除，此时直接清理，不再配置或启动端口 */
         if (dppd_devices_removal_requested(devices)) {
             rc = -ENODEV;
             goto fail;
@@ -273,6 +288,10 @@ int dppd_devices_poll_links(struct dppd_device_set *devices)
 
         if (!port->started)
             continue;
+        /**
+         * 先检查设备身份和移除状态，再判断是否跳过链路查询
+         * 即使 PMD 不支持 link API，也必须独立发现设备失效，不能永远跳过移除检测
+         */
         if (atomic_load_explicit(&port->removed, memory_order_acquire) ||
             !rte_eth_dev_is_valid_port(port->port_id) ||
             rte_eth_dev_is_removed(port->port_id)) {
@@ -298,6 +317,7 @@ int dppd_devices_poll_links(struct dppd_device_set *devices)
             fprintf(stderr, "[dppd] port=%u link=%s\n",
                     port->port_id, dppd_link_state_name(next));
     }
+    /** 覆盖遍历期间收到事件或尚未启动的端口已移除的情况，避免错误返回正常状态 */
     return dppd_devices_removal_requested(devices) ? -ENODEV : 0;
 }
 
@@ -310,12 +330,17 @@ int dppd_devices_stop(struct dppd_device_set *devices)
 
     if (devices == NULL)
         return -EINVAL;
+    /**
+     * 必须先注销所有端口的回调，再关闭任何端口或修改回调借用的元数据
+     * 按端口单独注销并检查结果，不能假定一次批量调用能准确报告每个在途回调
+     */
     for (i = 0; i < devices->nb_ports; ++i) {
         struct dppd_port *port = &devices->ports[i];
         int rc;
 
         if (!port->removal_callback_registered)
             continue;
+        /** EAGAIN 表示回调仍在执行，短暂休眠后重试，避免忙等并保证上下文仍然有效 */
         do {
             rc = rte_eth_dev_callback_unregister(port->port_id, RTE_ETH_EVENT_INTR_RMV,
                                                   handle_removal, devices);
@@ -327,6 +352,7 @@ int dppd_devices_stop(struct dppd_device_set *devices)
             }
         } while (rc == -EAGAIN);
         if (rc != 0) {
+            /** 其他注销错误不能当作成功，保留设备和缓冲池供调用方报告故障 */
             fprintf(stderr, "[dppd] port=%u removal callback unregister failed: %d\n",
                     port->port_id, rc);
             return rc;
@@ -346,6 +372,7 @@ int dppd_devices_stop(struct dppd_device_set *devices)
             }
         }
         if (port->configured) {
+            /** stop 失败后仍尝试 close，成功关闭后才有机会安全归还该端口使用的资源 */
             rc = rte_eth_dev_close(port->port_id);
             if (rc != 0) {
                 fprintf(stderr, "[dppd] port=%u device close failed: %d; retaining mbuf pools\n",
@@ -359,6 +386,7 @@ int dppd_devices_stop(struct dppd_device_set *devices)
         port->started = false;
         port->configured = false;
     }
+    /** 多个端口可能共用同一缓冲池，任一 close 失败就不能释放任何共享池 */
     if (!all_closed)
         return result;
     for (socket_id = 0; socket_id < RTE_MAX_NUMA_NODES; ++socket_id) {

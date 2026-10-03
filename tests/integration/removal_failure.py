@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise removal events/probes, callback lifetime, failed startup and snapshot replay."""
+"""验证设备移除、在途回调等待、启动失败清理和重启后的非空规则恢复"""
 
 import argparse
 import os
@@ -7,11 +7,12 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from batch_update import check
+from batch_update import check, fields
 from recovery_isolation import stop, wait_for
 
 
 def run_case(build, mode, port=1):
+    """每组使用独立目录和 daemon，先注入故障，再用不加载故障库的进程恢复"""
     with tempfile.TemporaryDirectory(prefix="dppd-removal-") as temporary:
         directory = Path(temporary)
         sock, state, trigger = directory / "ctl.sock", directory / "state.bin", directory / "fault"
@@ -23,6 +24,7 @@ def run_case(build, mode, port=1):
                    "--", "--ports", "0,1", "--queues", "1", "--rule-capacity", "2",
                    "--mbufs", "1024", "--cache", "0", "--control-socket", str(sock),
                    "--state-path", str(state)]
+        # 清除继承的测试变量，确保 CLI 和重启进程只运行正式逻辑
         clean_env = {key: value for key, value in os.environ.items()
                      if key != "LD_PRELOAD" and not key.startswith("DPPD_TEST_")}
         clean_env["LC_ALL"] = "C"
@@ -32,11 +34,13 @@ def run_case(build, mode, port=1):
                          DPPD_TEST_REMOVAL_PORT=str(port))
 
         def ctl(*tokens):
+            """CLI 使用干净环境，避免把 daemon 专用的拦截库加载到客户端"""
             return subprocess.run([str(build / "dppctl"), "--socket", str(sock), *map(str, tokens)],
                                   check=True, capture_output=True, text=True, timeout=5,
                                   env=clean_env).stdout
 
         def start(environment, log_name):
+            """保留每阶段日志，并只把本阶段选定的环境传给新进程"""
             with (directory / log_name).open("w") as output:
                 return subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
                                         env=environment)
@@ -48,6 +52,7 @@ def run_case(build, mode, port=1):
                 daemon.wait(timeout=10)
                 check(not sock.exists() and not state.exists(), "failed startup exposed management/state")
             else:
+                # 先保存两个端口的非空规则和快照，再显式触发故障，排除时序不确定性
                 wait_for(daemon, sock.exists, "management socket")
                 ctl("apply-drop", 15001, 0, 0, 0, "software")
                 ctl("apply-filter", 15002, 1, 0, "tcp", "192.168.100.2/32",
@@ -56,6 +61,10 @@ def run_case(build, mode, port=1):
                 saved_state = state.read_bytes()
                 if mode.endswith("no-link"):
                     check("link=unsupported " in ctl("port-show", port), "link API not unsupported")
+                    # 不支持 link 查询的端口可以继续运行，但健康结果必须标明链路未经验证
+                    wait_for(daemon, lambda: fields(ctl("health"))["ready"] == "yes", "worker readiness")
+                    health = fields(ctl("ready"))
+                    check(health["links-unsupported"] == "1" and health["links-up"] == "1", str(health))
                 trigger.touch()
                 daemon.wait(timeout=10)
                 check(not sock.exists() and state.read_bytes() == saved_state,
@@ -85,6 +94,7 @@ def run_case(build, mode, port=1):
 
         daemon = start(clean_env, "restored.log")
         try:
+            # 逐条核对旧版本和安装端口，COUNT 属于运行期数据，重启后应从零开始
             wait_for(daemon, sock.exists, "restored management socket")
             if saved_state is not None:
                 for rule_id, saved_rule in saved_rules.items():
@@ -106,6 +116,7 @@ def run_case(build, mode, port=1):
 
 
 def main():
+    """覆盖两个端口、链路查询不可用、启动事件和注册失败共八个独立场景"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     args = parser.parse_args()

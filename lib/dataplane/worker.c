@@ -31,6 +31,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
     uint16_t nb_tx = 0;
     uint16_t i;
 
+    /** 在进入驱动收包接口之前再次检查移除请求，减少通知后的设备访问 */
     if (dppd_devices_removal_requested(&runtime->devices))
         return;
     nb_rx = rte_eth_rx_burst(ingress->port_id,
@@ -74,7 +75,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             continue;
         }
 
-        /** 配对出口必须存在且与决策一致，不能把报文交给另一端口的发送队列 */
+        /** 配对出口必须存在、与决策一致且未断开或移除，无法发送的报文由本线程释放 */
         if (egress == NULL || decision.egress_port != egress->port_id ||
             !dppd_port_tx_available(egress)) {
             delta.policy_drops++;
@@ -108,6 +109,11 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         tx[nb_tx++] = rx[i];
     }
 
+    /**
+     * 逐包处理期间出口也可能发生变化，提交发送批次前再检查一次
+     * 这些报文尚未交给驱动，仍由当前线程持有，所以可以在此统计并释放
+     * 原子检查只能减少通知后的访问，不能替代物理热拔插所需的总线访问保护
+     */
     if (nb_tx != 0 && (dppd_devices_removal_requested(&runtime->devices) ||
                        !dppd_port_tx_available(egress))) {
         delta.policy_drops += nb_tx;
@@ -169,9 +175,16 @@ int dppd_worker_main(void *arg)
      */
     if (runtime->software_backend != NULL &&
         dppd_software_backend_worker_register(runtime->software_backend,
-                                              worker->queue_id) != 0)
+                                              worker->queue_id) != 0) {
+        /** 尚未开始收发就注册失败，也要通知主线程，不能留下貌似已启动的空线程 */
+        atomic_store_explicit(&worker->state, DPPD_WORKER_FAILED, memory_order_release);
         return -1;
+    }
 
+    /** 完成规则读者注册后才宣布线程可以收发，健康查询据此统计实际运行的队列 */
+    atomic_store_explicit(&worker->state, DPPD_WORKER_RUNNING, memory_order_release);
+
+    /** 移除回调直接通知所有工作线程退出，不依赖主线程先设置普通停止标记 */
     while (!atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) &&
            !dppd_devices_removal_requested(&runtime->devices)) {
         uint16_t i;
@@ -185,5 +198,7 @@ int dppd_worker_main(void *arg)
     /** 停止读取规则后注销；主线程还需等待本线程返回，之后才能销毁共享后端 */
     dppd_software_backend_worker_unregister(runtime->software_backend,
                                             worker->queue_id);
+    /** 先注销借用的规则读者，再发布已结束状态，资源释放仍须由主线程等待返回 */
+    atomic_store_explicit(&worker->state, DPPD_WORKER_STOPPED, memory_order_release);
     return 0;
 }

@@ -12,10 +12,10 @@
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /*
- * v9 增加端口链路状态；v8 增加端口和队列统计；v7 增加原子批量更新
+ * v10 增加健康与就绪查询；v9 增加端口链路状态；v8 增加端口和队列统计
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 9U
+#define DPPD_MANAGEMENT_VERSION 10U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -54,6 +54,8 @@ enum dppd_management_operation {
     /** v7 新增的整批更新操作，追加在末尾以保持既有操作编号不变 */
     DPPD_MANAGEMENT_RULE_UPDATE_BATCH,
     DPPD_MANAGEMENT_STATS_QUERY,
+    /** 健康快照可在恢复隔离期间查询，不执行规则操作、网卡探测或磁盘保存 */
+    DPPD_MANAGEMENT_HEALTH_GET,
 };
 
 /*
@@ -209,6 +211,52 @@ struct dppd_management_rule_page {
     struct dppd_management_rule_summary rules[DPPD_MANAGEMENT_RULE_PAGE_SIZE];
 };
 
+/**
+ * 每一位表示当前无法宣布就绪的一个原因，多种问题可同时保留，不能只报告第一个
+ * 初始不支持链路查询的端口单独计数，它本身不会禁止既有的软件转发
+ */
+enum dppd_management_health_blocker {
+    DPPD_HEALTH_NO_RUNTIME = 1U << 0,
+    DPPD_HEALTH_STOP_REQUESTED = 1U << 1,
+    DPPD_HEALTH_DEVICE_REMOVED = 1U << 2,
+    DPPD_HEALTH_WORKERS_NOT_RUNNING = 1U << 3,
+    DPPD_HEALTH_PORTS_NOT_STARTED = 1U << 4,
+    DPPD_HEALTH_LINK_DOWN = 1U << 5,
+    DPPD_HEALTH_LINK_UNKNOWN = 1U << 6,
+    DPPD_HEALTH_RECOVERY_REQUIRED = 1U << 7,
+    DPPD_HEALTH_PERSISTENCE_DIRTY = 1U << 8,
+    DPPD_HEALTH_WORKER_FAILED = 1U << 9,
+};
+
+/**
+ * 管理主线程读取自己持有的控制状态和工作线程发布的原子状态，组成无指针的快照
+ * ready 只说明当前配置、线程、已知链路与策略状态允许运行，不承诺端到端网络可达
+ * 查询成功即可证明主线程能够响应，客户端将此表示为 live=yes
+ */
+struct dppd_management_health {
+    bool ready;
+    uint8_t recovery_state;
+    bool persistence_enabled;
+    bool persistence_dirty;
+    uint32_t blockers;
+    uint16_t workers_expected;
+    uint16_t workers_running;
+    uint16_t workers_failed;
+    uint16_t ports_expected;
+    uint16_t ports_started;
+    uint16_t links_up;
+    uint16_t links_down;
+    uint16_t links_unknown;
+    /** 不支持查询表示链路未经验证，不能把此数值归入 links_up */
+    uint16_t links_unsupported;
+    uint16_t reserved;
+    uint32_t rule_count;
+    uint64_t repository_generation;
+    uint64_t persisted_generation;
+    int32_t persistence_last_error;
+    int32_t recovery_last_error;
+};
+
 struct dppd_management_response {
     uint16_t version;      /* daemon 实际使用的协议版本。 */
     uint16_t operation;    /* 回显请求 operation。 */
@@ -274,6 +322,7 @@ struct dppd_management_response {
         struct dppd_control_persistence_status persistence;
         struct dppd_control_recovery_status recovery;
         struct dppd_stats_values stats;
+        struct dppd_management_health health;
     } payload;
 };
 

@@ -12,6 +12,18 @@
 struct dppd_runtime;
 struct dppd_software_backend;
 
+/**
+ * 记录工作线程实际走到的阶段，不能把主线程成功提交启动请求等同于线程已可转发
+ * 主线程负责 IDLE/STARTING，工作线程完成读者注册后发布 RUNNING，退出时发布结束状态
+ */
+enum dppd_worker_state {
+    DPPD_WORKER_IDLE = 0,
+    DPPD_WORKER_STARTING,
+    DPPD_WORKER_RUNNING,
+    DPPD_WORKER_STOPPED,
+    DPPD_WORKER_FAILED,
+};
+
 struct dppd_worker {
     struct dppd_runtime *runtime;
     unsigned int lcore_id;
@@ -21,6 +33,8 @@ struct dppd_worker {
      */
     uint16_t queue_id;
     bool launched;
+    /** 跨线程状态使用 release/acquire 传递，管理查询不直接访问 DPDK 的内部线程结构 */
+    atomic_uint state;
     struct dppd_worker_stats stats;
     struct dppd_worker_stats port_stats[DPPD_MAX_PORTS];
 };
@@ -48,6 +62,8 @@ void dppd_runtime_set_software_backend(
     struct dppd_runtime *runtime,
     struct dppd_software_backend *software_backend);
 int dppd_runtime_start(struct dppd_runtime *runtime);
+/** 检查已启动的线程是否异常结束；正常停止和设备移除由各自的退出流程处理 */
+int dppd_runtime_check_workers(const struct dppd_runtime *runtime);
 void dppd_runtime_request_stop(struct dppd_runtime *runtime);
 int dppd_runtime_wait(struct dppd_runtime *runtime);
 void dppd_runtime_stats_read(const struct dppd_runtime *runtime,
@@ -56,6 +72,7 @@ int dppd_runtime_stats_query(const struct dppd_runtime *runtime,
                               uint16_t port_id, uint16_t queue_id,
                               struct dppd_stats_values *total);
 void dppd_runtime_stats_dump(const struct dppd_runtime *runtime);
+/** 停止线程并回收设备资源，返回清理错误，调用方应据此决定最终退出码 */
 int dppd_runtime_destroy(struct dppd_runtime *runtime);
 /** 工作线程入口，负责登记规则读者、处理收发循环，并在返回前注销读者身份 */
 int dppd_worker_main(void *arg);

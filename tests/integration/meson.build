@@ -1,4 +1,13 @@
-# Explicit LD_PRELOAD fixture, never linked into dppd or installed.
+# 测试专用入口只包装读者注册，正式 daemon 的线程监控和资源清理保持不变
+executable(
+  'test_worker_failure',
+  'worker_failure.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=dppd_software_backend_worker_register'],
+  install: false,
+)
+
+# 显式 LD_PRELOAD 的移除故障库，不链接到正式 dppd，也不安装
 shared_library(
   'dppd_removal_faults',
   'removal_faults.c',

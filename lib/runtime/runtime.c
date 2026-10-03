@@ -39,6 +39,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         worker->runtime = runtime;
         worker->lcore_id = lcore_id;
         worker->queue_id = worker_index;
+        atomic_init(&worker->state, DPPD_WORKER_IDLE);
         dppd_stats_init(&worker->stats);
         for (uint16_t port_index = 0; port_index < cfg->nb_ports; ++port_index)
             dppd_stats_init(&worker->port_stats[port_index]);
@@ -87,6 +88,7 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
 
     if (runtime == NULL || runtime->workers_started)
         return -EINVAL;
+    /** 普通停止后可以重新启动线程，但设备移除后必须重建整个运行实例 */
     if (dppd_devices_removal_requested(&runtime->devices))
         return -ENODEV;
 
@@ -95,8 +97,11 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
     for (i = 0; i < runtime->nb_workers; ++i) {
         struct dppd_worker *worker = &runtime->workers[i];
 
+        /** 必须在提交线程之前发布 STARTING，避免覆盖线程已经发布的 RUNNING 状态 */
+        atomic_store_explicit(&worker->state, DPPD_WORKER_STARTING, memory_order_release);
         rc = rte_eal_remote_launch(dppd_worker_main, worker, worker->lcore_id);
         if (rc != 0) {
+            atomic_store_explicit(&worker->state, DPPD_WORKER_FAILED, memory_order_release);
             fprintf(stderr, "[dppd] cannot launch queue %u on lcore %u: %d\n",
                     worker->queue_id, worker->lcore_id, rc);
             dppd_runtime_request_stop(runtime);
@@ -106,6 +111,36 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
         worker->launched = true;
     }
     runtime->workers_started = true;
+    return 0;
+}
+
+/**
+ * 此检查不等待线程，也不调用网卡接口，因此可放在主线程的周期循环中
+ * STARTING 是正常短暂阶段；在没有停止或移除请求时结束的线程必须按故障处理
+ */
+int dppd_runtime_check_workers(const struct dppd_runtime *runtime)
+{
+    if (runtime == NULL)
+        return -EINVAL;
+    if (!runtime->workers_started ||
+        atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
+        dppd_devices_removal_requested(&runtime->devices))
+        return 0;
+    for (uint16_t i = 0; i < runtime->nb_workers; ++i) {
+        const unsigned int state = atomic_load_explicit(&runtime->workers[i].state,
+                                                         memory_order_acquire);
+
+        if (state != DPPD_WORKER_STARTING && state != DPPD_WORKER_RUNNING) {
+            /**
+             * 初次检查后可能才收到停止或移除请求，线程会先看到请求并发布结束状态
+             * 读到结束状态后再次检查原因，避免把按通知结束的线程误报为独立故障
+             */
+            if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
+                dppd_devices_removal_requested(&runtime->devices))
+                return 0;
+            return -EIO;
+        }
+    }
     return 0;
 }
 
@@ -130,6 +165,10 @@ int dppd_runtime_wait(struct dppd_runtime *runtime)
             continue;
         rc = rte_eal_wait_lcore(worker->lcore_id);
         worker->launched = false;
+        /** 等待结果是最终依据，保留失败状态供清理前的诊断读取 */
+        atomic_store_explicit(&worker->state,
+                              rc == 0 ? DPPD_WORKER_STOPPED : DPPD_WORKER_FAILED,
+                              memory_order_release);
         if (rc != 0 && result == 0)
             result = rc;
     }
@@ -212,5 +251,6 @@ int dppd_runtime_destroy(struct dppd_runtime *runtime)
         (void)rte_pdump_uninit();
         runtime->pdump_initialized = false;
     }
+    /** 将端口关闭或回调注销错误交给进程入口，避免清理失败却报告正常退出 */
     return dppd_devices_stop(&runtime->devices);
 }

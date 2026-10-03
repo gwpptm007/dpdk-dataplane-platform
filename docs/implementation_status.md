@@ -2,6 +2,12 @@
 
 状态只表示代码是否真实存在，不以目录或占位接口计入完成度。
 
+2026-10-03 新增 management v10 的 `health/ready`、工作线程实际状态和异常结束监控。
+只读健康查询在恢复隔离期间仍可响应，未就绪时保留全部原因；存储修复和链路恢复后
+就绪自动恢复。`-Werror` 构建、19/19 单测、三个正常/存储恢复进程场景、两组线程
+注册故障、四组正式 worker 收发及既有隔离/移除/链路错误回归通过，详见
+[健康与就绪验证](health_readiness.md)。线程状态不包含卡死心跳或端到端可达性检查。
+
 2026-09-26 跨规则原子更新及 management v7 已通过 Ubuntu 22.04.5 / DPDK 21.11.9 下的 `-Werror` 全量构建、15/15 单测和四组 net_ring 进程间验证。验证了 2/4 条更新、满容量纯软件替换、旧版本拒绝、相同内容更新、混合路径容量拒绝、snapshot 状态和退出清理；新增并发分类及分配故障测试通过，并通过 AddressSanitizer/UBSan 检查；详见 [验证记录](validation_batch_update.md)。实际 RX/TX 验证也已补齐：正式 worker 在 net_ring 上处理 72456 个报文，两条和四条规则各成功更新 1001 次，DROP、COUNT、正常转发、分配失败后重试及 mbuf 回收通过普通和 AddressSanitizer/UBSan 构建验证。下方保留此前 v6 基线的硬件与 TAP 验证记录。
 
 在线恢复隔离另有两组进程级 flow API 故障注入测试通过：确认 worker 停止、普通请求
@@ -13,7 +19,7 @@
 | 构建 | 已验证 | Ubuntu 22.04、Meson 0.61.2、DPDK 21.11.9 下完成 `-Werror` 全量编译和链接 |
 | 配置 | 已实现最小 CLI | 端口对、队列、burst、mbuf、统计、duration、promisc、pdump、管理 socket、规则容量 |
 | ethdev | 已实现 baseline、链路恢复与移除保护 | capability 交集、RSS、per-socket pool、queue setup、start/stop；链路轮询、down 丢弃、up 恢复；移除通知/状态停止 worker，等待回调后退出重启；重新枚举、热重配与物理热拔插验收未完成 |
-| 软件 worker | 已实现 | 每 queue 一个 lcore，所有端口 burst RX/TX，mbuf ownership 完整 |
+| 软件 worker | 已实现 | 每 queue 一个 lcore，所有端口 burst RX/TX，mbuf ownership 完整；实际运行状态发布与异常结束监控 |
 | parser | 已实现 baseline | 双 VLAN、ARP、IPv4、fragment、UDP/TCP；IPv6/tunnel 未实现 |
 | 软件策略 | 已实现最小闭环 | malformed drop，其余受支持/未知协议按静态端口对转发 |
 | stats/telemetry | 已实现 baseline | 工作线程、端口、队列统计及丢弃原因；v8 stats 查询；telemetry 保留聚合；规则 COUNT 独立查询 |
@@ -27,7 +33,8 @@
 | 虚拟 PMD flow 验证 | TAP 与 net_ring 已验证 | 双 TAP 已验证硬件 DROP/QUEUE；软件 TCP+MARK+COUNT+DROP 有真实报文与计数证据；net_ring 已验证 prefer 回退，见 [待办文档](todo_virtual_flow_backend.md) |
 | 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
 | control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
-| management API | 本机 v9 已验证 | 保留既有命令；v9 port-show 增加链路状态；v8 stats 及 v7 RULE_UPDATE_BATCH 保留；旧版本客户端被拒绝 |
+| management API | 本机 v10 已验证 | 新增只读 health/ready，隔离仍可查询；保留端口链路、统计与批量更新；旧版本客户端被拒绝 |
+| health/readiness | 已实现本机最小闭环 | 实际线程、端口与链路、移除、恢复隔离和持久化 dirty；未就绪原因与 CLI 退出码；未提供远程探针、心跳或主动网络探测 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |
 | ACL/LPM/NAT/conntrack | 未实现 | 旧占位实现已删除，需按 stage/snapshot 模型重建 |
 | DPU/SmartNIC 实机 | 未验证 | 需在具体 PMD、固件、representor devargs 上建立能力矩阵 |
@@ -120,7 +127,7 @@
 - 没有查询 `rte_flow` 资源容量或预留规则空间；
 - COUNT id 由 rule id 的低 32 位生成，控制面必须保证其作用域内不冲突。
 - 硬件规则更新采用“先创建新 generation，再删除旧 generation”；若 PMD 拒绝重叠规则，更新失败并保留旧规则，当前不承诺跨 PMD 的无损原子替换。
-- management v7 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
+- management v10 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
 - 批量更新保留 `rule_capacity + 1` 的 backend 容量。纯软件路径整批替换快照、复用旧槽位，满表可更新；每次分类使用完整旧表或新表，新版本 COUNT 归零，未更新规则保留计数。硬件及混合路径仍需要临时容量，只保证账本整批发布；PREFER 可能整表替换但最终成为混合计划时，会在安装前复查软件空间。
 - daemon 为安全起见不会自动删除启动前已存在的 socket 路径；异常退出后需由部署脚本确认没有存活进程再清理残留文件。
-- snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入仅允许 `reconcile-status/reconcile-retry` 的进程内隔离模式；进程终止后的 PMD 专用 residual flow 清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md)。
+- snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready` 的进程内隔离模式；进程终止后的 PMD 专用 residual flow 清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md)。

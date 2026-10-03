@@ -11,6 +11,7 @@ static bool removed[2];
 static bool valid[2] = {true, true};
 
 int __wrap_rte_eth_dev_is_valid_port(uint16_t port_id);
+/** 与链路返回值独立控制端口是否仍存在，覆盖编号失效但没有链路错误的情况 */
 int __wrap_rte_eth_dev_is_valid_port(uint16_t port_id)
 {
     assert(port_id == 5 || port_id == 9);
@@ -18,6 +19,7 @@ int __wrap_rte_eth_dev_is_valid_port(uint16_t port_id)
 }
 
 int __wrap_rte_eth_dev_is_removed(uint16_t port_id);
+/** 模拟 PMD 的移除探测，不需要真正拔出设备，也不借助 link API 返回错误 */
 int __wrap_rte_eth_dev_is_removed(uint16_t port_id)
 {
     assert(port_id == 5 || port_id == 9);
@@ -83,16 +85,19 @@ int main(void)
     assert(!dppd_port_tx_available(&devices.ports[0]));
     assert(dppd_devices_poll_links(NULL) == -EINVAL);
     errors[0] = 0;
+    /** 即使第二端口已跳过不支持的链路查询，仍必须发布设备组移除请求 */
     removed[1] = true;
     assert(dppd_devices_poll_links(&devices) == -ENODEV);
     assert(dppd_devices_removal_requested(&devices));
     assert(atomic_load(&devices.ports[1].removed));
     assert(!dppd_port_tx_available(&devices.ports[1]));
+    /** 后续探测恢复正常也不能清除历史移除标记，更不能重新允许发送 */
     removed[1] = false;
     atomic_store(&devices.ports[1].link_state, DPPD_LINK_UP);
     assert(!dppd_port_tx_available(&devices.ports[1]));
     assert(dppd_devices_poll_links(&devices) == -ENODEV);
 
+    /** 仅在测试中重置场景，再验证端口编号失效也会触发移除退出 */
     atomic_store(&devices.ports[1].removed, false);
     atomic_store(&devices.ports[1].link_state, DPPD_LINK_UNSUPPORTED);
     atomic_store(&devices.removal_requested, false);

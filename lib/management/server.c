@@ -79,6 +79,89 @@ static int build_port_info(const struct dppd_device_set *devices,
     return 0;
 }
 
+/**
+ * 健康查询只读取已发布的状态，不调用 PMD，也不读取或修复快照文件
+ * 因此恢复隔离期间仍可安全响应，部署脚本能区分主线程存活与转发服务已就绪
+ * 链路和线程是独立原子采样，查询结果不承诺这些状态在未来持续不变
+ */
+static void build_health(const struct dppd_control_service *control,
+                          const struct dppd_runtime *runtime,
+                          struct dppd_management_health *output)
+{
+    struct dppd_control_persistence_status persistence;
+
+    dppd_control_persistence_status(control, &persistence);
+    output->recovery_state = (uint8_t)control->recovery_state;
+    output->recovery_last_error = control->recovery_last_error;
+    output->persistence_enabled = persistence.enabled;
+    output->persistence_dirty = persistence.dirty;
+    output->persisted_generation = persistence.persisted_generation;
+    output->repository_generation = persistence.current_generation;
+    output->persistence_last_error = persistence.last_error;
+    output->rule_count = dppd_rule_repository_count(&control->rules);
+    if (control->recovery_state != DPPD_CONTROL_RECOVERY_READY)
+        output->blockers |= DPPD_HEALTH_RECOVERY_REQUIRED;
+    if (persistence.enabled && persistence.dirty)
+        output->blockers |= DPPD_HEALTH_PERSISTENCE_DIRTY;
+    if (runtime == NULL) {
+        output->blockers |= DPPD_HEALTH_NO_RUNTIME;
+        return;
+    }
+
+    output->workers_expected = runtime->config.nb_queues;
+    output->ports_expected = runtime->config.nb_ports;
+    if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire))
+        output->blockers |= DPPD_HEALTH_STOP_REQUESTED;
+    for (uint16_t i = 0; i < runtime->nb_workers; ++i) {
+        const unsigned int state = atomic_load_explicit(&runtime->workers[i].state,
+                                                         memory_order_acquire);
+
+        output->workers_running += state == DPPD_WORKER_RUNNING;
+        output->workers_failed += state == DPPD_WORKER_FAILED;
+    }
+    /** 检查实际队列数和启动状态，避免配置了两条队列却只有一条线程运行也报告就绪 */
+    if (!runtime->workers_started || output->workers_expected == 0 ||
+        runtime->nb_workers != output->workers_expected ||
+        output->workers_running != output->workers_expected)
+        output->blockers |= DPPD_HEALTH_WORKERS_NOT_RUNNING;
+    if (output->workers_failed != 0)
+        output->blockers |= DPPD_HEALTH_WORKER_FAILED;
+
+    for (uint16_t i = 0; i < runtime->devices.nb_ports; ++i) {
+        const struct dppd_port *port = &runtime->devices.ports[i];
+        const unsigned int link = atomic_load_explicit(&port->link_state,
+                                                        memory_order_acquire);
+
+        output->ports_started += port->configured && port->started;
+        if (atomic_load_explicit(&port->removed, memory_order_acquire))
+            output->blockers |= DPPD_HEALTH_DEVICE_REMOVED;
+        switch (link) {
+        case DPPD_LINK_UP:
+            output->links_up++;
+            break;
+        case DPPD_LINK_DOWN:
+            output->links_down++;
+            output->blockers |= DPPD_HEALTH_LINK_DOWN;
+            break;
+        case DPPD_LINK_UNSUPPORTED:
+            /** 保留原有转发行为，并单独显示未验证的链路，不把它冒充为 up */
+            output->links_unsupported++;
+            break;
+        default:
+            output->links_unknown++;
+            output->blockers |= DPPD_HEALTH_LINK_UNKNOWN;
+            break;
+        }
+    }
+    if (output->ports_expected == 0 || runtime->devices.nb_ports != output->ports_expected ||
+        output->ports_started != output->ports_expected)
+        output->blockers |= DPPD_HEALTH_PORTS_NOT_STARTED;
+    /** 最后读取设备组标记，覆盖遍历端口期间收到移除通知的情况 */
+    if (dppd_devices_removal_requested(&runtime->devices))
+        output->blockers |= DPPD_HEALTH_DEVICE_REMOVED;
+    output->ready = output->blockers == 0;
+}
+
 static void build_rule_summary(const struct dppd_rule *rule,
                                struct dppd_management_rule_summary *summary)
 {
@@ -125,16 +208,22 @@ int dppd_management_handle(struct dppd_control_service *control,
     }
     /*
      * 回滚失败时 repository 从未发布，但 backend 可能还有实际 flow。除恢复状态和
-     * retry 外一律拒绝，防止“空 desired state”被误认为是可继续运行的正常状态。
+     * retry 和只读健康快照外一律拒绝，防止空 desired state 被误认为可以正常运行
      */
     if (control->recovery_state != DPPD_CONTROL_RECOVERY_READY &&
         request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS &&
-        request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY) {
+        request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY &&
+        request->operation != DPPD_MANAGEMENT_HEALTH_GET) {
         response->status = -EUCLEAN;
         return 0;
     }
 
     switch (request->operation) {
+    case DPPD_MANAGEMENT_HEALTH_GET:
+        /** 状态查询成功与已就绪是两件事，未就绪原因放在 payload 而不是伪造协议错误 */
+        build_health(control, runtime, &response->payload.health);
+        rc = 0;
+        break;
     case DPPD_MANAGEMENT_STATS_QUERY:
         if (request->payload.stats_query.reserved != 0)
             rc = -EINVAL;

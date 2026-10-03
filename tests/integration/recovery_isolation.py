@@ -88,6 +88,15 @@ def run_case(build, library, lcores, fault):
                     check(status["state"] == "reconciliation-required", str(status))
                     check(status["residual-objects"] == ("3" if fault == "create-rollback" else "1"),
                           str(status))
+                    # 隔离仍可证明管理线程存活，但停止的转发线程不能被报告为已就绪
+                    health = fields(ctl("health"))
+                    check(health["live"] == "yes" and health["ready"] == "no", str(health))
+                    check(health["workers"] == "0/1" and "recovery-required" in health["reasons"],
+                          str(health))
+                    readiness = subprocess.run([str(build / "dppctl"), "--socket", str(sock), "ready"],
+                                               env=client_env, capture_output=True, text=True, timeout=5)
+                    check(readiness.returncode == 1 and fields(readiness.stdout)["ready"] == "no",
+                          readiness.stdout + readiness.stderr)
                     for request in [("ping",), ("list",), ("get", 700), ("persistence-flush",),
                                     ("update-drop-batch", 0, 30, "require", 700, 1, 701, 2)]:
                         ctl(*request, error=errno.EUCLEAN)

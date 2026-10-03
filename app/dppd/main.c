@@ -138,6 +138,7 @@ int main(int argc, char **argv)
          * 唯一允许的状态转换是 reconcile-retry 成功后进入 RESTART_REQUIRED。
          */
         while (!stop_signal) {
+            /** 隔离仅停止软件转发，设备仍需监控，移除时应退出并清理而不是继续等待 */
             loop_error = dppd_devices_poll_links(&runtime.devices);
             if (loop_error != 0) {
                 fprintf(stderr, "[dppd] device monitoring failed during recovery isolation\n");
@@ -186,6 +187,15 @@ int main(int argc, char **argv)
         loop_error = dppd_devices_poll_links(&runtime.devices);
         if (loop_error != 0) {
             fprintf(stderr, "[dppd] device monitoring failed; stopping workers\n");
+            break;
+        }
+        /**
+         * 线程可能在完成启动请求后才遇到规则读者注册失败
+         * 检测到异常结束就停止其他线程并退出，避免管理进程存活却缺少转发队列
+         */
+        loop_error = dppd_runtime_check_workers(&runtime);
+        if (loop_error != 0) {
+            fprintf(stderr, "[dppd] worker monitoring failed; stopping workers\n");
             break;
         }
         if (!recovery_isolation && now >= next_stats) {
@@ -249,6 +259,7 @@ cleanup_control:
     if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)
         rc = EXIT_FAILURE;
 cleanup_runtime:
+    /** 清理失败或退出期间才收到移除通知，都必须保留失败退出码 */
     if (dppd_runtime_destroy(&runtime) != 0 ||
         dppd_devices_removal_requested(&runtime.devices))
         rc = EXIT_FAILURE;
