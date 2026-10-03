@@ -12,10 +12,10 @@
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /**
- * v12 增加能力画像与规则探测；v11 增加规则安装状态；v10 增加健康与就绪查询
+ * v13 增加规则请求指标与失败分类；v12 增加能力画像；v11 增加规则安装状态
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 12U
+#define DPPD_MANAGEMENT_VERSION 13U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -64,6 +64,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_CAPABILITY_PROBE,
     /** 显式放弃某个端口的旧探测结果，不删除网卡规则或账本记录 */
     DPPD_MANAGEMENT_CAPABILITY_CLEAR,
+    /** 请求累计值与最近失败只读查询，恢复隔离仍可响应 */
+    DPPD_MANAGEMENT_RULE_METRICS,
 };
 
 /*
@@ -359,6 +361,7 @@ struct dppd_management_response {
         struct dppd_control_rule_status rule_status;
         struct dppd_management_capability_profile capability;
         struct dppd_flow_probe_result probe;
+        struct dppd_rule_metrics rule_metrics;
     } payload;
 };
 

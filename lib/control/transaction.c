@@ -67,8 +67,10 @@ static void rollback_items(struct dppd_transaction *transaction,
         if (rc == 0)
             item->state = DPPD_TRANSACTION_ITEM_ROLLED_BACK;
         /** 保留第一个清理错误，同时继续尝试清理其余条目，便于上层判断是否必须隔离 */
-        else if (transaction->rollback_code == 0)
+        else if (transaction->rollback_code == 0) {
             transaction->rollback_code = rc;
+            transaction->rollback_item = i;
+        }
     }
     transaction->state = transaction->rollback_code == 0 ?
                          DPPD_TRANSACTION_ROLLED_BACK :
@@ -96,6 +98,9 @@ int dppd_transaction_init(struct dppd_transaction *transaction,
     transaction->nb_items = nb_items;
     transaction->failure_code = 0;
     transaction->rollback_code = 0;
+    transaction->failure_stage = DPPD_RULE_STAGE_NONE;
+    transaction->failure_item = UINT32_MAX;
+    transaction->rollback_item = UINT32_MAX;
     for (i = 0; i < nb_items; ++i) {
         items[i].state = DPPD_TRANSACTION_ITEM_PENDING;
         items[i].backend_token = 0;
@@ -141,6 +146,8 @@ int dppd_transaction_run(struct dppd_transaction *transaction,
             item->state = DPPD_TRANSACTION_ITEM_FAILED;
             item->error_code = rc;
             transaction->failure_code = rc;
+            transaction->failure_stage = DPPD_RULE_STAGE_VALIDATE;
+            transaction->failure_item = i;
             transaction->state = DPPD_TRANSACTION_FAILED;
             return rc;
         }
@@ -163,6 +170,8 @@ int dppd_transaction_run(struct dppd_transaction *transaction,
             item->state = DPPD_TRANSACTION_ITEM_FAILED;
             item->error_code = rc;
             transaction->failure_code = rc;
+            transaction->failure_stage = DPPD_RULE_STAGE_PREPARE;
+            transaction->failure_item = i;
             rollback_items(transaction, backends, 0);
             return rc;
         }
@@ -184,6 +193,8 @@ int dppd_transaction_run(struct dppd_transaction *transaction,
             item->state = DPPD_TRANSACTION_ITEM_FAILED;
             item->error_code = rc;
             transaction->failure_code = rc;
+            transaction->failure_stage = DPPD_RULE_STAGE_COMMIT;
+            transaction->failure_item = i;
             rollback_items(transaction, backends, i + 1U);
             return rc;
         }

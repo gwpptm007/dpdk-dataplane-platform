@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dppd/planner.h"
+#include "dppd/rule_observation.h"
 
 /** 一整批规则的处理进度；COMMITTED 表示后端安装完成，FINALIZED 表示已放弃事务回滚 */
 enum dppd_transaction_state {
@@ -84,6 +85,11 @@ struct dppd_transaction {
     int failure_code;
     /** 回滚中的第一个失败原因；非零表示不能宣称已经完整恢复到事务开始前 */
     int rollback_code;
+    /** 回滚会改变条目状态，因此单独保留最初失败的阶段和下标 */
+    enum dppd_rule_failure_stage failure_stage;
+    uint32_t failure_item;
+    /** 首个补偿失败条目的下标，无错误时为 UINT32_MAX */
+    uint32_t rollback_item;
 };
 
 int dppd_transaction_init(struct dppd_transaction *transaction,

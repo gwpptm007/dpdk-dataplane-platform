@@ -13,7 +13,7 @@
 
 ## M1：能力规划与规则控制面
 
-当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v12 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
+当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v13 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
 
 持久化方面已完成 [versioned snapshot v2](persistence_snapshot_v2.md)、install port 保存、
 control mutation 后的完整保存、dirty state、管理状态查询、`--state-path` 和全量硬件
@@ -28,15 +28,20 @@ NIC/SmartNIC 验收三个阶段推进。
 2026-10-03 已实现本机 management v11 的 `rule-status`，查询实际后端、安装端口、COUNT
 配置和提交耗时；纯软件批量更新报告共享的整批耗时，查询只读，重放重新计时。
 20/20 单测、两组 ring 状态场景、TAP 的真实 rte_flow 生命周期、四组 worker 收发及
-隔离/健康回归通过，见 [规则安装状态](rule_status.md)。规则 telemetry、失败分类和历史
-耗时分布仍待实现。
+隔离/健康回归通过，见 [规则安装状态](rule_status.md)。当时尚未提供规则 telemetry 和
+失败分类，已在下述 v13 补齐；历史耗时分布仍待实现。
 
 2026-10-03 已补齐 management v12 的设备/固件/DPDK 画像、描述符信息和完整规则诊断
 缓存，64 个共享槽位、五秒有效期、强制刷新、临时错误不缓存；正式安装仍新校验，
 创建/删除尝试使全端口旧结果失效。21/21 单测、ring/TAP 进程、隔离/健康、四组
 worker 收发与三个相关单测的 AddressSanitizer/UBSan 通过，见 [能力画像与探测](capability_probe.md)。
 资源容量、任意 flow 组合矩阵、AGE/indirect/template/async 探测未完成。
-下一项推进规则失败分类与规则 telemetry，同时保留跨进程 reconciliation 待办。
+2026-10-03 已完成 management v13 的规则失败分类、请求累计指标和完整规则 telemetry
+副本。原始错误、补偿错误、最终错误与发布标志分别保留；修复单规则补偿失败未隔离
+的缺口。23/23 单测、ring/TAP 查询与并发更新、三组在线/启动隔离、既有状态/健康/
+能力/worker 回归及三个单测的 AddressSanitizer/UBSan 通过，见
+[规则失败与 Telemetry](rule_telemetry.md)。下一项推进历史安装耗时分布，同时保留
+失败事件历史与跨进程 reconciliation 待办。
 
 交付：
 

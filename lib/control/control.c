@@ -5,6 +5,71 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int control_flush_impl(struct dppd_control_service *service);
+
+/** 阶段只影响当前管理请求的诊断上下文，不改变规划、事务或规则发布行为 */
+static void observe_stage(struct dppd_control_service *service, enum dppd_rule_failure_stage stage)
+{
+    if (service->observation.active)
+        service->observation.context.stage = stage;
+}
+
+/** 整体容量检查、整批账本发布和完整文件保存没有单个失败成员，明确清空成员身份 */
+static void observe_batch(struct dppd_control_service *service, enum dppd_rule_failure_stage stage)
+{
+    observe_stage(service, stage);
+    service->observation.context.rule_id = 0;
+    service->observation.context.generation = 0;
+    service->observation.context.port_known = false;
+    service->observation.context.backend_known = false;
+}
+
+/** 在接触本条规则之前登记身份与计划，批量失败可以准确定位到失败成员 */
+static void observe_rule(struct dppd_control_service *service, enum dppd_rule_failure_stage stage,
+    const struct dppd_rule *rule, uint16_t port_id, const struct dppd_execution_plan *plan)
+{
+    struct dppd_rule_failure_event *context = &service->observation.context;
+
+    if (!service->observation.active)
+        return;
+    context->stage = stage;
+    context->rule_id = rule->id;
+    context->generation = rule->generation;
+    context->install_port_id = port_id;
+    context->port_known = true;
+    context->backend_known = plan != NULL;
+    if (plan != NULL)
+        context->backend = plan->backend;
+}
+
+/** 事务已回滚后条目状态会变化，失败阶段和下标仍由事务的独立记录提供 */
+static void observe_transaction(struct dppd_control_service *service,
+                                 const struct dppd_transaction *transaction)
+{
+    if (transaction->failure_code != 0 && transaction->failure_item < transaction->nb_items) {
+        const struct dppd_transaction_item *item = &transaction->items[transaction->failure_item];
+
+        observe_rule(service, transaction->failure_stage, &item->rule,
+                      item->plan.install_port_id, &item->plan);
+        service->observation.context.transaction_id = transaction->id;
+        dppd_rule_observation_fault(&service->observation, transaction->failure_code);
+    }
+    if (transaction->rollback_code != 0) {
+        uint64_t id = transaction->rollback_item < transaction->nb_items ?
+            transaction->items[transaction->rollback_item].rule.id : 0;
+
+        dppd_rule_observation_compensation(&service->observation, transaction->rollback_code, id);
+    }
+}
+
+/** 无法证明对象与账本一致时封锁后续写入，原始失败已由观测上下文单独保留 */
+static int isolate_control(struct dppd_control_service *service, int code)
+{
+    service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+    service->recovery_last_error = code;
+    return -EUCLEAN;
+}
+
 /**
  * 把当前完整规则账本写入快照，未配置保存路径时直接成功返回
  * 保存发生在规则生效之后，写磁盘失败不能被解释为已经回滚规则
@@ -12,12 +77,17 @@
  */
 static int persist_current_repository(struct dppd_control_service *service)
 {
+    struct dppd_rule_failure_event previous = service->observation.context;
     int rc;
 
     if (service->persistence_path == NULL)
         return 0;
+    observe_stage(service, DPPD_RULE_STAGE_PERSIST);
+    if (service->observation.context.rule_count > 1)
+        observe_batch(service, DPPD_RULE_STAGE_PERSIST);
     rc = dppd_persistence_save(service->persistence_path, &service->rules);
     if (rc != 0) {
+        dppd_rule_observation_fault(&service->observation, rc);
         service->persistence_dirty = true;
         service->persistence_last_error = rc;
         return -EUCLEAN;
@@ -26,6 +96,7 @@ static int persist_current_repository(struct dppd_control_service *service)
     service->persistence_last_error = 0;
     service->persisted_generation =
         dppd_rule_repository_generation(&service->rules);
+    service->observation.context = previous;
     return 0;
 }
 
@@ -92,6 +163,10 @@ static int remove_actual_rule(struct dppd_control_service *service,
     rc = actual_backend_for(service, rule_id, generation, &backend_kind);
     if (rc != 0)
         return rc;
+    if (service->observation.active) {
+        service->observation.context.backend = backend_kind;
+        service->observation.context.backend_known = true;
+    }
     if (backend_kind == DPPD_PLAN_BACKEND_RTE_FLOW)
         return dppd_rte_flow_backend_remove_version(&service->rte_flow,
                                                     rule_id, generation,
@@ -110,7 +185,7 @@ static int restore_actual_rules(struct dppd_control_service *service,
                                 struct dppd_transaction_item *items,
                                 uint32_t count)
 {
-    struct dppd_transaction transaction;
+    struct dppd_transaction transaction = {0};
     struct dppd_transaction_backends backends;
     uint32_t i;
     int rc;
@@ -130,6 +205,12 @@ static int restore_actual_rules(struct dppd_control_service *service,
         rc = dppd_transaction_run(&transaction, &backends);
     if (rc == 0)
         rc = dppd_transaction_finalize(&transaction, &backends);
+    if (rc != 0) {
+        uint64_t id = transaction.failure_item < count ?
+            items[transaction.failure_item].rule.id : items[0].rule.id;
+
+        dppd_rule_observation_compensation(&service->observation, rc, id);
+    }
     return rc;
 }
 
@@ -225,7 +306,7 @@ int dppd_control_fini(struct dppd_control_service *service)
         return -EINVAL;
     if (service->recovery_state == DPPD_CONTROL_RECOVERY_READY &&
         service->persistence_dirty)
-        persistence_rc = dppd_control_persistence_flush(service);
+        persistence_rc = control_flush_impl(service);
     rc = dppd_rte_flow_backend_fini(&service->rte_flow);
     if (rc != 0)
         return rc;
@@ -265,7 +346,7 @@ int dppd_control_persistence_attach(struct dppd_control_service *service,
     return 0;
 }
 
-int dppd_control_persistence_restore(struct dppd_control_service *service,
+static int control_restore_impl(struct dppd_control_service *service,
                                      const char *path)
 {
     struct dppd_persisted_snapshot snapshot;
@@ -289,25 +370,30 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
         dppd_software_backend_count(&service->software) != 0)
         return -EBUSY;
 
+    observe_stage(service, DPPD_RULE_STAGE_LOAD);
     rc = dppd_persistence_load(path, &snapshot);
     if (rc == -ENOENT) {
         /*
          * 显式配置了 state path 就要求启动时建立可持久化的空基线。若目录或权限
          * 不可用，daemon 直接启动失败，不能悄悄退化成仅内存模式。
          */
+        observe_stage(service, DPPD_RULE_STAGE_PREFLIGHT);
         rc = dppd_control_persistence_attach(service, path);
         if (rc != 0)
             return rc;
-        return dppd_control_persistence_flush(service);
+        return control_flush_impl(service);
     }
     if (rc != 0)
         return rc;
+    observe_stage(service, DPPD_RULE_STAGE_PREFLIGHT);
+    service->observation.context.rule_count = snapshot.count;
     if (snapshot.count > service->rules.capacity) {
         rc = -ENOSPC;
         goto cleanup;
     }
 
     /* 在接触硬件前完成所有本地内存分配，避免提交后因 ENOMEM 进入模糊状态。 */
+    observe_stage(service, DPPD_RULE_STAGE_PREPARE);
     path_copy = strdup(path);
     if (path_copy == NULL) {
         rc = -ENOMEM;
@@ -331,6 +417,8 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
         planner_context.software_equivalent =
             dppd_software_backend_rule_supported(&snapshot.rules[i]);
         items[i].rule = snapshot.rules[i];
+        observe_rule(service, DPPD_RULE_STAGE_PLAN, &items[i].rule,
+                      planner_context.install_port_id, NULL);
         rc = dppd_plan_rule(&planner_context, &items[i].rule,
                             &items[i].plan);
         if (rc != 0)
@@ -353,6 +441,7 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
                                     &items[i].plan);
                 if (rc != 0)
                     goto cleanup;
+                service->observation.fallback_rules++;
             }
         }
     }
@@ -370,6 +459,7 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
         /* 全量 validate/prepare/commit；任一失败由 transaction 自动逆序回滚。 */
         rc = dppd_transaction_run(&transaction, &backends);
         if (rc != 0) {
+            observe_transaction(service, &transaction);
             if (transaction.rollback_code != 0) {
                 /*
                  * transaction 已尽力回滚，但 backend 仍持有可定位对象。保留 service
@@ -384,10 +474,12 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
         }
     }
 
+    observe_batch(service, DPPD_RULE_STAGE_PUBLISH);
     rc = dppd_rule_repository_restore(&service->rules, snapshot.rules,
                                       snapshot.count,
                                       snapshot.repository_generation);
     if (rc != 0) {
+        dppd_rule_observation_fault(&service->observation, rc);
         /*
          * restore 已全量预检且不分配，正常不应失败；仍保留防御性硬件回滚，避免
          * 未来 repository 实现变化时留下“硬件已装、desired 未发布”的对象。
@@ -397,9 +489,11 @@ int dppd_control_persistence_restore(struct dppd_control_service *service,
                                                                &backends);
             if (rollback_rc != 0)
                 rc = -EUCLEAN;
+            observe_transaction(service, &transaction);
         }
         goto cleanup;
     }
+    service->observation.applied = snapshot.count != 0 || snapshot.repository_generation != 0;
     if (snapshot.count != 0) {
         rc = dppd_transaction_finalize(&transaction, &backends);
         if (rc != 0)
@@ -421,7 +515,7 @@ cleanup:
     return rc;
 }
 
-int dppd_control_persistence_flush(struct dppd_control_service *service)
+static int control_flush_impl(struct dppd_control_service *service)
 {
     int rc;
 
@@ -429,8 +523,10 @@ int dppd_control_persistence_flush(struct dppd_control_service *service)
         return -EINVAL;
     if (recovery_write_preflight(service) != 0)
         return -EUCLEAN;
+    observe_stage(service, DPPD_RULE_STAGE_PERSIST);
     rc = dppd_persistence_save(service->persistence_path, &service->rules);
     if (rc != 0) {
+        dppd_rule_observation_fault(&service->observation, rc);
         service->persistence_dirty = true;
         service->persistence_last_error = rc;
         return rc;
@@ -474,7 +570,7 @@ void dppd_control_recovery_status(
     status->last_error = service->recovery_last_error;
 }
 
-int dppd_control_reconciliation_retry(struct dppd_control_service *service)
+static int control_reconcile_impl(struct dppd_control_service *service)
 {
     uint32_t residual_objects;
     int rc;
@@ -485,9 +581,11 @@ int dppd_control_reconciliation_retry(struct dppd_control_service *service)
         service->recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED)
         return -EALREADY;
 
+    observe_stage(service, DPPD_RULE_STAGE_RECONCILE);
     rc = dppd_rte_flow_backend_reconcile(&service->rte_flow,
                                          &residual_objects);
     if (rc != 0 || residual_objects != 0) {
+        dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);
         /*
          * remove 失败时仍保留对象和其 handle，下一次 retry 可以继续调用同一个 PMD
          * destroy。API 返回 EUCLEAN，具体底层 errno 通过 status.last_error 提供。
@@ -500,7 +598,7 @@ int dppd_control_reconciliation_retry(struct dppd_control_service *service)
     return 0;
 }
 
-int dppd_control_apply(struct dppd_control_service *service,
+static int control_apply_impl(struct dppd_control_service *service,
                        uint16_t install_port_id,
                        const struct dppd_rule *rule,
                        uint64_t expected_generation,
@@ -535,6 +633,7 @@ int dppd_control_apply(struct dppd_control_service *service,
         if (dppd_rule_equal(&existing, &candidate)) {
             result->status = DPPD_RULE_UNCHANGED;
             result->generation = existing.generation;
+            service->observation.unchanged = true;
             return 0;
         }
         if (expected_generation != DPPD_RULE_GENERATION_ANY &&
@@ -557,6 +656,7 @@ int dppd_control_apply(struct dppd_control_service *service,
     planner_context.hardware_available = true;
     planner_context.software_equivalent =
         dppd_software_backend_rule_supported(&candidate);
+    observe_rule(service, DPPD_RULE_STAGE_PLAN, &candidate, install_port_id, NULL);
     rc = dppd_plan_rule(&planner_context, &candidate, &result->plan);
     if (rc != 0)
         return rc;
@@ -568,6 +668,7 @@ int dppd_control_apply(struct dppd_control_service *service,
     backends.software = dppd_software_transaction_backend(&service->software);
     backends.rte_flow = dppd_rte_flow_transaction_backend(&service->rte_flow);
     result->transaction_id = service->next_transaction_id++;
+    service->observation.context.transaction_id = result->transaction_id;
     rc = dppd_transaction_init(&transaction, result->transaction_id, &item, 1);
     if (rc != 0)
         return rc;
@@ -586,6 +687,7 @@ int dppd_control_apply(struct dppd_control_service *service,
         rc = dppd_plan_rule(&planner_context, &candidate, &result->plan);
         if (rc != 0)
             return rc;
+        service->observation.fallback_rules++;
         item.plan = result->plan;
         rc = dppd_transaction_init(&transaction, result->transaction_id,
                                    &item, 1);
@@ -593,8 +695,12 @@ int dppd_control_apply(struct dppd_control_service *service,
             return rc;
         rc = dppd_transaction_run(&transaction, &backends);
     }
-    if (rc != 0)
+    if (rc != 0) {
+        observe_transaction(service, &transaction);
+        if (transaction.rollback_code != 0)
+            return isolate_control(service, transaction.rollback_code);
         return rc;
+    }
 
     if (updating) {
         int rollback_rc;
@@ -603,26 +709,34 @@ int dppd_control_apply(struct dppd_control_service *service,
          * 新 generation 已创建后才删除旧对象；旧对象删除失败时撤销新对象，
          * repository 仍指向旧 generation，因此控制面不会发布半更新状态。
          */
+        observe_rule(service, DPPD_RULE_STAGE_REMOVE, &existing, existing.install_port_id, NULL);
         rc = remove_actual_rule(service, existing.id, existing.generation);
         if (rc != 0) {
+            dppd_rule_observation_fault(&service->observation, rc);
             rollback_rc = remove_actual_rule(service, candidate.id,
                                              candidate.generation);
-            return rollback_rc == 0 ? rc : -EUCLEAN;
+            dppd_rule_observation_compensation(&service->observation, rollback_rc, candidate.id);
+            return rollback_rc == 0 ? rc : isolate_control(service, rollback_rc);
         }
     }
 
+    observe_rule(service, DPPD_RULE_STAGE_PUBLISH, &candidate, install_port_id, &result->plan);
     rc = dppd_rule_repository_apply(&service->rules, &candidate,
                                     updating ? existing.generation : expected_generation,
                                     &repository_result);
     if (rc != 0) {
         /* 单控制线程下不应到达这里；到达即表示 actual/desired 已失配。 */
-        return -EUCLEAN;
+        dppd_rule_observation_fault(&service->observation, rc);
+        return isolate_control(service, rc);
     }
+    service->observation.applied = true;
     result->status = repository_result.status;
     result->generation = repository_result.generation;
     rc = dppd_transaction_finalize(&transaction, &backends);
-    if (rc != 0)
-        return -EUCLEAN;
+    if (rc != 0) {
+        dppd_rule_observation_fault(&service->observation, rc);
+        return isolate_control(service, rc);
+    }
     return persist_current_repository(service);
 }
 
@@ -634,7 +748,7 @@ int dppd_control_apply(struct dppd_control_service *service,
  * 新对象安装由同一事务完成，事务成功后才按请求顺序写入规则账本
  * 安装失败会尝试撤销本批对象，撤销也失败则进入恢复隔离，不能声称已经全部回滚
  */
-int dppd_control_create_batch(
+static int control_create_batch_impl(
     struct dppd_control_service *service,
     const struct dppd_control_batch_create_request *requests,
     uint32_t request_count,
@@ -662,6 +776,7 @@ int dppd_control_create_batch(
                         dppd_rule_repository_count(&service->rules))
         return -ENOSPC;
 
+    observe_stage(service, DPPD_RULE_STAGE_PREPARE);
     items = calloc(request_count, sizeof(*items));
     if (items == NULL)
         return -ENOMEM;
@@ -681,6 +796,9 @@ int dppd_control_create_batch(
         struct dppd_rule existing;
         uint32_t previous;
 
+        observe_rule(service, DPPD_RULE_STAGE_PREFLIGHT, &requests[i].rule,
+                      requests[i].install_port_id, NULL);
+        service->observation.context.generation = requests[i].expected_generation;
         /**
          * 新建必须明确声明旧版本为零，不接受 ANY 或具体旧版本
          * 如果允许混入覆盖已有规则的请求，失败时还要恢复旧对象，不能复用纯创建的回滚逻辑
@@ -714,6 +832,8 @@ int dppd_control_create_batch(
         planner_context.hardware_available = true;
         planner_context.software_equivalent =
             dppd_software_backend_rule_supported(&items[i].rule);
+        observe_rule(service, DPPD_RULE_STAGE_PLAN, &items[i].rule,
+                      planner_context.install_port_id, NULL);
         rc = dppd_plan_rule(&planner_context, &items[i].rule, &items[i].plan);
         if (rc != 0)
             goto cleanup;
@@ -736,6 +856,7 @@ int dppd_control_create_batch(
                                     &items[i].plan);
                 if (rc != 0)
                     goto cleanup;
+                service->observation.fallback_rules++;
             }
         }
     }
@@ -744,12 +865,14 @@ int dppd_control_create_batch(
     backends.software = dppd_software_transaction_backend(&service->software);
     backends.rte_flow = dppd_rte_flow_transaction_backend(&service->rte_flow);
     transaction_id = service->next_transaction_id++;
+    service->observation.context.transaction_id = transaction_id;
     rc = dppd_transaction_init(&transaction, transaction_id, items, request_count);
     if (rc != 0)
         goto cleanup;
     /** 先让本批所有实际对象安装完成，再在同一控制线程中连续发布对应的账本记录 */
     rc = dppd_transaction_run(&transaction, &backends);
     if (rc != 0) {
+        observe_transaction(service, &transaction);
         /** 撤销也失败时可能仍有残留对象，记录恢复错误并封锁后续普通写入 */
         if (transaction.rollback_code != 0) {
             service->recovery_state =
@@ -768,12 +891,15 @@ int dppd_control_create_batch(
     for (i = 0; i < request_count; ++i) {
         struct dppd_rule_apply_result repository_result;
 
+        observe_rule(service, DPPD_RULE_STAGE_PUBLISH, &items[i].rule,
+                      items[i].plan.install_port_id, &items[i].plan);
         rc = dppd_rule_repository_apply(&service->rules, &items[i].rule, 0,
                                         &repository_result);
         if (rc != 0 || repository_result.status != DPPD_RULE_CREATED ||
             repository_result.generation != items[i].rule.generation) {
             int rollback_rc;
 
+            dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);
             /**
              * published_count 只记录当前批次已经写入账本的条数，逆序移除这部分记录
              * 删除记录仍会推进全局版本，所以撤回记录不等于把历史版本号恢复到原值
@@ -795,6 +921,7 @@ int dppd_control_create_batch(
             }
             rollback_rc = dppd_transaction_rollback_committed(&transaction,
                                                                &backends);
+            observe_transaction(service, &transaction);
             if (rollback_rc != 0) {
                 service->recovery_state =
                     DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
@@ -809,6 +936,7 @@ int dppd_control_create_batch(
         results[i].transaction_id = transaction_id;
         results[i].plan = items[i].plan;
     }
+    service->observation.applied = true;
     /** 实际规则和账本均已写好，不再需要本次回滚凭据，先结束事务临时资源再保存快照 */
     rc = dppd_transaction_finalize(&transaction, &backends);
     if (rc != 0) {
@@ -828,7 +956,7 @@ cleanup:
  * 如果实际删除到一半失败，账本仍保留全部旧记录，可按原版本重建已经删掉的对象
  * 通用事务接口描述的是对象创建，因此这里使用显式删除循环，并用创建事务完成补偿
  */
-int dppd_control_remove_batch(
+static int control_remove_batch_impl(
     struct dppd_control_service *service,
     const struct dppd_control_batch_remove_request *requests,
     uint32_t request_count,
@@ -847,6 +975,7 @@ int dppd_control_remove_batch(
     rc = persistence_write_preflight(service);
     if (rc != 0)
         return rc;
+    observe_stage(service, DPPD_RULE_STAGE_PREPARE);
     items = calloc(request_count, sizeof(*items));
     if (items == NULL)
         return -ENOMEM;
@@ -857,7 +986,11 @@ int dppd_control_remove_batch(
      */
     for (i = 0; i < request_count; ++i) {
         uint32_t previous;
+        struct dppd_rule target = {.id = requests[i].rule_id,
+                                   .generation = requests[i].expected_generation};
 
+        observe_rule(service, DPPD_RULE_STAGE_PREFLIGHT, &target, 0, NULL);
+        service->observation.context.port_known = false;
         if (requests[i].rule_id == 0 || requests[i].expected_generation == 0 ||
             requests[i].expected_generation == DPPD_RULE_GENERATION_ANY) {
             rc = -ESTALE;
@@ -888,9 +1021,14 @@ int dppd_control_remove_batch(
 
     /** removed_actual 只在删除成功后增加，失败时只恢复前面确实已经删掉的对象 */
     for (i = 0; i < request_count; ++i) {
+        observe_rule(service, DPPD_RULE_STAGE_REMOVE, &items[i].rule,
+                      items[i].rule.install_port_id, &items[i].plan);
         rc = remove_actual_rule(service, items[i].rule.id, items[i].rule.generation);
         if (rc != 0) {
-            int restore_rc = restore_actual_rules(service, items, removed_actual);
+            int restore_rc;
+
+            dppd_rule_observation_fault(&service->observation, rc);
+            restore_rc = restore_actual_rules(service, items, removed_actual);
 
             /**
              * 账本还没修改，补偿成功后实际对象又与旧账本一致，可以返回最初的删除错误
@@ -915,10 +1053,13 @@ int dppd_control_remove_batch(
         bool removed;
         uint64_t generation;
 
+        observe_rule(service, DPPD_RULE_STAGE_PUBLISH, &items[i].rule,
+                      items[i].rule.install_port_id, &items[i].plan);
         rc = dppd_rule_repository_remove(&service->rules, items[i].rule.id,
                                          items[i].rule.generation, &removed,
                                          &generation);
         if (rc != 0 || !removed) {
+            dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);
             service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
             service->recovery_last_error = rc != 0 ? rc : -EUCLEAN;
             rc = -EUCLEAN;
@@ -927,6 +1068,7 @@ int dppd_control_remove_batch(
         results[i].rule_id = items[i].rule.id;
         results[i].generation = generation;
     }
+    service->observation.applied = true;
     rc = persist_current_repository(service);
 
 cleanup:
@@ -945,7 +1087,7 @@ cleanup:
  * 涉及硬件时仍采用逐条安装与补偿流程，不保证所有报文在同一时刻切换规则
  * 返回 EUCLEAN 时要进一步区分恢复隔离和保存失败，不能直接认定本次更新没有生效
  */
-int dppd_control_update_batch(
+static int control_update_batch_impl(
     struct dppd_control_service *service,
     const struct dppd_control_batch_update_request *requests,
     uint32_t request_count,
@@ -1005,6 +1147,9 @@ int dppd_control_update_batch(
         char validation_error[128];
         uint32_t j;
 
+        observe_rule(service, DPPD_RULE_STAGE_PREFLIGHT, &requests[i].rule,
+                      requests[i].install_port_id, NULL);
+        service->observation.context.generation = requests[i].expected_generation;
         if (requests[i].reserved != 0 || requests[i].rule.id == 0)
             return -EINVAL;
         if (requests[i].expected_generation == 0 ||
@@ -1049,6 +1194,8 @@ int dppd_control_update_batch(
         context.hardware_available = true;
         context.software_equivalent =
             dppd_software_backend_rule_supported(&candidates[i]);
+        observe_rule(service, DPPD_RULE_STAGE_PLAN, &items[i].rule,
+                      context.install_port_id, NULL);
         rc = dppd_plan_rule(&context, &items[i].rule, &items[i].plan);
         if (rc != 0)
             return rc;
@@ -1069,6 +1216,7 @@ int dppd_control_update_batch(
      */
     hardware_count = dppd_rte_flow_backend_count(&service->rte_flow);
     software_count = dppd_software_backend_count(&service->software);
+    observe_batch(service, DPPD_RULE_STAGE_PREFLIGHT);
     if (hardware_count > service->rte_flow.capacity ||
         software_count > service->software.capacity) {
         rc = -EUCLEAN;
@@ -1099,6 +1247,7 @@ int dppd_control_update_batch(
                 rc = dppd_plan_rule(&context, &items[i].rule, &items[i].plan);
                 if (rc != 0)
                     return rc;
+                service->observation.fallback_rules++;
             }
         }
     }
@@ -1123,10 +1272,19 @@ int dppd_control_update_batch(
     if (rc != 0)
         return rc;
     if (atomic_software) {
+        /** 整批软件更新在一个函数里分配并发布，无法定位成员时明确报告批次而不猜 ID */
+        observe_stage(service, DPPD_RULE_STAGE_COMMIT);
+        service->observation.context.rule_id = 0;
+        service->observation.context.generation = 0;
+        service->observation.context.port_known = false;
+        service->observation.context.backend = DPPD_PLAN_BACKEND_SOFTWARE;
+        service->observation.context.backend_known = true;
+        service->observation.context.transaction_id = transaction.id;
         rc = dppd_software_backend_update_batch(&service->software, candidates,
                                                 expected, request_count);
         if (rc != 0)
             return rc;
+        observe_stage(service, DPPD_RULE_STAGE_PUBLISH);
         rc = dppd_rule_repository_update_batch(&service->rules, candidates,
                                                expected, request_count);
         if (rc != 0)
@@ -1135,6 +1293,7 @@ int dppd_control_update_batch(
     }
     rc = dppd_transaction_run(&transaction, &backends);
     if (rc != 0) {
+        observe_transaction(service, &transaction);
         if (transaction.rollback_code == 0)
             return rc;
         rc = transaction.rollback_code;
@@ -1146,17 +1305,22 @@ int dppd_control_update_batch(
      * 删除下标 i 失败，意味着只有前 i 条旧对象已经删除，补偿只恢复这部分
      */
     for (i = 0; i < request_count; ++i) {
+        observe_rule(service, DPPD_RULE_STAGE_REMOVE, &old[i].rule,
+                      old[i].rule.install_port_id, &old[i].plan);
+        service->observation.context.transaction_id = transaction.id;
         rc = remove_actual_rule(service, old[i].rule.id, old[i].rule.generation);
         if (rc != 0) {
             int rollback_rc;
             int restore_rc;
 
+            dppd_rule_observation_fault(&service->observation, rc);
             /**
              * 先撤销本批全部新版本，再按原规则、原版本和原后端恢复已删除的旧对象
              * 即使撤新失败也继续尝试恢复旧对象，以尽量减少缺失的规则
              * 两种补偿都成功才返回原始删除错误，否则返回 EUCLEAN 并封锁后续更新
              */
             rollback_rc = dppd_transaction_rollback_committed(&transaction, &backends);
+            observe_transaction(service, &transaction);
             restore_rc = restore_actual_rules(service, old, i);
             if (rollback_rc == 0 && restore_rc == 0)
                 return rc;
@@ -1170,6 +1334,7 @@ int dppd_control_update_batch(
      * 仓库接口会先复查所有条件，再执行不分配内存的替换循环
      * 内容没有变化的规则也获得新版本，这样整批结果始终使用连续的版本号
      */
+    observe_batch(service, DPPD_RULE_STAGE_PUBLISH);
     rc = dppd_rule_repository_update_batch(&service->rules, candidates,
                                            expected, request_count);
     if (rc != 0) {
@@ -1180,10 +1345,13 @@ int dppd_control_update_batch(
         (void)dppd_transaction_finalize(&transaction, &backends);
         goto isolate;
     }
+    /** 账本已经完整发布，之后的临时资源收尾错误也必须如实报告为已经生效 */
+    service->observation.applied = true;
     rc = dppd_transaction_finalize(&transaction, &backends);
     if (rc != 0)
         goto isolate;
 committed:
+    service->observation.applied = true;
     for (i = 0; i < request_count; ++i) {
         results[i].status = DPPD_RULE_UPDATED;
         results[i].generation = candidates[i].generation;
@@ -1202,12 +1370,13 @@ isolate:
      * 主循环随后停止软件工作线程，只保留恢复查询和清理重试入口
      * 底层错误另存于 recovery_last_error，便于区分创建、删除或补偿失败
      */
+    dppd_rule_observation_fault(&service->observation, rc);
     service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
     service->recovery_last_error = rc;
     return -EUCLEAN;
 }
 
-int dppd_control_remove(struct dppd_control_service *service,
+static int control_remove_impl(struct dppd_control_service *service,
                         uint64_t rule_id,
                         uint64_t expected_generation,
                         bool *removed,
@@ -1225,22 +1394,30 @@ int dppd_control_remove(struct dppd_control_service *service,
     if (rc != 0)
         return rc;
     rc = dppd_rule_repository_get(&service->rules, rule_id, &existing);
-    if (rc == -ENOENT)
-        return dppd_rule_repository_remove(&service->rules, rule_id,
+    if (rc == -ENOENT) {
+        rc = dppd_rule_repository_remove(&service->rules, rule_id,
                                            expected_generation, removed,
                                            generation);
+        service->observation.unchanged = rc == 0;
+        return rc;
+    }
     if (rc != 0)
         return rc;
     if (expected_generation != DPPD_RULE_GENERATION_ANY &&
         expected_generation != existing.generation)
         return -ESTALE;
+    observe_rule(service, DPPD_RULE_STAGE_REMOVE, &existing, existing.install_port_id, NULL);
     rc = remove_actual_rule(service, rule_id, existing.generation);
     if (rc != 0)
         return rc;
+    observe_stage(service, DPPD_RULE_STAGE_PUBLISH);
     rc = dppd_rule_repository_remove(&service->rules, rule_id,
                                       existing.generation, removed, generation);
-    if (rc != 0 || !*removed)
-        return rc;
+    if (rc != 0 || !*removed) {
+        dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);
+        return isolate_control(service, rc != 0 ? rc : -EUCLEAN);
+    }
+    service->observation.applied = true;
     return persist_current_repository(service);
 }
 
@@ -1347,4 +1524,126 @@ int dppd_control_query_count(struct dppd_control_service *service,
     result->rule_id = rule.id;
     result->generation = rule.generation;
     return 0;
+}
+
+/** 公开入口统一开始记录，空或已释放的 service 不参与指标，非法请求仍保留原返回值 */
+static bool begin_observed(struct dppd_control_service *service,
+    enum dppd_rule_operation operation, uint64_t rule_id, uint64_t generation,
+    uint32_t count, bool port_known, uint16_t port_id)
+{
+    struct dppd_rule_failure_event *context;
+
+    if (service == NULL || service->rules.records == NULL)
+        return false;
+    dppd_rule_observation_begin(&service->observation, operation);
+    context = &service->observation.context;
+    context->rule_id = rule_id;
+    context->generation = generation;
+    context->rule_count = count;
+    context->install_port_id = port_id;
+    context->port_known = port_known;
+    if (operation != DPPD_RULE_OPERATION_RECONCILE &&
+        service->recovery_state != DPPD_CONTROL_RECOVERY_READY)
+        context->stage = DPPD_RULE_STAGE_ISOLATION;
+    return true;
+}
+
+/** 只在整笔公开操作结束时更新累计值，内部成员和补偿事务不重复增加请求计数 */
+static int finish_observed(struct dppd_control_service *service, bool observed, int result)
+{
+    if (observed)
+        dppd_rule_observation_finish(&service->observation, result);
+    return result;
+}
+
+/** 单条 apply 的计数涵盖新建、更新和幂等重放，不改变内部事务的成功条件 */
+int dppd_control_apply(struct dppd_control_service *service, uint16_t port_id,
+    const struct dppd_rule *rule, uint64_t expected, struct dppd_control_apply_result *result)
+{
+    bool observed = begin_observed(service, DPPD_RULE_OPERATION_APPLY,
+        rule != NULL ? rule->id : 0, expected, 1, true, port_id);
+    int rc = control_apply_impl(service, port_id, rule, expected, result);
+
+    return finish_observed(service, observed, rc);
+}
+
+/** 批量整体失败时 ID 可为零，逐条检查和事务会在能够定位成员时补齐准确身份 */
+int dppd_control_create_batch(struct dppd_control_service *service,
+    const struct dppd_control_batch_create_request *requests, uint32_t count,
+    struct dppd_control_apply_result *results)
+{
+    bool observed = begin_observed(service, DPPD_RULE_OPERATION_CREATE_BATCH, 0, 0, count, false, 0);
+    int rc = control_create_batch_impl(service, requests, count, results);
+
+    return finish_observed(service, observed, rc);
+}
+
+/** 纯软件整批发布和硬件逐条事务共同按一次更新请求计数 */
+int dppd_control_update_batch(struct dppd_control_service *service,
+    const struct dppd_control_batch_update_request *requests, uint32_t count,
+    struct dppd_control_apply_result *results)
+{
+    bool observed = begin_observed(service, DPPD_RULE_OPERATION_UPDATE_BATCH, 0, 0, count, false, 0);
+    int rc = control_update_batch_impl(service, requests, count, results);
+
+    return finish_observed(service, observed, rc);
+}
+
+/** 删除不分配新的规则版本来补偿，观测层同样不参与对象或版本的分配 */
+int dppd_control_remove(struct dppd_control_service *service, uint64_t id, uint64_t expected,
+    bool *removed, uint64_t *generation)
+{
+    bool observed = begin_observed(service, DPPD_RULE_OPERATION_REMOVE, id, expected, 1, false, 0);
+    int rc = control_remove_impl(service, id, expected, removed, generation);
+
+    return finish_observed(service, observed, rc);
+}
+
+/** 整批删除只增加一笔请求，恢复旧对象的创建事务保留为补偿信息 */
+int dppd_control_remove_batch(struct dppd_control_service *service,
+    const struct dppd_control_batch_remove_request *requests, uint32_t count,
+    struct dppd_control_batch_remove_result *results)
+{
+    bool observed = begin_observed(service, DPPD_RULE_OPERATION_REMOVE_BATCH, 0, 0, count, false, 0);
+    int rc = control_remove_batch_impl(service, requests, count, results);
+
+    return finish_observed(service, observed, rc);
+}
+
+/** 启动重放算一笔操作，缺文件时建立空快照的内部保存不会再增加一笔 flush */
+int dppd_control_persistence_restore(struct dppd_control_service *service, const char *path)
+{
+    bool observed = begin_observed(service, DPPD_RULE_OPERATION_RESTORE, 0, 0, 0, false, 0);
+    int rc = control_restore_impl(service, path);
+
+    return finish_observed(service, observed, rc);
+}
+
+/** 显式保存本身属于可失败请求，退出清理中的内部保存不计入公开请求 */
+int dppd_control_persistence_flush(struct dppd_control_service *service)
+{
+    bool observed = begin_observed(service, DPPD_RULE_OPERATION_FLUSH, 0, 0, 0, false, 0);
+    int rc = control_flush_impl(service);
+
+    return finish_observed(service, observed, rc);
+}
+
+/** 清理重试单独记录底层错误，成功重试仍不会清掉导致隔离的历史失败 */
+int dppd_control_reconciliation_retry(struct dppd_control_service *service)
+{
+    bool observed = begin_observed(service, DPPD_RULE_OPERATION_RECONCILE, 0, 0, 0, false, 0);
+    int rc = control_reconcile_impl(service);
+
+    return finish_observed(service, observed, rc);
+}
+
+/** 管理线程直接复制完成态指标，telemetry 线程只能读取另行发布的值快照 */
+void dppd_control_rule_metrics(const struct dppd_control_service *service,
+                                struct dppd_rule_metrics *metrics)
+{
+    if (metrics == NULL)
+        return;
+    memset(metrics, 0, sizeof(*metrics));
+    if (service != NULL)
+        *metrics = service->observation.metrics;
 }

@@ -25,6 +25,7 @@ static unsigned int creates, destroys, live;
 /**
  * 由测试进程的环境变量选择场景，未显式指定支持的值时返回零
  * 场景一模拟“新版本创建失败且撤销失败”，场景二模拟“旧版本删除失败且恢复失败”
+ * 场景三从第二次创建开始失败，用来验证非空快照启动重放中的恢复隔离和诊断
  */
 static int mode(void)
 {
@@ -34,6 +35,8 @@ static int mode(void)
         return 1;
     if (value != NULL && strcmp(value, "delete-restore") == 0)
         return 2;
+    if (value != NULL && strcmp(value, "replay-rollback") == 0)
+        return 3;
     return 0;
 }
 
@@ -91,7 +94,7 @@ struct rte_flow *rte_flow_create(uint16_t port, const struct rte_flow_attr *attr
     (void)actions;
     ++creates;
     if (selected == 0 || (selected == 1 && creates == 4) ||
-        (selected == 2 && creates == 5)) {
+        (selected == 2 && creates == 5) || (selected == 3 && creates == 2)) {
         fail(error, EIO, "injected flow create failure");
         return NULL;
     }
@@ -117,6 +120,9 @@ int rte_flow_destroy(uint16_t port, struct rte_flow *handle, struct rte_flow_err
     int selected = mode();
 
     ++destroys;
+    /** 重放隔离也保留 handle，第一次回滚和第一次专用重试失败，第二次重试才释放 */
+    if (selected == 3 && creates >= 2 && destroys <= 2)
+        return fail(error, EFAULT, "injected replay destroy failure");
     /**
      * 创建调用达到第四次才开启删除故障，保证错误确实出现在在线更新期间
      * 重启后只重放两条旧规则，此条件不会满足，因此重放验证可以正常退出

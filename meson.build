@@ -7,6 +7,7 @@ project(
 )
 
 dpdk = dependency('libdpdk', version: '>=21.11', required: true)
+threads = dependency('threads')
 dppd_inc = include_directories('include')
 
 dppd_sources = files(
@@ -32,20 +33,21 @@ dppd_sources = files(
   'lib/offload/capability.c',
   'lib/observability/stats.c',
   'lib/observability/telemetry.c',
+  'lib/observability/rule_observation.c',
 )
 
 dppd_core = static_library(
   'dppd_core',
   dppd_sources,
   include_directories: dppd_inc,
-  dependencies: dpdk,
+  dependencies: [dpdk, threads],
   install: false,
 )
 
 dppd_core_dep = declare_dependency(
   link_with: dppd_core,
   include_directories: dppd_inc,
-  dependencies: dpdk,
+  dependencies: [dpdk, threads],
 )
 
 executable(

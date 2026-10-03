@@ -110,6 +110,14 @@ static void test_probe_arguments(void)
  */
 int main(void)
 {
+    /** 指标命令只接受命令名本身，不能默默忽略用户追加的规则 ID */
+    struct dppd_management_request metrics_request;
+    char *metrics_args[] = {"rule-metrics", "123"};
+
+    assert(build_request(1, metrics_args, &metrics_request) == 0);
+    assert(metrics_request.operation == DPPD_MANAGEMENT_RULE_METRICS);
+    assert(metrics_request.version == 13);
+    assert(build_request(2, metrics_args, &metrics_request) == -EINVAL);
     struct dppd_management_request request;
     char *probe[] = {"health", "unexpected"};
     char *stats[] = {"stats", "all", "2"};

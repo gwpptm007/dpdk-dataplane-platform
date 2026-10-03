@@ -119,6 +119,9 @@ int main(void)
     backends.software = operations(&fake);
     reset_items(items, 3);
     assert(dppd_transaction_init(&transaction, 1, items, 3) == 0);
+    /** 初始化必须清掉旧事务的失败定位，合法的零号成员不能充当“没有失败”的哨兵 */
+    assert(transaction.failure_stage == DPPD_RULE_STAGE_NONE);
+    assert(transaction.failure_item == UINT32_MAX && transaction.rollback_item == UINT32_MAX);
     assert(dppd_transaction_run(&transaction, &backends) == 0);
     assert(transaction.state == DPPD_TRANSACTION_COMMITTED);
     assert(fake.validate_calls == 3 && fake.prepare_calls == 3);
@@ -135,6 +138,7 @@ int main(void)
     assert(dppd_transaction_run(&transaction, &backends) == -EINVAL);
     assert(transaction.state == DPPD_TRANSACTION_FAILED);
     assert(fake.prepare_calls == 0 && fake.rollback_calls == 0);
+    assert(transaction.failure_stage == DPPD_RULE_STAGE_VALIDATE && transaction.failure_item == 1);
 
     reset_backend(&fake);
     fake.fail_prepare_at = 1;
@@ -143,6 +147,7 @@ int main(void)
     assert(dppd_transaction_run(&transaction, &backends) == -ENOMEM);
     assert(transaction.state == DPPD_TRANSACTION_ROLLED_BACK);
     assert(fake.commit_calls == 0 && fake.rollback_calls == 1);
+    assert(transaction.failure_stage == DPPD_RULE_STAGE_PREPARE && transaction.failure_item == 1);
     assert(!fake.rollback_commit_attempted[0]);
 
     reset_backend(&fake);
@@ -152,6 +157,7 @@ int main(void)
     assert(dppd_transaction_run(&transaction, &backends) == -EIO);
     assert(transaction.state == DPPD_TRANSACTION_ROLLED_BACK);
     assert(fake.rollback_calls == 3);
+    assert(transaction.failure_stage == DPPD_RULE_STAGE_COMMIT && transaction.failure_item == 1);
     assert(!fake.rollback_commit_attempted[0]);
     assert(fake.rollback_commit_attempted[1]);
     assert(fake.rollback_commit_attempted[2]);
@@ -165,5 +171,8 @@ int main(void)
     assert(transaction.state == DPPD_TRANSACTION_FAILED);
     assert(transaction.failure_code == -EIO);
     assert(transaction.rollback_code == -EFAULT);
+    /** 回滚从最后一个准备项开始，但原始提交失败仍指向第一个成员 */
+    assert(transaction.failure_stage == DPPD_RULE_STAGE_COMMIT && transaction.failure_item == 0);
+    assert(transaction.rollback_item == 2);
     return 0;
 }

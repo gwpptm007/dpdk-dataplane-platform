@@ -132,10 +132,15 @@ int main(int argc, char **argv)
     }
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+    /** 先发布本次重放或隔离的完成态，诊断线程只读取副本，不访问规则或驱动 */
+    if (dppd_telemetry_register(&runtime, &control) != 0) {
+        fprintf(stderr, "[dppd] telemetry command registration failed\n");
+        goto cleanup_management;
+    }
     if (recovery_isolation) {
-        /*
-         * 隔离循环不注册 telemetry、不启动 ethdev worker，也不输出正常转发统计。
-         * 唯一允许的状态转换是 reconcile-retry 成功后进入 RESTART_REQUIRED。
+        /**
+         * 隔离保留只读诊断，不启动 ethdev worker，也不输出正常转发统计
+         * 清理重试结束后更新诊断副本，成功进入 RESTART_REQUIRED 后仍必须退出重启
          */
         while (!stop_signal) {
             /** 隔离仅停止软件转发，设备仍需监控，移除时应退出并清理而不是继续等待 */
@@ -151,6 +156,8 @@ int main(int argc, char **argv)
                         loop_error);
                 break;
             }
+            if (dppd_telemetry_publish_rules(&control) != 0)
+                fprintf(stderr, "[dppd] rule telemetry snapshot unavailable\n");
             if (control.recovery_state ==
                 DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {
                 fprintf(stderr,
@@ -160,11 +167,7 @@ int main(int argc, char **argv)
             }
             sleep_control_loop();
         }
-        goto cleanup_management;
-    }
-    if (dppd_telemetry_register(&runtime) != 0) {
-        fprintf(stderr, "[dppd] telemetry command registration failed\n");
-        goto cleanup_management;
+        goto cleanup_telemetry;
     }
 
     if (dppd_runtime_start(&runtime) != 0)
@@ -212,6 +215,9 @@ int main(int argc, char **argv)
                     loop_error);
             break;
         }
+        /** 整轮请求处理完再发布，不让独立查询线程看到整批更新的中间账本 */
+        if (dppd_telemetry_publish_rules(&control) != 0)
+            fprintf(stderr, "[dppd] rule telemetry snapshot unavailable\n");
         if (control.recovery_state != DPPD_CONTROL_RECOVERY_READY) {
             if (!recovery_isolation) {
                 /**

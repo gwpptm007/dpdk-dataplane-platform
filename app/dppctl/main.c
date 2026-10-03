@@ -25,6 +25,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] port-show PORT\n", program);
     fprintf(stderr, "  %s [--socket PATH] capability-show PORT\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-cache-clear PORT\n", program);
+    fprintf(stderr, "  %s [--socket PATH] rule-metrics\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-drop RULE_ID PORT [PRIORITY] [refresh]\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-filter RULE_ID PORT"
                     " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
@@ -392,6 +393,11 @@ static int build_request(int argc, char **argv,
 {
     uint64_t value;
 
+    /** 请求指标不接受额外参数，避免用户误以为能按某个 ID 筛选累计值 */
+    if (argc == 1 && strcmp(argv[0], "rule-metrics") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RULE_METRICS);
+        return 0;
+    }
     /**
      * 探测复用正式 apply 的规则构造器，只在临时参数中补上新建版本零
      * 递归只发生一层，返回后改成独立的探测操作，发送到服务端时绝不会成为安装请求
@@ -956,6 +962,34 @@ static void print_response(const struct dppd_management_response *response)
 {
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释。 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_RULE_METRICS: {
+        const struct dppd_rule_metrics *metrics = &response->payload.rule_metrics;
+        const struct dppd_rule_failure_event *last = &metrics->last;
+
+        printf("rule-metrics ");
+#define PRINT_RULE_METRIC(field) printf(#field "=%" PRIu64 " ", metrics->field);
+        DPPD_RULE_METRIC_FIELDS(PRINT_RULE_METRIC)
+#undef PRINT_RULE_METRIC
+        printf("\n  failures ");
+        for (unsigned int kind = DPPD_RULE_FAILURE_INPUT; kind < DPPD_RULE_FAILURE_KIND_COUNT; ++kind)
+            printf("failed_%s=%" PRIu64 " ", dppd_rule_failure_kind_name(kind), metrics->failures[kind]);
+        printf("\n  last-failure sequence=%" PRIu64 " operation=%s stage=%s kind=%s"
+               " rule=%" PRIu64 " generation=%" PRIu64 " transaction=%" PRIu64 " rules=%u port=",
+               last->sequence, dppd_rule_operation_name(last->operation),
+               dppd_rule_failure_stage_name(last->stage), dppd_rule_failure_kind_name(last->kind),
+               last->rule_id, last->generation, last->transaction_id, last->rule_count);
+        if (last->port_known)
+            printf("%u", last->install_port_id);
+        else
+            printf("unknown");
+        printf(" backend=%s cause-error=%d response-error=%d compensation-error=%d"
+               " compensation-rule=%" PRIu64 " last-applied=%s\n",
+               !last->backend_known ? "unknown" :
+               last->backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software" : "rte_flow",
+               last->cause_code, last->response_code, last->compensation_code,
+               last->compensation_rule_id, last->applied ? "yes" : "no");
+        break;
+    }
     case DPPD_MANAGEMENT_CAPABILITY_GET:
     case DPPD_MANAGEMENT_CAPABILITY_CLEAR:
         print_capability(&response->payload.capability);

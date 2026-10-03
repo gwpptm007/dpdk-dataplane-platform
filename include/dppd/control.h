@@ -40,6 +40,8 @@ struct dppd_control_service {
     /* 启动恢复或在线补偿失败时置位；普通 mutation 不能自行清除此状态。 */
     enum dppd_control_recovery_state recovery_state;
     int recovery_last_error;
+    /** 仅管理线程更新的请求指标，逐包路径不读取它，也不增加时钟、锁或内存分配 */
+    struct dppd_rule_observation observation;
 };
 
 struct dppd_control_apply_result {
@@ -144,6 +146,9 @@ int dppd_control_init(struct dppd_control_service *service,
                       uint32_t rule_capacity,
                       const struct dppd_flow_api *flow_api);
 int dppd_control_fini(struct dppd_control_service *service);
+/** 只复制已完成请求的累计值和最近失败，不校验驱动、不查询 COUNT、不修改快照 */
+void dppd_control_rule_metrics(const struct dppd_control_service *service,
+                                struct dppd_rule_metrics *metrics);
 /**
  * 不安装规则的完整规则探测，允许 ID 尚不存在，探测也不会分配 generation 或事务编号
  * 同时给出驱动校验和已实现的软件等价能力，缓存仅用于诊断，正式 apply 仍重新校验
