@@ -13,7 +13,7 @@
 
 ## M1：能力规划与规则控制面
 
-当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v10 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
+当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v11 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
 
 持久化方面已完成 [versioned snapshot v2](persistence_snapshot_v2.md)、install port 保存、
 control mutation 后的完整保存、dirty state、管理状态查询、`--state-path` 和全量硬件
@@ -24,6 +24,12 @@ control mutation 后的完整保存、dirty state、管理状态查询、`--stat
 已登记延期项：[虚拟测试端口的规则执行能力](todo_virtual_flow_backend.md)。当前
 `net_ring` 不实现 rte_flow；后续按 TAP 基础 flow、平台 software backend、物理
 NIC/SmartNIC 验收三个阶段推进。
+
+2026-10-03 已实现本机 management v11 的 `rule-status`，查询实际后端、安装端口、COUNT
+配置和提交耗时；纯软件批量更新报告共享的整批耗时，查询只读，重放重新计时。
+20/20 单测、两组 ring 状态场景、TAP 的真实 rte_flow 生命周期、四组 worker 收发及
+隔离/健康回归通过，见 [规则安装状态](rule_status.md)。规则 telemetry、失败分类和历史
+耗时分布仍待实现，capability profile 与 PMD probe cache 继续列为下一项。
 
 交付：
 
@@ -60,7 +66,7 @@ QUEUE 是否存在软件等价语义必须先完成设计，不能静默模拟�
 
 交付：northbound API、鉴权、持久化、滚动升级、health/readiness、结构化日志、端口/队列/rule 指标、NUMA 自动布局和性能回归门禁。
 
-2026-10-03 已实现本机 `health/ready` 与工作线程异常结束监控。管理协议 v10 可查询
+2026-10-03 已实现本机 `health/ready` 与工作线程异常结束监控。管理协议 v11 可查询
 实际运行线程、端口/链路、设备移除、规则恢复隔离与快照 dirty，并返回全部未就绪
 原因；隔离期间保留存活查询。19/19 单测、三个正式进程状态/存储恢复场景、两组
 线程故障、四组 worker 收发和既有故障回归通过。远程探针、卡死心跳、主动网络探测

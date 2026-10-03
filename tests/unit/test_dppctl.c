@@ -8,6 +8,37 @@
 #undef main
 #include <assert.h>
 
+/** 状态查询默认读当前版本，也可携带精确非零版本，非法参数要在连接服务前被拒绝 */
+static void test_status_arguments(void)
+{
+    struct dppd_management_request request;
+    char *args[] = {"rule-status", "100", "any", "extra"};
+    const char *invalid[] = {"0", "-1", "wrong", "18446744073709551615",
+                             "18446744073709551616"};
+
+    assert(build_request(2, args, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_RULE_STATUS);
+    assert(request.payload.rule_status.rule_id == 100);
+    assert(request.payload.rule_status.expected_generation == DPPD_RULE_GENERATION_ANY);
+    assert(build_request(3, args, &request) == 0);
+    assert(request.payload.rule_status.expected_generation == DPPD_RULE_GENERATION_ANY);
+    args[2] = "7";
+    assert(build_request(3, args, &request) == 0);
+    assert(request.payload.rule_status.expected_generation == 7);
+    args[2] = "18446744073709551614";
+    assert(build_request(3, args, &request) == 0);
+    assert(build_request(1, args, &request) == -EINVAL);
+    assert(build_request(4, args, &request) == -EINVAL);
+    for (unsigned int i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        args[2] = (char *)invalid[i];
+        assert(build_request(3, args, &request) == -EINVAL);
+    }
+    args[1] = "0";
+    assert(build_request(2, args, &request) == -EINVAL);
+    args[1] = "-1";
+    assert(build_request(2, args, &request) == -EINVAL);
+}
+
 /**
  * 前半部分确认两到四条规则都能正确映射到请求字段
  * 后半部分逐项替换参数，确认不完整分组、无效旧版本、重复 ID 和越界数值都被拒绝
@@ -17,6 +48,8 @@ int main(void)
     struct dppd_management_request request;
     char *probe[] = {"health", "unexpected"};
     char *stats[] = {"stats", "all", "2"};
+
+    test_status_arguments();
 
     /** 健康与就绪命令都使用无参数的状态查询，额外参数必须明确拒绝 */
     assert(build_request(1, probe, &request) == 0);

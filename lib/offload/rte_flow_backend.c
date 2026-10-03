@@ -1,4 +1,5 @@
 #include "dppd/rte_flow_backend.h"
+#include "dppd/install_time.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -16,6 +17,8 @@ struct dppd_rte_flow_object {
     uint64_t rule_id;
     uint64_t generation;
     struct dppd_flow_handle handle;
+    /** 在 prepare 时保留安装意图，查询时据此核对驱动返回的 handle */
+    struct dppd_rule_install_info installation;
 };
 
 /** 按规则 ID 和精确版本查找已占用槽位，允许找到尚未安装的 prepare 预留项 */
@@ -150,6 +153,7 @@ static int transaction_prepare(void *context,
 {
     struct dppd_rte_flow_backend *backend = context;
     struct dppd_rte_flow_object *object;
+    uint16_t action;
 
     if (token == NULL)
         return -EINVAL;
@@ -160,6 +164,14 @@ static int transaction_prepare(void *context,
     object = reserve_object(backend, item->rule.id, item->rule.generation);
     if (object == NULL)
         return -ENOSPC;
+    object->installation.rule_id = item->rule.id;
+    object->installation.generation = item->rule.generation;
+    object->installation.install_port_id = item->plan.install_port_id;
+    object->installation.commit_rule_count = 1;
+    for (action = 0; action < item->rule.nb_actions; ++action) {
+        if (item->rule.actions[action].type == DPPD_ACTION_COUNT)
+            object->installation.has_count = true;
+    }
     *token = (uintptr_t)object;
     return 0;
 }
@@ -175,14 +187,20 @@ static int transaction_commit(void *context,
     struct dppd_rte_flow_backend *backend = context;
     struct dppd_rte_flow_object *object = (struct dppd_rte_flow_object *)token;
     struct dppd_flow_error error;
+    struct dppd_install_timer timer;
     int rc;
 
     if (object == NULL || !object->occupied || object->installed)
         return -EINVAL;
+    /** 只测量驱动创建调用，校验、事务准备和之后的规则账本保存不算在内 */
+    dppd_install_timer_start(&timer);
     rc = backend->api.create(item->plan.install_port_id, &item->rule,
                              &object->handle, &error);
-    if (rc == 0)
+    if (rc == 0) {
+        object->installation.timing_available = dppd_install_timer_finish(
+            &timer, &object->installation.install_duration_ns);
         object->installed = true;
+    }
     return rc;
 }
 
@@ -331,6 +349,32 @@ const struct dppd_flow_handle *dppd_rte_flow_backend_find_version(
     if (object == NULL || !object->installed)
         return NULL;
     return &object->handle;
+}
+
+/**
+ * 读取本进程保留的精确安装记录，查询本身不触碰网卡，也不自动修复异常对象
+ * prepare 只占用槽位，还不能报告安装成功；已安装对象必须保留一个有效且身份相符的 handle
+ */
+int dppd_rte_flow_backend_install_info(
+    const struct dppd_rte_flow_backend *backend, uint64_t rule_id,
+    uint64_t generation, struct dppd_rule_install_info *info)
+{
+    const struct dppd_rte_flow_object *object;
+
+    if (backend == NULL || backend->objects == NULL || rule_id == 0 ||
+        generation == 0 || info == NULL)
+        return -EINVAL;
+    memset(info, 0, sizeof(*info));
+    object = find_object_const(backend, rule_id, generation);
+    if (object == NULL || !object->installed)
+        return -ENOENT;
+    if (object->handle.flow == NULL || object->handle.rule_id != rule_id ||
+        object->handle.rule_generation != generation ||
+        object->handle.port_id != object->installation.install_port_id ||
+        object->handle.has_count != object->installation.has_count)
+        return -EUCLEAN;
+    *info = object->installation;
+    return 0;
 }
 
 /** 删除指定 ID 的最新槽位对应规则，仅在驱动删除成功后归还槽位 */

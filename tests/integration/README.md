@@ -1,5 +1,22 @@
 # 集成验收
 
+## 规则安装状态
+
+```bash
+python3 tests/integration/rule_status.py --build-dir build
+sudo python3 tests/integration/rule_status.py --build-dir build --tap
+```
+
+管理协议 v11。普通用户场景使用独立 ring 端口，验证 2/4 条规则的只读状态、prefer
+降级、共享整批耗时、旧版本拒绝、dirty/flush、重放和删除。`--tap` 单独执行需要 root
+的真实 rte_flow 场景，验证创建、更新安装端口、删除、平台软件对象共存和快照重放。
+临时 TAP 和 8191 个 mbuf 在退出后全部回收，不操作物理网卡。
+
+2026-10-03 三组场景及 20/20 单测通过。四组 `software_traffic.py` 同时验证 COUNT
+不会被状态查询清零，以及分配失败后的旧安装记录保持。隔离回归确认新增查询也被
+拒绝。耗时只代表后端提交，TAP 的 rte_flow 记录不证明物理硬件卸载，详见
+[规则安装状态与验证](../../docs/rule_status.md)。
+
 ## 健康与就绪
 
 ```bash
@@ -7,7 +24,7 @@ python3 tests/integration/health_readiness.py --build-dir build
 sudo python3 tests/integration/health_readiness.py --build-dir build --tap
 ```
 
-管理协议 v10。自动检查 `health/ready` 的输出与退出码、实际 worker 状态、只读查询、
+管理协议 v11。自动检查 `health/ready` 的输出与退出码、实际 worker 状态、只读查询、
 快照写入失败与 flush 修复、非空两规则重启，以及注册失败后的主线程故障监控。
 单队列使用 `net_ring`，双线程使用支持正式配置要求的 `net_null`；TAP 模式只操作
 测试自己创建的两个临时接口，验证 down/up 的未就绪与恢复、快照不变和退出清理。

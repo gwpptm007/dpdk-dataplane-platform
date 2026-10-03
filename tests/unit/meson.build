@@ -110,6 +110,12 @@ test('management protocol and socket', management_test)
 health_test = executable('test_health', 'test_health.c', dependencies: dppd_core_dep)
 test('health and worker readiness', health_test)
 
+# 只在状态测试中包装时钟，验证统计不可用时规则仍能正确安装
+rule_status_test = executable('test_rule_status', 'test_rule_status.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=clock_gettime'])
+test('rule installation status', rule_status_test)
+
 dppctl_test = executable(
   'test_dppctl',
   'test_dppctl.c',

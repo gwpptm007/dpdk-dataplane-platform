@@ -1196,6 +1196,62 @@ int dppd_control_remove(struct dppd_control_service *service,
     return persist_current_repository(service);
 }
 
+/**
+ * 先以规则账本确定当前版本，再读取两个后端的安装记录，不能仅凭 prefer 策略猜测实际位置
+ * 缺失或重复安装都属于账本与实际对象失配，保留原状态并报告错误，由已有恢复流程处理
+ */
+int dppd_control_rule_status(const struct dppd_control_service *service,
+                              uint64_t rule_id, uint64_t expected_generation,
+                              struct dppd_control_rule_status *result)
+{
+    struct dppd_rule_install_info hardware, software;
+    const struct dppd_rule_install_info *installed;
+    struct dppd_rule rule;
+    bool has_count = false;
+    uint16_t action;
+    int hardware_rc, software_rc, rc;
+
+    if (service == NULL || rule_id == 0 || expected_generation == 0 || result == NULL)
+        return -EINVAL;
+    memset(result, 0, sizeof(*result));
+    if (recovery_write_preflight(service) != 0)
+        return -EUCLEAN;
+    rc = dppd_rule_repository_get(&service->rules, rule_id, &rule);
+    if (rc != 0)
+        return rc;
+    if (expected_generation != DPPD_RULE_GENERATION_ANY &&
+        expected_generation != rule.generation)
+        return -ESTALE;
+
+    /** 这两个入口只读取安装记录，不借用会顺带回收旧快照的 contains 或 COUNT 查询 */
+    hardware_rc = dppd_rte_flow_backend_install_info(
+        &service->rte_flow, rule.id, rule.generation, &hardware);
+    software_rc = dppd_software_backend_install_info(
+        &service->software, rule.id, rule.generation, &software);
+    if ((hardware_rc != 0 && hardware_rc != -ENOENT) ||
+        (software_rc != 0 && software_rc != -ENOENT) ||
+        (hardware_rc == 0) == (software_rc == 0))
+        return -EUCLEAN;
+    installed = hardware_rc == 0 ? &hardware : &software;
+    for (action = 0; action < rule.nb_actions; ++action) {
+        if (rule.actions[action].type == DPPD_ACTION_COUNT)
+            has_count = true;
+    }
+    if (installed->rule_id != rule.id || installed->generation != rule.generation ||
+        installed->install_port_id != rule.install_port_id ||
+        installed->has_count != has_count || installed->commit_rule_count == 0 ||
+        (hardware_rc == 0 && rule.fallback == DPPD_FALLBACK_SOFTWARE_ONLY) ||
+        (software_rc == 0 && rule.fallback == DPPD_FALLBACK_REQUIRE_HARDWARE))
+        return -EUCLEAN;
+
+    result->installation = *installed;
+    result->backend = hardware_rc == 0 ? DPPD_PLAN_BACKEND_RTE_FLOW :
+                                        DPPD_PLAN_BACKEND_SOFTWARE;
+    result->fallback = rule.fallback;
+    dppd_control_persistence_status(service, &result->persistence);
+    return 0;
+}
+
 int dppd_control_query_count(struct dppd_control_service *service,
                              uint64_t rule_id,
                              uint64_t expected_generation,

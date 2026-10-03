@@ -34,7 +34,7 @@ meson test -C build --print-errorlogs
 ./build/dppctl stats all 1    # 全部端口的队列 1
 ```
 
-管理协议为 v10，daemon 和 CLI 必须一起更新，v9 及更旧客户端返回 EPROTO。不存在的端口或
+管理协议为 v11，daemon 和 CLI 必须一起更新，v10 及更旧客户端返回 EPROTO。不存在的端口或
 队列返回 ENOENT。队列编号是运行配置中的 RX/TX queue id，不是物理 CPU/lcore id。
 这些计数记录本项目软件工作线程实际处理的报文，不是网卡硬件计数；硬件卸载后未进入
 CPU 的报文不会计入。运行时初始化后从零开始，不跨进程重启保存，不提供清零操作。
@@ -155,10 +155,18 @@ v1 没有每条规则的端口信息，多端口旧快照不能安全使用这�
   queue:0 count mark:7 priority:30 require
 ./build/dppctl count 102 1
 ./build/dppctl get 100
+./build/dppctl rule-status 100
+./build/dppctl rule-status 100 1
 ./build/dppctl delete 100 1
 ```
 
 `apply-drop` 参数依次为 rule id、安装 ethdev port id、期望 generation、可选 priority 和 `prefer|require`。创建新规则时期望 generation 使用 `0`；更新、删除应传上次响应的 generation；需要无条件操作时可显式写 `any`。非默认路径通过 `--socket PATH` 指定。
+
+`rule-status RULE_ID [EXPECTED_GENERATION]` 查询当前规则的实际后端、安装端口、COUNT 配置、
+后端提交耗时和整个账本的保存状态。版本默认 `any`，也可指定精确非零版本，过期返回
+`ESTALE`。纯软件批量更新的各成员共享一次整批耗时，输出 `install-scope=batch` 和条数。
+查询不访问驱动、不清零计数、不保存快照；时钟不可用时显示 `install-ns=unknown`。
+规则状态和耗时不写入快照，重放会测量本次安装，详见 [规则安装状态](rule_status.md)。
 
 `apply-filter-drop` 在上述三个并发参数后增加协议、源/目的 CIDR、源/目的端口。协议支持 `ipv4|udp|tcp`；CIDR 和 L4 端口均可写 `any`。`ipv4` 不包含 L4 item，因此两个端口必须写 `any`，防止参数看似生效却被忽略。地址和端口会转换为 DPDK flow item 要求的网络字节序。
 
@@ -172,7 +180,7 @@ v1 没有每条规则的端口信息，多端口旧快照不能安全使用这�
 ./build/dppctl update-drop-batch 0 20 prefer 200 3 201 4
 ```
 
-成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v10，daemon 和 CLI 必须一起更新。
+成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v11，daemon 和 CLI 必须一起更新。
 
 `count RULE_ID EXPECTED_GENERATION` 查询已发布 generation 对应的 COUNT。它不会重置 counter；规则不存在、generation 已过期、规则没有 COUNT，以及当前 backend 不支持查询会分别返回错误。硬件规则的 hits/bytes 由目标 PMD 的 `rte_flow_query()` 决定；软件规则由 classifier 的原子计数器返回。
 
@@ -202,7 +210,7 @@ status 在 management socket 开放时已经是恢复完成的 clean generation�
 以执行完整 snapshot 重放。该 retry 只能处理当前进程仍持有 handle 的对象；进程已崩溃
 或被强制终止时，应使用目标 PMD/设备支持的复位或清理流程，不能直接使用全端口 flush。
 
-管理 socket 权限为 `0600`。v10 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
+管理 socket 权限为 `0600`。v11 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
 
 `health` 成功响应时退出码为 0，`live=yes` 证明管理线程能够响应；`ready` 只有
 `ready=yes` 才返回 0，否则打印全部未就绪原因并返回 1。两者都不修改规则或快照。

@@ -28,6 +28,8 @@ static void print_usage(const char *program)
             "  %s [--socket PATH] list [AFTER_RULE_ID [REPOSITORY_GENERATION]]\n",
             program);
     fprintf(stderr, "  %s [--socket PATH] get RULE_ID\n", program);
+    fprintf(stderr, "  %s [--socket PATH] rule-status RULE_ID [EXPECTED_GENERATION]\n",
+            program);
     fprintf(stderr, "  %s [--socket PATH] count RULE_ID EXPECTED_GENERATION\n",
             program);
     fprintf(stderr, "  %s [--socket PATH] delete RULE_ID EXPECTED_GENERATION\n",
@@ -452,6 +454,23 @@ static int build_request(int argc, char **argv,
     if (argc == 2 && strcmp(argv[0], "get") == 0) {
         initialize_request(request, DPPD_MANAGEMENT_RULE_GET);
         if (parse_u64(argv[1], 1, UINT64_MAX, &request->payload.get.rule_id) != 0)
+            return -EINVAL;
+        return 0;
+    }
+    /**
+     * 默认查询该 ID 当前版本，用户也可带上上次看到的非零版本以检测并发更新
+     * 零只用于创建规则，状态查询拒绝零，数值最大值仍保留为内部 ANY 哨兵
+     */
+    if ((argc == 2 || argc == 3) && strcmp(argv[0], "rule-status") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RULE_STATUS);
+        request->payload.rule_status.expected_generation = DPPD_RULE_GENERATION_ANY;
+        if (parse_u64(argv[1], 1, UINT64_MAX,
+                      &request->payload.rule_status.rule_id) != 0)
+            return -EINVAL;
+        if (argc == 3 &&
+            (parse_expected(argv[2],
+                            &request->payload.rule_status.expected_generation) != 0 ||
+             request->payload.rule_status.expected_generation == 0))
             return -EINVAL;
         return 0;
     }
@@ -951,6 +970,31 @@ static void print_response(const struct dppd_management_response *response)
             printf("  rule=%" PRIu64 " generation=%" PRIu64 "\n",
                    result->rule_id, result->generation);
         }
+        break;
+    }
+    case DPPD_MANAGEMENT_RULE_STATUS: {
+        const struct dppd_control_rule_status *status = &response->payload.rule_status;
+        const struct dppd_rule_install_info *installed = &status->installation;
+
+        /** 未配置 COUNT 也能查询状态，耗时未知时明确显示 unknown，避免把零当成有效测量 */
+        printf("rule-status rule=%" PRIu64 " generation=%" PRIu64
+               " port=%u backend=%s fallback=%s count=%s install-scope=%s"
+               " commit-rules=%u install-ns=",
+               installed->rule_id, installed->generation, installed->install_port_id,
+               status->backend == DPPD_PLAN_BACKEND_RTE_FLOW ? "rte_flow" : "software",
+               fallback_name((uint8_t)status->fallback), installed->has_count ? "yes" : "no",
+               installed->commit_rule_count > 1 ? "batch" : "rule",
+               installed->commit_rule_count);
+        if (installed->timing_available)
+            printf("%" PRIu64, installed->install_duration_ns);
+        else
+            printf("unknown");
+        printf(" persistence=%s dirty=%s persisted-generation=%" PRIu64
+               " repository-generation=%" PRIu64 " last-error=%d\n",
+               status->persistence.enabled ? "enabled" : "disabled",
+               status->persistence.dirty ? "yes" : "no",
+               status->persistence.persisted_generation,
+               status->persistence.current_generation, status->persistence.last_error);
         break;
     }
     case DPPD_MANAGEMENT_RULE_COUNT_QUERY:

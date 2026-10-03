@@ -167,11 +167,16 @@ static void run_updates(struct fixture *fixture)
     for (round = 1; round <= fixture->count + 2; ++round) {
         uint64_t before[4], hits, bytes;
         uint64_t revision = fixture->control.rules.generation;
+        struct dppd_control_rule_status original_status[4], queried_status;
 
-        for (i = 0; i < fixture->count; ++i)
+        for (i = 0; i < fixture->count; ++i) {
             assert(dppd_software_backend_query_count(&fixture->control.software,
                 fixture->requests[i].rule.id, fixture->requests[i].expected_generation,
                 &before[i], &bytes) == 0);
+            /** 同时保存版本的安装记录，验证真实工作线程运行期间的分配失败不会重写记录 */
+            assert(dppd_control_rule_status(&fixture->control, fixture->requests[i].rule.id,
+                fixture->requests[i].expected_generation, &original_status[i]) == 0);
+        }
         enqueue_round(fixture);
         toggle(fixture);
         fail_allocation = round;
@@ -181,6 +186,9 @@ static void run_updates(struct fixture *fixture)
         toggle(fixture);
         drain_round(fixture);
         for (i = 0; i < fixture->count; ++i) {
+            assert(dppd_control_rule_status(&fixture->control, fixture->requests[i].rule.id,
+                fixture->requests[i].expected_generation, &queried_status) == 0);
+            assert(memcmp(&queried_status, &original_status[i], sizeof(queried_status)) == 0);
             assert(dppd_software_backend_query_count(&fixture->control.software,
                 fixture->requests[i].rule.id, fixture->requests[i].expected_generation,
                 &hits, &bytes) == 0);
@@ -203,7 +211,16 @@ static void run_updates(struct fixture *fixture)
     drain_round(fixture);
     for (i = 0; i < fixture->count; ++i) {
         uint64_t hits, bytes;
+        struct dppd_control_rule_status status;
 
+        /** 报文已经排空后反复读取状态，真实命中数必须保留，不能被只读查询重置 */
+        for (unsigned int query = 0; query < 3; ++query) {
+            assert(dppd_control_rule_status(&fixture->control, fixture->requests[i].rule.id,
+                results[i].generation, &status) == 0);
+            assert(status.backend == DPPD_PLAN_BACKEND_SOFTWARE);
+            assert(status.installation.has_count && status.installation.timing_available);
+            assert(status.installation.commit_rule_count == fixture->count);
+        }
         assert(dppd_software_backend_query_count(&fixture->control.software,
             fixture->requests[i].rule.id, results[i].generation, &hits, &bytes) == 0);
         assert(hits == hits_per_round(fixture) && bytes == hits * 64);

@@ -12,6 +12,7 @@
 #pragma GCC diagnostic pop
 
 #include "dppd/config.h"
+#include "dppd/install_time.h"
 
 /**
  * 将计数器与规则数组分开保存，让同一规则版本在复制快照后继续累计 COUNT
@@ -23,6 +24,13 @@ struct dppd_software_rule_metrics {
     atomic_uint_fast64_t references;
     atomic_uint_fast64_t hits;
     atomic_uint_fast64_t bytes;
+    /**
+     * 同一版本复制快照时共享安装记录，修改其他规则不会覆盖此版本的原始耗时
+     * 以下字段只由控制面在 writer_lock 内访问，工作线程只使用上面的原子计数器
+     */
+    uint64_t install_duration_ns;
+    uint32_t commit_rule_count;
+    bool timing_available;
 };
 
 struct dppd_software_rule_object {
@@ -406,6 +414,7 @@ static int transaction_commit(void *context,
     struct dppd_software_classifier_snapshot *next;
     struct dppd_software_rule_metrics *metrics;
     uint32_t i;
+    struct dppd_install_timer timer;
 
     /** commit 必须再次检查：prepare 与 commit 之间可能已有另一控制请求完成发布。 */
     (void)item;
@@ -419,6 +428,7 @@ static int transaction_commit(void *context,
         (void)pthread_mutex_unlock(&backend->writer_lock);
         return -EEXIST;
     }
+    dppd_install_timer_start(&timer);
     /** 永不修改 active；即使只有一条规则变更也复制整张表，换取 worker 无锁读取。 */
     next = snapshot_clone(active, backend->capacity);
     if (next == NULL) {
@@ -448,6 +458,13 @@ static int transaction_commit(void *context,
         (void)pthread_mutex_unlock(&backend->writer_lock);
         return -ENOMEM;
     }
+    /**
+     * 成功发布后完成计时，耗时包括副本分配、指针发布和当次可完成的退役回收
+     * 查询同样持有 writer_lock，所以读不到尚未填完的记录，逐包匹配不读取这些字段
+     */
+    metrics->timing_available = dppd_install_timer_finish(
+        &timer, &metrics->install_duration_ns);
+    metrics->commit_rule_count = 1;
     pending->published = true;
     (void)pthread_mutex_unlock(&backend->writer_lock);
     return 0;
@@ -518,6 +535,7 @@ int dppd_software_backend_update_batch(
     struct dppd_software_classifier_snapshot *active, *next = NULL;
     uint32_t i;
     int rc = 0;
+    struct dppd_install_timer timer;
 
     if (backend == NULL || !backend->lock_initialized || rules == NULL ||
         expected_generations == NULL || count == 0 || count > backend->capacity)
@@ -557,6 +575,8 @@ int dppd_software_backend_update_batch(
             goto out;
         }
     }
+    /** 全批条件检查结束才开始计时，不把无效请求的检查耗时记录为安装耗时 */
+    dppd_install_timer_start(&timer);
     next = snapshot_clone(active, backend->capacity);
     if (next == NULL) {
         rc = -ENOMEM;
@@ -579,8 +599,25 @@ int dppd_software_backend_update_batch(
         next->objects[index].metrics = metrics;
     }
     rc = publish_locked(backend, next);
-    if (rc == 0)
+    if (rc == 0) {
+        uint64_t duration_ns;
+        bool timing_available = dppd_install_timer_finish(&timer, &duration_ns);
+
+        /**
+         * 一次发布同时替换整个批次，因此各新版本共享整批耗时，不能伪装成各自的单条耗时
+         * 这里只修改新分配的记录，未更新版本仍共享原来的记录，失败路径完全不改旧表
+         */
+        for (i = 0; i < count; ++i) {
+            int index = snapshot_find(next, backend->capacity, rules[i].id,
+                                      rules[i].generation);
+            struct dppd_software_rule_metrics *metrics = next->objects[index].metrics;
+
+            metrics->install_duration_ns = duration_ns;
+            metrics->timing_available = timing_available;
+            metrics->commit_rule_count = count;
+        }
         next = NULL;
+    }
 out:
     snapshot_destroy(next, backend->capacity);
     (void)pthread_mutex_unlock(&backend->writer_lock);
@@ -660,6 +697,45 @@ bool dppd_software_backend_contains_version(
     reclaim_locked((struct dppd_software_backend *)backend);
     (void)pthread_mutex_unlock((pthread_mutex_t *)&backend->writer_lock);
     return found;
+}
+
+/**
+ * 读取活跃版本的规则字段和提交耗时，不清零计数，也不推进退役快照回收
+ * 持锁期间快照不会被另一个控制请求替换并释放，退出前只复制不含指针的结果
+ */
+int dppd_software_backend_install_info(
+    const struct dppd_software_backend *backend, uint64_t rule_id,
+    uint64_t generation, struct dppd_rule_install_info *info)
+{
+    const struct dppd_software_classifier_snapshot *active;
+    const struct dppd_software_rule_object *object;
+    uint16_t action;
+    int index;
+
+    if (backend == NULL || !backend->lock_initialized || rule_id == 0 ||
+        generation == 0 || info == NULL)
+        return -EINVAL;
+    memset(info, 0, sizeof(*info));
+    (void)pthread_mutex_lock((pthread_mutex_t *)&backend->writer_lock);
+    active = atomic_load_explicit(&backend->active, memory_order_acquire);
+    index = snapshot_find(active, backend->capacity, rule_id, generation);
+    if (index < 0) {
+        (void)pthread_mutex_unlock((pthread_mutex_t *)&backend->writer_lock);
+        return -ENOENT;
+    }
+    object = &active->objects[index];
+    info->rule_id = object->rule.id;
+    info->generation = object->rule.generation;
+    info->install_port_id = object->rule.install_port_id;
+    info->install_duration_ns = object->metrics->install_duration_ns;
+    info->timing_available = object->metrics->timing_available;
+    info->commit_rule_count = object->metrics->commit_rule_count;
+    for (action = 0; action < object->rule.nb_actions; ++action) {
+        if (object->rule.actions[action].type == DPPD_ACTION_COUNT)
+            info->has_count = true;
+    }
+    (void)pthread_mutex_unlock((pthread_mutex_t *)&backend->writer_lock);
+    return 0;
 }
 
 /**

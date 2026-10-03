@@ -8,6 +8,7 @@
 
 #include "dppd/packet.h"
 #include "dppd/transaction.h"
+#include "dppd/install_info.h"
 
 struct dppd_software_classifier_snapshot;
 struct dppd_software_retired_snapshot;
@@ -91,6 +92,13 @@ int dppd_software_backend_remove_version(struct dppd_software_backend *backend,
 bool dppd_software_backend_contains_version(
     const struct dppd_software_backend *backend,
     uint64_t rule_id, uint64_t generation);
+/**
+ * 只读取当前活跃表中精确版本的安装记录，旧的退役表不参与查询
+ * 控制面锁保护记录的读取，不触发快照回收、不读取 COUNT，也不改变逐包路径
+ */
+int dppd_software_backend_install_info(
+    const struct dppd_software_backend *backend, uint64_t rule_id,
+    uint64_t generation, struct dppd_rule_install_info *info);
 /** 查询指定版本的累计命中数和字节数，不清零；两个数独立采样，并非同一瞬间的快照 */
 int dppd_software_backend_query_count(const struct dppd_software_backend *backend,
                                       uint64_t rule_id, uint64_t generation,

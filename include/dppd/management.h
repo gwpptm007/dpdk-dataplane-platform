@@ -12,10 +12,10 @@
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /*
- * v10 增加健康与就绪查询；v9 增加端口链路状态；v8 增加端口和队列统计
+ * v11 增加规则安装状态与提交耗时；v10 增加健康与就绪查询；v9 增加端口链路状态
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 10U
+#define DPPD_MANAGEMENT_VERSION 11U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -56,6 +56,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_STATS_QUERY,
     /** 健康快照可在恢复隔离期间查询，不执行规则操作、网卡探测或磁盘保存 */
     DPPD_MANAGEMENT_HEALTH_GET,
+    /** 按当前版本读取实际后端和安装记录，追加编号以保留旧操作的含义 */
+    DPPD_MANAGEMENT_RULE_STATUS,
 };
 
 /*
@@ -139,6 +141,11 @@ struct dppd_management_request {
             /* 查询也检查 generation，防止把更新后新规则的计数返回给旧客户端。 */
             uint64_t expected_generation;
         } count_query;
+        /** 不传 ANY 时只接受账本当前的精确版本，避免把新对象的状态返回给旧客户端 */
+        struct {
+            uint64_t rule_id;
+            uint64_t expected_generation;
+        } rule_status;
         struct {
             /* 返回 rule id 严格大于该值的记录；第一页使用 0。 */
             uint64_t after_rule_id;
@@ -323,6 +330,7 @@ struct dppd_management_response {
         struct dppd_control_recovery_status recovery;
         struct dppd_stats_values stats;
         struct dppd_management_health health;
+        struct dppd_control_rule_status rule_status;
     } payload;
 };
 

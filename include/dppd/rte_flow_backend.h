@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "dppd/install_info.h"
 #include "dppd/offload.h"
 #include "dppd/transaction.h"
 
@@ -60,6 +61,13 @@ const struct dppd_flow_handle *dppd_rte_flow_backend_find_version(
     const struct dppd_rte_flow_backend *backend,
     uint64_t rule_id,
     uint64_t generation);
+/**
+ * 读取精确版本的安装记录，不调用网卡接口，不把 prepare 预留项当作已安装对象
+ * 本地 handle 的 ID、版本、端口或 COUNT 配置与安装记录失配时返回 EUCLEAN
+ */
+int dppd_rte_flow_backend_install_info(
+    const struct dppd_rte_flow_backend *backend, uint64_t rule_id,
+    uint64_t generation, struct dppd_rule_install_info *info);
 int dppd_rte_flow_backend_remove(struct dppd_rte_flow_backend *backend,
                                  uint64_t rule_id,
                                  struct dppd_flow_error *error);

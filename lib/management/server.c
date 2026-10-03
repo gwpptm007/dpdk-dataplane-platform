@@ -346,6 +346,13 @@ int dppd_management_handle(struct dppd_control_service *control,
         rc = build_port_info(devices, request->payload.port_get.port_id,
                              &response->payload.port);
         break;
+    case DPPD_MANAGEMENT_RULE_STATUS:
+        /** 只复制控制面安装记录，隔离检查沿用普通规则查询的入口限制 */
+        rc = dppd_control_rule_status(
+            control, request->payload.rule_status.rule_id,
+            request->payload.rule_status.expected_generation,
+            &response->payload.rule_status);
+        break;
     case DPPD_MANAGEMENT_RULE_COUNT_QUERY:
         /*
          * COUNT 查询不改变 repository generation，也不重置 PMD counter。

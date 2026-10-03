@@ -116,10 +116,16 @@ static void test_failures(uint32_t count)
     struct dppd_software_decision decision;
     struct dppd_packet parsed = packet();
     struct dppd_software_classifier_snapshot *original;
+    struct dppd_rule_install_info original_info[5], queried_info, batch_info;
     uint64_t hits, bytes;
     uint32_t i;
 
     setup(&service, requests, &topology, count);
+    /** 安装记录属于具体版本，后面的每个失败位置都必须保留这些原始记录 */
+    for (i = 0; i <= count; ++i) {
+        assert(dppd_software_backend_install_info(&service.software, 100 + i, i + 1,
+                                                  &original_info[i]) == 0);
+    }
     assert(dppd_software_backend_worker_register(&service.software, 0) == 0);
     dppd_software_backend_decide(&service.software, 5, &parsed, &decision);
     dppd_software_backend_decide(&service.software, 7, &parsed, &decision);
@@ -142,6 +148,9 @@ static void test_failures(uint32_t count)
 
             assert(dppd_rule_repository_get(&service.rules, 100 + j, &stored) == 0);
             assert(stored.generation == j + 1);
+            assert(dppd_software_backend_install_info(&service.software, 100 + j, j + 1,
+                                                      &queried_info) == 0);
+            assert(memcmp(&queried_info, &original_info[j], sizeof(queried_info)) == 0);
             assert(dppd_software_backend_contains_version(&service.software,
                                                            100 + j, j + 1));
         }
@@ -149,6 +158,19 @@ static void test_failures(uint32_t count)
     assert(dppd_control_update_batch(&service, requests, count, results) == 0);
     assert(atomic_load(&service.software.active) != original);
     assert(service.software.retired != NULL);
+    /** 成功的一次整表发布对应一份整批耗时，所有新版本共享它，未更新版本保持原记录 */
+    assert(dppd_software_backend_install_info(&service.software, 100,
+                                              results[0].generation, &batch_info) == 0);
+    assert(batch_info.timing_available && batch_info.commit_rule_count == count);
+    for (i = 1; i < count; ++i) {
+        assert(dppd_software_backend_install_info(&service.software, 100 + i,
+                                                  results[i].generation, &queried_info) == 0);
+        assert(queried_info.timing_available && queried_info.commit_rule_count == count);
+        assert(queried_info.install_duration_ns == batch_info.install_duration_ns);
+    }
+    assert(dppd_software_backend_install_info(&service.software, 100 + count,
+                                              count + 1, &queried_info) == 0);
+    assert(memcmp(&queried_info, &original_info[count], sizeof(queried_info)) == 0);
     assert(dppd_software_backend_query_count(&service.software, 100,
                                               results[0].generation, &hits, &bytes) == 0);
     assert(hits == 0 && bytes == 0);
@@ -163,6 +185,15 @@ static void test_failures(uint32_t count)
                                               results[1].generation, &hits, &bytes) == 0);
     assert(hits == 1 && bytes == parsed.packet_len);
     dppd_software_backend_worker_unregister(&service.software, 0);
+    /** 读者已退出使旧表可以回收，但安装状态查询本身仍不能触发回收或改变 active */
+    {
+        struct dppd_software_retired_snapshot *retired = service.software.retired;
+        struct dppd_software_classifier_snapshot *active = atomic_load(&service.software.active);
+
+        assert(dppd_software_backend_install_info(&service.software, 100,
+                                                  results[0].generation, &queried_info) == 0);
+        assert(service.software.retired == retired && atomic_load(&service.software.active) == active);
+    }
     assert(dppd_software_backend_contains_version(&service.software, 100,
                                                    results[0].generation));
     assert(service.software.retired == NULL);

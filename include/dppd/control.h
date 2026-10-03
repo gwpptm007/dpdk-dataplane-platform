@@ -122,6 +122,17 @@ struct dppd_control_persistence_status {
     int last_error;
 };
 
+/**
+ * 一条当前已发布规则的安装状态，实际后端来自对象仓库，fallback 仍表示用户的选择策略
+ * persistence 描述整个规则账本的保存状态，不代表某一条规则独立保存了一个文件
+ */
+struct dppd_control_rule_status {
+    struct dppd_rule_install_info installation;
+    enum dppd_plan_backend backend;
+    enum dppd_fallback_policy fallback;
+    struct dppd_control_persistence_status persistence;
+};
+
 struct dppd_control_recovery_status {
     enum dppd_control_recovery_state state;
     uint32_t residual_objects;
@@ -225,5 +236,14 @@ int dppd_control_query_count(struct dppd_control_service *service,
                              uint64_t rule_id,
                              uint64_t expected_generation,
                              struct dppd_control_count_result *result);
+
+/**
+ * 查询当前账本版本的安装状态，expected_generation 为精确非零版本或 ANY
+ * 同一版本必须恰好安装在一个后端中，身份、端口或 COUNT 配置失配时返回 EUCLEAN
+ * 查询只读内存，不调用驱动、不查询计数、不保存磁盘，恢复隔离期间仍拒绝普通规则查询
+ */
+int dppd_control_rule_status(const struct dppd_control_service *service,
+                              uint64_t rule_id, uint64_t expected_generation,
+                              struct dppd_control_rule_status *result);
 
 #endif
