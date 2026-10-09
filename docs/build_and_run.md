@@ -172,6 +172,24 @@ port 对全部规则执行 plan/validate/prepare/commit；任一规则失败就�
 
 v1 没有每条规则的端口信息，多端口旧快照不能安全使用这个统一映射工具。
 
+## 跨进程恢复保护
+
+为已有启动命令同时配置两个不同文件：
+
+```text
+--state-path /var/lib/dppd/rules.snapshot --recovery-path /var/lib/dppd/hardware.recovery
+```
+
+恢复保护默认禁用。启用后，驱动 create 前先保存涉及端口的身份；上次未确认清理的
+硬件活动会阻止运行时初始化和快照重放。此时管理服务尚未开放，使用离线工具查看：
+
+```bash
+sudo ./build/dppd-recovery show /var/lib/dppd/hardware.recovery
+```
+
+按 PMD/设备的受支持方法完成外部清理，再使用查询返回的精确版本确认，随后重新启动。
+工具自身不执行硬件清理；文件锁、损坏记录、部署与确认流程见 [跨进程恢复保护](recovery_guard.md)。
+
 ## 本机规则管理
 
 `dppd` 启动后，使用同一次构建生成的 `dppctl` 访问管理 socket：
@@ -249,6 +267,7 @@ status 在 management socket 开放时已经是恢复完成的 clean generation�
 设备问题后执行 retry；全部 residual 对象删除成功时 daemon 自动退出，随后应重新启动
 以执行完整 snapshot 重放。该 retry 只能处理当前进程仍持有 handle 的对象；进程已崩溃
 或被强制终止时，应使用目标 PMD/设备支持的复位或清理流程，不能直接使用全端口 flush。
+可选的 `--recovery-path` 为这种跨进程情况保存线索并阻止未确认的重放，详见上述离线流程。
 
 管理 socket 权限为 `0600`。v15 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
 

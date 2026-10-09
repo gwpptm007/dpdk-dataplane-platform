@@ -24,6 +24,7 @@
 - 启动时加载、topology resolve、按策略选择硬件或软件的全量事务重放及 preserved generation 发布；
 - 任一规则重放失败时逆序回滚本轮对象并拒绝启动。
 - v1 到 v2 的离线迁移工具；迁移时显式指定统一的安装端口。
+- 可选 `--recovery-path` 的跨进程硬件安装保护与离线清理确认，独立文件不改变 snapshot v2，见 [恢复保护](recovery_guard.md)。
 
 尚未实现：
 
@@ -226,8 +227,10 @@ dppctl reconcile-retry
 
 该机制仅解决进程仍存活时的瞬态 PMD 删除失败。若进程在 retry 前被 `SIGKILL`、崩溃或
 机器断电，handle 无法跨进程序列化，当前版本不会尝试猜测或对整个端口执行
-`rte_flow_flush()`；部署方应按目标 PMD 的受支持流程复位/清理设备。跨进程 residual
-flow journal 与 PMD 专用 reconciliation 是后续独立工作。
+`rte_flow_flush()`；部署方应按目标 PMD 的受支持流程复位/清理设备。
+2026-10-09 已增加可选 `--recovery-path`：在驱动 create 前持久化端口线索，发现旧标记
+时阻止直接重放，通过 `dppd-recovery` 离线查询和确认外部清理。该文件不保存句柄或完整
+实际流表，PMD 专用残留枚举与自动 reconciliation 仍待实现，见 [恢复保护](recovery_guard.md)。
 
 在线批量更新补偿失败同样进入上述隔离模式：停止软件 worker，保留旧 desired snapshot，
 只接受恢复查询与重试，成功后退出重启。`residual_objects` 统计硬件 backend 对象；软件

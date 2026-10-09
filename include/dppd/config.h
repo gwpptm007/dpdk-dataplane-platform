@@ -27,6 +27,8 @@ struct dppd_config {
     char control_socket[DPPD_CONTROL_SOCKET_PATH_CAPACITY];
     /* 为空表示禁用持久化；非空时启动必须成功恢复或创建该 snapshot。 */
     char state_path[DPPD_STATE_PATH_CAPACITY];
+    /** 显式启用跨进程安装保护，须与 state_path 配对，默认不创建额外文件 */
+    char recovery_path[DPPD_STATE_PATH_CAPACITY];
     bool promiscuous;
     bool enable_pdump;
 };

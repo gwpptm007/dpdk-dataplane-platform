@@ -1,5 +1,20 @@
 # 集成验收
 
+## 跨进程硬件安装保护
+
+```bash
+python3 tests/integration/recovery_guard.py --build-dir build
+sudo python3 tests/integration/recovery_guard.py --build-dir build --tap
+```
+
+2026-10-09 通过：真实 daemon 的软件崩溃重放、硬件正常退出清理、SIGKILL 后拒绝重放、
+同文件双实例/离线工具锁竞争、坏记录/路径误配/旧确认版本拒绝、外部清理确认后恢复，以及
+运行时文件路径丢失后拒绝新安装。26/26 单测、恢复保护/硬件 backend/事务/控制服务的
+四项 AddressSanitizer/UBSan、既有三组隔离、健康和四组 worker 回归通过。
+普通模式显式加载独立 flow 夹具；TAP 使用真实驱动，确认测试进程及自有接口消失后才
+确认清理。验证正常退出时 handle、socket、接口与 mbuf 回收，不证明物理残留枚举或自动
+设备复位，详见 [跨进程恢复保护](../../docs/recovery_guard.md)。
+
 ## 规则失败分类、事件历史、历史耗时与 Telemetry
 
 ```bash

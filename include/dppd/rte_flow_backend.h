@@ -46,6 +46,12 @@ struct dppd_rte_flow_backend {
     struct dppd_flow_probe_cache *probes;
     /** 只由控制面记录成功 create 的历史，后续删除和回滚不抹掉已经发生的安装 */
     struct dppd_rule_latency_histogram latency;
+    /**
+     * 可选的安装前保护，只在控制面调用，成功后才允许进入驱动 create
+     * daemon 用它先持久化可能残留的端口，context 必须存活到 backend 清理完成
+     */
+    int (*before_create)(void *context, uint16_t port_id, const struct dppd_rule *rule);
+    void *before_create_context;
 };
 
 /**
@@ -56,7 +62,7 @@ struct dppd_rte_flow_backend {
 int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend,
                                uint32_t capacity,
                                const struct dppd_flow_api *api);
-/** 删除已标记安装成功的对象并释放仓库，删除失败时返回错误且保留剩余清理线索 */
+/** 删除已安装或失败后仍有 handle 的对象，删除失败时保留剩余清理线索 */
 int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend);
 /** 正式安装始终重新校验，不用探测缓存跳过驱动，也不把探测成功当成安装成功 */
 int dppd_rte_flow_backend_validate_rule(struct dppd_rte_flow_backend *backend,

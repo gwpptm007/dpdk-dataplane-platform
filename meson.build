@@ -19,6 +19,7 @@ dppd_sources = files(
   'lib/control/rule.c',
   'lib/control/rule_repository.c',
   'lib/control/persistence.c',
+  'lib/control/recovery_guard.c',
   'lib/control/planner.c',
   'lib/control/transaction.c',
   'lib/control/control.c',
@@ -68,6 +69,13 @@ executable(
 executable(
   'dppd-snapshot-migrate',
   'app/dppd_snapshot_migrate/main.c',
+  dependencies: dppd_core_dep,
+  install: false,
+)
+
+executable(
+  'dppd-recovery',
+  'app/dppd_recovery/main.c',
   dependencies: dppd_core_dep,
   install: false,
 )

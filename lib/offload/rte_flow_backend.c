@@ -220,6 +220,12 @@ static int transaction_commit(void *context,
 
     if (object == NULL || !object->occupied || object->installed)
         return -EINVAL;
+    /** 恢复记录落盘失败时不进入驱动，事务仍可撤销尚未安装的预留槽位 */
+    if (backend->before_create != NULL) {
+        rc = backend->before_create(backend->before_create_context, item->plan.install_port_id, &item->rule);
+        if (rc != 0)
+            return rc;
+    }
     /** 即使创建报错，也可能改变部分资源，不能继续沿用此前的探测答复 */
     dppd_flow_probe_cache_invalidate_all(backend->probes);
     /** 只测量驱动创建调用，校验、事务准备和之后的规则账本保存不算在内 */
@@ -303,9 +309,9 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend,
 }
 
 /**
- * 普通退出时尝试删除所有标记为已安装的对象，然后释放本地仓库
+ * 普通退出时尝试删除所有已安装或失败后仍有 handle 的对象，然后释放本地仓库
  * 某个删除失败时仍继续处理其他对象，但保留仓库并返回第一个错误，避免丢失失败 handle
- * 恢复隔离中的清理使用 reconcile，它还会检查未标记安装成功却留下 handle 的槽位
+ * 与隔离重试一样保留部分创建的清理线索，不能因 installed 为假就漏删并报告干净
  */
 int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
 {
@@ -319,7 +325,7 @@ int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
         struct dppd_rte_flow_object *object = &backend->objects[i];
         int rc;
 
-        if (!object->occupied || !object->installed)
+        if (!object->occupied || (!object->installed && object->handle.flow == NULL))
             continue;
         rc = remove_object(backend, object, &error);
         if (rc == 0)

@@ -70,6 +70,10 @@ daemon 不启动 worker 而进入 recovery isolation，仅保留已知 handle �
 retry 全部成功后退出重启。跨进程无法从 handle 重建未知 flow，因此不得把全端口 flush
 当作通用 reconciliation。
 
+可选 `--recovery-path` 已为跨进程恢复建立第一阶段保护：同一文件生命周期锁、安装前
+持久化端口身份、未确认时阻止项目运行时初始化与重放、离线精确版本确认。检查在 EAL
+初始化之后执行；自动清理与设备所有权证明仍需 PMD 专用适配，见 [恢复保护](recovery_guard.md)。
+
 端口查询合并 runtime device capability 与 topology endpoint，但只传递无指针的协议快照，不暴露 `rte_eth_dev_info`。它区分 PMD 报告的能力上限与 dppd 实际启用的 offload 子集；由于 `rte_flow` 能力依赖具体 pattern/action 组合，端口快照不能替代逐规则 validate。
 
 ### 3.3 目标事务语义

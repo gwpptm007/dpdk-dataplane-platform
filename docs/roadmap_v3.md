@@ -13,13 +13,13 @@
 
 ## M1：能力规划与规则控制面
 
-当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v15 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
+当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v15 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程自动 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
 
 持久化方面已完成 [versioned snapshot v2](persistence_snapshot_v2.md)、install port 保存、
 control mutation 后的完整保存、dirty state、管理状态查询、`--state-path` 和全量硬件
 事务重放；rollback 自身失败时可保留 handle 进入隔离模式并重试删除。`dppd-snapshot-migrate`
-可将确认使用同一安装端口的 v1 文件显式转换为 v2。跨进程 residual flow reconciliation
-与多端口 v1 迁移仍属于 M1 待办。
+可将确认使用同一安装端口的 v1 文件显式转换为 v2。跨进程恢复已落地可选安装保护和
+外部清理确认，实际残留 flow 枚举、PMD 专用自动 reconciliation 与多端口 v1 迁移仍属于 M1 待办。
 
 已登记延期项：[虚拟测试端口的规则执行能力](todo_virtual_flow_backend.md)。当前
 `net_ring` 不实现 rte_flow；后续按 TAP 基础 flow、平台 software backend、物理
@@ -52,7 +52,14 @@ worker 收发与三个相关单测的 AddressSanitizer/UBSan 通过，见 [能�
 失败按独立事件 ID 分页，每页 4 条，精确版本、覆盖缺口和编号耗尽显式标记；隔离可读，
 成功不清除，重启重新记录。25/25 单测、ring/TAP 的 130 次失败及 16 页完整对齐、三组
 恢复故障、状态/健康/四组 worker 回归，以及四个单测的 AddressSanitizer/UBSan 通过，见
-[失败事件历史](rule_history.md)。下一项推进跨进程 residual flow reconciliation。
+[失败事件历史](rule_history.md)。
+
+2026-10-09 完成跨进程恢复的第一阶段：可选 `--recovery-path` 保存安装前端口线索，
+同一文件持有生命周期锁，异常退出后阻止直接重放，外部清理完成后通过离线工具按精确
+版本确认。正常退出还会清理创建报错但仍留下 handle 的对象。26/26 单测、ring 夹具与
+真实 TAP 的 SIGKILL/恢复流程、三组隔离、健康和四组 worker 回归、四项 sanitizer
+通过，见 [跨进程恢复保护](recovery_guard.md)。下一项推进 PMD 专用残留识别和所有权核对，
+自动清理、物理复位验收仍未完成。
 
 交付：
 

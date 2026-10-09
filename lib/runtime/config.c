@@ -87,6 +87,7 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"control-socket", required_argument, NULL, 1002},
         {"rule-capacity", required_argument, NULL, 1003},
         {"state-path", required_argument, NULL, 1004},
+        {"recovery-path", required_argument, NULL, 1005},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -162,6 +163,12 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
                 return DPPD_CONFIG_ERROR;
             memcpy(cfg->state_path, optarg, strlen(optarg) + 1U);
             break;
+        case 1005:
+            /** 恢复记录必须有明确路径，启动时再检查文件锁、格式和快照绑定 */
+            if (optarg == NULL || optarg[0] == '\0' || strlen(optarg) >= sizeof(cfg->recovery_path))
+                return DPPD_CONFIG_ERROR;
+            memcpy(cfg->recovery_path, optarg, strlen(optarg) + 1U);
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -171,6 +178,9 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
 
     /* getopt 结束后仍有位置参数，通常表示拼写错误，不能静默忽略。 */
     if (optind != argc)
+        return DPPD_CONFIG_ERROR;
+    if (cfg->recovery_path[0] != '\0' && (cfg->state_path[0] == '\0' ||
+        strcmp(cfg->recovery_path, cfg->state_path) == 0))
         return DPPD_CONFIG_ERROR;
     return DPPD_CONFIG_OK;
 }
@@ -207,6 +217,12 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
                  DPPD_MANAGEMENT_SOCKET_PATH_MAX);
         return -1;
     }
+    /** 没有快照就没有可重放的期望状态，恢复记录也不能覆盖快照自身 */
+    if (cfg->recovery_path[0] != '\0' && (cfg->state_path[0] == '\0' ||
+        strcmp(cfg->recovery_path, cfg->state_path) == 0)) {
+        snprintf(error, error_len, "recovery-path requires a distinct state-path");
+        return -1;
+    }
     /* 重复 port 会导致多个逻辑端点争用同一 RX/TX queue，启动前直接拒绝。 */
     for (i = 0; i < cfg->nb_ports; ++i) {
         for (j = (uint16_t)(i + 1U); j < cfg->nb_ports; ++j) {
@@ -238,6 +254,7 @@ void dppd_config_print_usage(const char *program)
     printf("  --rule-capacity N   maximum number of desired rules (default %u)\n",
            DPPD_DEFAULT_RULE_CAPACITY);
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");
+    printf("  --recovery-path P   guard hardware replay after an unclean exit (requires state-path)\n");
 }
 
 void dppd_config_dump(const struct dppd_config *cfg)
@@ -248,7 +265,7 @@ void dppd_config_dump(const struct dppd_config *cfg)
     for (i = 0; i < cfg->nb_ports; ++i)
         printf("%s%u", i == 0 ? "" : ",", cfg->ports[i]);
     printf(" queues=%u burst=%u mbufs/socket=%u cache=%u stats=%ums duration=%us"
-           " rules=%u control=%s state=%s promisc=%s pdump=%s\n",
+           " rules=%u control=%s state=%s recovery=%s promisc=%s pdump=%s\n",
            cfg->nb_queues,
            cfg->burst_size,
            cfg->mbufs_per_socket,
@@ -258,6 +275,7 @@ void dppd_config_dump(const struct dppd_config *cfg)
            cfg->rule_capacity,
            cfg->control_socket,
            cfg->state_path[0] == '\0' ? "disabled" : cfg->state_path,
+           cfg->recovery_path[0] == '\0' ? "disabled" : cfg->recovery_path,
            cfg->promiscuous ? "on" : "off",
            cfg->enable_pdump ? "on" : "off");
 }

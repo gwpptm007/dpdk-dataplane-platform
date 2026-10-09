@@ -13,9 +13,29 @@
 #include "dppd/control.h"
 #include "dppd/management.h"
 #include "dppd/runtime.h"
+#include "dppd/recovery_guard.h"
 #include "dppd/telemetry.h"
 
 static volatile sig_atomic_t stop_signal;
+
+/** 恢复记录与已捕获设备身份只由主线程借用，软件 worker 不访问文件或这些指针 */
+struct recovery_context {
+    struct dppd_recovery_guard *guard;
+    const struct dppd_device_set *devices;
+};
+
+/** 不能只凭可重用的端口号记录身份，无法取得设备名称时拒绝这次硬件安装 */
+static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_rule *rule)
+{
+    struct recovery_context *recovery = context;
+    const struct dppd_port *port = dppd_devices_find(recovery->devices, port_id);
+    const struct dppd_endpoint *endpoint = dppd_topology_find(&recovery->devices->topology, port_id);
+
+    if (port == NULL || endpoint == NULL || !port->identity.device_name_known)
+        return -ENODEV;
+    return dppd_recovery_guard_prepare(recovery->guard, port_id, port->identity.device_name,
+        endpoint->driver_name, rule->id, rule->generation);
+}
 
 static void handle_signal(int signal_number)
 {
@@ -42,6 +62,8 @@ int main(int argc, char **argv)
     struct dppd_control_service control;
     struct dppd_management_server management;
     struct dppd_runtime runtime;
+    struct dppd_recovery_guard recovery_guard = {.fd = -1};
+    struct recovery_context recovery_context = {.guard = &recovery_guard, .devices = &runtime.devices};
     uint64_t started_at;
     uint64_t next_stats;
     uint64_t timer_hz;
@@ -73,6 +95,23 @@ int main(int argc, char **argv)
     }
 
     dppd_config_dump(&config);
+    /**
+     * EAL 已完成参数和设备探测，但本项目尚未配置队列、启动 worker 或重放规则
+     * 旧进程的待核对标记必须在这些步骤之前拦住启动，空 backend 不能证明设备已干净
+     */
+    if (config.recovery_path[0] != '\0') {
+        int guard_rc = dppd_recovery_guard_open(&recovery_guard, config.recovery_path, config.state_path);
+        if (guard_rc != 0) {
+            fprintf(stderr, "[dppd] recovery guard open failed: %d\n", guard_rc);
+            goto cleanup_eal;
+        }
+        if (recovery_guard.record.count != 0) {
+            fprintf(stderr, "[dppd] prior hardware activity requires external reconciliation: "
+                "revision=%" PRIu64 " ports=%u; inspect with dppd-recovery show PATH\n",
+                recovery_guard.record.revision, recovery_guard.record.count);
+            goto cleanup_eal;
+        }
+    }
     /*
      * 初始化依赖顺序：先发现并启动 ethdev，得到拓扑；control 引用该拓扑；
      * management 再引用 control。goto 清理标签严格按相反顺序释放。
@@ -90,6 +129,11 @@ int main(int argc, char **argv)
      * 绑定临时对象，也不能在 runtime_start 后替换该地址。
      */
     dppd_runtime_set_software_backend(&runtime, &control.software);
+    /** 启动重放也会安装硬件规则，所以必须在读取并重放快照之前绑定保护 */
+    if (recovery_guard.fd >= 0) {
+        control.rte_flow.before_create = prepare_recovery;
+        control.rte_flow.before_create_context = &recovery_context;
+    }
     if (config.state_path[0] != '\0') {
         int restore_rc = dppd_control_persistence_restore(&control,
                                                           config.state_path);
@@ -264,12 +308,20 @@ cleanup_management:
 cleanup_control:
     if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)
         rc = EXIT_FAILURE;
+    /** backend 真正释放才证明已删除所有本进程 handle，失败时保留磁盘标记等待下次核对 */
+    if (recovery_guard.fd >= 0 && control.rte_flow.objects == NULL &&
+        dppd_recovery_guard_clean(&recovery_guard) != 0) {
+        fprintf(stderr, "[dppd] recovery guard could not record completed cleanup\n");
+        rc = EXIT_FAILURE;
+    }
 cleanup_runtime:
     /** 清理失败或退出期间才收到移除通知，都必须保留失败退出码 */
     if (dppd_runtime_destroy(&runtime) != 0 ||
         dppd_devices_removal_requested(&runtime.devices))
         rc = EXIT_FAILURE;
 cleanup_eal:
+    /** 启动被旧标记阻断时同样只解锁，绝不能自动清除上一进程的线索 */
+    dppd_recovery_guard_close(&recovery_guard);
     if (rte_eal_cleanup() != 0 && rc == EXIT_SUCCESS)
         rc = EXIT_FAILURE;
     return rc;

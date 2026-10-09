@@ -2,19 +2,26 @@
 
 状态只表示代码是否真实存在，不以目录或占位接口计入完成度。
 
+2026-10-09 完成跨进程恢复第一阶段：可选 `--recovery-path` 在驱动 create 前持久化端口
+身份并同步，旧记录未确认时阻止项目运行时初始化和快照重放；`dppd-recovery` 提供离线
+查看与精确版本的外部清理确认，同一文件由进程持锁。修复退出漏删部分创建 handle 的
+缺口。`-Werror`、26/26 单测、ring 夹具/真实 TAP 的 SIGKILL 与恢复、三组旧隔离场景、
+健康/四组 worker 回归及四项 AddressSanitizer/UBSan 通过，见 [恢复保护](recovery_guard.md)。
+此功能不枚举实际流表、不自动复位或清理设备；下一项是 PMD 专用残留识别和所有权核对。
+
 2026-10-09 新增 management v15 的 `rule-history` 与 `/dppd/rule_history`。固定保留
 最近 64 次完成态失败，每页 4 条，独立失败 ID 与历史版本校验，覆盖缺口和编号耗尽显式
 标记；原始/补偿/最终错误和发布标志完整保留。成功操作不清除，隔离仍可读，重启清空。
 `-Werror` 构建、25/25 单测、ring/TAP 的 130 次失败覆盖与 16 页 CLI/JSON 对齐、三组
 恢复故障、状态/健康/四组 worker 回归，以及四项相关单测的 AddressSanitizer/UBSan
-通过，见 [失败事件历史](rule_history.md)。下一项推进跨进程 residual flow reconciliation。
+通过，见 [失败事件历史](rule_history.md)。跨进程恢复保护已在上述阶段落地，自动清理仍待实现。
 
 2026-10-04 新增 management v14 的 `rule-latency` 与 `/dppd/rule_latency`。历史成功提交
 按软件单条、软件整批和驱动创建分组，复用已有计时，提供十六区间、均值和 P50/P95/P99
 上界；未知时钟单独计数，溢出显式标记。删除或回滚保留历史，隔离仍可读，重启重新累计。
 `-Werror` 构建、24/24 单测、ring/TAP CLI/JSON 对齐与并发更新、三组恢复故障、状态/健康/
 四组 worker 收发回归，以及四项相关单测的 AddressSanitizer/UBSan 通过，见
-[历史耗时分布](rule_latency.md)。失败事件历史已在上述 v15 补齐；跨进程 reconciliation 仍待实现。
+[历史耗时分布](rule_latency.md)。失败事件历史已在上述 v15 补齐；跨进程自动 reconciliation 仍待实现。
 
 2026-10-03 新增 management v13 的 `rule-metrics` 和规则 telemetry。按公开控制请求
 累计成功、失败、幂等、生效和回退，保留原始/补偿/最终错误、失败阶段与生效标志。
@@ -22,7 +29,7 @@
 补齐单规则补偿失败的隔离保护。`-Werror` 构建、23/23 单测、两组 ring/TAP telemetry、
 三组在线/启动隔离、规则状态、健康、能力画像和四组 worker 收发通过；两个新单测与
 事务单测通过 AddressSanitizer/UBSan，见 [规则失败与 Telemetry](rule_telemetry.md)。
-该版本尚未提供历史耗时分布和失败事件列表，已分别在上述 v14、v15 补齐；跨进程 reconciliation 仍待实现。
+该版本尚未提供历史耗时分布和失败事件列表，已分别在上述 v14、v15 补齐；跨进程自动 reconciliation 仍待实现。
 
 2026-10-03 新增 management v12 的能力画像、完整规则探测和固定 64 槽的五秒诊断缓存。
 设备、PMD、固件、DPDK 版本和描述符信息在启动时保存；临时错误不缓存，正式安装仍
@@ -62,7 +69,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | capability profile / probe cache | 已实现本机诊断闭环 | 设备/固件/DPDK 身份、描述符和既有 queue/RSS/offload；完整规则校验结果缓存五秒、64 槽、强制刷新与失效；成功观察集合不承诺任意组合；正式安装始终新校验 |
 | rule IR | 已实现第一版 | 有序 match/action、domain/fallback、持久化 install port 和语义校验 |
 | rule repository | 已实现内存版和可选写路径 | 稳定 ID、单调 generation、幂等 CRUD、乐观并发、按 ID 稳定分页；control 可在 mutation 后保存完整 snapshot |
-| snapshot persistence | 已实现 v2、v1 单端口迁移与进程内恢复隔离 | 保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败的 handle 重试；v1 迁移需显式统一端口；跨进程 residual flow reconciliation 未实现 |
+| snapshot persistence | 已实现 v2、v1 单端口迁移、进程内隔离与可选跨进程保护 | 保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；独立恢复记录在安装前落盘，异常退出需外部清理确认；自动残留枚举和清理未实现 |
 | planner | 已实现第一版 | 明确 software/rte_flow 选择、fallback reason 与 transfer domain 校验 |
 | rte_flow | 已实现事务 backend | validate 与 create 分离；对象仓库持有 handle；批量失败逆序 destroy |
 | 等价软件 fallback | 已实现最小集合 | ingress Ethernet/IPv4/UDP/TCP、DROP/MARK/COUNT；`prefer` 仅在 validate 失败时回退，QUEUE/transfer 拒绝降级；immutable snapshot + DPDK QSBR 非阻塞回收已接入 |
@@ -167,4 +174,4 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 - management v15 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
 - 批量更新保留 `rule_capacity + 1` 的 backend 容量。纯软件路径整批替换快照、复用旧槽位，满表可更新；每次分类使用完整旧表或新表，新版本 COUNT 归零，未更新规则保留计数。硬件及混合路径仍需要临时容量，只保证账本整批发布；PREFER 可能整表替换但最终成为混合计划时，会在安装前复查软件空间。
 - daemon 为安全起见不会自动删除启动前已存在的 socket 路径；异常退出后需由部署脚本确认没有存活进程再清理残留文件。
-- snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready`、`capability-show`、`rule-metrics/rule-latency/rule-history` 与规则 telemetry 的进程内隔离模式；进程终止后的 PMD 专用 residual flow 清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md)。
+- snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready`、`capability-show`、`rule-metrics/rule-latency/rule-history` 与规则 telemetry 的进程内隔离模式。可选 `--recovery-path` 已提供异常退出后的重放阻断与外部清理确认；PMD 专用自动残留清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md) 与 [恢复保护](recovery_guard.md)。
