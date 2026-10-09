@@ -30,8 +30,10 @@ int __wrap_fsync(int fd)
 }
 
 /** 测试固定设备身份，把真实恢复保护接到正式 backend 的安装入口 */
-static int prepare(void *context, uint16_t port, const struct dppd_rule *rule, uint64_t *attempt)
+static int prepare(void *context, uint16_t port, const struct dppd_rule *rule, uint64_t *attempt,
+    uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
 {
+    memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
     *attempt = 0;
     return dppd_recovery_guard_prepare(context, port, "0000:01:00.0", "test-driver",
         rule->id, rule->generation);
@@ -222,11 +224,11 @@ static void damaged_files(const char *path, const char *state, const char *backu
     assert(dppd_recovery_guard_open(&guard, path, state) == -EBADMSG);
 }
 
-/** 测试将正式 v2 编码收窄为既有 v1 布局并重算 CRC，避免用内存结构冒充磁盘兼容性 */
+/** 将当前编码收窄为旧磁盘布局并重算 CRC，兼容测试必须经过实际文件解码 */
 static void legacy_file(const char *path, unsigned int format)
 {
-    unsigned char current[33856], legacy[9248] = {0};
-    size_t size = format == 1 ? 7712 : 9248;
+    unsigned char current[37952], legacy[33856] = {0};
+    size_t size = format == 1 ? 7712 : format == 2 ? 9248 : 33856;
     uint32_t crc = UINT32_MAX;
     int fd = open(path, O_RDWR);
     assert(fd >= 0 && pread(fd, current, sizeof(current), 0) == sizeof(current));
@@ -238,6 +240,11 @@ static void legacy_file(const char *path, unsigned int format)
     for (unsigned int index = 0; index < DPPD_MAX_PORTS; ++index)
         memcpy(legacy + 4128 + index * (format == 1 ? 224 : 320), current + 4128 + index * 320,
             format == 1 ? 216 : 320);
+    if (format == 3) {
+        memcpy(legacy + 9248, current + 9248, 32);
+        for (unsigned int index = 0; index < DPPD_RECOVERY_ATTEMPT_LIMIT; ++index)
+            memcpy(legacy + 9280 + index * 96, current + 9280 + index * 112, 96);
+    }
     for (size_t index = 0; index < size; ++index) {
         crc ^= legacy[index];
         for (unsigned int bit = 0; bit < 8; ++bit)
@@ -257,7 +264,7 @@ static void identity_and_compatibility(const char *path, const char *state)
     struct dppd_recovery_identity identity = {.ifindex = 123, .ifname = "test-tap",
         .boot_id = "01234567-89ab-cdef-0123-456789abcdef", .netns_device = 4, .netns_inode = 567};
     struct stat info;
-    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.record.format == 3);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.record.format == 4);
     identity.boot_id[0] = 'z';
     assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 1, 1, &identity) == -EINVAL);
     identity.boot_id[0] = '0';
@@ -285,15 +292,29 @@ static void identity_and_compatibility(const char *path, const char *state)
     assert(stat(path, &info) == 0 && info.st_size == 7712);
     dppd_recovery_guard_close(&guard);
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
-    assert(guard.record.format == 3 && guard.record.revision == revision + 2);
-    assert(stat(path, &info) == 0 && info.st_size == 33856);
+    assert(guard.record.format == 4 && guard.record.revision == revision + 2);
+    assert(stat(path, &info) == 0 && info.st_size == 37952);
     dppd_recovery_guard_close(&guard);
     legacy_file(path, 2);
     assert(dppd_recovery_guard_open(&guard, path, NULL) == 0 && guard.record.format == 2);
     assert(guard.record.revision == revision + 2);
     dppd_recovery_guard_close(&guard);
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
-    assert(guard.record.format == 3 && guard.record.revision == revision + 3);
+    assert(guard.record.format == 4 && guard.record.revision == revision + 3);
+    /** v3 待处理尝试不能在启动时升级，人工确认后升级仍保留单调编号 */
+    uint64_t attempt;
+    assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 3, 2, &identity) == 0);
+    assert(dppd_recovery_guard_begin(&guard, 0, 3, 2, &attempt) == 0);
+    dppd_recovery_guard_close(&guard);
+    legacy_file(path, 3);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && !guard.writable);
+    assert(guard.record.format == 3 && guard.record.attempt_count == 1);
+    assert(!dppd_tap_cookie_present(guard.record.attempts[0].owner_cookie));
+    assert(guard.record.attempts[0].id == attempt && guard.record.attempts[0].phase == DPPD_RECOVERY_INTENT);
+    assert(dppd_recovery_guard_acknowledge(&guard, guard.record.revision) == 0);
+    dppd_recovery_guard_close(&guard);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
+    assert(guard.record.format == 4 && guard.record.last_attempt == attempt && guard.record.attempt_count == 0);
     dppd_recovery_guard_close(&guard);
 }
 

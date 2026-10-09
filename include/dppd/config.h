@@ -29,6 +29,8 @@ struct dppd_config {
     char state_path[DPPD_STATE_PATH_CAPACITY];
     /** 显式启用跨进程安装保护，须与 state_path 配对，默认不创建额外文件 */
     char recovery_path[DPPD_STATE_PATH_CAPACITY];
+    /** 显式启用适配后的 TAP 原生标识，必须同时配置恢复保护 */
+    bool tap_owner_cookie;
     bool promiscuous;
     bool enable_pdump;
 };

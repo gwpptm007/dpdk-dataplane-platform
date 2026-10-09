@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dppd/config.h"
+#include "dppd/tap_owner.h"
 
 #define DPPD_RECOVERY_DEVICE_SIZE 128U
 #define DPPD_RECOVERY_DRIVER_SIZE 64U
@@ -17,6 +18,9 @@ struct dppd_recovery_filter {
     uint32_t parent, handle, chain;
     uint16_t priority, protocol;
     char kind[DPPD_RECOVERY_KIND_SIZE];
+    /** 仅运行时观察保存动作标识，候选坐标编码不把它当作创建前的持久化意图 */
+    bool cookie_valid;
+    uint8_t cookie[DPPD_TAP_COOKIE_SIZE];
 };
 
 enum dppd_recovery_phase {
@@ -41,6 +45,8 @@ struct dppd_recovery_attempt {
     enum dppd_recovery_evidence evidence;
     int32_t create_error, remove_error, observation_error;
     struct dppd_recovery_filter candidate;
+    /** v4 在驱动调用前同步保存，旧格式和普通模式始终为全零 */
+    uint8_t owner_cookie[DPPD_TAP_COOKIE_SIZE];
 };
 
 /**
@@ -110,6 +116,9 @@ int dppd_recovery_guard_acknowledge(struct dppd_recovery_guard *guard, uint64_t 
 /** 端口已登记后为本次驱动调用先写入意图，写盘失败或记录满时不能进入驱动 */
 int dppd_recovery_guard_begin(struct dppd_recovery_guard *guard, uint16_t port_id,
     uint64_t rule_id, uint64_t generation, uint64_t *attempt);
+/** 为已核对身份的 TAP 生成随机标识，写盘成功才向驱动调用方返回 */
+int dppd_recovery_guard_begin_owned(struct dppd_recovery_guard *guard, uint16_t port_id,
+    uint64_t rule_id, uint64_t generation, uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE]);
 /** 保存真实创建结果与可选候选坐标，失败时调用方仍持有 handle 并执行原事务回滚 */
 int dppd_recovery_guard_created(struct dppd_recovery_guard *guard, uint64_t attempt, int create_error,
     enum dppd_recovery_evidence evidence, int observation_error, const struct dppd_recovery_filter *candidate);

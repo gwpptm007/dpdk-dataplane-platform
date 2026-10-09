@@ -60,10 +60,19 @@ static void correlate_attempts(const struct dppd_recovery_record *record, uint16
     for (uint32_t index = 0; index < record->attempt_count; ++index) {
         const struct dppd_recovery_attempt *attempt = &record->attempts[index];
         const char *status = "no-candidate";
+        const char *owner = "unknown";
         if (attempt->port_id != port_id)
             continue;
         if (attempt->phase == DPPD_RECOVERY_REMOVED)
             status = "removed-record";
+        else if (dppd_tap_cookie_present(attempt->owner_cookie)) {
+            int matches = inspect_error != 0 ? inspect_error :
+                dppd_recovery_cookie_matches(inspection, attempt->owner_cookie);
+            status = matches < 0 ? "inspection-unavailable" : matches == 1 ? "token-present" :
+                matches == 0 ? "token-absent" : "token-ambiguous";
+            if (matches == 1)
+                owner = "token-match";
+        }
         else if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION) {
             uint32_t matches = 0;
             for (uint32_t row = 0; row < inspection->count; ++row)
@@ -72,12 +81,12 @@ static void correlate_attempts(const struct dppd_recovery_record *record, uint16
                 matches == 0 ? "coordinate-absent" : "coordinate-ambiguous";
         }
         printf("correlation attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
-            " port=%u phase=%s evidence=%s status=%s owner=unknown\n", attempt->id, attempt->rule_id,
-            attempt->generation, port_id, phase_name(attempt->phase), evidence_name(attempt->evidence), status);
+            " port=%u phase=%s evidence=%s status=%s owner=%s content=unchecked\n", attempt->id, attempt->rule_id,
+            attempt->generation, port_id, phase_name(attempt->phase), evidence_name(attempt->evidence), status, owner);
     }
 }
 
-/** 查询成功只代表本地范围已读完，所有规则仍显示归属未知，恢复标记保持原样 */
+/** 标识匹配不验证完整规则内容，也不构成清理确认，恢复标记保持原样 */
 static int inspect_record(const struct dppd_recovery_record *record, uint64_t revision)
 {
     int result = 0;
@@ -150,7 +159,7 @@ int main(int argc, char **argv)
             guard.record.revision, guard.record.count);
         printf("snapshot=%s\n", guard.record.state_path);
         printf("format=%u\n", guard.record.format);
-        if (guard.record.format == 3)
+        if (guard.record.format >= 3)
             printf("attempts=%u last-attempt=%" PRIu64 " capacity=%u\n", guard.record.attempt_count,
                 guard.record.last_attempt, DPPD_RECOVERY_ATTEMPT_LIMIT);
         for (uint32_t index = 0; index < guard.record.count; ++index) {
@@ -168,6 +177,12 @@ int main(int argc, char **argv)
                 " port=%u phase=%s create-error=%d remove-error=%d evidence=%s observation-error=%d ownership=unproven\n",
                 attempt->id, attempt->rule_id, attempt->generation, attempt->port_id, phase_name(attempt->phase),
                 attempt->create_error, attempt->remove_error, evidence_name(attempt->evidence), attempt->observation_error);
+            if (dppd_tap_cookie_present(attempt->owner_cookie)) {
+                printf("owner-token attempt=%" PRIu64 " cookie=", attempt->id);
+                for (unsigned int byte = 0; byte < DPPD_TAP_COOKIE_SIZE; ++byte)
+                    printf("%02x", attempt->owner_cookie[byte]);
+                putchar('\n');
+            }
             if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION)
                 printf("candidate attempt=%" PRIu64 " parent=%08x handle=%08x chain=%u priority=%u protocol=%04x kind=%s\n",
                     attempt->id, attempt->candidate.parent, attempt->candidate.handle, attempt->candidate.chain,

@@ -158,6 +158,13 @@ recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attem
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])
 test('durable recovery attempts', recovery_attempt_test)
 
+# 验证随机标识先落盘、熵源故障、私有动作编译和禁止无标识降级
+tap_owner_test = executable('test_tap_owner', 'test_tap_owner.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=getrandom', '-Wl,--wrap=fsync', '-Wl,--wrap=rte_eth_dev_info_get',
+              '-Wl,--wrap=rte_flow_validate', '-Wl,--wrap=rte_flow_create', '-Wl,--wrap=rte_flow_destroy'])
+test('native TAP owner cookie', tap_owner_test)
+
 # 完成态环形历史、覆盖缺口、稳定分页、整数边界和真实隔离 socket 查询
 rule_history_test = executable('test_rule_history', 'test_rule_history.c',
   dependencies: dppd_core_dep,

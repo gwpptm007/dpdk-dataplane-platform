@@ -35,5 +35,8 @@ enum dppd_recovery_evidence dppd_recovery_compare(const struct dppd_recovery_ins
 /** 比较显式字段，不读取 C 结构体填充字节 */
 bool dppd_recovery_filter_equal(const struct dppd_recovery_filter *left,
     const struct dppd_recovery_filter *right);
+/** 返回标识匹配数量，多个匹配仍有歧义，负值表示观察范围不可用 */
+int dppd_recovery_cookie_matches(const struct dppd_recovery_inspection *inspection,
+    const uint8_t cookie[DPPD_TAP_COOKIE_SIZE]);
 
 #endif

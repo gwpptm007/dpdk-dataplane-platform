@@ -18,6 +18,7 @@ struct dppd_rte_flow_object {
     uint64_t generation;
     /** 精确关联本次驱动调用的磁盘记录，业务 ID 和版本相同的补偿重建也不复用 */
     uint64_t recovery_attempt;
+    uint8_t owner_cookie[DPPD_TAP_COOKIE_SIZE];
     struct dppd_flow_handle handle;
     /** 在 prepare 时保留安装意图，查询时据此核对驱动返回的 handle */
     struct dppd_rule_install_info installation;
@@ -228,7 +229,7 @@ static int transaction_commit(void *context,
     /** 恢复记录落盘失败时不进入驱动，事务仍可撤销尚未安装的预留槽位 */
     if (backend->before_create != NULL) {
         rc = backend->before_create(backend->before_create_context, item->plan.install_port_id,
-            &item->rule, &object->recovery_attempt);
+            &item->rule, &object->recovery_attempt, object->owner_cookie);
         if (rc != 0)
             return rc;
     }
@@ -236,8 +237,11 @@ static int transaction_commit(void *context,
     dppd_flow_probe_cache_invalidate_all(backend->probes);
     /** 只测量驱动创建调用，校验、事务准备和之后的规则账本保存不算在内 */
     dppd_install_timer_start(&timer);
-    rc = backend->api.create(item->plan.install_port_id, &item->rule,
-                             &object->handle, &error);
+    if (dppd_tap_cookie_present(object->owner_cookie))
+        rc = backend->api.create_owned == NULL ? -ENOTSUP : backend->api.create_owned(
+            item->plan.install_port_id, &item->rule, object->owner_cookie, &object->handle, &error);
+    else
+        rc = backend->api.create(item->plan.install_port_id, &item->rule, &object->handle, &error);
     if (rc == 0) {
         object->installation.timing_available = dppd_install_timer_finish(
             &timer, &object->installation.install_duration_ns);
@@ -292,6 +296,7 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend,
     static const struct dppd_flow_api default_api = {
         .validate = dppd_flow_validate,
         .create = dppd_flow_create,
+        .create_owned = dppd_flow_create_owned,
         .remove = dppd_flow_remove,
         .query_count = dppd_flow_query_count,
     };

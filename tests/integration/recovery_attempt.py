@@ -14,7 +14,7 @@ from health_readiness import clean_environment, daemon_command
 from recovery_isolation import wait_for
 
 
-def run_case(build, mode):
+def run_case(build, mode, native=False):
     """仅测试进程加载暂停夹具，CLI、离线工具和内核查询都使用正常环境"""
     environment = clean_environment()
     owned = {}
@@ -42,6 +42,8 @@ def run_case(build, mode):
         guard, sock, log = directory / "recovery", directory / "ctl.sock", directory / "daemon.log"
         interfaces = (f"da{os.getpid()}a", f"da{os.getpid()}b")
         command = daemon_command(build, directory, 1, interfaces) + ["--recovery-path", str(guard)]
+        if native:
+            command.append("--tap-owner-cookie")
         try:
             for name in interfaces:
                 check(not Path(f"/sys/class/net/{name}").exists(), "existing interface")
@@ -82,28 +84,37 @@ def run_case(build, mode):
             inspected = run(build / "dppd-recovery", "inspect", guard, revision)
             expected = 1 if mode == "after" else 0
             check(f"complete=yes error=0 filters={expected}" in inspected, inspected)
-            check("status=no-candidate owner=unknown" in inspected, inspected)
+            if native:
+                check("owner-token attempt=1 cookie=" in show, show)
+                expected_status = "token-present owner=token-match" if mode == "after" else "token-absent owner=unknown"
+                check(f"status={expected_status}" in inspected, inspected)
+                check("content=unchecked" in inspected and "cleanup-confirmed=no" in inspected, inspected)
+            else:
+                check("status=no-candidate owner=unknown" in inspected, inspected)
             # 即使当前本地列表为空，记录仍待确认，测试先明确删除全部自有接口再确认
             remove_interfaces()
             run(build / "dppd-recovery", "acknowledge-clean", guard, revision, "--external-cleanup-complete")
+        except Exception as error:
+            raise AssertionError(log.read_text() if log.exists() else "daemon not started") from error
         finally:
             for process in (client, daemon):
                 if process is not None and process.poll() is None:
                     process.kill()
                     process.wait(timeout=10)
             remove_interfaces()
-    print(f"PASS recovery attempt {mode}: durable intent/result, kernel residual count, "
-          "unproven ownership, unchanged snapshot, no automatic acknowledgement", flush=True)
+    print(f"PASS recovery attempt {mode} native={native}: durable intent/result, kernel residual count, "
+          "ownership evidence checked, unchanged snapshot, no automatic acknowledgement", flush=True)
 
 
 def main():
     """三个场景只使用自建 TAP，物理网卡不参与测试"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
+    parser.add_argument("--native", action="store_true", help="require patched TAP owner cookie support")
     arguments = parser.parse_args()
     check(os.geteuid() == 0, "TAP recovery attempt tests need root")
     for mode in ("before", "after", "fail-empty"):
-        run_case(arguments.build_dir.resolve(), mode)
+        run_case(arguments.build_dir.resolve(), mode, arguments.native)
 
 
 if __name__ == "__main__":

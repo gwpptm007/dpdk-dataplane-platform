@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <rte_errno.h>
+#include <rte_ethdev.h>
 #include <rte_flow.h>
 
 struct compiled_flow {
@@ -18,7 +19,8 @@ struct compiled_flow {
     struct rte_flow_item_tcp tcp_mask[DPPD_RULE_MAX_ITEMS];
     struct rte_flow_item_ethdev ethdev_spec[DPPD_RULE_MAX_ITEMS];
     struct rte_flow_item_ethdev ethdev_mask[DPPD_RULE_MAX_ITEMS];
-    struct rte_flow_action actions[DPPD_RULE_MAX_ACTIONS + 1U];
+    struct rte_flow_action actions[DPPD_RULE_MAX_ACTIONS + 2U];
+    struct dppd_tap_owner_action owner;
     struct rte_flow_action_queue queue[DPPD_RULE_MAX_ACTIONS];
     struct rte_flow_action_mark mark[DPPD_RULE_MAX_ACTIONS];
     struct rte_flow_action_count count[DPPD_RULE_MAX_ACTIONS];
@@ -189,8 +191,37 @@ static int validate_rule(const struct dppd_rule *rule,
     return 0;
 }
 
-int dppd_flow_validate(uint16_t port_id,
-                       const struct dppd_rule *rule,
+/**
+ * 普通规则保持原有动作，启用标识时追加独立的私有动作和新的 END
+ * 在进入驱动前限定支持范围，完整的远端配置检查仍由适配后的 TAP 驱动执行
+ */
+static int compile_owner(uint16_t port_id, const struct dppd_rule *rule,
+    const uint8_t *cookie, struct compiled_flow *compiled)
+{
+    struct rte_eth_dev_info info;
+    if (cookie == NULL)
+        return 0;
+    if (!dppd_tap_cookie_present(cookie))
+        return -EINVAL;
+    if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || rule->nb_actions != 1 ||
+        (rule->actions[0].type != DPPD_ACTION_DROP && rule->actions[0].type != DPPD_ACTION_QUEUE))
+        return -ENOTSUP;
+    int rc = rte_eth_dev_info_get(port_id, &info);
+    if (rc != 0)
+        return rc;
+    if (info.driver_name == NULL || strcmp(info.driver_name, "net_tap") != 0)
+        return -ENOTSUP;
+    compiled->owner.version = 1;
+    compiled->owner.size = sizeof(compiled->owner);
+    memcpy(compiled->owner.cookie, cookie, DPPD_TAP_COOKIE_SIZE);
+    compiled->actions[rule->nb_actions] = (struct rte_flow_action){
+        .type = (enum rte_flow_action_type)DPPD_TAP_ACTION_OWNER_V1, .conf = &compiled->owner};
+    compiled->actions[rule->nb_actions + 1].type = RTE_FLOW_ACTION_TYPE_END;
+    return 0;
+}
+
+static int flow_validate(uint16_t port_id,
+                       const struct dppd_rule *rule, const uint8_t *cookie,
                        struct dppd_flow_error *error)
 {
     struct compiled_flow compiled;
@@ -202,6 +233,8 @@ int dppd_flow_validate(uint16_t port_id,
     if (rc != 0)
         return rc;
     rc = compile_rule(rule, &compiled);
+    if (rc == 0)
+        rc = compile_owner(port_id, rule, cookie, &compiled);
     if (rc != 0)
         return report_error(error, rc, "compile", NULL);
 
@@ -216,8 +249,8 @@ int dppd_flow_validate(uint16_t port_id,
     return 0;
 }
 
-int dppd_flow_create(uint16_t port_id,
-                     const struct dppd_rule *rule,
+static int flow_create(uint16_t port_id,
+                     const struct dppd_rule *rule, const uint8_t *cookie,
                      struct dppd_flow_handle *handle,
                      struct dppd_flow_error *error)
 {
@@ -235,6 +268,8 @@ int dppd_flow_create(uint16_t port_id,
     if (rc != 0)
         return rc;
     rc = compile_rule(rule, &compiled);
+    if (rc == 0)
+        rc = compile_owner(port_id, rule, cookie, &compiled);
     if (rc != 0)
         return report_error(error, rc, "compile", NULL);
 
@@ -260,6 +295,40 @@ int dppd_flow_create(uint16_t port_id,
         }
     }
     return 0;
+}
+
+/** 普通入口明确不携带私有动作，兼容原来的驱动与业务规则 */
+int dppd_flow_validate(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error)
+{
+    return flow_validate(port_id, rule, NULL, error);
+}
+
+int dppd_flow_create(uint16_t port_id, const struct dppd_rule *rule,
+    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+{
+    return flow_create(port_id, rule, NULL, handle, error);
+}
+
+/** 校验不安装任何对象，可在写入尝试记录前确认驱动是否认识私有动作 */
+int dppd_flow_validate_owned(uint16_t port_id, const struct dppd_rule *rule,
+    const uint8_t cookie[DPPD_TAP_COOKIE_SIZE], struct dppd_flow_error *error)
+{
+    if (cookie == NULL)
+        return report_error(error, -EINVAL, "owner cookie", NULL);
+    return flow_validate(port_id, rule, cookie, error);
+}
+
+/** 输出 handle 不用作输入，创建失败也不会读取调用方尚未初始化的字段 */
+int dppd_flow_create_owned(uint16_t port_id, const struct dppd_rule *rule,
+    const uint8_t cookie[DPPD_TAP_COOKIE_SIZE], struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
+{
+    if (cookie == NULL) {
+        if (handle != NULL)
+            memset(handle, 0, sizeof(*handle));
+        return report_error(error, -EINVAL, "owner cookie", NULL);
+    }
+    return flow_create(port_id, rule, cookie, handle, error);
 }
 
 int dppd_flow_install(uint16_t port_id,

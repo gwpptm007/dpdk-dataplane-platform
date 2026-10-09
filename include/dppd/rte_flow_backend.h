@@ -29,6 +29,10 @@ struct dppd_flow_api {
                        uint64_t *hits,
                        uint64_t *bytes,
                        struct dppd_flow_error *error);
+    /** 标识非零时必须调用此接口，缺失时明确报错，不能回退到不带标识的 create */
+    int (*create_owned)(uint16_t port_id, const struct dppd_rule *rule,
+        const uint8_t cookie[DPPD_TAP_COOKIE_SIZE], struct dppd_flow_handle *handle,
+        struct dppd_flow_error *error);
 };
 
 struct dppd_rte_flow_object;
@@ -50,7 +54,8 @@ struct dppd_rte_flow_backend {
      * 可选的安装前保护，只在控制面调用，成功后才允许进入驱动 create
      * daemon 用它先持久化可能残留的端口，context 必须存活到 backend 清理完成
      */
-    int (*before_create)(void *context, uint16_t port_id, const struct dppd_rule *rule, uint64_t *attempt);
+    int (*before_create)(void *context, uint16_t port_id, const struct dppd_rule *rule,
+        uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE]);
     void *before_create_context;
     /** 创建结果记录失败时向事务返回错误，真实 handle 仍保留供回滚删除 */
     int (*after_create)(void *context, uint64_t attempt, int create_error);

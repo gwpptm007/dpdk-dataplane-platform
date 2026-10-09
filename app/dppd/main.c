@@ -28,6 +28,8 @@ struct recovery_context {
     uint16_t pending_port;
     int before_error;
     bool record_error_reported;
+    bool native_owner;
+    uint8_t pending_cookie[DPPD_TAP_COOKIE_SIZE];
 };
 
 /** 从已落盘的端口身份读取观察范围，不再按可复用的 DPDK 名称推断内核接口 */
@@ -40,7 +42,8 @@ static int observe_recovery_port(struct recovery_context *context, struct dppd_r
 }
 
 /** 不能只凭可重用的端口号记录身份，无法取得设备名称时拒绝这次硬件安装 */
-static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_rule *rule, uint64_t *attempt)
+static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_rule *rule,
+    uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
 {
     struct recovery_context *recovery = context;
     const struct dppd_port *port = dppd_devices_find(recovery->devices, port_id);
@@ -49,6 +52,18 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
 
     if (port == NULL || endpoint == NULL || !port->identity.device_name_known)
         return -ENODEV;
+    memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
+    memset(recovery->pending_cookie, 0, sizeof(recovery->pending_cookie));
+    /** 此标识仅用于无副作用的能力检查，真正创建的随机标识稍后生成并落盘 */
+    if (recovery->native_owner) {
+        const uint8_t probe[DPPD_TAP_COOKIE_SIZE] = {1};
+        struct dppd_flow_error error;
+        rc = dppd_flow_validate_owned(port_id, rule, probe, &error);
+        if (rc != 0) {
+            fprintf(stderr, "[dppd] TAP owner validation failed: %s (%d)\n", error.message, rc);
+            return rc;
+        }
+    }
     /** TAP 的 DPDK 名称和内核接口名不同，必须由驱动给出真实索引后再向内核核对 */
     if (strcmp(endpoint->driver_name, "net_tap") == 0) {
         struct rte_eth_dev_info info;
@@ -65,10 +80,13 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
             endpoint->driver_name, rule->id, rule->generation);
     if (rc != 0)
         return rc;
-    rc = dppd_recovery_guard_begin(recovery->guard, port_id, rule->id, rule->generation, attempt);
+    rc = recovery->native_owner ? dppd_recovery_guard_begin_owned(recovery->guard, port_id,
+        rule->id, rule->generation, attempt, cookie) :
+        dppd_recovery_guard_begin(recovery->guard, port_id, rule->id, rule->generation, attempt);
     if (rc != 0)
         return rc;
     recovery->pending_port = port_id;
+    memcpy(recovery->pending_cookie, cookie, sizeof(recovery->pending_cookie));
     /** 观察是附加线索，失败仍允许有意图保护的创建，之后明确记录无法观察 */
     recovery->before_error = observe_recovery_port(recovery, &recovery->before);
     return 0;
@@ -88,18 +106,30 @@ static void recovery_record_error(struct recovery_context *context, int error)
 static int finish_recovery_create(void *context, uint64_t attempt, int create_error)
 {
     struct recovery_context *recovery = context;
-    struct dppd_recovery_inspection after;
+    struct dppd_recovery_inspection after = {0};
     struct dppd_recovery_filter candidate;
     enum dppd_recovery_evidence evidence = DPPD_EVIDENCE_UNAVAILABLE;
-    int observed = recovery->before_error;
-    if (observed == 0)
-        observed = observe_recovery_port(recovery, &after);
+    int after_error = recovery->native_owner || recovery->before_error == 0 ?
+        observe_recovery_port(recovery, &after) : recovery->before_error;
+    int observed = recovery->before_error != 0 ? recovery->before_error : after_error;
     if (observed == 0)
         evidence = dppd_recovery_compare(&recovery->before, &after, &candidate);
     int rc = dppd_recovery_guard_created(recovery->guard, attempt, create_error, evidence, observed,
         evidence == DPPD_EVIDENCE_SINGLE_ADDITION ? &candidate : NULL);
     if (rc != 0)
         recovery_record_error(recovery, rc);
+    /**
+     * 驱动报告成功后还要读回唯一标识，防止内核忽略属性时把未标记规则当作受保护
+     * 原始创建结果已经保存，返回错误会触发事务使用真实 handle 回滚
+     */
+    if (rc == 0 && create_error == 0 && recovery->native_owner) {
+        int matches = after_error != 0 ? after_error :
+            dppd_recovery_cookie_matches(&after, recovery->pending_cookie);
+        if (matches != 1) {
+            fprintf(stderr, "[dppd] TAP owner readback not unique: %d; rolling back\n", matches);
+            return matches < 0 ? matches : -EUCLEAN;
+        }
+    }
     return rc;
 }
 
@@ -206,6 +236,7 @@ int main(int argc, char **argv)
     dppd_runtime_set_software_backend(&runtime, &control.software);
     /** 启动重放也会安装硬件规则，所以必须在读取并重放快照之前绑定保护 */
     if (recovery_guard.fd >= 0) {
+        recovery_context.native_owner = config.tap_owner_cookie;
         control.rte_flow.before_create = prepare_recovery;
         control.rte_flow.before_create_context = &recovery_context;
         control.rte_flow.after_create = finish_recovery_create;

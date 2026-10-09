@@ -1,0 +1,133 @@
+--- a/drivers/net/tap/tap_flow.c
++++ b/drivers/net/tap/tap_flow.c
+@@ -18,6 +18,7 @@
+ #include <tap_autoconf.h>
+ #include <tap_tcmsgs.h>
+ #include <tap_rss.h>
++#include "dppd_tap_owner.h"
+ 
+ #ifndef HAVE_TC_FLOWER
+ /*
+@@ -131,6 +132,7 @@
+ 	struct rte_flow *remote_flow; /* associated remote flow */
+ 	int bpf_fd[SEC_MAX]; /* list of bfs fds per ELF section */
+ 	uint32_t key_idx; /* RSS rule key index into BPF map */
++	uint8_t owner_cookie[DPPD_TAP_COOKIE_SIZE];
+ 	struct nlmsg msg;
+ };
+ 
+@@ -926,6 +928,10 @@
+ 
+ 	tap_nlattr_add(&msg->nh, TCA_ACT_KIND,
+ 				strlen(adata->id) + 1, adata->id);
++	/** 标识与动作放进同一次创建消息，进程在返回前退出也不会留下未标记对象 */
++	if (dppd_tap_cookie_present(flow->owner_cookie))
++		tap_nlattr_add(&msg->nh, TCA_ACT_COOKIE,
++			      sizeof(flow->owner_cookie), flow->owner_cookie);
+ 	if (tap_nlattr_nested_start(msg, TCA_ACT_OPTIONS) < 0)
+ 		return -1;
+ 	if (strcmp("gact", adata->id) == 0) {
+@@ -1025,6 +1031,50 @@
+  * @return
+  *   0 on success, a negative errno value otherwise and rte_errno is set.
+  */
++/**
++ * 私有标识只支持本地 TAP 的单个 DROP 或 QUEUE 动作
++ * 先检查完整动作列表，禁止远端复制、共享 RSS 动作和缺失标识的降级
++ * validate 与 create 共用这里，任何内核写入发生前都必须通过检查
++ */
++static int
++tap_owner_validate(struct pmd_internals *pmd,
++		   const struct rte_flow_attr *attr,
++		   const struct rte_flow_action actions[],
++		   struct rte_flow_error *error, struct rte_flow *flow,
++		   int mirred)
++{
++	const struct dppd_tap_owner_action *owner = NULL;
++	const struct rte_flow_action *entry;
++	unsigned int markers = 0, fates = 0, unsupported = 0;
++
++	for (entry = actions; entry->type != RTE_FLOW_ACTION_TYPE_END; ++entry) {
++		if ((int)entry->type == DPPD_TAP_ACTION_OWNER_V1) {
++			markers++;
++			owner = entry->conf;
++		} else if (entry->type == RTE_FLOW_ACTION_TYPE_DROP ||
++			   entry->type == RTE_FLOW_ACTION_TYPE_QUEUE) {
++			fates++;
++		} else if (entry->type != RTE_FLOW_ACTION_TYPE_VOID) {
++			unsupported++;
++		}
++	}
++	if (markers == 0)
++		return 0;
++	if (markers != 1 || owner == NULL || owner->version != 1 ||
++	    owner->size != sizeof(*owner) ||
++	    !dppd_tap_cookie_present(owner->cookie))
++		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ACTION_CONF,
++				  actions, "invalid DPPD TAP owner action");
++	if (!attr->ingress || attr->egress || attr->transfer ||
++	    pmd->remote_if_index != 0 || mirred != 0 ||
++	    fates != 1 || unsupported != 0)
++		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ACTION,
++				  actions, "DPPD owner requires local ingress DROP or QUEUE");
++	if (flow != NULL)
++		memcpy(flow->owner_cookie, owner->cookie, sizeof(flow->owner_cookie));
++	return 0;
++}
++
+ static int
+ priv_flow_process(struct pmd_internals *pmd,
+ 		  const struct rte_flow_attr *attr,
+@@ -1041,6 +1091,10 @@
+ 		.flow = flow,
+ 	};
+ 	int action = 0; /* Only one action authorized for now */
++
++	int owner_rc = tap_owner_validate(pmd, attr, actions, error, flow, mirred);
++	if (owner_rc != 0)
++		return owner_rc;
+ 
+ 	if (attr->transfer) {
+ 		rte_flow_error_set(
+@@ -1162,7 +1216,8 @@
+ 	for (; actions->type != RTE_FLOW_ACTION_TYPE_END; ++actions) {
+ 		int err = 0;
+ 
+-		if (actions->type == RTE_FLOW_ACTION_TYPE_VOID) {
++		if (actions->type == RTE_FLOW_ACTION_TYPE_VOID ||
++		    (int)actions->type == DPPD_TAP_ACTION_OWNER_V1) {
+ 			continue;
+ 		} else if (actions->type == RTE_FLOW_ACTION_TYPE_DROP) {
+ 			if (action)
+--- /dev/null
++++ b/drivers/net/tap/dppd_tap_owner.h
+@@ -0,0 +1,29 @@
++#ifndef DPPD_TAP_OWNER_H
++#define DPPD_TAP_OWNER_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/**
++ * 与仓库中的 DPDK 21.11.9 TAP 补丁共用的私有动作协议，不属于 DPDK 标准接口
++ * 独立动作让未适配驱动明确拒绝，不能把需要标识的请求悄悄变成普通规则
++ */
++#define DPPD_TAP_ACTION_OWNER_V1 (-0x44505001)
++#define DPPD_TAP_COOKIE_SIZE 16U
++
++struct dppd_tap_owner_action {
++    uint32_t version;
++    uint32_t size;
++    uint8_t cookie[DPPD_TAP_COOKIE_SIZE];
++};
++
++/** 全零保留给未启用原生标识的旧路径，随机生成器不得把它当作有效标识 */
++static inline bool dppd_tap_cookie_present(const uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
++{
++    uint8_t bits = 0;
++    for (unsigned int index = 0; index < DPPD_TAP_COOKIE_SIZE; ++index)
++        bits |= cookie[index];
++    return bits != 0;
++}
++
++#endif

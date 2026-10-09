@@ -4,5 +4,7 @@
 *.md text eol=lf
 *.py text eol=lf
 *.sh text eol=lf
+# 补丁上下文行必须保留开头的空格，包括空行和原本以制表符缩进的行
+*.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
 meson.build text eol=lf
 meson_options.txt text eol=lf

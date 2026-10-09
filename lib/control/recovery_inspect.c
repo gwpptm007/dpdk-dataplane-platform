@@ -6,6 +6,7 @@
 #include <linux/if_link.h>
 #include <linux/if_tun.h>
 #include <linux/pkt_sched.h>
+#include <linux/pkt_cls.h>
 #include <linux/rtnetlink.h>
 #include <stdio.h>
 #include <string.h>
@@ -247,6 +248,47 @@ int dppd_recovery_tap_identity(uint32_t ifindex, struct dppd_recovery_identity *
     return rc;
 }
 
+/**
+ * 逐层读取 flower 动作中的原生标识，所有长度和重复属性都必须先检查
+ * 带标识的多动作或未知动作不能被忽略，否则可能漏掉复制出的同标识对象
+ * 遇到无法解释的标识就让整次观察失败，不能据不完整范围宣称唯一匹配
+ */
+static int read_cookie(const struct rtattr *options, struct dppd_recovery_filter *filter)
+{
+    const struct rtattr *flower[TCA_FLOWER_MAX + 1];
+    if (options == NULL)
+        return 0;
+    if (attributes(RTA_DATA(options), RTA_PAYLOAD(options), flower, TCA_FLOWER_MAX + 1) != 0)
+        return -EBADMSG;
+    if (flower[TCA_FLOWER_ACT] == NULL)
+        return 0;
+    const struct rtattr *action = RTA_DATA(flower[TCA_FLOWER_ACT]);
+    size_t left = RTA_PAYLOAD(flower[TCA_FLOWER_ACT]);
+    unsigned int count = 0, cookies = 0;
+    while (left != 0) {
+        const struct rtattr *attrs[TCA_ACT_MAX + 1];
+        if (left < sizeof(*action) || action->rta_len < sizeof(*action) || RTA_ALIGN(action->rta_len) > left ||
+            attributes(RTA_DATA(action), RTA_PAYLOAD(action), attrs, TCA_ACT_MAX + 1) != 0)
+            return -EBADMSG;
+        count++;
+        if (attrs[TCA_ACT_COOKIE] != NULL) {
+            char kind[DPPD_RECOVERY_KIND_SIZE];
+            if (RTA_PAYLOAD(attrs[TCA_ACT_COOKIE]) != DPPD_TAP_COOKIE_SIZE ||
+                attribute_string(attrs[TCA_ACT_KIND], kind, sizeof(kind)) != 0 ||
+                (strcmp(kind, "gact") != 0 && strcmp(kind, "skbedit") != 0))
+                return -ENOTSUP;
+            cookies++;
+            memcpy(filter->cookie, RTA_DATA(attrs[TCA_ACT_COOKIE]), DPPD_TAP_COOKIE_SIZE);
+        }
+        left -= RTA_ALIGN(action->rta_len);
+        action = (const struct rtattr *)((const char *)action + RTA_ALIGN(action->rta_len));
+    }
+    if (cookies != 0 && (count != 1 || cookies != 1))
+        return -ENOTSUP;
+    filter->cookie_valid = cookies == 1;
+    return 0;
+}
+
 /** 先枚举挂载点再读取过滤器，挂载点类型被替换时返回不支持，避免误报完整的空列表 */
 static int read_tc(const struct nlmsghdr *header, void *context)
 {
@@ -294,6 +336,11 @@ static int read_tc(const struct nlmsghdr *header, void *context)
     filter->priority = (uint16_t)(message->tcm_info >> 16);
     filter->protocol = ntohs((uint16_t)message->tcm_info);
     strcpy(filter->kind, kind);
+    if (strcmp(kind, "flower") == 0) {
+        int rc = read_cookie(attrs[TCA_OPTIONS], filter);
+        if (rc != 0)
+            return rc;
+    }
     query->inspection->count++;
     return 0;
 }
@@ -406,6 +453,21 @@ bool dppd_recovery_filter_equal(const struct dppd_recovery_filter *left,
 {
     return left->parent == right->parent && left->handle == right->handle && left->chain == right->chain &&
         left->priority == right->priority && left->protocol == right->protocol && strcmp(left->kind, right->kind) == 0;
+}
+
+/** 只统计完整观察中的随机标识，坐标相同或新增一个对象都不能代替标识匹配 */
+int dppd_recovery_cookie_matches(const struct dppd_recovery_inspection *inspection,
+    const uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
+{
+    int matches = 0;
+    if (inspection == NULL || cookie == NULL || !dppd_tap_cookie_present(cookie))
+        return -EINVAL;
+    if (inspection->state != DPPD_INSPECT_PRESENT && inspection->state != DPPD_INSPECT_ABSENT)
+        return -ENODATA;
+    for (uint32_t index = 0; index < inspection->count; ++index)
+        matches += inspection->filters[index].cookie_valid &&
+            memcmp(inspection->filters[index].cookie, cookie, DPPD_TAP_COOKIE_SIZE) == 0;
+    return matches;
 }
 
 /** 同一坐标重复、旧对象消失或新增多个对象都视为有歧义，单一新增也只是时间相关线索 */

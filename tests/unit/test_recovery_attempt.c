@@ -18,8 +18,8 @@ int __wrap_fsync(int fd);
 /** 改坏字段后重新计算 CRC，确保拒绝来自语义和规范编码检查，而非仅依赖校验和 */
 static void damaged_attempts(const char *path)
 {
-    unsigned char original[33856], damaged[33856];
-    const unsigned int offsets[] = {26, 24, 28, 36, 56, 95, 96};
+    unsigned char original[37952], damaged[37952];
+    const unsigned int offsets[] = {26, 24, 28, 36, 56, 95, 112};
     struct dppd_recovery_guard guard;
     int fd = open(path, O_RDWR);
     assert(fd >= 0 && pread(fd, original, sizeof(original), 0) == sizeof(original));
@@ -54,8 +54,10 @@ int __wrap_fsync(int fd)
 }
 
 /** 先有端口保护再有逐次意图，正常返回时才把尝试编号交给 backend 槽位 */
-static int begin(void *context, uint16_t port, const struct dppd_rule *rule, uint64_t *attempt)
+static int begin(void *context, uint16_t port, const struct dppd_rule *rule, uint64_t *attempt,
+    uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
 {
+    memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
     int rc = dppd_recovery_guard_prepare(context, port, "test-device", "test-driver", rule->id, rule->generation);
     return rc == 0 ? dppd_recovery_guard_begin(context, port, rule->id, rule->generation, attempt) : rc;
 }

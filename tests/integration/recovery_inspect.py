@@ -89,7 +89,7 @@ def run_case(build):
             check(all(Path(f"/sys/class/net/{name}").exists() for name in interfaces), "persistent TAP vanished")
             show = run(build / "dppd-recovery", "show", guard)
             revision = int(fields(show.splitlines()[0])["revision"])
-            check("format=3" in show and "ports=2" in show, show)
+            check("format=4" in show and "ports=2" in show, show)
             check(show.count("phase=created ") == 2 and show.count("evidence=single-addition ") == 2, show)
             original_guard, original_state = guard.read_bytes(), state.read_bytes()
             expected = [kernel_filters(name) for name in interfaces]

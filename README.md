@@ -51,8 +51,10 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 同时指定 `--state-path` 与 `--recovery-path` 可启用跨进程安装保护。上次硬件活动未确认
 清理时启动失败，使用 `dppd-recovery show` 离线查看；完成外部设备清理后才能确认并重放。
 保护默认禁用。TAP 可用 `dppd-recovery inspect PATH REVISION` 只读核对本地残留；
-新恢复文件 v3 同时保存逐次安装线索，最多 256 个记录槽位，只有成功删除的槽位可复用。
-候选坐标仍不能证明所有权；其他 PMD 的枚举、驱动原生归属标识和自动清理仍待实现。
+新恢复文件 v4 同时保存逐次安装线索，最多 256 个记录槽位，只有成功删除的槽位可复用。
+适配后的 DPDK 21.11.9 TAP 可显式启用 `--tap-owner-cookie`，在创建前持久保存随机标识，
+随本地 DROP/QUEUE 一次写入内核并回读；离线核对区分唯一匹配、缺失和重复。
+规则内容核验、其他 PMD 和自动清理仍待实现，见 [TAP 原生标识](docs/tap_owner_cookie.md)。
 
 ```bash
 bash scripts/build.sh

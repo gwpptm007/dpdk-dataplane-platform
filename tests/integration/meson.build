@@ -38,6 +38,7 @@ shared_library(
 
 # 只为恢复窗口测试暂停真实 TAP 创建，不链接生产程序
 shared_library('dppd_recovery_attempt_faults', 'recovery_attempt_faults.c',
+  include_directories: dppd_inc,
   dependencies: [dpdk, meson.get_compiler('c').find_library('dl')], install: false)
 
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', required: false)

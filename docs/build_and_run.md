@@ -193,12 +193,17 @@ TAP 记录支持实际内核规则的只读核对，使用 `show` 返回的修�
 sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 ```
 
-查询只覆盖本地 TAP 的 multiq/ingress，所有对象归属仍为未知；接口消失或空列表不会
+查询只覆盖本地 TAP 的 multiq/ingress，普通模式对象归属仍为未知；接口消失或空列表不会
 解除恢复保护。旧 v1 记录缺少定位时明确返回未知，见 [TAP 残留核对](recovery_inspection.md)。
 
-新恢复文件 v3 保存逐次安装意图、创建/删除结果及候选坐标，`show` 增加 `attempt` 行，
+新恢复文件 v4 保存逐次安装意图、创建/删除结果及候选坐标，`show` 增加 `attempt` 行，
 `inspect` 增加 `correlation` 行。记录最多 256 槽，仅成功删除项可复用，满时拒绝新的
 硬件安装。创建失败且没有 handle 时也保留待核对状态，详见 [逐次安装记录](recovery_attempts.md)。
+
+独立适配后的 DPDK 21.11.9 TAP 可加 `--tap-owner-cookie`，将先落盘的 16 字节随机
+标识随本地 DROP/QUEUE 创建并回读；旧驱动和 remote 配置明确拒绝。离线工具可按
+标识关联对象，规则内容仍未核验，也不自动清理。构建与完整步骤见
+[TAP 原生标识](tap_owner_cookie.md)。
 
 按 PMD/设备的受支持方法完成外部清理，再使用查询返回的精确版本确认，随后重新启动。
 工具自身不执行硬件清理；文件锁、损坏记录、部署与确认流程见 [跨进程恢复保护](recovery_guard.md)。

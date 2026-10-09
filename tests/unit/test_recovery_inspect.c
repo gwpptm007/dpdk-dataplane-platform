@@ -138,6 +138,46 @@ static void unknown_identity(void)
     assert(dppd_recovery_tap_identity(1, &port.identity) == -EXDEV);
 }
 
+/** 真正嵌套编码覆盖短标识、重复属性、多动作和复制标识，不能只测试手填结构 */
+static void cookie_messages(void)
+{
+    const uint8_t cookie[DPPD_TAP_COOKIE_SIZE] = {0x12, 0x34};
+    for (unsigned int mode = 0; mode < 6; ++mode) {
+        struct test_message action = {.header.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg))};
+        struct test_message actions = action, options = action;
+        struct dppd_recovery_filter filter = {0};
+        append(&action, TCA_ACT_KIND, "gact", 5);
+        append(&action, TCA_ACT_COOKIE, cookie, mode == 1 ? 15 : sizeof(cookie));
+        if (mode == 2)
+            append(&action, TCA_ACT_COOKIE, cookie, sizeof(cookie));
+        append(&actions, 1, action.data, action.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        if (mode == 3)
+            append(&actions, 2, action.data, action.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        append(&options, TCA_FLOWER_ACT, actions.data, actions.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        struct test_message outer = {.header.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg))};
+        append(&outer, TCA_OPTIONS, options.data, options.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        struct rtattr *attr = (struct rtattr *)outer.data;
+        if (mode == 4)
+            attr->rta_len--;
+        if (mode == 5)
+            ((struct rtattr *)RTA_DATA(attr))->rta_len = 1;
+        int rc = read_cookie(attr, &filter);
+        assert(rc == (mode == 0 ? 0 : mode == 1 || mode == 3 ? -ENOTSUP : -EBADMSG));
+        if (mode == 0)
+            assert(filter.cookie_valid && memcmp(filter.cookie, cookie, sizeof(cookie)) == 0);
+    }
+    struct dppd_recovery_inspection inspection = {.state = DPPD_INSPECT_PRESENT, .count = 2};
+    inspection.filters[0].cookie_valid = true;
+    memcpy(inspection.filters[0].cookie, cookie, sizeof(cookie));
+    assert(dppd_recovery_cookie_matches(&inspection, cookie) == 1);
+    inspection.filters[1] = inspection.filters[0];
+    assert(dppd_recovery_cookie_matches(&inspection, cookie) == 2);
+    inspection.filters[0].cookie_valid = inspection.filters[1].cookie_valid = false;
+    assert(dppd_recovery_cookie_matches(&inspection, cookie) == 0);
+    inspection.state = DPPD_INSPECT_UNAVAILABLE;
+    assert(dppd_recovery_cookie_matches(&inspection, cookie) == -ENODATA);
+}
+
 int main(void)
 {
     /** 正常单新增、同时多新增、旧对象变化和重复坐标必须分开判断 */
@@ -160,5 +200,6 @@ int main(void)
     qdisc_messages();
     transport_failures();
     unknown_identity();
+    cookie_messages();
     return 0;
 }

@@ -2,12 +2,19 @@
 
 状态只表示代码是否真实存在，不以目录或占位接口计入完成度。
 
+2026-10-09 完成本地 TAP 原生标识适配：可选 `--tap-owner-cookie` 配合独立 DPDK 21.11.9
+补丁，将先落盘的随机标识与 DROP/QUEUE 放在同一次内核创建中，创建后回读唯一标识。
+恢复记录 v4 兼容 v1/v2/v3，离线工具区分标识匹配、缺失和重复，保持只读与未确认清理。
+系统与补丁构建各 29/29 单测、真实创建窗口、正常删除、同坐标替换、复制标识、旧驱动与
+remote 拒绝、六项 sanitizer 通过，见 [TAP 原生标识](tap_owner_cookie.md)。下一项是完整
+规则内容和对象作用范围核验，自动跨进程清理尚未实现。
+
 2026-10-09 完成持久逐次安装记录：恢复文件 v3 保存唯一尝试编号、规则版本、安装意图、
 创建/删除结果和 TAP 单一新增候选；创建结果同步失败仍保留 handle 回滚，无 handle 的
 创建失败不再允许正常退出自动确认 clean。256 槽只复用成功删除的记录，v1/v2 待确认
 文件保持原格式。`-Werror`、28/28 单测、三个真实创建窗口故障、同坐标外部规则替换、
 ring/TAP 保护与原隔离/健康回归、五项 sanitizer 通过，见 [逐次安装记录](recovery_attempts.md)。
-这些是可追溯线索，仍不是所有权证明；下一项需要驱动原生可回读的归属标识与完整范围核验。
+这些是可追溯线索，仍不是所有权证明；本地 TAP 原生标识已在上述阶段补齐，完整范围仍待核验。
 
 2026-10-09 完成跨进程恢复第二阶段的 TAP 本地只读核对：安装前保存内核接口、启动
 标识和网络命名空间，离线 `inspect` 按精确修订号读取实际 TC 对象，识别环境不符、
@@ -84,7 +91,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | capability profile / probe cache | 已实现本机诊断闭环 | 设备/固件/DPDK 身份、描述符和既有 queue/RSS/offload；完整规则校验结果缓存五秒、64 槽、强制刷新与失效；成功观察集合不承诺任意组合；正式安装始终新校验 |
 | rule IR | 已实现第一版 | 有序 match/action、domain/fallback、持久化 install port 和语义校验 |
 | rule repository | 已实现内存版和可选写路径 | 稳定 ID、单调 generation、幂等 CRUD、乐观并发、按 ID 稳定分页；control 可在 mutation 后保存完整 snapshot |
-| snapshot persistence | 已实现 v2、v1 单端口迁移、进程内隔离与可选跨进程保护 | 保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；独立恢复记录 v3 保存逐次意图、结果和候选坐标；TAP 本地只读核对已实现，归属证明和自动清理未实现 |
+| snapshot persistence | 已实现 v2、v1 单端口迁移、进程内隔离与可选跨进程保护 | 保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；恢复记录 v4 保存逐次线索与可选原生标识；本地 TAP DROP/QUEUE 标识核对已实现，完整内容核验和自动清理未实现 |
 | planner | 已实现第一版 | 明确 software/rte_flow 选择、fallback reason 与 transfer domain 校验 |
 | rte_flow | 已实现事务 backend | validate 与 create 分离；对象仓库持有 handle；批量失败逆序 destroy |
 | 等价软件 fallback | 已实现最小集合 | ingress Ethernet/IPv4/UDP/TCP、DROP/MARK/COUNT；`prefer` 仅在 validate 失败时回退，QUEUE/transfer 拒绝降级；immutable snapshot + DPDK QSBR 非阻塞回收已接入 |
