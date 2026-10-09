@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "bad3e532-26d7-498c-82aa-dcf36eb02f67",
+  "status": "current",
+  "command": "deliver",
+  "type": "lifecycle",
+  "input": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\lifecycle-recovery-20261009-225434\\candidate.json",
+  "output": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\lifecycle-recovery-20261009-225434\\recovery.html",
+  "specification": {
+    "sha256": "85fa1d6ee3991943daf0df8aa57ea62afa922573f275fe38e1ce35f8291c067f",
+    "bytes": 10451
+  },
+  "artifact": {
+    "sha256": "2d2bccb514288fab83baef0147927cd0da5e32f82c62283137f48d8b6f980054",
+    "bytes": 773570
+  }
+}

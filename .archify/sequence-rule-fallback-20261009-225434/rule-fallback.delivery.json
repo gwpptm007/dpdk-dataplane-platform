@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "c3e95f2d-4786-4a98-9252-7c139f3b5100",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\sequence-rule-fallback-20261009-225434\\candidate.json",
+  "output": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\sequence-rule-fallback-20261009-225434\\rule-fallback.html",
+  "specification": {
+    "sha256": "d7ed82ca7cc4de9e17ac6bd0c08e5adc223e889cd2745d37b56272a55b0d15c2",
+    "bytes": 8549
+  },
+  "artifact": {
+    "sha256": "b308198ffa32f851b9aecfb1f0259d6589339e931ddf306310c18e1a7ad47be2",
+    "bytes": 765490
+  }
+}

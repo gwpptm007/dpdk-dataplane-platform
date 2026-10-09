@@ -1,0 +1,325 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "单规则下发：prefer 校验失败后的软件回退",
+    "locale": "zh-CN",
+    "output": ".archify/sequence-rule-fallback-20261009-225434/rule-fallback.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      670
+    ],
+    "repository": {
+      "url": "git@github.com:gwpptm007/dpdk-dataplane-platform.git",
+      "revision": "14ba76b358c5795f16b7b0b17f293a7698f89c49",
+      "link_mode": "local-only"
+    },
+    "column_fit": "spread"
+  },
+  "participants": [
+    {
+      "id": "cli",
+      "type": "external",
+      "label": "dppctl",
+      "sublabel": "独立客户端",
+      "sources": [
+        {
+          "path": "app/dppctl/main.c",
+          "line": 345,
+          "end_line": 387
+        }
+      ]
+    },
+    {
+      "id": "control",
+      "type": "backend",
+      "label": "控制面",
+      "sublabel": "管理与规划",
+      "sources": [
+        {
+          "path": "lib/management/server.c",
+          "line": 207,
+          "end_line": 291
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 608,
+          "end_line": 740
+        },
+        {
+          "path": "lib/control/planner.c",
+          "line": 65,
+          "end_line": 128
+        }
+      ]
+    },
+    {
+      "id": "txn",
+      "type": "backend",
+      "label": "事务引擎",
+      "sublabel": "同步调用",
+      "sources": [
+        {
+          "path": "lib/control/transaction.c",
+          "line": 118,
+          "end_line": 205
+        },
+        {
+          "path": "lib/control/transaction.c",
+          "line": 224,
+          "end_line": 253
+        }
+      ]
+    },
+    {
+      "id": "hw",
+      "type": "backend",
+      "label": "硬件后端",
+      "sublabel": "rte_flow",
+      "sources": [
+        {
+          "path": "lib/offload/rte_flow_backend.c",
+          "line": 149,
+          "end_line": 176
+        },
+        {
+          "path": "lib/offload/rte_flow_backend.c",
+          "line": 220,
+          "end_line": 271
+        }
+      ]
+    },
+    {
+      "id": "sw",
+      "type": "backend",
+      "label": "软件后端",
+      "sublabel": "规则快照",
+      "sources": [
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 233,
+          "end_line": 253
+        },
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 419,
+          "end_line": 474
+        }
+      ]
+    },
+    {
+      "id": "repo",
+      "type": "database",
+      "label": "规则账本",
+      "sublabel": "内存状态",
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 628,
+          "end_line": 658
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 723,
+          "end_line": 740
+        }
+      ]
+    },
+    {
+      "id": "disk",
+      "type": "database",
+      "label": "快照文件",
+      "sublabel": "可选持久化",
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 71,
+          "end_line": 112
+        },
+        {
+          "path": "lib/control/persistence.c",
+          "line": 405,
+          "end_line": 428
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 180,
+      "label": "入口与预检"
+    },
+    {
+      "from": 182,
+      "to": 287,
+      "label": "硬件校验失败"
+    },
+    {
+      "from": 290,
+      "to": 455,
+      "label": "等价软件回退"
+    },
+    {
+      "from": 458,
+      "to": 566,
+      "label": "发布与响应"
+    }
+  ],
+  "messages": [
+    {
+      "id": "request",
+      "from": "cli",
+      "to": "control",
+      "y": 160,
+      "label": "SEQPACKET 请求",
+      "variant": "security"
+    },
+    {
+      "id": "hw-run",
+      "from": "control",
+      "to": "txn",
+      "y": 188,
+      "label": "硬件计划",
+      "variant": "emphasis"
+    },
+    {
+      "id": "hw-validate",
+      "from": "txn",
+      "to": "hw",
+      "y": 216,
+      "label": "validate"
+    },
+    {
+      "id": "reject",
+      "from": "hw",
+      "to": "txn",
+      "y": 244,
+      "label": "校验失败",
+      "variant": "return"
+    },
+    {
+      "id": "failed",
+      "from": "txn",
+      "to": "control",
+      "y": 272,
+      "label": "FAILED；token=0",
+      "variant": "return"
+    },
+    {
+      "id": "fallback",
+      "from": "control",
+      "to": "txn",
+      "y": 300,
+      "label": "prefer 且等价回退",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sw-validate",
+      "from": "txn",
+      "to": "sw",
+      "y": 328,
+      "label": "validate：软件语义校验"
+    },
+    {
+      "id": "sw-prepare",
+      "from": "txn",
+      "to": "sw",
+      "y": 356,
+      "label": "prepare：可撤销资源"
+    },
+    {
+      "id": "sw-commit",
+      "from": "txn",
+      "to": "sw",
+      "y": 384,
+      "label": "commit：复制并原子发布规则表",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sw-return",
+      "from": "sw",
+      "to": "txn",
+      "y": 412,
+      "label": "发布成功，旧表进入 QSBR 退役链",
+      "variant": "return"
+    },
+    {
+      "id": "committed",
+      "from": "txn",
+      "to": "control",
+      "y": 440,
+      "label": "COMMITTED",
+      "variant": "return"
+    },
+    {
+      "id": "publish",
+      "from": "control",
+      "to": "repo",
+      "y": 468,
+      "label": "发布新规则与 generation",
+      "variant": "emphasis"
+    },
+    {
+      "id": "finalize",
+      "from": "control",
+      "to": "txn",
+      "y": 496,
+      "label": "finalize"
+    },
+    {
+      "id": "save",
+      "from": "control",
+      "to": "disk",
+      "y": 524,
+      "label": "若启用 state-path：fsync → rename → 目录 fsync"
+    },
+    {
+      "id": "response",
+      "from": "control",
+      "to": "cli",
+      "y": 552,
+      "label": "成功与新版本",
+      "variant": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "读图约定",
+      "items": [
+        "这是一次新建规则的具体成功路径：prefer 策略先遇到硬件 validate 失败，再成功安装到软件。它不是硬件和软件依次处理同一报文。",
+        "除客户端外，控制、事务和后端调用都在 dppd 主线程同步执行；各生命线表示职责，不表示独立线程。",
+        "预检还包含恢复 READY、dirty 状态补写、ID、容量和 generation 检查。相同内容幂等返回时不会进入本图事务；过期版本与其他预检错误直接失败。",
+        "本例规则 ID 不存在且容量与版本检查通过；账本发布和可选落盘成功后返回新 generation。图省略这些同步调用的单独返回箭头。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "允许回退的精确边界",
+      "items": [
+        "代码要求 prefer、事务与条目均处于 FAILED、backend_token 为零，并且软件可表达等价语义；本路径对应 validate 失败。依据：lib/control/control.c:675–697。",
+        "显式 software 从软件计划开始；require 不回退。QUEUE / transfer 等没有等价软件语义时必须拒绝。",
+        "prepare 或 commit 失败会执行回滚；create 失败、创建后记录失败或回滚失败都不允许伪装成软件回退成功。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "未画入主时序的失败与替换分支",
+      "items": [
+        "硬件 validate 成功则继续硬件 prepare / commit；启用恢复保护时，create 前同步记录意图，create 后保存驱动结果，记录失败交事务回滚。依据：lib/offload/rte_flow_backend.c:220–271。",
+        "更新已有规则时，新版本安装后先删除旧版本，再发布账本；删除失败则撤销新版本，补偿失败进入隔离。依据：lib/control/control.c:705–730。",
+        "提交成功后才发布账本；账本或 finalize 异常会隔离。保存失败则返回 EUCLEAN 并置 dirty，但规则已生效，不等于恢复隔离。下一次修改先尝试补写。"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "源码基线与范围",
+      "items": [
+        "固定提交 14ba76b（完整 SHA 见源码元数据）；源引用读取该提交，工作区存在后续未提交修改。",
+        "未纳入开发中的 TAP owner cookie、恢复记录 v4、create_owned 与标识读回检查；相关文件包括 app/dppd/main.c、lib/offload/rte_flow_backend.c、lib/control/recovery_guard.c 等。"
+      ]
+    }
+  ]
+}

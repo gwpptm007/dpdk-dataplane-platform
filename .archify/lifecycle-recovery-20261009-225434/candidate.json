@@ -1,0 +1,380 @@
+{
+  "schema_version": 2,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "dppd 恢复隔离：启动门禁、清理与重启",
+    "locale": "zh-CN",
+    "output": ".archify/lifecycle-recovery-20261009-225434/recovery.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:gwpptm007/dpdk-dataplane-platform.git",
+      "revision": "14ba76b358c5795f16b7b0b17f293a7698f89c49",
+      "link_mode": "local-only"
+    }
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "进程内控制状态与执行阶段"
+    },
+    {
+      "id": "recovery",
+      "label": "跨进程处理 / 等待重启"
+    },
+    {
+      "id": "terminal",
+      "label": "进程退出"
+    }
+  ],
+  "states": [
+    {
+      "id": "gate",
+      "type": "start",
+      "label": "启动门禁",
+      "sublabel": "可选恢复保护",
+      "tag": "EAL 已初始化",
+      "lane": "main",
+      "col": 0,
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 173,
+          "end_line": 194
+        }
+      ]
+    },
+    {
+      "id": "replay",
+      "type": "active",
+      "label": "初始化与重放",
+      "sublabel": "可选 state-path",
+      "tag": "worker 尚未启动",
+      "lane": "main",
+      "col": 1,
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 194,
+          "end_line": 260
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 374,
+          "end_line": 384
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 449,
+          "end_line": 474
+        }
+      ]
+    },
+    {
+      "id": "ready",
+      "type": "active",
+      "label": "正常服务",
+      "sublabel": "READY",
+      "tag": "启动并监控 workers",
+      "lane": "main",
+      "col": 2,
+      "sources": [
+        {
+          "path": "include/dppd/control.h",
+          "line": 13,
+          "end_line": 21
+        },
+        {
+          "path": "app/dppd/main.c",
+          "line": 294,
+          "end_line": 341
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 114,
+          "end_line": 122
+        }
+      ]
+    },
+    {
+      "id": "isolation",
+      "type": "waiting",
+      "label": "恢复隔离",
+      "sublabel": "保留已知 handle",
+      "tag": "写入封锁；worker 停止",
+      "lane": "main",
+      "col": 3,
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 63,
+          "end_line": 70
+        },
+        {
+          "path": "app/dppd/main.c",
+          "line": 261,
+          "end_line": 291
+        },
+        {
+          "path": "app/dppd/main.c",
+          "line": 342,
+          "end_line": 355
+        }
+      ]
+    },
+    {
+      "id": "retry",
+      "type": "active",
+      "label": "清理重试",
+      "sublabel": "reconcile-retry",
+      "tag": "清理本进程已知对象",
+      "lane": "main",
+      "col": 4,
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 573,
+          "end_line": 598
+        },
+        {
+          "path": "lib/offload/rte_flow_backend.c",
+          "line": 490,
+          "end_line": 525
+        }
+      ]
+    },
+    {
+      "id": "external",
+      "type": "external",
+      "label": "外部核对清理",
+      "sublabel": "启动已被阻止",
+      "tag": "离线工具需精确 revision",
+      "lane": "recovery",
+      "col": 0,
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 177,
+          "end_line": 188
+        },
+        {
+          "path": "app/dppd_recovery/main.c",
+          "line": 116,
+          "end_line": 149
+        },
+        {
+          "path": "lib/control/recovery_guard.c",
+          "line": 623,
+          "end_line": 646
+        }
+      ]
+    },
+    {
+      "id": "restart",
+      "type": "waiting",
+      "label": "必须重启",
+      "sublabel": "RESTART_REQUIRED",
+      "tag": "不在原进程恢复转发",
+      "lane": "recovery",
+      "col": 4,
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 580,
+          "end_line": 598
+        },
+        {
+          "path": "app/dppd/main.c",
+          "line": 357,
+          "end_line": 364
+        }
+      ]
+    },
+    {
+      "id": "startup_fail",
+      "type": "failure",
+      "label": "启动失败退出",
+      "sublabel": "未进入恢复隔离",
+      "tag": "执行已初始化资源清理",
+      "lane": "terminal",
+      "col": 1,
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 194,
+          "end_line": 200
+        },
+        {
+          "path": "app/dppd/main.c",
+          "line": 218,
+          "end_line": 229
+        },
+        {
+          "path": "app/dppd/main.c",
+          "line": 379,
+          "end_line": 405
+        }
+      ]
+    },
+    {
+      "id": "exit",
+      "type": "neutral",
+      "label": "清理并退出",
+      "sublabel": "等待外部重新启动",
+      "tag": "故障路径返回失败状态",
+      "lane": "terminal",
+      "col": 4,
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 282,
+          "end_line": 291
+        },
+        {
+          "path": "app/dppd/main.c",
+          "line": 357,
+          "end_line": 405
+        },
+        {
+          "path": "lib/control/recovery_guard.c",
+          "line": 623,
+          "end_line": 633
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "id": "gate-clean",
+      "from": "gate",
+      "to": "replay",
+      "label": "干净或未启用"
+    },
+    {
+      "id": "replay-ok",
+      "from": "replay",
+      "to": "ready",
+      "label": "初始化成功"
+    },
+    {
+      "id": "online-isolate",
+      "from": "ready",
+      "to": "isolation",
+      "label": "补偿失败",
+      "variant": "security"
+    },
+    {
+      "id": "cleanup-request",
+      "from": "isolation",
+      "to": "retry",
+      "label": "显式重试"
+    },
+    {
+      "id": "retry-fail",
+      "from": "retry",
+      "to": "isolation",
+      "label": "失败或仍有残留",
+      "variant": "security"
+    },
+    {
+      "id": "blocked",
+      "from": "gate",
+      "to": "external",
+      "label": "旧记录未清",
+      "variant": "security"
+    },
+    {
+      "id": "external-restart",
+      "from": "external",
+      "to": "gate",
+      "label": "清理确认后重启",
+      "variant": "dashed"
+    },
+    {
+      "id": "replay-isolate",
+      "from": "replay",
+      "to": "isolation",
+      "label": "重放事务回滚失败",
+      "variant": "security"
+    },
+    {
+      "id": "replay-fail",
+      "from": "replay",
+      "to": "startup_fail",
+      "label": "其他初始化失败",
+      "variant": "security"
+    },
+    {
+      "id": "cleanup-ok",
+      "from": "retry",
+      "to": "restart",
+      "label": "零错误且零残留",
+      "variant": "emphasis"
+    },
+    {
+      "id": "restart-exit",
+      "from": "restart",
+      "to": "exit",
+      "label": "主循环退出"
+    },
+    {
+      "id": "relaunch",
+      "from": "exit",
+      "to": "gate",
+      "label": "外部重新启动",
+      "variant": "dashed"
+    },
+    {
+      "id": "isolate-exit",
+      "from": "isolation",
+      "to": "exit",
+      "label": "信号或监控故障",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "三个真实控制状态",
+      "items": [
+        "READY → RECONCILIATION_REQUIRED → RESTART_REQUIRED 是 include/dppd/control.h 中的控制状态；其余节点是启动、操作或退出阶段。",
+        "在线事务补偿失败、发布不变量异常等会隔离；本图主箭头展示补偿失败。隔离封锁普通写入，主循环停止并等待 worker，下一轮才处理清理重试。",
+        "重放事务回滚失败且状态已置为 RECONCILIATION_REQUIRED 时进入启动隔离，worker 从未启动。普通重放错误或初始化失败则清理并退出。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "进程内重试能做什么",
+      "items": [
+        "reconcile-retry 按本进程 rte_flow 对象仓库逐个处理：仅预留但无 handle 的槽位可释放；安装对象或非空 handle 必须调用驱动删除。",
+        "任一删除失败或仍有残留，保持隔离并保留 handle，可再次重试；全部成功只转到 RESTART_REQUIRED。依据：lib/control/control.c:573–598。",
+        "停止 worker 仅停止软件转发，不保证设备残留规则停止生效。隔离期间保留恢复查询、health / ready、只读能力与规则诊断；禁止普通规则操作。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "跨进程恢复是另一层保护",
+      "items": [
+        "--recovery-path 开启时，旧记录 count 非零会在 runtime 初始化和规则重放前阻止启动；EAL 的参数处理与设备探测已完成。",
+        "已提交版本采用逐次尝试记录：create 前保存 INTENT，之后记录 CREATED / CREATE_FAILED，删除成功记录 REMOVED。任何未确认尝试都可能阻止自动清除保护记录。",
+        "离线 inspect 只读核对 TAP 本地规则及候选坐标，无法证明归属；外部完成清理并按精确版本确认后，才重新启动。没有跨进程自动硬件清理。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "失败不都等于隔离",
+      "items": [
+        "规则已提交后的 snapshot 保存失败仅置 persistence_dirty，返回 EUCLEAN；它不自动把控制状态从 READY 改成隔离。后续修改先补写，补写失败则拒绝新修改。",
+        "RESTART_REQUIRED 不会直接返回 READY；进程先退出，再由操作者或服务管理器重新启动。退出清理若无法同步确认恢复记录干净，下次启动仍被门禁拦截。",
+        "图聚焦恢复相关路径；未展开正常 duration / 信号退出、所有 READY 监控故障及每种初始化错误。"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "源码基线与范围",
+      "items": [
+        "固定提交 14ba76b（完整 SHA 见源码元数据）；源引用读取该提交，工作区存在后续未提交修改。",
+        "未纳入开发中的 TAP owner cookie、恢复记录 v4、create_owned 与标识读回检查；相关文件包括 app/dppd/main.c、lib/offload/rte_flow_backend.c、lib/control/recovery_guard.c 等。"
+      ]
+    }
+  ]
+}
