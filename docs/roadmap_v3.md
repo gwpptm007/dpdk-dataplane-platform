@@ -13,7 +13,7 @@
 
 ## M1：能力规划与规则控制面
 
-当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v14 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
+当前进度：rule repository、generation、幂等 CRUD、第一版 planner、transaction/rollback engine、真实 rte_flow adapter、software adapter、immutable classifier snapshot + DPDK QSBR、generation replacement、单规则 control service、受限批量创建/精确批量删除/跨规则原子更新与本机 management v15 API，以及 snapshot v2 写路径、fail-closed 启动重放、v1 单端口迁移和进程内 recovery isolation 已落地；跨进程 reconciliation、degraded recovery 与多端口迁移尚未实现。纯软件跨规则更新已支持一次快照发布、满表替换、分配失败保留旧表及并发分类验证。跨规则更新已通过 Linux + DPDK 21.11.9 构建、15 项单测及 net_ring 进程间验证，详见 [批量更新](todo_batch_update.md)。
 
 持久化方面已完成 [versioned snapshot v2](persistence_snapshot_v2.md)、install port 保存、
 control mutation 后的完整保存、dirty state、管理状态查询、`--state-path` 和全量硬件
@@ -47,7 +47,12 @@ worker 收发与三个相关单测的 AddressSanitizer/UBSan 通过，见 [能�
 上界，未知时钟和整数溢出显式标记。历史包含后来删除或被撤销的成功提交，重启重新累计。
 24/24 单测、ring/TAP CLI/JSON 对齐与并发更新、三组恢复故障、状态/健康/四组 worker
 收发，以及四个单测的 AddressSanitizer/UBSan 通过，见 [历史耗时分布](rule_latency.md)。
-下一项推进失败事件历史列表，同时保留跨进程 reconciliation 待办。
+
+2026-10-09 已完成 management v15 的失败事件历史与只读 telemetry。最近 64 次完整
+失败按独立事件 ID 分页，每页 4 条，精确版本、覆盖缺口和编号耗尽显式标记；隔离可读，
+成功不清除，重启重新记录。25/25 单测、ring/TAP 的 130 次失败及 16 页完整对齐、三组
+恢复故障、状态/健康/四组 worker 回归，以及四个单测的 AddressSanitizer/UBSan 通过，见
+[失败事件历史](rule_history.md)。下一项推进跨进程 residual flow reconciliation。
 
 交付：
 

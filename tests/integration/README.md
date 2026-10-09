@@ -1,6 +1,6 @@
 # 集成验收
 
-## 规则失败分类、历史耗时与 Telemetry
+## 规则失败分类、事件历史、历史耗时与 Telemetry
 
 ```bash
 python3 tests/integration/rule_telemetry.py --build-dir build
@@ -8,17 +8,21 @@ sudo python3 tests/integration/rule_telemetry.py --build-dir build --tap
 python3 tests/integration/recovery_isolation.py --build-dir build
 ```
 
-当前管理协议 v14。真实 ring/TAP 进程查询 DPDK telemetry v2 socket，核对分类、
+当前管理协议 v15。真实 ring/TAP 进程查询 DPDK telemetry v2 socket，核对分类、
 原始/补偿/最终错误、生效与保存失败、累计值、64 ID 分页和最大 uint64 ID。
 72 条规则下并发查询与 20 次软件整批更新，验证完成态关系、过期分页、只读 COUNT/
 快照/画像以及重启指标重置。历史耗时逐字段对齐 CLI 与 JSON，软件整批二十次发布
 只增加二十个样本和四十条涉及规则，删除保留历史，重启只记录仍需重放的规则。
 两组在线隔离与一组启动重放隔离验证未启动或已停止 worker 时仍可诊断，已撤销的
 成功创建保留耗时历史，清理重试不抹去样本，从旧快照正常重启后重新累计。
-2026-10-04，24/24 单测和四个相关单测的 AddressSanitizer/UBSan 通过，
+失败事件逐字段对齐 CLI 与 JSON，连续 130 次失败后保留最近 64 条，按同一历史版本
+完整读取 16 页；验证过期版本、覆盖缺口边界、最大游标、成功不清除与重启清空。
+并发查询覆盖历史窗口变化，三组隔离验证首个补偿错误保留、失败重试新增事件与隔离可读。
+2026-10-09，25/25 单测和四个相关单测的 AddressSanitizer/UBSan 通过，
 既有状态/健康/四组 worker 回归通过。
 只创建测试自己的虚拟端口，ring/TAP 的 1024/8191 个 mbuf 全部归还。
-详见 [规则失败与 Telemetry](../../docs/rule_telemetry.md) 与 [历史耗时分布](../../docs/rule_latency.md)。
+详见 [规则失败与 Telemetry](../../docs/rule_telemetry.md)、[失败事件历史](../../docs/rule_history.md)
+与 [历史耗时分布](../../docs/rule_latency.md)。
 
 ## 网卡能力画像与探测缓存
 
@@ -27,7 +31,7 @@ python3 tests/integration/capability_probe.py --build-dir build
 sudo python3 tests/integration/capability_probe.py --build-dir build --tap
 ```
 
-该功能最初在 v12 验证，当前管理协议 v14。默认场景由普通用户运行 ring 进程，检查启动身份和固件未知、画像
+该功能最初在 v12 验证，当前管理协议 v15。默认场景由普通用户运行 ring 进程，检查启动身份和固件未知、画像
 只读、完整规则键、缓存命中/刷新/清空/实际过期、require 新校验与 prefer 等价降级，
 以及探测不安装、不修改版本/COUNT/快照和重启建立新缓存。`--tap` 单独验证需 root
 的真实 TAP 校验与创建/更新/删除、跨端口失效和平台软件对象共存。测试只创建临时
@@ -45,7 +49,7 @@ python3 tests/integration/rule_status.py --build-dir build
 sudo python3 tests/integration/rule_status.py --build-dir build --tap
 ```
 
-当前管理协议 v14。普通用户场景使用独立 ring 端口，验证 2/4 条规则的只读状态、prefer
+当前管理协议 v15。普通用户场景使用独立 ring 端口，验证 2/4 条规则的只读状态、prefer
 降级、共享整批耗时、旧版本拒绝、dirty/flush、重放和删除。`--tap` 单独执行需要 root
 的真实 rte_flow 场景，验证创建、更新安装端口、删除、平台软件对象共存和快照重放。
 临时 TAP 和 8191 个 mbuf 在退出后全部回收，不操作物理网卡。
@@ -62,7 +66,7 @@ python3 tests/integration/health_readiness.py --build-dir build
 sudo python3 tests/integration/health_readiness.py --build-dir build --tap
 ```
 
-当前管理协议 v14。自动检查 `health/ready` 的输出与退出码、实际 worker 状态、只读查询、
+当前管理协议 v15。自动检查 `health/ready` 的输出与退出码、实际 worker 状态、只读查询、
 快照写入失败与 flush 修复、非空两规则重启，以及注册失败后的主线程故障监控。
 单队列使用 `net_ring`，双线程使用支持正式配置要求的 `net_null`；TAP 模式只操作
 测试自己创建的两个临时接口，验证 down/up 的未就绪与恢复、快照不变和退出清理。

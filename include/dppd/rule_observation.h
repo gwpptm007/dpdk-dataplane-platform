@@ -80,6 +80,57 @@ struct dppd_rule_failure_event {
     bool applied;
 };
 
+/** 只保留最近六十四次公开请求失败，固定空间不会随运行时间增长 */
+#define DPPD_RULE_HISTORY_CAPACITY 64U
+/** 每页最多四条完整失败，管理报文和 telemetry 字典都保持小且受控 */
+#define DPPD_RULE_HISTORY_PAGE_SIZE 4U
+/** 省略分页版本时使用此保留值，真实历史版本永远不会取到它 */
+#define DPPD_RULE_HISTORY_REVISION_ANY UINT64_MAX
+
+/**
+ * event_id 只随失败增加，failure.sequence 仍表示原有的公开操作序号，两者不能混用
+ * 每条都是完成态的值复制，不持有规则或驱动指针，之后成功或删除不会改写它
+ */
+struct dppd_rule_history_entry {
+    uint64_t event_id;
+    struct dppd_rule_failure_event failure;
+};
+
+/**
+ * 管理线程独占的环形历史，head 指向最旧记录，满容量时覆盖它并推进 head
+ * revision 同时是最新 event_id，overwritten 表示已经离开保留窗口的失败次数
+ * 编号空间耗尽时冻结历史并显式标记，最近失败指标仍照常更新
+ */
+struct dppd_rule_failure_history {
+    uint64_t revision;
+    uint64_t overwritten;
+    uint32_t head;
+    uint32_t count;
+    bool exhausted;
+    struct dppd_rule_history_entry entries[DPPD_RULE_HISTORY_CAPACITY];
+};
+
+/**
+ * 单页携带完整窗口元数据，事件按 event_id 从旧到新返回，next_after 是最后一条 ID
+ * gap 表示当前游标后存在已被覆盖的失败，客户端不能把保留窗口误认为完整审计日志
+ * 精确 revision 防止多页查询期间新增失败，拼出来自不同窗口的记录
+ */
+struct dppd_rule_history_page {
+    uint64_t revision;
+    uint64_t overwritten;
+    uint64_t oldest_event_id;
+    uint64_t newest_event_id;
+    uint64_t after_event_id;
+    uint64_t next_after;
+    uint32_t capacity;
+    uint32_t total;
+    uint32_t returned;
+    bool more;
+    bool gap;
+    bool exhausted;
+    struct dppd_rule_history_entry events[DPPD_RULE_HISTORY_PAGE_SIZE];
+};
+
 /** 字段清单供管理 CLI 与 telemetry 共用，累计单位是公开控制请求而不是报文 */
 #define DPPD_RULE_METRIC_FIELDS(X) \
     X(operations) X(succeeded) X(failed) X(unchanged) X(applied) \
@@ -97,6 +148,7 @@ struct dppd_rule_metrics {
 /** 仅管理线程更新的临时上下文，公共指标查询只复制 metrics，不暴露进行中的请求 */
 struct dppd_rule_observation {
     struct dppd_rule_metrics metrics;
+    struct dppd_rule_failure_history history;
     struct dppd_rule_failure_event context;
     struct dppd_rule_failure_event failure;
     uint64_t fallback_rules;
@@ -138,5 +190,8 @@ void dppd_rule_observation_fault(struct dppd_rule_observation *observation, int 
 void dppd_rule_observation_compensation(struct dppd_rule_observation *observation,
                                         int code, uint64_t rule_id);
 void dppd_rule_observation_finish(struct dppd_rule_observation *observation, int result);
+/** 只读指定窗口的一页，不分配、不读时钟、不改变游标或累计值，调用方负责与写者串行 */
+int dppd_rule_history_read(const struct dppd_rule_failure_history *history,
+    uint64_t after_event_id, uint64_t expected_revision, struct dppd_rule_history_page *page);
 
 #endif

@@ -4,7 +4,7 @@
 成功后端提交，提供次数、均值、最小值、最大值、固定区间和 P50/P95/P99 上界。
 删除规则或回滚请求不会抹去已经成功提交的样本，因此可以观察目前账本里已不存在的安装。
 
-本机管理协议为 **v14**，`dppd` 与 `dppctl` 必须一起更新；v13 及更旧客户端返回 `EPROTO`。
+本机管理协议为 **v15**，`dppd` 与 `dppctl` 必须一起更新；v14 及更旧客户端返回 `EPROTO`。
 规则快照格式仍为 v2；耗时历史只在内存保存，重启后从本次实际安装或启动重放重新累计。
 
 ## 查看三组统计
@@ -160,4 +160,4 @@ sudo python3 tests/integration/rule_status.py --build-dir build --tap
 独立 sanitizer 构建使用 `-Db_sanitize=address,undefined -Db_lundef=false -Db_pie=false`。
 TAP 仅创建测试自己的临时接口；检查接口、socket、handle 和 mbuf 回收。
 测试不包含真实物理 PMD 安装性能、端到端 P99 达标或跨进程 residual flow 清理验收。
-失败事件历史列表和跨进程 reconciliation 仍待实现。
+2026-10-09 已补齐 [失败事件历史列表](rule_history.md)；跨进程 reconciliation 仍待实现。

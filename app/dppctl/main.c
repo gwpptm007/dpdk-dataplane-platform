@@ -27,6 +27,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] probe-cache-clear PORT\n", program);
     fprintf(stderr, "  %s [--socket PATH] rule-metrics\n", program);
     fprintf(stderr, "  %s [--socket PATH] rule-latency\n", program);
+    fprintf(stderr, "  %s [--socket PATH] rule-history [AFTER_EVENT_ID [EXPECTED_REVISION]]\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-drop RULE_ID PORT [PRIORITY] [refresh]\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-filter RULE_ID PORT"
                     " ipv4|udp|tcp SRC_CIDR DST_CIDR SRC_PORT DST_PORT"
@@ -394,6 +395,19 @@ static int build_request(int argc, char **argv,
 {
     uint64_t value;
 
+    /** 从零开始读取最近窗口，后续页可携带同一个历史版本，不能误用规则 generation */
+    if (argc >= 1 && argc <= 3 && strcmp(argv[0], "rule-history") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_RULE_HISTORY);
+        request->payload.rule_history.expected_revision = DPPD_RULE_HISTORY_REVISION_ANY;
+        if (argc >= 2 && (argv[1][0] < '0' || argv[1][0] > '9' ||
+            parse_u64(argv[1], 0, UINT64_MAX, &request->payload.rule_history.after_event_id) != 0))
+            return -EINVAL;
+        if (argc == 3 && (argv[2][0] < '0' || argv[2][0] > '9' ||
+            parse_u64(argv[2], 0, DPPD_RULE_HISTORY_REVISION_ANY - 1U,
+                      &request->payload.rule_history.expected_revision) != 0))
+            return -EINVAL;
+        return 0;
+    }
     /** 请求指标不接受额外参数，避免用户误以为能按某个 ID 筛选累计值 */
     if (argc == 1 && (strcmp(argv[0], "rule-metrics") == 0 || strcmp(argv[0], "rule-latency") == 0)) {
         initialize_request(request, strcmp(argv[0], "rule-metrics") == 0 ?
@@ -964,6 +978,36 @@ static void print_response(const struct dppd_management_response *response)
 {
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释。 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_RULE_HISTORY: {
+        const struct dppd_rule_history_page *page = &response->payload.rule_history;
+
+        /** 覆盖计数和 gap 显示记录缺口，返回窗口不能被误认为本进程全部失败 */
+        printf("rule-history revision=%" PRIu64 " capacity=%u total=%u returned=%u"
+               " overwritten=%" PRIu64 " oldest=%" PRIu64 " newest=%" PRIu64
+               " after=%" PRIu64 " next-after=%" PRIu64 " more=%s gap=%s exhausted=%s\n",
+               page->revision, page->capacity, page->total, page->returned, page->overwritten,
+               page->oldest_event_id, page->newest_event_id, page->after_event_id, page->next_after,
+               page->more ? "yes" : "no", page->gap ? "yes" : "no", page->exhausted ? "yes" : "no");
+        for (unsigned int index = 0; index < page->returned; ++index) {
+            const struct dppd_rule_history_entry *entry = &page->events[index];
+            const struct dppd_rule_failure_event *failure = &entry->failure;
+
+            /** 每条保存独立身份和三个错误，未知端口/后端用标志表示，零值不冒充已知 */
+            printf("  event id=%" PRIu64 " sequence=%" PRIu64 " operation=%s stage=%s kind=%s"
+                   " rule=%" PRIu64 " generation=%" PRIu64 " transaction=%" PRIu64 " rules=%u"
+                   " port-known=%s port=%u backend-known=%s backend=%s cause-error=%d"
+                   " response-error=%d compensation-error=%d compensation-rule=%" PRIu64 " applied=%s\n",
+                   entry->event_id, failure->sequence, dppd_rule_operation_name(failure->operation),
+                   dppd_rule_failure_stage_name(failure->stage), dppd_rule_failure_kind_name(failure->kind),
+                   failure->rule_id, failure->generation, failure->transaction_id, failure->rule_count,
+                   failure->port_known ? "yes" : "no", failure->install_port_id,
+                   failure->backend_known ? "yes" : "no", !failure->backend_known ? "unknown" :
+                   failure->backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software" : "rte_flow",
+                   failure->cause_code, failure->response_code, failure->compensation_code,
+                   failure->compensation_rule_id, failure->applied ? "yes" : "no");
+        }
+        break;
+    }
     case DPPD_MANAGEMENT_RULE_LATENCY:
         /** 均值和分位数的可用性单独展示，未知时钟不能被当作零耗时样本 */
         for (unsigned int scope = 0; scope < DPPD_RULE_LATENCY_SCOPE_COUNT; ++scope) {

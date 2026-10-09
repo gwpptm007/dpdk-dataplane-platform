@@ -83,6 +83,75 @@ def check_latency_commits(report, software, software_batch, rte_flow, batch_rule
               str(report))
 
 
+def history_events(report):
+    """将公开的索引前缀转为便于比较的记录列表，不参与服务端的分页计算"""
+    return [{name[len(prefix):]: value for name, value in report.items() if name.startswith(prefix)}
+            for prefix in (f"event_{index}_" for index in range(report["returned"]))]
+
+
+def check_history_last(event, metrics):
+    """历史末条和既有最近失败指标必须保留相同身份、原因、补偿及生效状态"""
+    for name in ("operation", "stage", "kind", "rule_id", "generation", "transaction_id",
+                 "rule_count", "port", "port_known", "backend", "backend_known", "cause_error",
+                 "response_error", "compensation_error", "compensation_rule_id"):
+        check(event[name] == metrics[name], f"history field {name} differs: {event}")
+    check(event["sequence"] == metrics["last_sequence"] and event["applied"] == metrics["last_applied"],
+          "history changed operation sequence or publication outcome")
+
+
+def check_history(report):
+    """检查一份 JSON 的窗口与游标关系，失败 ID 连续，操作序号允许成功请求留下间隔"""
+    check(report["capacity"] == 64 and 0 <= report["returned"] <= min(4, report["total"]), str(report))
+    check(report["total"] <= 64 and report["overwritten"] + report["total"] == report["revision"], str(report))
+    if report["total"]:
+        check(report["oldest_event_id"] == report["overwritten"] + 1 and
+              report["newest_event_id"] == report["revision"], str(report))
+    else:
+        check(report["oldest_event_id"] == report["newest_event_id"] == 0, str(report))
+    check(report["gap"] == bool(report["total"] and
+          report["after_event_id"] < report["oldest_event_id"] - 1), str(report))
+    events = history_events(report)
+    if events:
+        first = max(report["after_event_id"] + 1, report["oldest_event_id"])
+        check([event["id"] for event in events] == list(range(first, first + len(events))), str(report))
+        check(report["next_after"] == events[-1]["id"], str(report))
+    else:
+        check(report["next_after"] == report["after_event_id"], str(report))
+    check(report["has_more"] == (report["next_after"] < report["newest_event_id"]), str(report))
+
+
+def read_history(ctl, telemetry, after=0, revision=None):
+    """真实 CLI 与 JSON 逐字段对齐，包括身份、原始/补偿/最终错误和未知标志"""
+    parameters = (after,) if revision is None else (after, revision)
+    lines = ctl("rule-history", *parameters).splitlines()
+    aliases = {"oldest": "oldest_event_id", "newest": "newest_event_id", "after": "after_event_id",
+               "more": "has_more", "rule": "rule_id", "transaction": "transaction_id",
+               "rules": "rule_count", "compensation-rule": "compensation_rule_id"}
+
+    def converted(line):
+        """JSON 用下划线和 0/1，CLI 的 yes/no 仅作表示转换，不改字段语义"""
+        return {aliases.get(name, name.replace("-", "_")):
+                int(value == "yes") if value in ("yes", "no") else
+                value if name in ("operation", "stage", "kind", "backend") else int(value)
+                for name, value in fields(line).items()}
+
+    expected = converted(lines[0])
+    check(len(lines) == expected["returned"] + 1, "incomplete CLI history page")
+    for index, line in enumerate(lines[1:]):
+        expected.update({f"event_{index}_{name}": value for name, value in converted(line).items()})
+
+    def published():
+        """指定版本尚未发布时允许暂时 null，等到整页字段一致才认定完成"""
+        report = telemetry.query("/dppd/rule_history", *parameters)
+        return report is not None and all(report.get(name) == value for name, value in expected.items())
+
+    telemetry.wait(published)
+    report = telemetry.query("/dppd/rule_history", *parameters)
+    check_history(report)
+    check(all(report[name] == value for name, value in expected.items()), "CLI and JSON history differ")
+    return {name: value for name, value in report.items() if name != "publication"}
+
+
 class Telemetry:
     """按 EAL 日志中的运行目录定位 socket，用完整 JSON 报文读取每次回应"""
 
@@ -110,7 +179,8 @@ class Telemetry:
             check(time.monotonic() < deadline, "telemetry socket was not ready")
             time.sleep(0.02)
         self.wait(lambda: all(name in self.query("/") for name in (
-            "/dppd/stats", "/dppd/rules", "/dppd/rule", "/dppd/rule_failures", "/dppd/rule_latency")))
+            "/dppd/stats", "/dppd/rules", "/dppd/rule", "/dppd/rule_failures", "/dppd/rule_latency",
+            "/dppd/rule_history")))
 
     def query(self, command, *parameters):
         """逗号是 telemetry v2 参数分隔符，错误回调由 DPDK 编码成 null"""

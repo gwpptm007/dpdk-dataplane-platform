@@ -149,6 +149,9 @@ int dppd_control_fini(struct dppd_control_service *service);
 /** 只复制已完成请求的累计值和最近失败，不校验驱动、不查询 COUNT、不修改快照 */
 void dppd_control_rule_metrics(const struct dppd_control_service *service,
                                 struct dppd_rule_metrics *metrics);
+/** 只读最近失败历史，版本不匹配返回 ESTALE，恢复隔离期间也可读取 */
+int dppd_control_rule_history(const struct dppd_control_service *service,
+    uint64_t after_event_id, uint64_t expected_revision, struct dppd_rule_history_page *page);
 /** 读取本进程成功提交的历史耗时分布，已删除或回滚的样本保留，隔离期间也可查询 */
 void dppd_control_rule_latency(const struct dppd_control_service *service,
     struct dppd_rule_latency_report *report);

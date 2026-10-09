@@ -2,7 +2,7 @@
 
 规则修改失败时，现在可以查出失败发生在哪个阶段、哪条规则，以及最初错误和补偿错误。
 查询同时说明账本是否已经完整发布，避免把“规则已经生效，但文件没有保存成功”误认为回滚成功。
-本功能最初随 v13 实现，当前管理协议为 **v14**，`dppd` 和 `dppctl` 必须一起更新；v13 及更旧客户端返回 `EPROTO`。
+本功能最初随 v13 实现，当前管理协议为 **v15**，`dppd` 和 `dppctl` 必须一起更新；v14 及更旧客户端返回 `EPROTO`。
 规则快照格式仍为 v2。
 
 ## 查看累计结果与最近失败
@@ -96,6 +96,8 @@ DPDK 使用 Unix socket 和 JSON，逗号分隔命令参数；EAL 的 `--no-tele
 /dppd/rule,1001
 /dppd/rule_latency
 /dppd/rule_latency,software_batch
+/dppd/rule_history
+/dppd/rule_history,10,70
 ```
 
 | 命令 | 输出 |
@@ -105,6 +107,7 @@ DPDK 使用 Unix socket 和 JSON，逗号分隔命令参数；EAL 的 `--no-tele
 | `/dppd/rules[,AFTER_ID[,GENERATION]]` | 规则汇总和最多 64 个升序 ID |
 | `/dppd/rule,RULE_ID` | 当前发布副本中指定规则的实际后端与安装记录 |
 | `/dppd/rule_latency[,SCOPE]` | 本进程成功后端提交的三组历史耗时、均值、区间与分位数上界 |
+| `/dppd/rule_history[,AFTER_EVENT_ID[,EXPECTED_REVISION]]` | 最近 64 次完成态失败，每页 4 条，独立历史版本和覆盖缺口提示 |
 
 规则汇总包含 repository generation、软件/硬件/不可用规则数、本地实际对象数、
 恢复状态、保存是否启用、dirty、已保存版本和失败概况。本地对象数用于解释补偿残留，
@@ -140,7 +143,7 @@ telemetry 线程只在短锁内复制需要的值，离开锁后生成 JSON，�
 
 启动重放的回滚失败时也注册只读 telemetry，但不启动 worker。在线隔离仍保留
 期望账本，规则行的 `status_error=EUCLEAN`、backend 为 `unknown`，汇总独立显示
-残留对象数；不把无法核对的实际状态报告为安装成功。`rule-metrics` 与 `rule-latency` 在隔离仍可读取。
+残留对象数；不把无法核对的实际状态报告为安装成功。`rule-metrics`、`rule-latency` 与 `rule-history` 在隔离仍可读取。
 退出先解绑查询入口，等待统计查询结束，再释放副本、控制层和运行实例。
 
 ## 验证记录
@@ -169,4 +172,5 @@ TAP 只创建本测试自己的临时接口，验证后接口、管理 socket �
 ring 回收 1024 个 mbuf。测试共享库只加载到独立故障实例，不链接生产程序。
 这些结果不证明真实物理 PMD 的故障恢复、硬件卸载性能或跨进程 residual flow 清理。
 2026-10-04 已补齐 [历史安装耗时分布](rule_latency.md)，成功后被删除或撤销的提交也保留，
-纯软件整批发布只记一次。失败事件历史列表和跨进程 reconciliation 仍待实现。
+纯软件整批发布只记一次。2026-10-09 已补齐 [失败事件历史](rule_history.md)，保留最近
+64 次完整失败并提供版本分页、覆盖提示和隔离查询；跨进程 reconciliation 仍待实现。

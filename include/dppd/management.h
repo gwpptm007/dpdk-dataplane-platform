@@ -12,10 +12,10 @@
  * daemon 返回 -EPROTO，避免客户端按错误的结构体布局解释响应。
  */
 /**
- * v14 增加历史安装耗时分布；v13 增加规则请求指标与失败分类；v12 增加能力画像
+ * v15 增加失败事件历史分页；v14 增加历史安装耗时分布；v13 增加请求指标与失败分类
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload。
  */
-#define DPPD_MANAGEMENT_VERSION 14U
+#define DPPD_MANAGEMENT_VERSION 15U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0'。 */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -68,6 +68,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_RULE_METRICS,
     /** 只读的后端提交耗时历史，恢复隔离仍可查询，不改变规则或累计值 */
     DPPD_MANAGEMENT_RULE_LATENCY,
+    /** 只读最近失败历史，完整分页在恢复隔离期间仍可使用 */
+    DPPD_MANAGEMENT_RULE_HISTORY,
 };
 
 /*
@@ -177,6 +179,11 @@ struct dppd_management_request {
              */
             uint64_t expected_repository_generation;
         } list;
+        /** 游标是失败 ID 而不是操作序号，省略版本时使用独立历史 ANY 保留值 */
+        struct {
+            uint64_t after_event_id;
+            uint64_t expected_revision;
+        } rule_history;
     } payload;
 };
 
@@ -365,6 +372,7 @@ struct dppd_management_response {
         struct dppd_flow_probe_result probe;
         struct dppd_rule_metrics rule_metrics;
         struct dppd_rule_latency_report rule_latency;
+        struct dppd_rule_history_page rule_history;
     } payload;
 };
 

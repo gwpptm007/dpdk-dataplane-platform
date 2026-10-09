@@ -13,7 +13,7 @@ from batch_update import check, fields
 from health_readiness import clean_environment, daemon_command
 from recovery_isolation import stop, wait_for
 from telemetry_client import (Telemetry, LATENCY_SCOPES, check_latency, check_latency_commits,
-                              read_latency)
+                              read_latency, read_history, check_history, history_events)
 
 
 def run_case(build, tap=False):
@@ -66,6 +66,7 @@ def run_case(build, tap=False):
             report = metrics()
             check(report["operations"] == 1 and report["failed"] == 0, str(report))
             check_latency_commits(read_latency(ctl, telemetry), 0, 0, 0)
+            check(read_history(ctl, telemetry)["revision"] == 0, "empty restore produced a failure")
             ctl("apply-filter", 100, 0, 0, "tcp", "any", "any", "any", 10000,
                 "drop", "count", "software")
             if not tap:
@@ -99,12 +100,15 @@ def run_case(build, tap=False):
             counted = telemetry.query("/dppd/rule", 100)
             history = read_latency(ctl, telemetry)
             check_latency_commits(history, 1 if tap else 2, 0, 1 if tap else 0)
+            failures = read_history(ctl, telemetry)
+            check(failures["revision"] == (2 if tap else 3), str(failures))
             for _ in range(5):
                 check(telemetry.query("/dppd/rule", 100) == counted, "read changed installation status")
                 telemetry.query("/dppd/rules")
                 telemetry.query("/dppd/stats")
                 check(telemetry.query("/dppd/rule_failures") == report, "read changed failure history")
                 check(read_latency(ctl, telemetry) == history, "read changed latency history")
+                check(read_history(ctl, telemetry) == failures, "read changed failure history")
             for scope in LATENCY_SCOPES:
                 selected = telemetry.query("/dppd/rule_latency", scope)
                 check_latency(selected)
@@ -122,10 +126,15 @@ def run_case(build, tap=False):
                             ("/dppd/rule", 0), ("/dppd/rule", 999999),
                             ("/dppd/rule_failures", 1), ("/dppd/rule_latency", "unknown"),
                             ("/dppd/rule_latency", "software,rte_flow"),
-                            ("/dppd/rule_latency", "SOFTWARE"), ("/dppd/rule_latency", "software,")]:
+                            ("/dppd/rule_latency", "SOFTWARE"), ("/dppd/rule_latency", "software,"),
+                            ("/dppd/rule_history", -1), ("/dppd/rule_history", " 1"),
+                            ("/dppd/rule_history", "1,"), ("/dppd/rule_history", "1,2,3"),
+                            ("/dppd/rule_history", "18446744073709551616"),
+                            ("/dppd/rule_history", 0, 18446744073709551615)]:
                 check(telemetry.query(*request) is None, "invalid request did not return null")
             check(metrics() == report, "bad telemetry parameters changed control metrics")
             check(read_latency(ctl, telemetry) == history, "bad parameters changed installation history")
+            check(read_history(ctl, telemetry) == failures, "bad parameters created a failure event")
 
             # 规则多于一页并包含最大 uint64 ID，验证完整规则镜像和稳定版本分页
             for rule_id in [*range(1000, 1069), 18446744073709551615]:
@@ -159,6 +168,7 @@ def run_case(build, tap=False):
                         check_latency(latency)
                         batch_commits = latency["software_batch_samples"] + latency["software_batch_unavailable"]
                         check(latency["software_batch_rules"] == batch_commits * 2, str(latency))
+                        check_history(reader.query("/dppd/rule_history"))
                         sample_count[0] += 1
                 except Exception as error:
                     failed.append(error)
@@ -171,6 +181,12 @@ def run_case(build, tap=False):
                              for token in (rule_id, fields(ctl("get", rule_id))["generation"])]
                     ctl("update-drop-batch", 1, priority, "software", *pairs)
                 metrics()
+                saved_before_failures = state.read_bytes()
+                # 一百三十次真正的预检失败覆盖两轮窗口，保留最大 uint64 规则身份
+                for _ in range(130):
+                    ctl("apply-drop", 18446744073709551615, 1, 9999, 99, "software", error=errno.ESTALE)
+                metrics()
+                check(state.read_bytes() == saved_before_failures, "preflight failure saved a snapshot")
             finally:
                 running.clear()
                 thread.join(timeout=5)
@@ -178,6 +194,27 @@ def run_case(build, tap=False):
             check(not thread.is_alive() and not failed and sample_count[0] > 0, str(failed))
             history = read_latency(ctl, telemetry)
             check_latency_commits(history, 71 if tap else 72, 20, 1 if tap else 0, batch_rules=40)
+            retained = read_history(ctl, telemetry)
+            check(retained["total"] == 64 and retained["gap"] and
+                  retained["revision"] == failures["revision"] + 130, str(retained))
+            ctl("rule-history", 0, failures["revision"], error=errno.ESTALE)
+            check(telemetry.query("/dppd/rule_history", 0, failures["revision"]) is None,
+                  "stale failure revision was accepted")
+            events, page = [], retained
+            while True:
+                events.extend(history_events(page))
+                if not page["has_more"]:
+                    break
+                page = read_history(ctl, telemetry, page["next_after"], retained["revision"])
+                check(not page["gap"], "a retained cursor unexpectedly lost failures")
+            check(len(events) == 64 and all(event["rule_id"] == 18446744073709551615 and
+                  event["generation"] == 9999 and event["cause_error"] == -errno.ESTALE and
+                  event["response_error"] == -errno.ESTALE and event["compensation_error"] == 0 and
+                  not event["applied"] for event in events), str(events))
+            check(read_history(ctl, telemetry, retained["oldest_event_id"] - 1,
+                               retained["revision"])["gap"] == 0, "gap boundary is off by one")
+            check(read_history(ctl, telemetry, 18446744073709551615)["returned"] == 0,
+                  "maximum cursor did not return an empty page")
             check(telemetry.query("/dppd/rules", first["next_after"], first["repository_generation"]) is None,
                   "stale pagination accepted a different repository")
 
@@ -195,6 +232,12 @@ def run_case(build, tap=False):
             check(page["dirty"] == 1 and page["total"] == 73, str(page))
             history = read_latency(ctl, telemetry)
             check_latency_commits(history, 72 if tap else 73, 20, 1 if tap else 0, batch_rules=40)
+            failed_after_apply = read_history(ctl, telemetry)
+            event = history_events(read_history(ctl, telemetry, failed_after_apply["newest_event_id"] - 1,
+                                               failed_after_apply["revision"]))[0]
+            check(event["rule_id"] == 1100 and event["stage"] == "persist" and event["applied"] and
+                  event["cause_error"] == -errno.ENOTDIR and event["response_error"] == -errno.EUCLEAN,
+                  str(event))
             for _ in range(3):
                 telemetry.query("/dppd/rule", 1100)
                 check(telemetry.query("/dppd/rule_failures") == report, "dirty read changed failure")
@@ -205,16 +248,19 @@ def run_case(build, tap=False):
             ctl("persistence-flush", error=errno.ENOTDIR)
             report = metrics()
             check(report["operation"] == "flush" and report["response_error"] == -errno.ENOTDIR, str(report))
+            flushed_failure = read_history(ctl, telemetry)
             storage.unlink()
             backup.rename(storage)
             ctl("persistence-flush")
             check(metrics()["last_sequence"] == report["last_sequence"], "success removed last failure")
             check(telemetry.query("/dppd/rules")["dirty"] == 0, "flush not published")
             check(read_latency(ctl, telemetry) == history, "blocked write or flush changed installation history")
+            check(read_history(ctl, telemetry) == flushed_failure, "successful flush changed failure history")
             # 删除已经成功安装的规则，历史仍完整保留，下一次启动只统计仍需重放的规则
             ctl("delete", 1100, fields(ctl("get", 1100))["generation"])
             metrics()
             check(read_latency(ctl, telemetry) == history, "delete removed a historical commit")
+            check(read_history(ctl, telemetry) == flushed_failure, "successful delete changed failure history")
             check(telemetry.query("/dppd/rules")["total"] == 72, "delete did not update desired rules")
             saved = state.read_bytes()
             telemetry.close()
@@ -241,6 +287,7 @@ def run_case(build, tap=False):
             check(telemetry.query("/dppd/rules")["total"] == 72 and state.read_bytes() == saved,
                   "replay changed persisted rules")
             check_latency_commits(read_latency(ctl, telemetry), 71 if tap else 72, 0, 1 if tap else 0)
+            check(read_history(ctl, telemetry)["revision"] == 0, "restart reused old failure history")
         finally:
             telemetry.close()
             stop(daemon)
@@ -249,7 +296,8 @@ def run_case(build, tap=False):
             check(not Path(f"/sys/class/net/{interface}").exists(), "temporary TAP interface remains")
         print(f"PASS {'TAP' if tap else 'ring'} rule telemetry: classified failures, read-only snapshots, "
               "64-ID pagination, uint64 IDs, historical latency, concurrent updates, persistence failure, "
-              "delete history, fresh replay epoch, cleanup", flush=True)
+              "130 failures, retained window, stable history pagination, delete history, fresh replay epoch, cleanup",
+              flush=True)
 
 
 def main():

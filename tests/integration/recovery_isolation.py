@@ -11,7 +11,8 @@ import tempfile
 import time
 
 from batch_update import check, fields
-from telemetry_client import Telemetry, check_latency_commits, read_latency
+from telemetry_client import (Telemetry, check_latency_commits, read_latency,
+                              read_history, history_events, check_history_last)
 
 
 def wait_for(daemon, predicate, label, seconds=10):
@@ -78,6 +79,7 @@ def run_case(build, library, lcores, fault):
                               str(rule))
                     check(fields(ctl("reconcile-status"))["state"] == "ready", "replay not ready")
                     check_latency_commits(read_latency(ctl, telemetry), 0, 0, 2)
+                    check(read_history(ctl, telemetry)["revision"] == 0, "replay reused failed history")
                     stop(daemon)
                     check(daemon.returncode == 0, log.read_text())
                 else:
@@ -114,6 +116,10 @@ def run_case(build, library, lcores, fault):
                     # 未发布或随后被撤销的成功创建仍保留，失败的创建与失败恢复不产生样本
                     history = read_latency(ctl, telemetry)
                     check_latency_commits(history, 0, 0, 3 if fault == "create-rollback" else 4)
+                    failures = read_history(ctl, telemetry)
+                    check(failures["revision"] == failures["total"] == 1, str(failures))
+                    original_failure = history_events(failures)[0]
+                    check_history_last(original_failure, report)
                     # 隔离仍可证明管理线程存活，但停止的转发线程不能被报告为已就绪
                     health = fields(ctl("health"))
                     check(health["live"] == "yes" and health["ready"] == "no", str(health))
@@ -138,6 +144,7 @@ def run_case(build, library, lcores, fault):
                           telemetry.query("/dppd/rule_failures") == report,
                           "rejected protocol requests changed completed control metrics")
                     check(read_latency(ctl, telemetry) == history, "isolated read changed installation history")
+                    check(read_history(ctl, telemetry) == failures, "blocked requests added history events")
                     ctl("reconcile-retry", error=errno.EUCLEAN)
                     telemetry.wait(lambda: telemetry.query("/dppd/rule_failures")["operations"] ==
                                    report["operations"] + 1)
@@ -148,6 +155,13 @@ def run_case(build, library, lcores, fault):
                     check(status["state"] == "reconciliation-required" and
                           status["residual-objects"] == "1", str(status))
                     check(read_latency(ctl, telemetry) == history, "retry deleted installation history")
+                    retried_history = read_history(ctl, telemetry)
+                    records = history_events(retried_history)
+                    check(retried_history["revision"] == 2 and len(records) == 2 and
+                          records[0] == original_failure, "retry replaced the original failure")
+                    check_history_last(records[1], retried_failure)
+                    ctl("rule-history", 0, failures["revision"], error=errno.ESTALE)
+                    check(read_history(ctl, telemetry) == retried_history, "stale query added a failure")
                     ctl("ping", error=errno.EUCLEAN)
                     telemetry.close()
                     retried = fields(ctl("reconcile-retry"))
@@ -232,14 +246,22 @@ def run_startup_case(build, library, lcores):
             check(telemetry.query("/dppd/rule", 700) is None, "unpublished actual object became desired state")
             history = read_latency(ctl, telemetry)
             check_latency_commits(history, 0, 0, 1)
+            failures = read_history(ctl, telemetry)
+            check(failures["revision"] == failures["total"] == 1, str(failures))
+            original_failure = history_events(failures)[0]
+            check_history_last(original_failure, report)
             ctl("apply-drop", 702, 0, 0, error=errno.EUCLEAN)
             check(fields(ctl("rule-metrics")) == observed and state.read_bytes() == saved,
                   "blocked write changed snapshot")
+            check(read_history(ctl, telemetry) == failures, "startup isolation write changed history")
             ctl("reconcile-retry", error=errno.EUCLEAN)
             telemetry.wait(lambda: telemetry.query("/dppd/rule_failures")["operations"] == 2)
             report = telemetry.query("/dppd/rule_failures")
             check(report["stage"] == "reconcile" and report["cause_error"] == -errno.EFAULT, str(report))
             check(read_latency(ctl, telemetry) == history, "startup retry changed installation history")
+            records = history_events(read_history(ctl, telemetry))
+            check(len(records) == 2 and records[0] == original_failure, "startup retry lost original cause")
+            check_history_last(records[1], report)
             telemetry.close()
             ctl("reconcile-retry")
             daemon.wait(timeout=10)
@@ -263,6 +285,7 @@ def run_startup_case(build, library, lcores):
             restarted = Telemetry(daemon, log)
             try:
                 check_latency_commits(read_latency(ctl, restarted), 0, 0, 2)
+                check(read_history(ctl, restarted)["revision"] == 0, "recovered process reused history")
             finally:
                 restarted.close()
         finally:

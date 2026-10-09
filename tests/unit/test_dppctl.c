@@ -39,6 +39,34 @@ static void test_status_arguments(void)
     assert(build_request(2, args, &request) == -EINVAL);
 }
 
+/** 失败历史允许零游标和零版本，最大整数只允许作游标，不能作为显式历史版本 */
+static void test_history_arguments(void)
+{
+    struct dppd_management_request request;
+    char *args[] = {"rule-history", "0", "0", "extra"};
+    const char *invalid[] = {"-1", "+1", " 1", "", "wrong", "18446744073709551616"};
+
+    assert(build_request(1, args, &request) == 0 && request.operation == DPPD_MANAGEMENT_RULE_HISTORY);
+    assert(request.payload.rule_history.after_event_id == 0);
+    assert(request.payload.rule_history.expected_revision == DPPD_RULE_HISTORY_REVISION_ANY);
+    assert(build_request(2, args, &request) == 0);
+    assert(build_request(3, args, &request) == 0 && request.payload.rule_history.expected_revision == 0);
+    assert(build_request(4, args, &request) == -EINVAL);
+    args[1] = "18446744073709551615";
+    args[2] = "18446744073709551614";
+    assert(build_request(3, args, &request) == 0);
+    assert(request.payload.rule_history.after_event_id == UINT64_MAX);
+    args[2] = "18446744073709551615";
+    assert(build_request(3, args, &request) == -EINVAL);
+    for (unsigned int index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+        args[1] = (char *)invalid[index];
+        assert(build_request(2, args, &request) == -EINVAL);
+        args[1] = "0";
+        args[2] = (char *)invalid[index];
+        assert(build_request(3, args, &request) == -EINVAL);
+    }
+}
+
 /** 探测必须生成独立的诊断请求，不能因复用规则构造器而变成真正的安装命令 */
 static void test_probe_arguments(void)
 {
@@ -129,6 +157,7 @@ int main(void)
 
     test_status_arguments();
     test_probe_arguments();
+    test_history_arguments();
 
     /** 健康与就绪命令都使用无参数的状态查询，额外参数必须明确拒绝 */
     assert(build_request(1, probe, &request) == 0);

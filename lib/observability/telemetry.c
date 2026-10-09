@@ -28,6 +28,7 @@ struct telemetry_rule {
 /** 一个发布时刻的整体规则信息，与同次发布的规则数组配对 */
 struct telemetry_rules {
     struct dppd_rule_metrics metrics;
+    struct dppd_rule_failure_history history;
     struct dppd_rule_latency_report latency;
     struct dppd_control_persistence_status persistence;
     uint64_t generation;
@@ -107,6 +108,8 @@ static int build_snapshot(const struct dppd_control_service *control,
 
     memset(summary, 0, sizeof(*summary));
     dppd_control_rule_metrics(control, &summary->metrics);
+    /** 已完成历史随同一份规则镜像发布，查询线程不借用变化中的观察上下文 */
+    summary->history = control->observation.history;
     dppd_control_rule_latency(control, &summary->latency);
     dppd_control_persistence_status(control, &summary->persistence);
     summary->generation = control->rules.generation;
@@ -353,6 +356,101 @@ static int failures_callback(const char *command, const char *parameters, struct
     return 0;
 }
 
+/** 一页四条使用索引前缀，完整值在栈中复制，不分配子容器或保留历史指针 */
+static int add_history_entry(struct rte_tel_data *data, unsigned int index,
+                            const struct dppd_rule_history_entry *entry)
+{
+    const struct dppd_rule_failure_event *failure = &entry->failure;
+    char name[64];
+
+#define ADD_EVENT_U64(field, value) do { \
+    snprintf(name, sizeof(name), "event_%u_" field, index); \
+    ADD_U64(name, value); \
+} while (0)
+#define ADD_EVENT_INT(field, value) do { \
+    snprintf(name, sizeof(name), "event_%u_" field, index); \
+    ADD_INT(name, value); \
+} while (0)
+#define ADD_EVENT_STRING(field, value) do { \
+    snprintf(name, sizeof(name), "event_%u_" field, index); \
+    ADD_STRING(name, value); \
+} while (0)
+    ADD_EVENT_U64("id", entry->event_id);
+    ADD_EVENT_U64("sequence", failure->sequence);
+    ADD_EVENT_U64("rule_id", failure->rule_id);
+    ADD_EVENT_U64("generation", failure->generation);
+    ADD_EVENT_U64("transaction_id", failure->transaction_id);
+    ADD_EVENT_U64("compensation_rule_id", failure->compensation_rule_id);
+    ADD_EVENT_U64("rule_count", failure->rule_count);
+    ADD_EVENT_STRING("operation", dppd_rule_operation_name(failure->operation));
+    ADD_EVENT_STRING("stage", dppd_rule_failure_stage_name(failure->stage));
+    ADD_EVENT_STRING("kind", dppd_rule_failure_kind_name(failure->kind));
+    ADD_EVENT_STRING("backend", !failure->backend_known ? "unknown" :
+        failure->backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software" : "rte_flow");
+    ADD_EVENT_INT("port", failure->install_port_id);
+    ADD_EVENT_INT("port_known", failure->port_known);
+    ADD_EVENT_INT("backend_known", failure->backend_known);
+    ADD_EVENT_INT("cause_error", failure->cause_code);
+    ADD_EVENT_INT("response_error", failure->response_code);
+    ADD_EVENT_INT("compensation_error", failure->compensation_code);
+    ADD_EVENT_INT("applied", failure->applied);
+#undef ADD_EVENT_U64
+#undef ADD_EVENT_INT
+#undef ADD_EVENT_STRING
+    return 0;
+}
+
+/** 严格解析失败 ID 和独立历史版本，在短锁内选一页，锁外构造完整 JSON */
+static int history_callback(const char *command, const char *parameters, struct rte_tel_data *data)
+{
+    struct dppd_rule_history_page page;
+    uint64_t after = 0, expected = DPPD_RULE_HISTORY_REVISION_ANY, publication;
+    int rc;
+
+    (void)command;
+    if (parameters != NULL && parameters[0] != '\0') {
+        if (parse_number(&parameters, &after) != 0)
+            return -EINVAL;
+        if (*parameters == ',') {
+            parameters++;
+            if (parse_number(&parameters, &expected) != 0 || expected == DPPD_RULE_HISTORY_REVISION_ANY)
+                return -EINVAL;
+        }
+        if (*parameters != '\0')
+            return -EINVAL;
+    }
+    pthread_mutex_lock(&active.lock);
+    if (active.runtime == NULL) {
+        pthread_mutex_unlock(&active.lock);
+        return -EAGAIN;
+    }
+    rc = dppd_rule_history_read(&active.summary.history, after, expected, &page);
+    publication = active.publication;
+    pthread_mutex_unlock(&active.lock);
+    if (rc != 0)
+        return rc;
+    START_DICT();
+    ADD_U64("publication", publication);
+    ADD_U64("revision", page.revision);
+    ADD_U64("capacity", page.capacity);
+    ADD_U64("total", page.total);
+    ADD_U64("returned", page.returned);
+    ADD_U64("overwritten", page.overwritten);
+    ADD_U64("oldest_event_id", page.oldest_event_id);
+    ADD_U64("newest_event_id", page.newest_event_id);
+    ADD_U64("after_event_id", page.after_event_id);
+    ADD_U64("next_after", page.next_after);
+    ADD_INT("has_more", page.more);
+    ADD_INT("gap", page.gap);
+    ADD_INT("exhausted", page.exhausted);
+    for (unsigned int index = 0; index < page.returned; ++index) {
+        rc = add_history_entry(data, index, &page.events[index]);
+        if (rc != 0)
+            return rc;
+    }
+    return 0;
+}
+
 /**
  * 每组字段使用独立前缀，区间计数保持互斥，不需要动态分配子容器
  * 全部三组和十六个上界仍在 DPDK 字典容量内，字段构造失败直接回传错误
@@ -452,6 +550,7 @@ int dppd_telemetry_register(const struct dppd_runtime *runtime,
         {"/dppd/rule", rule_callback, "Installed rule snapshot. Required: rule_id."},
         {"/dppd/rule_failures", failures_callback, "Control outcomes and last failure. No parameters."},
         {"/dppd/rule_latency", latency_callback, "Successful commit history. Optional: software, software_batch or rte_flow."},
+        {"/dppd/rule_history", history_callback, "Last 64 failures, 4 per page. Optional: after_event_id,history_revision."},
     };
     struct telemetry_rule *rows, *work;
     struct telemetry_rules summary;
@@ -519,6 +618,8 @@ int dppd_telemetry_publish_rules(const struct dppd_control_service *control)
     /** 后端自身的成功提交也可能没有改变账本，显式对比历史，避免副本漏掉这类变化 */
     dppd_control_rule_latency(control, &latency);
     if (previous.metrics.operations == control->observation.metrics.operations &&
+        previous.history.revision == control->observation.history.revision &&
+        previous.history.exhausted == control->observation.history.exhausted &&
         previous.generation == control->rules.generation &&
         previous.recovery == control->recovery_state &&
         previous.recovery_error == control->recovery_last_error &&

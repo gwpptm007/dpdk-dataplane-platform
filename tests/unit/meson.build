@@ -142,6 +142,12 @@ rule_latency_test = executable('test_rule_latency', 'test_rule_latency.c',
   link_args: ['-Wl,--wrap=clock_gettime', '-Wl,--wrap=calloc'])
 test('rule commit latency history', rule_latency_test)
 
+# 完成态环形历史、覆盖缺口、稳定分页、整数边界和真实隔离 socket 查询
+rule_history_test = executable('test_rule_history', 'test_rule_history.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=clock_gettime', '-Wl,--wrap=calloc'])
+test('rule failure history and pagination', rule_history_test)
+
 dppctl_test = executable(
   'test_dppctl',
   'test_dppctl.c',

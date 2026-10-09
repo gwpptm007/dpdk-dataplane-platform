@@ -13,7 +13,7 @@
 #include "dppd/telemetry.h"
 
 /** 保存生产代码实际注册的回调，用真实 DPDK 数据容器验证输出，不启动额外服务进程 */
-static telemetry_cb callbacks[5];
+static telemetry_cb callbacks[6];
 static unsigned int registrations, register_calls, fail_register = 2;
 static _Thread_local unsigned int fail_allocation, fail_field;
 static _Thread_local struct {
@@ -23,6 +23,9 @@ static _Thread_local struct {
     int more;
     uint64_t software_samples, software_batch_samples, software_batch_rules, rte_flow_samples;
     uint64_t software_batch_buckets;
+    uint64_t revision, overwritten, oldest_event_id, newest_event_id, next_after;
+    uint64_t event_ids[4], event_sequences[4];
+    int gap, exhausted;
     struct rte_tel_data *container;
 } output;
 static pthread_mutex_t barrier_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -59,9 +62,9 @@ void *__wrap_calloc(size_t count, size_t size)
 int __wrap_rte_telemetry_register_cmd(const char *name, telemetry_cb callback, const char *help)
 {
     static const char *const names[] = {"/dppd/stats", "/dppd/rules", "/dppd/rule", "/dppd/rule_failures",
-        "/dppd/rule_latency"};
+        "/dppd/rule_latency", "/dppd/rule_history"};
 
-    assert(registrations < 5 && strcmp(name, names[registrations]) == 0 && help != NULL);
+    assert(registrations < 6 && strcmp(name, names[registrations]) == 0 && help != NULL);
     if (register_calls++ == fail_register)
         return -ENOMEM;
     callbacks[registrations++] = callback;
@@ -77,7 +80,18 @@ int __wrap_rte_tel_data_add_dict_u64(struct rte_tel_data *data, const char *name
     CAPTURE(publication) CAPTURE(repository_generation) CAPTURE(generation)
     CAPTURE(operations) CAPTURE(succeeded) CAPTURE(failed) CAPTURE(total) CAPTURE(returned)
     CAPTURE(software_samples) CAPTURE(software_batch_samples) CAPTURE(software_batch_rules) CAPTURE(rte_flow_samples)
+    CAPTURE(revision) CAPTURE(overwritten) CAPTURE(oldest_event_id) CAPTURE(newest_event_id) CAPTURE(next_after)
 #undef CAPTURE
+    for (unsigned int index = 0; index < DPPD_RULE_HISTORY_PAGE_SIZE; ++index) {
+        char expected[64];
+
+        snprintf(expected, sizeof(expected), "event_%u_id", index);
+        if (strcmp(name, expected) == 0)
+            output.event_ids[index] = value;
+        snprintf(expected, sizeof(expected), "event_%u_sequence", index);
+        if (strcmp(name, expected) == 0)
+            output.event_sequences[index] = value;
+    }
     if (strncmp(name, "software_batch_bucket_", strlen("software_batch_bucket_")) == 0)
         output.software_batch_buckets += value;
     return __real_rte_tel_data_add_dict_u64(data, name, value);
@@ -88,6 +102,10 @@ int __wrap_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name
 {
     if (strcmp(name, "has_more") == 0)
         output.more = value;
+    if (strcmp(name, "gap") == 0)
+        output.gap = value;
+    if (strcmp(name, "exhausted") == 0)
+        output.exhausted = value;
     return __real_rte_tel_data_add_dict_int(data, name, value);
 }
 
@@ -200,6 +218,12 @@ static void *read_snapshots(void *unused)
         assert(query(4, NULL) == 0);
         assert(output.software_samples == 70 && output.software_batch_rules == 2 * output.software_batch_samples);
         assert(output.software_batch_buckets == output.software_batch_samples);
+        /** 环形窗口与返回记录必须来自同一次发布，成功更新不改变失败历史版本 */
+        assert(query(5, NULL) == 0);
+        assert(output.total <= 64 && output.returned <= 4 && output.overwritten + output.total == output.revision);
+        for (unsigned int index = 0; index < output.returned; ++index)
+            assert(output.event_ids[index] == output.oldest_event_id + index &&
+                   output.event_sequences[index] == output.event_ids[index] + 70);
         atomic_fetch_add(&samples, 1);
     } while (!atomic_load(&stop_reader));
     return NULL;
@@ -259,7 +283,7 @@ int main(void)
     }
     assert(dppd_telemetry_register(&runtime, &control) == -ENOMEM);
     assert(registrations == 2 && query(1, NULL) == -EAGAIN);
-    assert(dppd_telemetry_register(&runtime, &control) == 0 && registrations == 5 && register_calls == 6);
+    assert(dppd_telemetry_register(&runtime, &control) == 0 && registrations == 6 && register_calls == 7);
     assert(dppd_telemetry_register(&runtime, &control) == -EALREADY);
     assert(query(1, NULL) == 0 && output.id_count == 64 && output.ids[63] == 64 && output.more);
     publication = output.publication;
@@ -277,6 +301,10 @@ int main(void)
     assert(query(4, "software_batch") == 0 && output.software_samples == 0);
     assert(query(4, "rte_flow") == 0 && output.rte_flow_samples == 0);
     assert(query(4, "software,1") == -EINVAL && query(4, "wrong") == -EINVAL);
+    assert(query(5, NULL) == 0 && output.total == 0 && output.revision == 0 && !output.more && !output.gap);
+    assert(query(5, "0,0") == 0 && query(5, "0,1") == -ESTALE);
+    for (unsigned int index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index)
+        assert(query(5, invalid[index]) == -EINVAL);
     fail_field = 1;
     assert(query(1, NULL) == -E2BIG);
     fail_field = 25;
@@ -286,10 +314,31 @@ int main(void)
     fail_allocation = 0;
     assert(query(1, NULL) == 0 && output.publication == publication);
 
-    /** 反复整批更新两条软件规则，读者同时检查完整发布的累计关系和版本边界 */
+    /** 新失败只在显式发布后可见，成功更新不推进历史版本，也不抹去覆盖计数 */
+    struct dppd_rule bad = rule(1, DPPD_FALLBACK_SOFTWARE_ONLY);
+    bad.priority = 9;
+    assert(dppd_control_apply(&control, 5, &bad, 9999, &result) == -ESTALE);
+    assert(query(5, NULL) == 0 && output.revision == 0);
+    assert(dppd_telemetry_publish_rules(&control) == 0);
+    assert(query(5, NULL) == 0 && output.revision == 1 && output.event_sequences[0] == 71);
+    fail_allocation = 1;
+    assert(query(5, NULL) == 0 && fail_allocation == 1);
+    fail_allocation = 0;
+    fail_field = 15;
+    assert(query(5, NULL) == -E2BIG);
+
+    /** 读者与一百三十次失败发布并发，覆盖两轮环形窗口后继续检查成功更新 */
     assert(pthread_create(&reader, NULL, read_snapshots, NULL) == 0);
     while (atomic_load(&samples) == 0)
         sched_yield();
+    for (unsigned int index = 1; index < 130; ++index) {
+        assert(dppd_control_apply(&control, 5, &bad, 9999, &result) == -ESTALE);
+        assert(dppd_telemetry_publish_rules(&control) == 0);
+    }
+    assert(query(5, NULL) == 0 && output.revision == 130 && output.overwritten == 66);
+    assert(output.event_ids[0] == 67 && output.event_ids[3] == 70 && output.more && output.gap);
+    assert(query(5, "66,130") == 0 && !output.gap);
+    assert(query(5, "70,129") == -ESTALE);
     for (unsigned int iteration = 0; iteration < 300; ++iteration) {
         struct dppd_control_batch_update_request requests[2] = {0};
         struct dppd_control_apply_result results[2];
@@ -319,6 +368,7 @@ int main(void)
     assert(query(1, NULL) == 0 && output.total == 70);
     assert(query(2, "500") == -ENOENT);
     assert(query(4, NULL) == 0 && output.rte_flow_samples == 0 && output.software_batch_samples == 300);
+    assert(query(5, NULL) == 0 && output.revision == 130 && output.event_ids[0] == 67);
     pthread_mutex_lock(&barrier_lock);
     release_create = true;
     pthread_cond_broadcast(&barrier_condition);
@@ -347,7 +397,7 @@ int main(void)
     pthread_cond_broadcast(&barrier_condition);
     pthread_mutex_unlock(&barrier_lock);
     assert(pthread_join(reader, NULL) == 0 && pthread_join(detacher, NULL) == 0);
-    for (unsigned int callback = 0; callback < 5; ++callback)
+    for (unsigned int callback = 0; callback < 6; ++callback)
         assert(query(callback, callback == 2 ? "1" : NULL) == -EAGAIN);
     dppd_telemetry_unregister_runtime();
     assert(dppd_control_fini(&control) == 0);

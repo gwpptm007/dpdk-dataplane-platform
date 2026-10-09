@@ -1648,6 +1648,14 @@ void dppd_control_rule_metrics(const struct dppd_control_service *service,
         *metrics = service->observation.metrics;
 }
 
+/** 按失败 ID 读取保留窗口的一页，沿用管理线程的串行约定，不触发新的控制请求 */
+int dppd_control_rule_history(const struct dppd_control_service *service,
+    uint64_t after_event_id, uint64_t expected_revision, struct dppd_rule_history_page *page)
+{
+    return dppd_rule_history_read(service == NULL ? NULL : &service->observation.history,
+        after_event_id, expected_revision, page);
+}
+
 /** 查询只从后端历史值生成摘要，不校验驱动、读取 COUNT、保存文件或重新安装规则 */
 void dppd_control_rule_latency(const struct dppd_control_service *service,
     struct dppd_rule_latency_report *report)
