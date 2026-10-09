@@ -1,0 +1,424 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "DPDK 平台运行时架构",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-dpdk-runtime-20261009-220751/dpdk-runtime.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:gwpptm007/dpdk-dataplane-platform.git",
+      "revision": "46e8d09c970e2f059ba60b86a64a56897e6cdc24",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "cli",
+      "type": "external",
+      "label": "dppctl 管理客户端",
+      "sublabel": "独立进程 · 本地协议 v15",
+      "pos": [
+        40,
+        70
+      ],
+      "size": [
+        230,
+        85
+      ],
+      "sources": [
+        {
+          "path": "app/dppctl/main.c",
+          "line": 345,
+          "end_line": 387
+        },
+        {
+          "path": "include/dppd/management.h",
+          "line": 18,
+          "end_line": 27
+        }
+      ]
+    },
+    {
+      "id": "control",
+      "type": "backend",
+      "label": "dppd 主线程 / 控制面",
+      "sublabel": "管理接口 · 规则账本 · 规划与事务",
+      "tag": "恢复 READY 才允许普通规则写入",
+      "pos": [
+        490,
+        70
+      ],
+      "size": [
+        310,
+        105
+      ],
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 114,
+          "end_line": 200
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 608,
+          "end_line": 740
+        },
+        {
+          "path": "lib/management/server.c",
+          "line": 207,
+          "end_line": 295
+        }
+      ]
+    },
+    {
+      "id": "files",
+      "type": "database",
+      "label": "可选本地状态文件",
+      "sublabel": "规则 snapshot v2 / 恢复保护记录",
+      "tag": "--state-path / --recovery-path",
+      "pos": [
+        1010,
+        70
+      ],
+      "size": [
+        290,
+        100
+      ],
+      "sources": [
+        {
+          "path": "lib/control/persistence.c",
+          "line": 405,
+          "end_line": 428
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 352,
+          "end_line": 384
+        },
+        {
+          "path": "lib/control/recovery_guard.c",
+          "line": 193,
+          "end_line": 220
+        }
+      ]
+    },
+    {
+      "id": "flow",
+      "type": "backend",
+      "label": "rte_flow 后端",
+      "sublabel": "IR 编译 · 校验 / 创建 / 查询 / 删除",
+      "tag": "持有实际 flow handle 与 generation",
+      "pos": [
+        40,
+        350
+      ],
+      "size": [
+        290,
+        100
+      ],
+      "sources": [
+        {
+          "path": "lib/offload/rte_flow_backend.c",
+          "line": 211,
+          "end_line": 251
+        },
+        {
+          "path": "lib/offload/rte_flow.c",
+          "line": 190,
+          "end_line": 265
+        },
+        {
+          "path": "lib/offload/rte_flow.c",
+          "line": 278,
+          "end_line": 318
+        }
+      ]
+    },
+    {
+      "id": "software",
+      "type": "database",
+      "label": "软件规则与转发快照",
+      "sublabel": "不可变 classifier · 静态端口配对",
+      "tag": "原子发布 · QSBR 延迟回收",
+      "pos": [
+        500,
+        350
+      ],
+      "size": [
+        290,
+        100
+      ],
+      "sources": [
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 233,
+          "end_line": 253
+        },
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 838,
+          "end_line": 890
+        },
+        {
+          "path": "lib/control/snapshot.c",
+          "line": 6,
+          "end_line": 43
+        }
+      ]
+    },
+    {
+      "id": "telemetry",
+      "type": "backend",
+      "label": "DPDK Telemetry",
+      "sublabel": "独立查询线程 · /dppd/*",
+      "tag": "规则完成态副本 + 原子报文统计",
+      "pos": [
+        1010,
+        350
+      ],
+      "size": [
+        290,
+        100
+      ],
+      "sources": [
+        {
+          "path": "lib/observability/telemetry.c",
+          "line": 155,
+          "end_line": 177
+        },
+        {
+          "path": "lib/observability/telemetry.c",
+          "line": 540,
+          "end_line": 557
+        },
+        {
+          "path": "lib/observability/telemetry.c",
+          "line": 599,
+          "end_line": 642
+        }
+      ]
+    },
+    {
+      "id": "ingress",
+      "type": "external",
+      "label": "入口 ethdev / PMD",
+      "sublabel": "外部报文 · 设备执行已安装规则",
+      "tag": "硬件 / 虚拟 PMD 能力以实际校验为准",
+      "pos": [
+        40,
+        650
+      ],
+      "size": [
+        290,
+        100
+      ],
+      "sources": [
+        {
+          "path": "lib/device/device.c",
+          "line": 140,
+          "end_line": 215
+        },
+        {
+          "path": "lib/device/topology.c",
+          "line": 7,
+          "end_line": 38
+        },
+        {
+          "path": "lib/offload/rte_flow.c",
+          "line": 218,
+          "end_line": 263
+        }
+      ]
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "数据面 worker lcores",
+      "sublabel": "解析 → 策略 → 配对出口",
+      "tag": "每队列一个 lcore · 收到的报文完整处理",
+      "pos": [
+        500,
+        650
+      ],
+      "size": [
+        290,
+        100
+      ],
+      "sources": [
+        {
+          "path": "lib/runtime/runtime.c",
+          "line": 31,
+          "end_line": 56
+        },
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 22,
+          "end_line": 153
+        },
+        {
+          "path": "lib/dataplane/pipeline.c",
+          "line": 10,
+          "end_line": 55
+        }
+      ]
+    },
+    {
+      "id": "egress",
+      "type": "external",
+      "label": "配对出口 ethdev / PMD",
+      "sublabel": "TX 队列接管已发送 mbuf",
+      "tag": "不可发送 / 未接收尾包由 worker 释放",
+      "pos": [
+        1010,
+        650
+      ],
+      "size": [
+        290,
+        100
+      ],
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 77,
+          "end_line": 153
+        },
+        {
+          "path": "lib/control/snapshot.c",
+          "line": 19,
+          "end_line": 24
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "dppd 主线程：串行管理与生命周期",
+      "wraps": [
+        "control"
+      ],
+      "pad": 24
+    },
+    {
+      "kind": "region",
+      "label": "dppd 工作 lcores：逐包执行",
+      "wraps": [
+        "workers"
+      ],
+      "pad": 24
+    }
+  ],
+  "connections": [
+    {
+      "id": "manage",
+      "from": "cli",
+      "to": "control",
+      "label": "Unix SEQPACKET",
+      "variant": "security"
+    },
+    {
+      "id": "persist",
+      "from": "control",
+      "to": "files",
+      "label": "可选保存 / 启动读取",
+      "variant": "dashed"
+    },
+    {
+      "id": "hw-plan",
+      "from": "control",
+      "to": "flow",
+      "label": "选择硬件后端",
+      "variant": "dashed"
+    },
+    {
+      "id": "sw-publish",
+      "from": "control",
+      "to": "software",
+      "label": "software / prefer校验失败且等价",
+      "variant": "dashed"
+    },
+    {
+      "id": "observe",
+      "from": "control",
+      "to": "telemetry",
+      "label": "发布规则完成态副本",
+      "variant": "dashed"
+    },
+    {
+      "id": "install",
+      "from": "flow",
+      "to": "ingress",
+      "label": "rte_flow API",
+      "variant": "dashed"
+    },
+    {
+      "id": "receive",
+      "from": "ingress",
+      "to": "workers",
+      "label": "CPU RX burst",
+      "variant": "emphasis"
+    },
+    {
+      "id": "classify",
+      "from": "workers",
+      "to": "software",
+      "label": "逐包读取 / QSBR",
+      "variant": "default"
+    },
+    {
+      "id": "transmit",
+      "from": "workers",
+      "to": "egress",
+      "label": "配对端口 TX burst",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "报文路径与硬件执行",
+      "items": [
+        "实线主路径表示送达 CPU 的报文：RX → 解析与策略 → 配对端口 TX。畸形包、策略 DROP、无路由或出口不可用会在 worker 释放。",
+        "DROP / transfer 等设备侧动作可在 CPU 路径前完成；QUEUE 可将包导向 CPU 队列。硬件卸载不是 worker 的逐包运行模式。",
+        "入口和出口是逻辑角色，端口配对为双向；representor 是 PMD 暴露的 ethdev 端点。具体设备、拓扑和卸载能力需部署时确定。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "主线程如何改变规则",
+      "items": [
+        "主线程串行处理管理请求：检查 generation → planner → validate / prepare / commit → 发布规则账本 → 可选落盘。",
+        "software 显式选软件；prefer 只在硬件 validate 尚未创建对象且语义等价时回退。QUEUE 和 transfer 不做不等价降级。",
+        "纯软件整批更新通过一次 classifier 快照发布；硬件或混合批次不保证报文视角整批原子切换。依据：lib/control/control.c:1101–1366。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "线程与内存所有权",
+      "items": [
+        "EAL → 参数解析 → 恢复保护 → ethdev / NUMA mbuf pool / RSS 初始化 → control 与启动重放 → 管理、遥测 → 启动 workers。",
+        "一个 queue_id 绑定一个工作 lcore，循环扫描各端口同编号队列；每轮扫描后报告 QSBR 静默点。依据：lib/dataplane/worker.c:176–224。",
+        "worker 读取一次 active 规则表，不拿控制面写锁；旧表等待宽限期回收。转发端口配对快照与动态 classifier 是两种不同快照。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "持久化与恢复门禁",
+      "items": [
+        "--state-path 启用规则快照保存与启动重放；保存采用临时文件、fsync、rename、目录 fsync。保存失败记 dirty，下次修改前先补写。",
+        "--recovery-path 启用驱动 create 前的同步保护记录；上次残留标记会在运行时初始化和重放前阻止启动。依据：app/dppd/main.c:114–149。",
+        "回滚清理失败进入隔离：停止 / 不启动 worker，限制管理写入，保留诊断和 reconcile-retry；清理完成仍须退出重启。停止 CPU 转发不意味着设备残留规则停止。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "观测与离线维护",
+      "items": [
+        "Telemetry 读取主线程发布的规则完成态副本；/dppd/stats 直接采样 worker 原子计数。规则失败、历史延迟和最近 64 次失败由进程内状态提供，重启重新累计。",
+        "dppctl 支持规则、计数、能力、health / ready 与恢复诊断；Unix socket 权限为 0600。依据：lib/management/server.c:505–558。",
+        "dppd-snapshot-migrate 离线执行 v1 → v2；dppd-recovery 离线核对 TAP 残留并接受外部清理确认。均不属于常驻转发链；跨进程自动清理尚未实现。"
+      ]
+    }
+  ]
+}
