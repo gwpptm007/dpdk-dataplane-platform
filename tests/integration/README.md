@@ -1,5 +1,18 @@
 # 集成验收
 
+## TAP 实际残留只读核对
+
+```bash
+sudo python3 tests/integration/recovery_inspect.py --build-dir build
+```
+
+2026-10-09 通过：自有持久 TAP 在 daemon 被 SIGKILL 后保留实际 TC 规则，检查结果
+与 `tc -j` 的挂载点、句柄、链号、优先级和类型逐条一致；额外外部测试规则归属同样
+保持未知，内核规则、恢复文件与规则快照均不变。覆盖锁竞争、旧修订号、新网络命名空间、
+同名接口重建、接口消失和旧 v1 身份未知。27/27 单测、ring/TAP 保护回归及检查器、
+恢复保护、硬件 backend、控制服务四项 sanitizer 通过，见
+[TAP 残留核对](../../docs/recovery_inspection.md)。不代表物理 PMD 或自动所有权清理验收。
+
 ## 跨进程硬件安装保护
 
 ```bash

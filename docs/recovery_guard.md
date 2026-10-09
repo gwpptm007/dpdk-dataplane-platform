@@ -2,11 +2,13 @@
 
 2026-10-09 完成跨进程恢复的第一阶段：硬件安装前持久化端口线索，异常退出后阻止
 未经核对的快照重放，外部清理完成后按精确版本确认，再重新启动。管理协议仍为 v15，
-规则快照仍为 v2；新增独立恢复记录格式 v1 和离线工具 `dppd-recovery`。
+规则快照仍为 v2；第一阶段新增独立恢复记录格式 v1 和离线工具 `dppd-recovery`。
+同日第二阶段新增 [TAP 本地残留只读核对](recovery_inspection.md)，恢复记录现使用 v2
+并兼容读取 v1，管理协议和规则快照格式不变。
 
 这一步解决“旧进程已失去句柄，新进程却直接按空 backend 继续安装”的问题。
-它不枚举实际残留规则，也不执行设备复位、全端口 flush 或 PMD 专用删除。
-自动识别和清理残留对象仍需后续驱动适配。
+TAP 现可只读枚举本地 multiq/ingress 残留，归属仍为未知；不执行设备复位、全端口
+flush 或 PMD 专用删除。其他 PMD 识别和自动清理仍需后续适配。
 
 DPDK 的 flow 句柄由应用在当前进程中保管，flush 操作作用于端口关联的所有规则。
 本项目不会把磁盘中的旧指针恢复为有效句柄，也不会把整端口清空当作按所有权清理。
@@ -74,6 +76,7 @@ sudo ./build/dppd-recovery show /var/lib/dppd/hardware.recovery
 ```text
 recovery state=external-reconciliation-required revision=5 ports=2
 snapshot=/var/lib/dppd/rules.snapshot
+format=2
 port=0 device=0000:01:00.0 driver=example first-rule=901 first-generation=2
 port=1 device=0000:02:00.0 driver=example first-rule=902 first-generation=3
 ```
@@ -82,6 +85,9 @@ port=1 device=0000:02:00.0 driver=example first-rule=902 first-generation=3
 `first-rule/first-generation` 仅为各端口本轮首次尝试的线索，不是完整安装日志。
 端口编号可能在重启后变化，应结合设备名称、驱动及部署配置核对实际对象；记录的安装
 端口也不能代表 transfer 规则影响的全部端点。工具不会据此自行选择设备并删除规则。
+
+TAP 的新记录另外显示内核 `identity` 行，可使用 `inspect PATH REVISION` 读取当前
+本地 TC 对象。接口消失、空列表或检查成功均不解除保护，详见 [检查范围与结果](recovery_inspection.md)。
 
 按目标 PMD 和设备支持的方法完成外部核对、清理或复位，确认允许重新安装后，使用
 刚刚查看的版本显式确认。下面的命令仅登记这个事实，本身不执行清理或验证硬件状态：
@@ -105,13 +111,17 @@ sudo ./build/dppd-recovery acknowledge-clean \
 
 ## 文件与错误边界
 
-恢复文件固定 7712 字节，显式小端编码，不依赖 C 结构体布局：
+当前恢复文件 v2 固定 9248 字节，旧 v1 为 7712 字节，显式小端编码，不依赖 C 结构体布局：
 
 | 区域 | 字节数 | 内容 |
 |---|---|---|
-| 头部 | 32 | magic、版本 1、总长度、uint64 修订号、端口数、CRC32 |
+| 头部 | 32 | magic、数值版本 2、总长度、uint64 修订号、端口数、CRC32 |
 | 快照路径 | 4096 | 规范化绝对路径，NUL 终止，未使用部分为零 |
-| 16 个端口槽位 | 每个 224 | 端口、首次规则和版本、128 字节设备名、64 字节驱动名及保留位 |
+| 16 个端口槽位 | 每个 320 | 端口、首次规则和版本、128 字节设备名、64 字节驱动名、TAP 内核身份及保留位 |
+
+v1 的端口槽为 224 字节，没有 TAP 内核身份。旧待核对文件不会自动升级；显式确认
+干净后，下次新 daemon 打开时才原位升级 v2 并推进修订号。离线查看和检查不升级，
+旧版程序无法读取 v2。字段布局见 [恢复文件兼容性](recovery_inspection.md#恢复文件兼容性)。
 
 记录新增端口和清除时推进修订号，重复安装同一端口不推进。修订号耗尽后拒绝写入，
 不会回绕。CRC32、完整长度、字符串终止、重复端口、保留位和布局都必须通过校验。
@@ -128,6 +138,9 @@ CRC32 不防恶意篡改，文件和目录权限属于必要部署条件。
 控制操作都可成功，也不能证明物理设备中不存在其他所有者的规则。
 
 ## 验证记录
+
+以下保留第一阶段记录。第二阶段 27/27 单测、真实残留核对和兼容性验证见
+[TAP 核对验证](recovery_inspection.md#验证记录)。
 
 2026-10-09，Ubuntu 22.04.5 / DPDK 21.11.9 / GCC 11.4 / Meson 0.61.2：
 
@@ -152,4 +165,5 @@ python3 tests/integration/software_traffic.py --build-dir build
 
 TAP 验证只使用测试自建的临时接口，并在确认进程和接口消失后执行测试记录的离线确认。
 ring 夹具的 flow 只存在于独立进程堆内存，不代表物理 PMD 行为。测试检查正常退出时
-handle、socket、虚拟接口和 mbuf 回收；没有真实断电、物理设备复位或跨进程实际流表枚举验收。
+handle、socket、虚拟接口和 mbuf 回收；第一阶段没有跨进程实际流表枚举验收，后续已补齐
+本地 TAP 检查。真实断电和物理设备复位仍未验收。

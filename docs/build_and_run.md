@@ -187,6 +187,15 @@ v1 没有每条规则的端口信息，多端口旧快照不能安全使用这�
 sudo ./build/dppd-recovery show /var/lib/dppd/hardware.recovery
 ```
 
+TAP 记录支持实际内核规则的只读核对，使用 `show` 返回的修订号：
+
+```bash
+sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
+```
+
+查询只覆盖本地 TAP 的 multiq/ingress，所有对象归属仍为未知；接口消失或空列表不会
+解除恢复保护。旧 v1 记录缺少定位时明确返回未知，见 [TAP 残留核对](recovery_inspection.md)。
+
 按 PMD/设备的受支持方法完成外部清理，再使用查询返回的精确版本确认，随后重新启动。
 工具自身不执行硬件清理；文件锁、损坏记录、部署与确认流程见 [跨进程恢复保护](recovery_guard.md)。
 

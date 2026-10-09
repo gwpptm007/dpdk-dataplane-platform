@@ -19,7 +19,8 @@
 control mutation 后的完整保存、dirty state、管理状态查询、`--state-path` 和全量硬件
 事务重放；rollback 自身失败时可保留 handle 进入隔离模式并重试删除。`dppd-snapshot-migrate`
 可将确认使用同一安装端口的 v1 文件显式转换为 v2。跨进程恢复已落地可选安装保护和
-外部清理确认，实际残留 flow 枚举、PMD 专用自动 reconciliation 与多端口 v1 迁移仍属于 M1 待办。
+外部清理确认，并支持 TAP 本地实际 TC 残留只读核对；逐规则所有权证明、其他 PMD 枚举、
+自动 reconciliation 与多端口 v1 迁移仍属于 M1 待办。
 
 已登记延期项：[虚拟测试端口的规则执行能力](todo_virtual_flow_backend.md)。当前
 `net_ring` 不实现 rte_flow；后续按 TAP 基础 flow、平台 software backend、物理
@@ -58,8 +59,13 @@ worker 收发与三个相关单测的 AddressSanitizer/UBSan 通过，见 [能�
 同一文件持有生命周期锁，异常退出后阻止直接重放，外部清理完成后通过离线工具按精确
 版本确认。正常退出还会清理创建报错但仍留下 handle 的对象。26/26 单测、ring 夹具与
 真实 TAP 的 SIGKILL/恢复流程、三组隔离、健康和四组 worker 回归、四项 sanitizer
-通过，见 [跨进程恢复保护](recovery_guard.md)。下一项推进 PMD 专用残留识别和所有权核对，
-自动清理、物理复位验收仍未完成。
+通过，见 [跨进程恢复保护](recovery_guard.md)。
+
+2026-10-09 增加 TAP 本地只读残留核对和恢复记录 v2。内核接口、启动标识与命名空间
+在安装前持久保存，离线工具按修订号读取 TC 规则；旧 v1 身份未知，干净后才自动升级。
+27/27 单测、持久 TAP 崩溃后的内核列表对齐、接口替换/命名空间错配、ring/TAP 保护回归
+和四项 sanitizer 通过，见 [TAP 残留核对](recovery_inspection.md)。下一项建立逐规则的
+持久所有权证据与精确清理设计；remote 范围、其他 PMD 和自动清理、物理复位验收尚未完成。
 
 交付：
 

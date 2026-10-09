@@ -13,7 +13,9 @@
 
 /** 固定长度、小端编码、CRC32，坏文件必须阻止启动，不能被解释成空白或已清理 */
 #define RECORD_HEADER 32U
-#define RECORD_PORT 224U
+#define RECORD_V1_PORT 224U
+#define RECORD_PORT 320U
+#define RECORD_V1_SIZE (RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + DPPD_MAX_PORTS * RECORD_V1_PORT)
 #define RECORD_SIZE (RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + DPPD_MAX_PORTS * RECORD_PORT)
 static const unsigned char magic[8] = {'D', 'P', 'P', 'R', 'E', 'C', '1', 0};
 
@@ -34,10 +36,10 @@ static uint64_t get(const unsigned char *source, unsigned int width)
 }
 
 /** CRC 用于发现截断或部分写入，不作为身份认证，目录仍须由部署方保护 */
-static uint32_t checksum(const unsigned char *bytes)
+static uint32_t checksum(const unsigned char *bytes, size_t size)
 {
     uint32_t crc = UINT32_MAX;
-    for (unsigned int index = 0; index < RECORD_SIZE; ++index) {
+    for (size_t index = 0; index < size; ++index) {
         crc ^= index >= 28 && index < 32 ? 0 : bytes[index];
         for (unsigned int bit = 0; bit < 8; ++bit)
             crc = (crc >> 1) ^ (0xedb88320U & (0U - (crc & 1U)));
@@ -46,25 +48,35 @@ static uint32_t checksum(const unsigned char *bytes)
 }
 
 /** 每次完整编码都清零保留字段和字符串尾部，便于严格拒绝未知布局 */
-static void encode(const struct dppd_recovery_record *record, unsigned char *bytes)
+static size_t encode(const struct dppd_recovery_record *record, unsigned char *bytes)
 {
+    size_t size = record->format == 1 ? RECORD_V1_SIZE : RECORD_SIZE;
+    size_t stride = record->format == 1 ? RECORD_V1_PORT : RECORD_PORT;
     memset(bytes, 0, RECORD_SIZE);
     memcpy(bytes, magic, sizeof(magic));
-    put(bytes + 8, 1, 4);
-    put(bytes + 12, RECORD_SIZE, 4);
+    put(bytes + 8, record->format, 4);
+    put(bytes + 12, size, 4);
     put(bytes + 16, record->revision, 8);
     put(bytes + 24, record->count, 4);
     memcpy(bytes + RECORD_HEADER, record->state_path, strlen(record->state_path));
     for (uint32_t index = 0; index < record->count; ++index) {
         const struct dppd_recovery_port *port = &record->ports[index];
-        unsigned char *row = bytes + RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + index * RECORD_PORT;
+        unsigned char *row = bytes + RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + index * stride;
         put(row, port->port_id, 2);
         put(row + 8, port->first_rule, 8);
         put(row + 16, port->first_generation, 8);
         memcpy(row + 24, port->device, strlen(port->device));
         memcpy(row + 152, port->driver, strlen(port->driver));
+        if (record->format == 2 && port->identity.ifindex != 0) {
+            put(row + 216, port->identity.ifindex, 4);
+            memcpy(row + 220, port->identity.ifname, strlen(port->identity.ifname));
+            memcpy(row + 236, port->identity.boot_id, strlen(port->identity.boot_id));
+            put(row + 280, port->identity.netns_device, 8);
+            put(row + 288, port->identity.netns_inode, 8);
+        }
     }
-    put(bytes + 28, checksum(bytes), 4);
+    put(bytes + 28, checksum(bytes, size), 4);
+    return size;
 }
 
 /** 非空且终止的字符串才可被日志和离线工具使用，避免坏文件引发越界读取 */
@@ -73,15 +85,33 @@ static bool valid_string(const char *value, size_t capacity)
     return value[0] != '\0' && memchr(value, '\0', capacity) != NULL;
 }
 
+/** 启动标识必须是内核使用的小写 UUID，拒绝长度相同但格式损坏的定位信息 */
+static bool valid_boot_id(const char *value)
+{
+    if (!valid_string(value, DPPD_RECOVERY_BOOT_SIZE) || strlen(value) != 36)
+        return false;
+    for (size_t index = 0; index < 36; ++index) {
+        bool hyphen = index == 8 || index == 13 || index == 18 || index == 23;
+        if (hyphen ? value[index] != '-' : !((value[index] >= '0' && value[index] <= '9') ||
+            (value[index] >= 'a' && value[index] <= 'f')))
+            return false;
+    }
+    return true;
+}
+
 /** 验证校验和、唯一端口和完整规范编码，预留位或无效尾部也不能静默接受 */
-static int decode(const unsigned char *bytes, struct dppd_recovery_record *record)
+static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_record *record)
 {
     unsigned char canonical[RECORD_SIZE];
+    uint32_t format = (uint32_t)get(bytes + 8, 4);
+    size_t stride = format == 1 ? RECORD_V1_PORT : RECORD_PORT;
 
-    if (memcmp(bytes, magic, sizeof(magic)) != 0 || get(bytes + 8, 4) != 1 ||
-        get(bytes + 12, 4) != RECORD_SIZE || get(bytes + 28, 4) != checksum(bytes))
+    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format != 1 && format != 2) ||
+        size != (format == 1 ? RECORD_V1_SIZE : RECORD_SIZE) ||
+        get(bytes + 12, 4) != size || get(bytes + 28, 4) != checksum(bytes, size))
         return -EBADMSG;
     memset(record, 0, sizeof(*record));
+    record->format = format;
     record->revision = get(bytes + 16, 8);
     record->count = (uint32_t)get(bytes + 24, 4);
     memcpy(record->state_path, bytes + RECORD_HEADER, sizeof(record->state_path));
@@ -90,7 +120,7 @@ static int decode(const unsigned char *bytes, struct dppd_recovery_record *recor
         return -EBADMSG;
     for (uint32_t index = 0; index < record->count; ++index) {
         struct dppd_recovery_port *port = &record->ports[index];
-        const unsigned char *row = bytes + RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + index * RECORD_PORT;
+        const unsigned char *row = bytes + RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + index * stride;
         port->port_id = (uint16_t)get(row, 2);
         port->first_rule = get(row + 8, 8);
         port->first_generation = get(row + 16, 8);
@@ -99,12 +129,26 @@ static int decode(const unsigned char *bytes, struct dppd_recovery_record *recor
         if (!valid_string(port->device, sizeof(port->device)) ||
             !valid_string(port->driver, sizeof(port->driver)) || !port->first_rule || !port->first_generation)
             return -EBADMSG;
+        if (format == 2) {
+            struct dppd_recovery_identity *identity = &port->identity;
+            identity->ifindex = (uint32_t)get(row + 216, 4);
+            if (identity->ifindex != 0) {
+                memcpy(identity->ifname, row + 220, sizeof(identity->ifname));
+                memcpy(identity->boot_id, row + 236, sizeof(identity->boot_id));
+                identity->netns_device = get(row + 280, 8);
+                identity->netns_inode = get(row + 288, 8);
+                if (identity->ifindex > INT32_MAX || strcmp(port->driver, "net_tap") != 0 ||
+                    !valid_string(identity->ifname, sizeof(identity->ifname)) ||
+                    !valid_boot_id(identity->boot_id) || identity->netns_inode == 0)
+                    return -EBADMSG;
+            }
+        }
         for (uint32_t prior = 0; prior < index; ++prior)
             if (record->ports[prior].port_id == port->port_id)
                 return -EBADMSG;
     }
     encode(record, canonical);
-    return memcmp(bytes, canonical, RECORD_SIZE) == 0 ? 0 : -EBADMSG;
+    return memcmp(bytes, canonical, size) == 0 ? 0 : -EBADMSG;
 }
 
 /** 解析父目录后保留文件名，允许快照尚不存在，同时拒绝目录本身和超长路径 */
@@ -151,14 +195,14 @@ static int same_file(struct dppd_recovery_guard *guard)
 static int save(struct dppd_recovery_guard *guard, const struct dppd_recovery_record *record)
 {
     unsigned char bytes[RECORD_SIZE];
-    size_t done = 0;
+    size_t done = 0, size;
     int rc = same_file(guard);
 
     if (rc != 0)
         goto fail;
-    encode(record, bytes);
-    while (done < sizeof(bytes)) {
-        ssize_t written = pwrite(guard->fd, bytes + done, sizeof(bytes) - done, (off_t)done);
+    size = encode(record, bytes);
+    while (done < size) {
+        ssize_t written = pwrite(guard->fd, bytes + done, size - done, (off_t)done);
         if (written < 0 && errno == EINTR)
             continue;
         if (written <= 0) {
@@ -227,6 +271,7 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
     if (rc != 0)
         goto fail;
     if (created) {
+        guard->record.format = 2;
         strcpy(guard->record.state_path, state);
         rc = save(guard, &guard->record);
         if (rc != 0)
@@ -236,12 +281,12 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
             rc = -errno;
             goto fail;
         }
-        if (info.st_size != RECORD_SIZE) {
+        if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V1_SIZE) {
             rc = -EBADMSG;
             goto fail;
         }
-        while (done < sizeof(bytes)) {
-            ssize_t received = pread(guard->fd, bytes + done, sizeof(bytes) - done, (off_t)done);
+        while (done < (size_t)info.st_size) {
+            ssize_t received = pread(guard->fd, bytes + done, (size_t)info.st_size - done, (off_t)done);
             if (received < 0 && errno == EINTR)
                 continue;
             if (received <= 0) {
@@ -250,13 +295,26 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
             }
             done += (size_t)received;
         }
-        rc = decode(bytes, &guard->record);
+        rc = decode(bytes, (size_t)info.st_size, &guard->record);
         if (rc != 0)
             goto fail;
         if (state_path != NULL && strcmp(state, guard->record.state_path) != 0) {
             rc = -EXDEV;
             goto fail;
         }
+    }
+    /** 旧待核对记录保持原格式，只有确认干净的旧文件才允许在新 daemon 启动时升级 */
+    if (state_path != NULL && guard->record.format == 1 && guard->record.count == 0) {
+        struct dppd_recovery_record upgraded = guard->record;
+        if (upgraded.revision == UINT64_MAX) {
+            rc = -EOVERFLOW;
+            goto fail;
+        }
+        upgraded.format = 2;
+        upgraded.revision++;
+        rc = save(guard, &upgraded);
+        if (rc != 0)
+            goto fail;
     }
     /** 也同步已存在文件的目录，覆盖首次创建者同步目录前退出、后继进程接手的窗口 */
     strcpy(parent, guard->path);
@@ -282,8 +340,9 @@ fail:
 }
 
 /** 每个端口首次尝试前先持久化，之后同一身份可复用标记，软件路径完全不调用这里 */
-int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port_id,
-    const char *device, const char *driver, uint64_t rule_id, uint64_t generation)
+int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint16_t port_id,
+    const char *device, const char *driver, uint64_t rule_id, uint64_t generation,
+    const struct dppd_recovery_identity *identity)
 {
     struct dppd_recovery_record next;
     struct dppd_recovery_port *port;
@@ -292,6 +351,11 @@ int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port
     if (guard == NULL || device == NULL || driver == NULL || device[0] == '\0' || driver[0] == '\0' ||
         strlen(device) >= DPPD_RECOVERY_DEVICE_SIZE || strlen(driver) >= DPPD_RECOVERY_DRIVER_SIZE ||
         rule_id == 0 || generation == 0)
+        return -EINVAL;
+    if (identity != NULL && (guard->record.format != 2 || strcmp(driver, "net_tap") != 0 ||
+        identity->ifindex == 0 || identity->ifindex > INT32_MAX || identity->netns_inode == 0 ||
+        !valid_string(identity->ifname, sizeof(identity->ifname)) ||
+        !valid_boot_id(identity->boot_id)))
         return -EINVAL;
     if (!guard->writable || guard->faulted)
         return -EUCLEAN;
@@ -302,8 +366,17 @@ int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port
     }
     for (uint32_t index = 0; index < guard->record.count; ++index) {
         port = &guard->record.ports[index];
-        if (port->port_id == port_id)
-            return strcmp(port->device, device) == 0 && strcmp(port->driver, driver) == 0 ? 0 : -EXDEV;
+        if (port->port_id == port_id) {
+            if (strcmp(port->device, device) != 0 || strcmp(port->driver, driver) != 0)
+                return -EXDEV;
+            if (identity == NULL)
+                return port->identity.ifindex == 0 ? 0 : -EXDEV;
+            return port->identity.ifindex == identity->ifindex &&
+                port->identity.netns_device == identity->netns_device &&
+                port->identity.netns_inode == identity->netns_inode &&
+                strcmp(port->identity.ifname, identity->ifname) == 0 &&
+                strcmp(port->identity.boot_id, identity->boot_id) == 0 ? 0 : -EXDEV;
+        }
     }
     if (guard->record.count == DPPD_MAX_PORTS || guard->record.revision == UINT64_MAX)
         return -EOVERFLOW;
@@ -315,7 +388,16 @@ int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port
     port->first_generation = generation;
     strcpy(port->device, device);
     strcpy(port->driver, driver);
+    if (identity != NULL)
+        port->identity = *identity;
     return save(guard, &next);
+}
+
+/** 不支持内核定位的驱动沿用原保护，空身份必须明确保留为未知 */
+int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port_id,
+    const char *device, const char *driver, uint64_t rule_id, uint64_t generation)
+{
+    return dppd_recovery_guard_prepare_identity(guard, port_id, device, driver, rule_id, generation, NULL);
 }
 
 /** 清理确认同样先落盘再报告成功，失败时保留不确定状态，不能让后续安装继续 */

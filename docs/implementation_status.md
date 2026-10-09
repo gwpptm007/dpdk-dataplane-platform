@@ -2,12 +2,20 @@
 
 状态只表示代码是否真实存在，不以目录或占位接口计入完成度。
 
+2026-10-09 完成跨进程恢复第二阶段的 TAP 本地只读核对：安装前保存内核接口、启动
+标识和网络命名空间，离线 `inspect` 按精确修订号读取实际 TC 对象，识别环境不符、
+同名接口替换及接口消失；所有对象归属仍标为未知，检查不解除恢复保护。恢复记录 v2
+兼容读取 v1，干净旧文件才升级。`-Werror`、27/27 单测、自有持久 TAP 的真实崩溃残留
+与内核列表对齐、ring/TAP 保护回归及四项 AddressSanitizer/UBSan 通过，见
+[TAP 残留核对](recovery_inspection.md)。下一项是逐规则可持久验证的所有权证据与精确清理设计；
+其他 PMD、remote 范围和自动清理仍未实现。
+
 2026-10-09 完成跨进程恢复第一阶段：可选 `--recovery-path` 在驱动 create 前持久化端口
 身份并同步，旧记录未确认时阻止项目运行时初始化和快照重放；`dppd-recovery` 提供离线
 查看与精确版本的外部清理确认，同一文件由进程持锁。修复退出漏删部分创建 handle 的
 缺口。`-Werror`、26/26 单测、ring 夹具/真实 TAP 的 SIGKILL 与恢复、三组旧隔离场景、
 健康/四组 worker 回归及四项 AddressSanitizer/UBSan 通过，见 [恢复保护](recovery_guard.md)。
-此功能不枚举实际流表、不自动复位或清理设备；下一项是 PMD 专用残留识别和所有权核对。
+第一阶段未枚举实际流表；本地 TAP 核对已在上述阶段补齐，自动复位或清理仍未实现。
 
 2026-10-09 新增 management v15 的 `rule-history` 与 `/dppd/rule_history`。固定保留
 最近 64 次完成态失败，每页 4 条，独立失败 ID 与历史版本校验，覆盖缺口和编号耗尽显式
@@ -69,7 +77,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | capability profile / probe cache | 已实现本机诊断闭环 | 设备/固件/DPDK 身份、描述符和既有 queue/RSS/offload；完整规则校验结果缓存五秒、64 槽、强制刷新与失效；成功观察集合不承诺任意组合；正式安装始终新校验 |
 | rule IR | 已实现第一版 | 有序 match/action、domain/fallback、持久化 install port 和语义校验 |
 | rule repository | 已实现内存版和可选写路径 | 稳定 ID、单调 generation、幂等 CRUD、乐观并发、按 ID 稳定分页；control 可在 mutation 后保存完整 snapshot |
-| snapshot persistence | 已实现 v2、v1 单端口迁移、进程内隔离与可选跨进程保护 | 保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；独立恢复记录在安装前落盘，异常退出需外部清理确认；自动残留枚举和清理未实现 |
+| snapshot persistence | 已实现 v2、v1 单端口迁移、进程内隔离与可选跨进程保护 | 保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；独立恢复记录在安装前落盘，异常退出需外部清理确认；TAP 本地残留只读核对已实现，归属证明和自动清理未实现 |
 | planner | 已实现第一版 | 明确 software/rte_flow 选择、fallback reason 与 transfer domain 校验 |
 | rte_flow | 已实现事务 backend | validate 与 create 分离；对象仓库持有 handle；批量失败逆序 destroy |
 | 等价软件 fallback | 已实现最小集合 | ingress Ethernet/IPv4/UDP/TCP、DROP/MARK/COUNT；`prefer` 仅在 validate 失败时回退，QUEUE/transfer 拒绝降级；immutable snapshot + DPDK QSBR 非阻塞回收已接入 |

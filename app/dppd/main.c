@@ -9,11 +9,13 @@
 #include <time.h>
 #include <rte_cycles.h>
 #include <rte_eal.h>
+#include <rte_ethdev.h>
 #include "dppd/config.h"
 #include "dppd/control.h"
 #include "dppd/management.h"
 #include "dppd/runtime.h"
 #include "dppd/recovery_guard.h"
+#include "dppd/recovery_inspect.h"
 #include "dppd/telemetry.h"
 
 static volatile sig_atomic_t stop_signal;
@@ -33,6 +35,18 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
 
     if (port == NULL || endpoint == NULL || !port->identity.device_name_known)
         return -ENODEV;
+    /** TAP 的 DPDK 名称和内核接口名不同，必须由驱动给出真实索引后再向内核核对 */
+    if (strcmp(endpoint->driver_name, "net_tap") == 0) {
+        struct rte_eth_dev_info info;
+        struct dppd_recovery_identity identity;
+        int rc = rte_eth_dev_info_get(port_id, &info);
+        if (rc == 0)
+            rc = dppd_recovery_tap_identity(info.if_index, &identity);
+        if (rc != 0)
+            return rc;
+        return dppd_recovery_guard_prepare_identity(recovery->guard, port_id, port->identity.device_name,
+            endpoint->driver_name, rule->id, rule->generation, &identity);
+    }
     return dppd_recovery_guard_prepare(recovery->guard, port_id, port->identity.device_name,
         endpoint->driver_name, rule->id, rule->generation);
 }

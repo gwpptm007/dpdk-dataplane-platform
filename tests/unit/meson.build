@@ -148,6 +148,11 @@ recovery_guard_test = executable('test_recovery_guard', 'test_recovery_guard.c',
   link_args: ['-Wl,--wrap=fsync'])
 test('cross-process recovery guard', recovery_guard_test)
 
+# 内核消息边界、未知身份和只读查询，TAP 实际残留由独立 root 集成测试覆盖
+recovery_inspect_test = executable('test_recovery_inspect', 'test_recovery_inspect.c',
+  include_directories: dppd_inc)
+test('TAP recovery inspection', recovery_inspect_test)
+
 # 完成态环形历史、覆盖缺口、稳定分页、整数边界和真实隔离 socket 查询
 rule_history_test = executable('test_rule_history', 'test_rule_history.c',
   dependencies: dppd_core_dep,
