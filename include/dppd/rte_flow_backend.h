@@ -50,8 +50,12 @@ struct dppd_rte_flow_backend {
      * 可选的安装前保护，只在控制面调用，成功后才允许进入驱动 create
      * daemon 用它先持久化可能残留的端口，context 必须存活到 backend 清理完成
      */
-    int (*before_create)(void *context, uint16_t port_id, const struct dppd_rule *rule);
+    int (*before_create)(void *context, uint16_t port_id, const struct dppd_rule *rule, uint64_t *attempt);
     void *before_create_context;
+    /** 创建结果记录失败时向事务返回错误，真实 handle 仍保留供回滚删除 */
+    int (*after_create)(void *context, uint64_t attempt, int create_error);
+    /** 删除通知不替代驱动结果，记录故障由保护层锁存并阻止后续安装和自动清理确认 */
+    void (*after_remove)(void *context, uint64_t attempt, int remove_error);
 };
 
 /**

@@ -196,6 +196,10 @@ sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 查询只覆盖本地 TAP 的 multiq/ingress，所有对象归属仍为未知；接口消失或空列表不会
 解除恢复保护。旧 v1 记录缺少定位时明确返回未知，见 [TAP 残留核对](recovery_inspection.md)。
 
+新恢复文件 v3 保存逐次安装意图、创建/删除结果及候选坐标，`show` 增加 `attempt` 行，
+`inspect` 增加 `correlation` 行。记录最多 256 槽，仅成功删除项可复用，满时拒绝新的
+硬件安装。创建失败且没有 handle 时也保留待核对状态，详见 [逐次安装记录](recovery_attempts.md)。
+
 按 PMD/设备的受支持方法完成外部清理，再使用查询返回的精确版本确认，随后重新启动。
 工具自身不执行硬件清理；文件锁、损坏记录、部署与确认流程见 [跨进程恢复保护](recovery_guard.md)。
 

@@ -89,7 +89,8 @@ def run_case(build):
             check(all(Path(f"/sys/class/net/{name}").exists() for name in interfaces), "persistent TAP vanished")
             show = run(build / "dppd-recovery", "show", guard)
             revision = int(fields(show.splitlines()[0])["revision"])
-            check("format=2" in show and "ports=2" in show, show)
+            check("format=3" in show and "ports=2" in show, show)
+            check(show.count("phase=created ") == 2 and show.count("evidence=single-addition ") == 2, show)
             original_guard, original_state = guard.read_bytes(), state.read_bytes()
             expected = [kernel_filters(name) for name in interfaces]
             check(len(expected[0]) >= 2 and len(expected[1]) >= 1, str(expected))
@@ -106,6 +107,10 @@ def run_case(build):
                                                 int(row["priority"]), row["kind"]))
             check([sorted(rows) for rows in actual] == expected, inspected + str(expected))
             check(inspected.count("status=coordinates-match complete=yes") == 2, inspected)
+            check(inspected.count("status=coordinate-present owner=unknown") == 2, inspected)
+            candidates = [fields(line) for line in show.splitlines() if line.startswith("candidate ")]
+            check(len(candidates) == 2 and all(int(row["handle"], 16) != 0xabc for row in candidates),
+                  "foreign fixture claimed as recorded candidate")
             check("cleanup-confirmed=no" in inspected, inspected)
             check([kernel_filters(name) for name in interfaces] == expected, "inspection changed kernel filters")
             run(build / "dppd-recovery", "inspect", guard, revision - 1, error=errno.ESTALE)
@@ -130,6 +135,25 @@ def run_case(build):
             unknown = run(build / "dppd-recovery", "inspect", legacy_path, revision, error=errno.ENODATA)
             check(unknown.count("status=identity-unavailable complete=no") == 2 and "filters=" not in unknown, unknown)
             check(legacy_path.read_bytes() == legacy, "read-only tool upgraded legacy file")
+            legacy_v2 = bytearray(original_guard[:9248])
+            struct.pack_into("<II", legacy_v2, 8, 2, len(legacy_v2))
+            struct.pack_into("<I", legacy_v2, 28, 0)
+            struct.pack_into("<I", legacy_v2, 28, zlib.crc32(legacy_v2))
+            legacy_path.write_bytes(legacy_v2)
+            check("format=2" in run(build / "dppd-recovery", "show", legacy_path), "v2 read failed")
+            old_inspection = run(build / "dppd-recovery", "inspect", legacy_path, revision)
+            check(old_inspection.count("status=coordinates-match complete=yes") == 2 and
+                  "correlation " not in old_inspection, old_inspection)
+            check(legacy_path.read_bytes() == legacy_v2, "read-only tool upgraded v2 file")
+            # 删除原对象后以相同坐标重建外部规则，坐标相关性仍不能被提升为所有权
+            chosen = candidates[0]
+            selection = ["dev", interfaces[0], "parent", "1:", "protocol", "all", "pref", chosen["priority"],
+                         "handle", "0x" + chosen["handle"], "flower"]
+            run("tc", "filter", "del", *selection)
+            run("tc", "filter", "add", *selection, "action", "pass")
+            replaced = run(build / "dppd-recovery", "inspect", guard, revision)
+            check(replaced.count("status=coordinate-present owner=unknown") == 2, replaced)
+            check(guard.read_bytes() == original_guard, "same-coordinate replacement changed evidence")
             # 删除后同名重建会得到不同索引，不能把新接口当作旧接口无残留
             remove(interfaces[0])
             create(interfaces[0])
@@ -139,6 +163,7 @@ def run_case(build):
                 remove(name)
             absent = run(build / "dppd-recovery", "inspect", guard, revision)
             check(absent.count("status=interface-absent complete=yes") == 2, absent)
+            check(absent.count("status=coordinate-absent owner=unknown") == 2, absent)
             check(guard.read_bytes() == original_guard and state.read_bytes() == original_state,
                   "interface absence incorrectly cleared recovery guard")
             check("state=external-reconciliation-required" in run(build / "dppd-recovery", "show", guard),
@@ -153,7 +178,8 @@ def run_case(build):
                 remove(name)
     print("PASS TAP recovery inspection: persistent crash residuals, kernel TC inventory equality, "
           "unknown ownership including foreign rule, read-only files/filters, live lock, stale revision, "
-          "network namespace mismatch, legacy format, same-name replacement, interface absence, explicit cleanup", flush=True)
+          "network namespace mismatch, v1/v2 formats, durable attempt candidates, same-coordinate foreign rule, same-name replacement, "
+          "interface absence, explicit cleanup", flush=True)
 
 
 def main():

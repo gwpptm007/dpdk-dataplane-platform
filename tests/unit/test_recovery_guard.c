@@ -30,8 +30,9 @@ int __wrap_fsync(int fd)
 }
 
 /** 测试固定设备身份，把真实恢复保护接到正式 backend 的安装入口 */
-static int prepare(void *context, uint16_t port, const struct dppd_rule *rule)
+static int prepare(void *context, uint16_t port, const struct dppd_rule *rule, uint64_t *attempt)
 {
+    *attempt = 0;
     return dppd_recovery_guard_prepare(context, port, "0000:01:00.0", "test-driver",
         rule->id, rule->generation);
 }
@@ -222,20 +223,22 @@ static void damaged_files(const char *path, const char *state, const char *backu
 }
 
 /** 测试将正式 v2 编码收窄为既有 v1 布局并重算 CRC，避免用内存结构冒充磁盘兼容性 */
-static void legacy_file(const char *path)
+static void legacy_file(const char *path, unsigned int format)
 {
-    unsigned char current[9248], legacy[7712] = {0};
+    unsigned char current[33856], legacy[9248] = {0};
+    size_t size = format == 1 ? 7712 : 9248;
     uint32_t crc = UINT32_MAX;
     int fd = open(path, O_RDWR);
     assert(fd >= 0 && pread(fd, current, sizeof(current), 0) == sizeof(current));
     memcpy(legacy, current, 4128);
-    legacy[8] = 1;
-    legacy[12] = (unsigned char)sizeof(legacy);
-    legacy[13] = (unsigned char)(sizeof(legacy) >> 8);
+    legacy[8] = (unsigned char)format;
+    legacy[12] = (unsigned char)size;
+    legacy[13] = (unsigned char)(size >> 8);
     memset(legacy + 28, 0, 4);
     for (unsigned int index = 0; index < DPPD_MAX_PORTS; ++index)
-        memcpy(legacy + 4128 + index * 224, current + 4128 + index * 320, 216);
-    for (size_t index = 0; index < sizeof(legacy); ++index) {
+        memcpy(legacy + 4128 + index * (format == 1 ? 224 : 320), current + 4128 + index * 320,
+            format == 1 ? 216 : 320);
+    for (size_t index = 0; index < size; ++index) {
         crc ^= legacy[index];
         for (unsigned int bit = 0; bit < 8; ++bit)
             crc = (crc >> 1) ^ (0xedb88320U & (0U - (crc & 1U)));
@@ -243,8 +246,8 @@ static void legacy_file(const char *path)
     crc = ~crc;
     for (unsigned int index = 0; index < 4; ++index)
         legacy[28 + index] = (unsigned char)(crc >> (index * 8));
-    assert(pwrite(fd, legacy, sizeof(legacy), 0) == sizeof(legacy));
-    assert(ftruncate(fd, sizeof(legacy)) == 0 && close(fd) == 0);
+    assert(pwrite(fd, legacy, size, 0) == (ssize_t)size);
+    assert(ftruncate(fd, (off_t)size) == 0 && close(fd) == 0);
 }
 
 /** 定位信息必须完整保存，同端口更换身份不能复用旧标记，v1 待确认文件禁止自动升级 */
@@ -254,7 +257,7 @@ static void identity_and_compatibility(const char *path, const char *state)
     struct dppd_recovery_identity identity = {.ifindex = 123, .ifname = "test-tap",
         .boot_id = "01234567-89ab-cdef-0123-456789abcdef", .netns_device = 4, .netns_inode = 567};
     struct stat info;
-    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.record.format == 2);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.record.format == 3);
     identity.boot_id[0] = 'z';
     assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 1, 1, &identity) == -EINVAL);
     identity.boot_id[0] = '0';
@@ -272,7 +275,7 @@ static void identity_and_compatibility(const char *path, const char *state)
     assert(guard.record.ports[0].identity.netns_inode == 567);
     assert(strcmp(guard.record.ports[0].identity.boot_id, identity.boot_id) == 0);
     dppd_recovery_guard_close(&guard);
-    legacy_file(path);
+    legacy_file(path, 1);
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && !guard.writable);
     assert(guard.record.format == 1 && guard.record.revision == revision);
     assert(guard.record.ports[0].identity.ifindex == 0);
@@ -282,8 +285,15 @@ static void identity_and_compatibility(const char *path, const char *state)
     assert(stat(path, &info) == 0 && info.st_size == 7712);
     dppd_recovery_guard_close(&guard);
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
-    assert(guard.record.format == 2 && guard.record.revision == revision + 2);
-    assert(stat(path, &info) == 0 && info.st_size == 9248);
+    assert(guard.record.format == 3 && guard.record.revision == revision + 2);
+    assert(stat(path, &info) == 0 && info.st_size == 33856);
+    dppd_recovery_guard_close(&guard);
+    legacy_file(path, 2);
+    assert(dppd_recovery_guard_open(&guard, path, NULL) == 0 && guard.record.format == 2);
+    assert(guard.record.revision == revision + 2);
+    dppd_recovery_guard_close(&guard);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
+    assert(guard.record.format == 3 && guard.record.revision == revision + 3);
     dppd_recovery_guard_close(&guard);
 }
 

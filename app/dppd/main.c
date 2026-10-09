@@ -24,14 +24,28 @@ static volatile sig_atomic_t stop_signal;
 struct recovery_context {
     struct dppd_recovery_guard *guard;
     const struct dppd_device_set *devices;
+    struct dppd_recovery_inspection before;
+    uint16_t pending_port;
+    int before_error;
+    bool record_error_reported;
 };
 
+/** 从已落盘的端口身份读取观察范围，不再按可复用的 DPDK 名称推断内核接口 */
+static int observe_recovery_port(struct recovery_context *context, struct dppd_recovery_inspection *inspection)
+{
+    for (uint32_t index = 0; index < context->guard->record.count; ++index)
+        if (context->guard->record.ports[index].port_id == context->pending_port)
+            return dppd_recovery_inspect(&context->guard->record.ports[index], inspection);
+    return -ENOENT;
+}
+
 /** 不能只凭可重用的端口号记录身份，无法取得设备名称时拒绝这次硬件安装 */
-static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_rule *rule)
+static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_rule *rule, uint64_t *attempt)
 {
     struct recovery_context *recovery = context;
     const struct dppd_port *port = dppd_devices_find(recovery->devices, port_id);
     const struct dppd_endpoint *endpoint = dppd_topology_find(&recovery->devices->topology, port_id);
+    int rc;
 
     if (port == NULL || endpoint == NULL || !port->identity.device_name_known)
         return -ENODEV;
@@ -39,16 +53,63 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
     if (strcmp(endpoint->driver_name, "net_tap") == 0) {
         struct rte_eth_dev_info info;
         struct dppd_recovery_identity identity;
-        int rc = rte_eth_dev_info_get(port_id, &info);
+        rc = rte_eth_dev_info_get(port_id, &info);
         if (rc == 0)
             rc = dppd_recovery_tap_identity(info.if_index, &identity);
         if (rc != 0)
             return rc;
-        return dppd_recovery_guard_prepare_identity(recovery->guard, port_id, port->identity.device_name,
+        rc = dppd_recovery_guard_prepare_identity(recovery->guard, port_id, port->identity.device_name,
             endpoint->driver_name, rule->id, rule->generation, &identity);
+    } else
+        rc = dppd_recovery_guard_prepare(recovery->guard, port_id, port->identity.device_name,
+            endpoint->driver_name, rule->id, rule->generation);
+    if (rc != 0)
+        return rc;
+    rc = dppd_recovery_guard_begin(recovery->guard, port_id, rule->id, rule->generation, attempt);
+    if (rc != 0)
+        return rc;
+    recovery->pending_port = port_id;
+    /** 观察是附加线索，失败仍允许有意图保护的创建，之后明确记录无法观察 */
+    recovery->before_error = observe_recovery_port(recovery, &recovery->before);
+    return 0;
+}
+
+/** 记录失败只报告一次并保持故障锁存，避免清理阶段反复刷屏或把不确定记录覆盖为干净 */
+static void recovery_record_error(struct recovery_context *context, int error)
+{
+    context->guard->faulted = true;
+    if (!context->record_error_reported) {
+        fprintf(stderr, "[dppd] recovery attempt record failed: %d; external reconciliation required\n", error);
+        context->record_error_reported = true;
     }
-    return dppd_recovery_guard_prepare(recovery->guard, port_id, port->identity.device_name,
-        endpoint->driver_name, rule->id, rule->generation);
+}
+
+/** 对比创建前后的只读列表，保留原始驱动结果，候选坐标只表示观察到一次新增 */
+static int finish_recovery_create(void *context, uint64_t attempt, int create_error)
+{
+    struct recovery_context *recovery = context;
+    struct dppd_recovery_inspection after;
+    struct dppd_recovery_filter candidate;
+    enum dppd_recovery_evidence evidence = DPPD_EVIDENCE_UNAVAILABLE;
+    int observed = recovery->before_error;
+    if (observed == 0)
+        observed = observe_recovery_port(recovery, &after);
+    if (observed == 0)
+        evidence = dppd_recovery_compare(&recovery->before, &after, &candidate);
+    int rc = dppd_recovery_guard_created(recovery->guard, attempt, create_error, evidence, observed,
+        evidence == DPPD_EVIDENCE_SINGLE_ADDITION ? &candidate : NULL);
+    if (rc != 0)
+        recovery_record_error(recovery, rc);
+    return rc;
+}
+
+/** 无论普通删除、回滚还是退出清理，都按同一个尝试编号记录实际驱动结果 */
+static void finish_recovery_remove(void *context, uint64_t attempt, int remove_error)
+{
+    struct recovery_context *recovery = context;
+    int rc = dppd_recovery_guard_removed(recovery->guard, attempt, remove_error);
+    if (rc != 0)
+        recovery_record_error(recovery, rc);
 }
 
 static void handle_signal(int signal_number)
@@ -147,6 +208,8 @@ int main(int argc, char **argv)
     if (recovery_guard.fd >= 0) {
         control.rte_flow.before_create = prepare_recovery;
         control.rte_flow.before_create_context = &recovery_context;
+        control.rte_flow.after_create = finish_recovery_create;
+        control.rte_flow.after_remove = finish_recovery_remove;
     }
     if (config.state_path[0] != '\0') {
         int restore_rc = dppd_control_persistence_restore(&control,

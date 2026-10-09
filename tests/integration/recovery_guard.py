@@ -111,7 +111,7 @@ def run_case(build, tap=False):
             stop(daemon)
             check(daemon.returncode == 0, log.read_text())
             status, _ = show()
-            check(status["state"] == "clean" and int(status["revision"]) == 3, str(status))
+            check(status["state"] == "clean" and int(status["revision"]) == 9, str(status))
 
             daemon, log = start("crashed.log")
             check(fields(ctl("list").splitlines()[0])["total"] == "3", "three rules not replayed")
@@ -121,6 +121,7 @@ def run_case(build, tap=False):
             check(status["state"] == "external-reconciliation-required" and status["ports"] == "2", text)
             check("port=0 device=net_" in text and "port=1 device=net_" in text, text)
             check("first-rule=901" in text and "first-rule=902" in text, text)
+            check(text.count("phase=created ") == 2 and "attempts=2 last-attempt=4" in text, text)
             # 未支持的 PMD 不能把未知写成零残留，临时 TAP 消失也不能自动解除保护
             before_inspect = guard.read_bytes()
             inspected = tool("inspect", guard, revision, error=None if tap else errno.ENOTSUP)

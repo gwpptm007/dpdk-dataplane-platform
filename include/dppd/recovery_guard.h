@@ -9,6 +9,39 @@
 #define DPPD_RECOVERY_DRIVER_SIZE 64U
 #define DPPD_RECOVERY_IFNAME_SIZE 16U
 #define DPPD_RECOVERY_BOOT_SIZE 40U
+#define DPPD_RECOVERY_ATTEMPT_LIMIT 256U
+#define DPPD_RECOVERY_KIND_SIZE 32U
+
+/** 内核坐标是观察线索，不包含跨进程有效的指针，也不构成对象所有权证明 */
+struct dppd_recovery_filter {
+    uint32_t parent, handle, chain;
+    uint16_t priority, protocol;
+    char kind[DPPD_RECOVERY_KIND_SIZE];
+};
+
+enum dppd_recovery_phase {
+    DPPD_RECOVERY_INTENT = 1,
+    DPPD_RECOVERY_CREATED,
+    DPPD_RECOVERY_CREATE_FAILED,
+    DPPD_RECOVERY_REMOVED
+};
+
+enum dppd_recovery_evidence {
+    DPPD_EVIDENCE_NONE,
+    DPPD_EVIDENCE_SINGLE_ADDITION,
+    DPPD_EVIDENCE_AMBIGUOUS,
+    DPPD_EVIDENCE_UNAVAILABLE
+};
+
+/** 每次尝试都有不复用的编号，同一业务版本补偿重建时也必须重新登记 */
+struct dppd_recovery_attempt {
+    uint64_t id, rule_id, generation;
+    uint16_t port_id;
+    enum dppd_recovery_phase phase;
+    enum dppd_recovery_evidence evidence;
+    int32_t create_error, remove_error, observation_error;
+    struct dppd_recovery_filter candidate;
+};
 
 /**
  * TAP 的内核定位信息必须连同启动身份和网络命名空间保存，避免到另一个环境查同号接口
@@ -42,6 +75,10 @@ struct dppd_recovery_record {
     uint32_t count;
     char state_path[DPPD_STATE_PATH_CAPACITY];
     struct dppd_recovery_port ports[DPPD_MAX_PORTS];
+    /** 只复用已成功删除的槽位，仍可能有残留的记录不可被覆盖 */
+    uint64_t last_attempt;
+    uint32_t attempt_count;
+    struct dppd_recovery_attempt attempts[DPPD_RECOVERY_ATTEMPT_LIMIT];
 };
 
 /**
@@ -70,6 +107,14 @@ int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint
 int dppd_recovery_guard_clean(struct dppd_recovery_guard *guard);
 /** 离线确认外部清理已经完成，精确版本防止确认旧记录，此函数本身不执行设备清理 */
 int dppd_recovery_guard_acknowledge(struct dppd_recovery_guard *guard, uint64_t revision);
+/** 端口已登记后为本次驱动调用先写入意图，写盘失败或记录满时不能进入驱动 */
+int dppd_recovery_guard_begin(struct dppd_recovery_guard *guard, uint16_t port_id,
+    uint64_t rule_id, uint64_t generation, uint64_t *attempt);
+/** 保存真实创建结果与可选候选坐标，失败时调用方仍持有 handle 并执行原事务回滚 */
+int dppd_recovery_guard_created(struct dppd_recovery_guard *guard, uint64_t attempt, int create_error,
+    enum dppd_recovery_evidence evidence, int observation_error, const struct dppd_recovery_filter *candidate);
+/** 删除结果只更新记录，不能让记录失败阻止已知 handle 的实际清理 */
+int dppd_recovery_guard_removed(struct dppd_recovery_guard *guard, uint64_t attempt, int remove_error);
 /** 只释放文件锁，不删除记录、不清除待核对状态 */
 void dppd_recovery_guard_close(struct dppd_recovery_guard *guard);
 

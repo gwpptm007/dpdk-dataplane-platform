@@ -140,6 +140,22 @@ static void unknown_identity(void)
 
 int main(void)
 {
+    /** 正常单新增、同时多新增、旧对象变化和重复坐标必须分开判断 */
+    struct dppd_recovery_inspection before = {.state = DPPD_INSPECT_PRESENT, .count = 1};
+    struct dppd_recovery_inspection after = {.state = DPPD_INSPECT_PRESENT, .count = 2};
+    struct dppd_recovery_filter candidate;
+    before.filters[0] = (struct dppd_recovery_filter){.handle = 1, .kind = "flower"};
+    after.filters[0] = before.filters[0];
+    after.filters[1] = (struct dppd_recovery_filter){.handle = 2, .kind = "flower"};
+    assert(dppd_recovery_compare(&before, &after, &candidate) == DPPD_EVIDENCE_SINGLE_ADDITION);
+    assert(candidate.handle == 2);
+    after.count = 3;
+    assert(dppd_recovery_compare(&before, &after, &candidate) == DPPD_EVIDENCE_AMBIGUOUS && candidate.handle == 0);
+    after.count = 2;
+    after.filters[0].handle = 3;
+    assert(dppd_recovery_compare(&before, &after, &candidate) == DPPD_EVIDENCE_AMBIGUOUS);
+    after.filters[0] = after.filters[1];
+    assert(dppd_recovery_compare(&before, &after, &candidate) == DPPD_EVIDENCE_AMBIGUOUS);
     filter_messages();
     qdisc_messages();
     transport_failures();

@@ -399,3 +399,45 @@ const char *dppd_recovery_inspection_name(enum dppd_recovery_inspection_state st
     default: return "unavailable";
     }
 }
+
+/** 坐标比较不涉及指针和结构体填充，也不比较内核动态计数 */
+bool dppd_recovery_filter_equal(const struct dppd_recovery_filter *left,
+    const struct dppd_recovery_filter *right)
+{
+    return left->parent == right->parent && left->handle == right->handle && left->chain == right->chain &&
+        left->priority == right->priority && left->protocol == right->protocol && strcmp(left->kind, right->kind) == 0;
+}
+
+/** 同一坐标重复、旧对象消失或新增多个对象都视为有歧义，单一新增也只是时间相关线索 */
+enum dppd_recovery_evidence dppd_recovery_compare(const struct dppd_recovery_inspection *before,
+    const struct dppd_recovery_inspection *after, struct dppd_recovery_filter *candidate)
+{
+    memset(candidate, 0, sizeof(*candidate));
+    if (before->state != DPPD_INSPECT_PRESENT || after->state != DPPD_INSPECT_PRESENT ||
+        before->count >= DPPD_RECOVERY_FILTER_LIMIT || after->count != before->count + 1)
+        return DPPD_EVIDENCE_AMBIGUOUS;
+    for (uint32_t side = 0; side < 2; ++side) {
+        const struct dppd_recovery_inspection *set = side ? after : before;
+        for (uint32_t index = 0; index < set->count; ++index)
+            for (uint32_t prior = 0; prior < index; ++prior)
+                if (dppd_recovery_filter_equal(&set->filters[index], &set->filters[prior]))
+                    return DPPD_EVIDENCE_AMBIGUOUS;
+    }
+    for (uint32_t index = 0; index < before->count; ++index) {
+        bool found = false;
+        for (uint32_t row = 0; row < after->count; ++row)
+            found |= dppd_recovery_filter_equal(&before->filters[index], &after->filters[row]);
+        if (!found)
+            return DPPD_EVIDENCE_AMBIGUOUS;
+    }
+    for (uint32_t row = 0; row < after->count; ++row) {
+        bool found = false;
+        for (uint32_t index = 0; index < before->count; ++index)
+            found |= dppd_recovery_filter_equal(&before->filters[index], &after->filters[row]);
+        if (!found) {
+            *candidate = after->filters[row];
+            return DPPD_EVIDENCE_SINGLE_ADDITION;
+        }
+    }
+    return DPPD_EVIDENCE_AMBIGUOUS;
+}

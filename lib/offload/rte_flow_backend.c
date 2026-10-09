@@ -16,6 +16,8 @@ struct dppd_rte_flow_object {
     bool installed;
     uint64_t rule_id;
     uint64_t generation;
+    /** 精确关联本次驱动调用的磁盘记录，业务 ID 和版本相同的补偿重建也不复用 */
+    uint64_t recovery_attempt;
     struct dppd_flow_handle handle;
     /** 在 prepare 时保留安装意图，查询时据此核对驱动返回的 handle */
     struct dppd_rule_install_info installation;
@@ -137,7 +139,10 @@ static int remove_object(struct dppd_rte_flow_backend *backend,
                           struct dppd_flow_error *error)
 {
     dppd_flow_probe_cache_invalidate_all(backend->probes);
-    return backend->api.remove(&object->handle, error);
+    int rc = backend->api.remove(&object->handle, error);
+    if (backend->after_remove != NULL && object->recovery_attempt != 0)
+        backend->after_remove(backend->before_create_context, object->recovery_attempt, rc);
+    return rc;
 }
 
 /**
@@ -222,7 +227,8 @@ static int transaction_commit(void *context,
         return -EINVAL;
     /** 恢复记录落盘失败时不进入驱动，事务仍可撤销尚未安装的预留槽位 */
     if (backend->before_create != NULL) {
-        rc = backend->before_create(backend->before_create_context, item->plan.install_port_id, &item->rule);
+        rc = backend->before_create(backend->before_create_context, item->plan.install_port_id,
+            &item->rule, &object->recovery_attempt);
         if (rc != 0)
             return rc;
     }
@@ -239,6 +245,12 @@ static int transaction_commit(void *context,
         /** 复用刚完成的测量，不额外读时钟，也不因之后的事务回滚扣除这次成功创建 */
         dppd_rule_latency_record(&backend->latency, object->installation.timing_available,
             object->installation.install_duration_ns, 1);
+    }
+    /** 先完成驱动计时和 handle 登记，再保存观察结果，写盘失败不能把已创建对象遗忘 */
+    if (backend->after_create != NULL && object->recovery_attempt != 0) {
+        int recorded = backend->after_create(backend->before_create_context, object->recovery_attempt, rc);
+        if (rc == 0)
+            rc = recorded;
     }
     return rc;
 }

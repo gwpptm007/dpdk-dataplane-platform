@@ -4,14 +4,6 @@
 #include "dppd/recovery_guard.h"
 
 #define DPPD_RECOVERY_FILTER_LIMIT 256U
-#define DPPD_RECOVERY_KIND_SIZE 32U
-
-/** TC 句柄用于定位当前看到的对象，不代表项目拥有它，也不能由业务规则 ID 推算 */
-struct dppd_recovery_filter {
-    uint32_t parent, handle, chain;
-    uint16_t priority, protocol;
-    char kind[DPPD_RECOVERY_KIND_SIZE];
-};
 
 enum dppd_recovery_inspection_state {
     DPPD_INSPECT_UNAVAILABLE,
@@ -37,5 +29,11 @@ int dppd_recovery_inspect(const struct dppd_recovery_port *port,
     struct dppd_recovery_inspection *inspection);
 /** 返回稳定的诊断名称，便于离线工具和测试区分缺失、未知与上下文不符 */
 const char *dppd_recovery_inspection_name(enum dppd_recovery_inspection_state state);
+/** 仅当旧坐标全部保留且恰好新增一个对象时返回候选，仍不能据此断言归属 */
+enum dppd_recovery_evidence dppd_recovery_compare(const struct dppd_recovery_inspection *before,
+    const struct dppd_recovery_inspection *after, struct dppd_recovery_filter *candidate);
+/** 比较显式字段，不读取 C 结构体填充字节 */
+bool dppd_recovery_filter_equal(const struct dppd_recovery_filter *left,
+    const struct dppd_recovery_filter *right);
 
 #endif

@@ -16,7 +16,9 @@
 #define RECORD_V1_PORT 224U
 #define RECORD_PORT 320U
 #define RECORD_V1_SIZE (RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + DPPD_MAX_PORTS * RECORD_V1_PORT)
-#define RECORD_SIZE (RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + DPPD_MAX_PORTS * RECORD_PORT)
+#define RECORD_V2_SIZE (RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + DPPD_MAX_PORTS * RECORD_PORT)
+#define RECORD_ATTEMPT 96U
+#define RECORD_SIZE (RECORD_V2_SIZE + 32U + DPPD_RECOVERY_ATTEMPT_LIMIT * RECORD_ATTEMPT)
 static const unsigned char magic[8] = {'D', 'P', 'P', 'R', 'E', 'C', '1', 0};
 
 /** 逐字节编码避免对齐和主机字节序影响，宽度只使用 2、4、8 字节 */
@@ -50,7 +52,7 @@ static uint32_t checksum(const unsigned char *bytes, size_t size)
 /** 每次完整编码都清零保留字段和字符串尾部，便于严格拒绝未知布局 */
 static size_t encode(const struct dppd_recovery_record *record, unsigned char *bytes)
 {
-    size_t size = record->format == 1 ? RECORD_V1_SIZE : RECORD_SIZE;
+    size_t size = record->format == 1 ? RECORD_V1_SIZE : record->format == 2 ? RECORD_V2_SIZE : RECORD_SIZE;
     size_t stride = record->format == 1 ? RECORD_V1_PORT : RECORD_PORT;
     memset(bytes, 0, RECORD_SIZE);
     memcpy(bytes, magic, sizeof(magic));
@@ -67,12 +69,37 @@ static size_t encode(const struct dppd_recovery_record *record, unsigned char *b
         put(row + 16, port->first_generation, 8);
         memcpy(row + 24, port->device, strlen(port->device));
         memcpy(row + 152, port->driver, strlen(port->driver));
-        if (record->format == 2 && port->identity.ifindex != 0) {
+        if (record->format >= 2 && port->identity.ifindex != 0) {
             put(row + 216, port->identity.ifindex, 4);
             memcpy(row + 220, port->identity.ifname, strlen(port->identity.ifname));
             memcpy(row + 236, port->identity.boot_id, strlen(port->identity.boot_id));
             put(row + 280, port->identity.netns_device, 8);
             put(row + 288, port->identity.netns_inode, 8);
+        }
+    }
+    if (record->format == 3) {
+        put(bytes + RECORD_V2_SIZE, record->last_attempt, 8);
+        put(bytes + RECORD_V2_SIZE + 8, record->attempt_count, 4);
+        for (uint32_t index = 0; index < record->attempt_count; ++index) {
+            const struct dppd_recovery_attempt *attempt = &record->attempts[index];
+            unsigned char *row = bytes + RECORD_V2_SIZE + 32 + index * RECORD_ATTEMPT;
+            put(row, attempt->id, 8);
+            put(row + 8, attempt->rule_id, 8);
+            put(row + 16, attempt->generation, 8);
+            put(row + 24, attempt->port_id, 2);
+            row[26] = (unsigned char)attempt->phase;
+            row[27] = (unsigned char)attempt->evidence;
+            put(row + 28, (uint32_t)attempt->create_error, 4);
+            put(row + 32, (uint32_t)attempt->remove_error, 4);
+            put(row + 36, (uint32_t)attempt->observation_error, 4);
+            if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION) {
+                put(row + 40, attempt->candidate.parent, 4);
+                put(row + 44, attempt->candidate.handle, 4);
+                put(row + 48, attempt->candidate.chain, 4);
+                put(row + 52, attempt->candidate.priority, 2);
+                put(row + 54, attempt->candidate.protocol, 2);
+                memcpy(row + 56, attempt->candidate.kind, strlen(attempt->candidate.kind));
+            }
         }
     }
     put(bytes + 28, checksum(bytes, size), 4);
@@ -99,6 +126,34 @@ static bool valid_boot_id(const char *value)
     return true;
 }
 
+/** 正式接口统一保存 Linux 负 errno，损坏的正数或超出范围值不能混入恢复结论 */
+static bool valid_error(int value)
+{
+    return value <= 0 && value >= -4095;
+}
+
+/** 同时校验状态和字段组合，意图未完成时不得带成功证据，删除成功才允许复用槽位 */
+static bool valid_attempt(const struct dppd_recovery_attempt *attempt)
+{
+    if (attempt->id == 0 || attempt->rule_id == 0 || attempt->generation == 0 ||
+        attempt->phase < DPPD_RECOVERY_INTENT || attempt->phase > DPPD_RECOVERY_REMOVED ||
+        attempt->evidence < DPPD_EVIDENCE_NONE || attempt->evidence > DPPD_EVIDENCE_UNAVAILABLE ||
+        !valid_error(attempt->create_error) || !valid_error(attempt->remove_error) ||
+        !valid_error(attempt->observation_error))
+        return false;
+    if ((attempt->phase == DPPD_RECOVERY_CREATED && attempt->create_error != 0) ||
+        (attempt->phase == DPPD_RECOVERY_CREATE_FAILED && attempt->create_error == 0) ||
+        (attempt->phase == DPPD_RECOVERY_REMOVED && attempt->remove_error != 0))
+        return false;
+    if (attempt->phase == DPPD_RECOVERY_INTENT && (attempt->create_error != 0 ||
+        attempt->remove_error != 0 || attempt->evidence != DPPD_EVIDENCE_NONE))
+        return false;
+    if ((attempt->evidence == DPPD_EVIDENCE_UNAVAILABLE) != (attempt->observation_error != 0))
+        return false;
+    return attempt->evidence != DPPD_EVIDENCE_SINGLE_ADDITION ||
+        (attempt->candidate.handle != 0 && valid_string(attempt->candidate.kind, sizeof(attempt->candidate.kind)));
+}
+
 /** 验证校验和、唯一端口和完整规范编码，预留位或无效尾部也不能静默接受 */
 static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_record *record)
 {
@@ -106,8 +161,8 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
     uint32_t format = (uint32_t)get(bytes + 8, 4);
     size_t stride = format == 1 ? RECORD_V1_PORT : RECORD_PORT;
 
-    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format != 1 && format != 2) ||
-        size != (format == 1 ? RECORD_V1_SIZE : RECORD_SIZE) ||
+    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format < 1 || format > 3) ||
+        size != (format == 1 ? RECORD_V1_SIZE : format == 2 ? RECORD_V2_SIZE : RECORD_SIZE) ||
         get(bytes + 12, 4) != size || get(bytes + 28, 4) != checksum(bytes, size))
         return -EBADMSG;
     memset(record, 0, sizeof(*record));
@@ -129,7 +184,7 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
         if (!valid_string(port->device, sizeof(port->device)) ||
             !valid_string(port->driver, sizeof(port->driver)) || !port->first_rule || !port->first_generation)
             return -EBADMSG;
-        if (format == 2) {
+        if (format >= 2) {
             struct dppd_recovery_identity *identity = &port->identity;
             identity->ifindex = (uint32_t)get(row + 216, 4);
             if (identity->ifindex != 0) {
@@ -146,6 +201,47 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
         for (uint32_t prior = 0; prior < index; ++prior)
             if (record->ports[prior].port_id == port->port_id)
                 return -EBADMSG;
+    }
+    if (format == 3) {
+        record->last_attempt = get(bytes + RECORD_V2_SIZE, 8);
+        record->attempt_count = (uint32_t)get(bytes + RECORD_V2_SIZE + 8, 4);
+        if (record->attempt_count > DPPD_RECOVERY_ATTEMPT_LIMIT ||
+            (record->count == 0 && record->attempt_count != 0))
+            return -EBADMSG;
+        for (uint32_t index = 0; index < record->attempt_count; ++index) {
+            struct dppd_recovery_attempt *attempt = &record->attempts[index];
+            const unsigned char *row = bytes + RECORD_V2_SIZE + 32 + index * RECORD_ATTEMPT;
+            attempt->id = get(row, 8);
+            attempt->rule_id = get(row + 8, 8);
+            attempt->generation = get(row + 16, 8);
+            attempt->port_id = (uint16_t)get(row + 24, 2);
+            attempt->phase = row[26];
+            attempt->evidence = row[27];
+            attempt->create_error = (int32_t)get(row + 28, 4);
+            attempt->remove_error = (int32_t)get(row + 32, 4);
+            attempt->observation_error = (int32_t)get(row + 36, 4);
+            attempt->candidate.parent = (uint32_t)get(row + 40, 4);
+            attempt->candidate.handle = (uint32_t)get(row + 44, 4);
+            attempt->candidate.chain = (uint32_t)get(row + 48, 4);
+            attempt->candidate.priority = (uint16_t)get(row + 52, 2);
+            attempt->candidate.protocol = (uint16_t)get(row + 54, 2);
+            memcpy(attempt->candidate.kind, row + 56, sizeof(attempt->candidate.kind));
+            if (!valid_attempt(attempt) || attempt->id > record->last_attempt)
+                return -EBADMSG;
+            bool known_port = false;
+            for (uint32_t port = 0; port < record->count; ++port)
+                if (record->ports[port].port_id == attempt->port_id) {
+                    known_port = true;
+                    if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION &&
+                        record->ports[port].identity.ifindex == 0)
+                        return -EBADMSG;
+                }
+            if (!known_port)
+                return -EBADMSG;
+            for (uint32_t prior = 0; prior < index; ++prior)
+                if (record->attempts[prior].id == attempt->id)
+                    return -EBADMSG;
+        }
     }
     encode(record, canonical);
     return memcmp(bytes, canonical, size) == 0 ? 0 : -EBADMSG;
@@ -271,7 +367,7 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
     if (rc != 0)
         goto fail;
     if (created) {
-        guard->record.format = 2;
+        guard->record.format = 3;
         strcpy(guard->record.state_path, state);
         rc = save(guard, &guard->record);
         if (rc != 0)
@@ -281,7 +377,7 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
             rc = -errno;
             goto fail;
         }
-        if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V1_SIZE) {
+        if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V1_SIZE && info.st_size != RECORD_V2_SIZE) {
             rc = -EBADMSG;
             goto fail;
         }
@@ -304,13 +400,13 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
         }
     }
     /** 旧待核对记录保持原格式，只有确认干净的旧文件才允许在新 daemon 启动时升级 */
-    if (state_path != NULL && guard->record.format == 1 && guard->record.count == 0) {
+    if (state_path != NULL && guard->record.format < 3 && guard->record.count == 0) {
         struct dppd_recovery_record upgraded = guard->record;
         if (upgraded.revision == UINT64_MAX) {
             rc = -EOVERFLOW;
             goto fail;
         }
-        upgraded.format = 2;
+        upgraded.format = 3;
         upgraded.revision++;
         rc = save(guard, &upgraded);
         if (rc != 0)
@@ -352,7 +448,7 @@ int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint
         strlen(device) >= DPPD_RECOVERY_DEVICE_SIZE || strlen(driver) >= DPPD_RECOVERY_DRIVER_SIZE ||
         rule_id == 0 || generation == 0)
         return -EINVAL;
-    if (identity != NULL && (guard->record.format != 2 || strcmp(driver, "net_tap") != 0 ||
+    if (identity != NULL && (guard->record.format < 2 || strcmp(driver, "net_tap") != 0 ||
         identity->ifindex == 0 || identity->ifindex > INT32_MAX || identity->netns_inode == 0 ||
         !valid_string(identity->ifname, sizeof(identity->ifname)) ||
         !valid_boot_id(identity->boot_id)))
@@ -400,6 +496,111 @@ int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port
     return dppd_recovery_guard_prepare_identity(guard, port_id, device, driver, rule_id, generation, NULL);
 }
 
+/** 单调编号与意图一起落盘，删除过的槽位可复用，未清理线索满时显式拒绝新安装 */
+int dppd_recovery_guard_begin(struct dppd_recovery_guard *guard, uint16_t port_id,
+    uint64_t rule_id, uint64_t generation, uint64_t *attempt)
+{
+    struct dppd_recovery_record next;
+    bool known_port = false;
+    uint32_t slot;
+    if (guard == NULL || attempt == NULL || rule_id == 0 || generation == 0)
+        return -EINVAL;
+    *attempt = 0;
+    if (!guard->writable || guard->faulted || guard->record.format != 3)
+        return -EUCLEAN;
+    if (guard->record.last_attempt == UINT64_MAX || guard->record.revision == UINT64_MAX)
+        return -EOVERFLOW;
+    for (uint32_t index = 0; index < guard->record.count; ++index)
+        known_port |= guard->record.ports[index].port_id == port_id;
+    if (!known_port)
+        return -ENOENT;
+    for (slot = 0; slot < guard->record.attempt_count; ++slot)
+        if (guard->record.attempts[slot].phase == DPPD_RECOVERY_REMOVED)
+            break;
+    if (slot == DPPD_RECOVERY_ATTEMPT_LIMIT)
+        return -ENOSPC;
+    next = guard->record;
+    if (slot == next.attempt_count)
+        next.attempt_count++;
+    next.attempts[slot] = (struct dppd_recovery_attempt){.id = ++next.last_attempt,
+        .rule_id = rule_id, .generation = generation, .port_id = port_id, .phase = DPPD_RECOVERY_INTENT};
+    next.revision++;
+    int rc = save(guard, &next);
+    if (rc == 0)
+        *attempt = next.last_attempt;
+    return rc;
+}
+
+/** 更新必须引用本文件仍保留的精确尝试编号，不能凭可能重复的业务 ID 修改另一轮记录 */
+static int attempt_slot(const struct dppd_recovery_guard *guard, uint64_t attempt)
+{
+    if (guard == NULL || attempt == 0)
+        return -EINVAL;
+    if (!guard->writable || guard->faulted || guard->record.format != 3)
+        return -EUCLEAN;
+    if (guard->record.revision == UINT64_MAX)
+        return -EOVERFLOW;
+    for (uint32_t index = 0; index < guard->record.attempt_count; ++index)
+        if (guard->record.attempts[index].id == attempt)
+            return (int)index;
+    return -ENOENT;
+}
+
+/** 驱动结果独立于观察结果保存，查询失败不能伪造没有新增规则，也不能改写驱动错误 */
+int dppd_recovery_guard_created(struct dppd_recovery_guard *guard, uint64_t attempt, int create_error,
+    enum dppd_recovery_evidence evidence, int observation_error, const struct dppd_recovery_filter *candidate)
+{
+    struct dppd_recovery_record next;
+    int slot = attempt_slot(guard, attempt);
+    if (slot < 0)
+        return slot;
+    if (guard->record.attempts[slot].phase != DPPD_RECOVERY_INTENT)
+        return -EALREADY;
+    next = guard->record;
+    struct dppd_recovery_attempt *entry = &next.attempts[slot];
+    entry->phase = create_error == 0 ? DPPD_RECOVERY_CREATED : DPPD_RECOVERY_CREATE_FAILED;
+    entry->create_error = create_error;
+    entry->evidence = evidence;
+    entry->observation_error = observation_error;
+    if ((candidate != NULL) != (evidence == DPPD_EVIDENCE_SINGLE_ADDITION))
+        return -EINVAL;
+    if (candidate != NULL) {
+        bool known_identity = false;
+        for (uint32_t index = 0; index < next.count; ++index)
+            known_identity |= next.ports[index].port_id == entry->port_id && next.ports[index].identity.ifindex != 0;
+        if (!known_identity)
+            return -EINVAL;
+        entry->candidate = *candidate;
+    }
+    if (!valid_attempt(entry))
+        return -EINVAL;
+    next.revision++;
+    return save(guard, &next);
+}
+
+/** 驱动删除成功后才标记 removed，失败保留原阶段和最新删除错误，绝不提前复用 */
+int dppd_recovery_guard_removed(struct dppd_recovery_guard *guard, uint64_t attempt, int remove_error)
+{
+    struct dppd_recovery_record next;
+    int slot = attempt_slot(guard, attempt);
+    if (slot < 0)
+        return slot;
+    if (!valid_error(remove_error))
+        return -EINVAL;
+    next = guard->record;
+    struct dppd_recovery_attempt *entry = &next.attempts[slot];
+    if (entry->phase == DPPD_RECOVERY_REMOVED)
+        return -EALREADY;
+    /** 创建结果同步失败时磁盘上可能仍为 intent，faulted 已阻止此处覆盖不确定状态 */
+    if (entry->phase == DPPD_RECOVERY_INTENT)
+        return -EINVAL;
+    entry->remove_error = remove_error;
+    if (remove_error == 0)
+        entry->phase = DPPD_RECOVERY_REMOVED;
+    next.revision++;
+    return save(guard, &next);
+}
+
 /** 清理确认同样先落盘再报告成功，失败时保留不确定状态，不能让后续安装继续 */
 static int clear_record(struct dppd_recovery_guard *guard)
 {
@@ -413,6 +614,8 @@ static int clear_record(struct dppd_recovery_guard *guard)
     next.revision++;
     next.count = 0;
     memset(next.ports, 0, sizeof(next.ports));
+    next.attempt_count = 0;
+    memset(next.attempts, 0, sizeof(next.attempts));
     return save(guard, &next);
 }
 
@@ -421,6 +624,10 @@ int dppd_recovery_guard_clean(struct dppd_recovery_guard *guard)
 {
     if (guard == NULL || guard->fd < 0)
         return -EINVAL;
+    /** 没有取得可删除 handle 的失败创建也可能留有对象，只有显式外部确认能解除 */
+    for (uint32_t index = 0; index < guard->record.attempt_count; ++index)
+        if (guard->record.attempts[index].phase != DPPD_RECOVERY_REMOVED)
+            return -EUCLEAN;
     return guard->writable ? clear_record(guard) : -EUCLEAN;
 }
 

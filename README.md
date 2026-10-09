@@ -24,6 +24,7 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - 本机 `rule-history` 和 telemetry 保留最近 64 次完整失败，提供分页、版本校验和覆盖缺口提示，详见 [失败事件历史](docs/rule_history.md)；
 - 可选 `--recovery-path` 在硬件安装前保存恢复线索，异常退出后阻止直接重放，提供离线核对与外部清理确认，详见 [跨进程恢复保护](docs/recovery_guard.md)；
 - 离线 `dppd-recovery inspect` 核对 TAP 本地实际 TC 规则和内核接口身份，保持未知归属与恢复保护，详见 [TAP 残留核对](docs/recovery_inspection.md)；
+- 启用恢复保护时逐次持久保存安装意图、驱动结果、删除结果和 TAP 候选坐标，详见 [逐次安装记录](docs/recovery_attempts.md)；
 - 本机网卡能力画像、完整规则探测和五秒诊断缓存，正式安装仍重新校验，详见 [能力画像与探测](docs/capability_probe.md)；
 - 本机 `rule-status` 查询实际后端、安装端口、COUNT 配置和后端提交耗时，详见 [规则安装状态](docs/rule_status.md)；
 - 本机 `health/ready`、全部未就绪原因、工作线程实际状态和异常结束监控，详见 [健康与就绪](docs/health_readiness.md)。
@@ -50,7 +51,8 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 同时指定 `--state-path` 与 `--recovery-path` 可启用跨进程安装保护。上次硬件活动未确认
 清理时启动失败，使用 `dppd-recovery show` 离线查看；完成外部设备清理后才能确认并重放。
 保护默认禁用。TAP 可用 `dppd-recovery inspect PATH REVISION` 只读核对本地残留；
-其他 PMD 的枚举、逐规则所有权证明和自动清理仍待实现。
+新恢复文件 v3 同时保存逐次安装线索，最多 256 个记录槽位，只有成功删除的槽位可复用。
+候选坐标仍不能证明所有权；其他 PMD 的枚举、驱动原生归属标识和自动清理仍待实现。
 
 ```bash
 bash scripts/build.sh

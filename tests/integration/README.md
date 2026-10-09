@@ -1,5 +1,19 @@
 # 集成验收
 
+## 持久逐次安装与真实创建窗口
+
+```bash
+sudo python3 tests/integration/recovery_attempt.py --build-dir build
+sudo python3 tests/integration/recovery_inspect.py --build-dir build
+```
+
+2026-10-09 通过：真实 TAP 创建前暂停、内核创建后返回前暂停并 SIGKILL，以及创建
+失败且没有 handle。分别核对磁盘 intent/失败记录、实际内核对象数和未改动的规则快照，
+均不自动确认 clean。候选核对补充同坐标外部规则重建、v1/v2 兼容。28/28 单测、
+五项 sanitizer、ring/TAP 保护和原隔离/健康回归通过，见
+[逐次安装记录](../../docs/recovery_attempts.md)。暂停库只显式加载到测试 daemon，
+不链接或安装到生产程序；候选坐标不代表所有权证明。
+
 ## TAP 实际残留只读核对
 
 ```bash

@@ -153,6 +153,11 @@ recovery_inspect_test = executable('test_recovery_inspect', 'test_recovery_inspe
   include_directories: dppd_inc)
 test('TAP recovery inspection', recovery_inspect_test)
 
+# 持久化意图、结果和删除事件，覆盖驱动前后写盘故障及清理时的真实 handle 回收
+recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attempt.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])
+test('durable recovery attempts', recovery_attempt_test)
+
 # 完成态环形历史、覆盖缺口、稳定分页、整数边界和真实隔离 socket 查询
 rule_history_test = executable('test_rule_history', 'test_rule_history.c',
   dependencies: dppd_core_dep,
