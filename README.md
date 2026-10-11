@@ -61,7 +61,9 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 计划查询期间还会监听链路和 TC 变化，中途重建、修改或接收丢包时撤销候选，见
 [查询窗口监视](docs/recovery_observation_window.md)。另有独立 `dppd-monitor` 在业务退出后
 继续观察 TAP 生命周期，保存失效原因并识别监护中断，见 [接口监护](docs/recovery_monitor.md)。
-业务握手、强制会话绑定、历史连续性证明和删除时的写入隔离仍待实现。
+业务可加 `--recovery-monitor SESSION_PATH`，启动及安装前后核对身份与新鲜回复，
+会话持久绑定至恢复记录 v6，失效后停止安装并退出，见 [监护握手](docs/recovery_monitor_handshake.md)。
+受控写入者、历史连续性证明和删除时的写入交接仍待实现。
 
 ```bash
 bash scripts/build.sh

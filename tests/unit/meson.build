@@ -166,6 +166,10 @@ test('recovery observation window', recovery_watch_test)
 recovery_monitor_test = executable('test_recovery_monitor', 'test_recovery_monitor.c', include_directories: dppd_inc)
 test('independent recovery monitor evidence', recovery_monitor_test)
 
+# 真正的跨进程往返覆盖暂停超时、随机数与会话错配、消息边界和失败锁存
+monitor_channel_test = executable('test_monitor_channel', 'test_monitor_channel.c', dependencies: dppd_core_dep)
+test('recovery monitor handshake', monitor_channel_test)
+
 # 持久化意图、结果和删除事件，覆盖驱动前后写盘故障及清理时的真实 handle 回收
 recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attempt.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])

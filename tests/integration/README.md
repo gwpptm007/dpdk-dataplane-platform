@@ -1,5 +1,19 @@
 # 集成验收
 
+## 业务监护握手与创建失效窗口
+
+```bash
+sudo python3 tests/integration/monitor_handshake.py --build-dir build
+sudo python3 tests/integration/monitor_handshake.py --build-dir build-native --native
+```
+
+2026-10-11，两套构建各 12 个真实场景通过：正常安装与新会话重放、业务崩溃后保留绑定、端口映射错配、
+集合缺失、恢复文件错配、启动时监护暂停、运行中监护退出/暂停、会话文件替换，以及
+安装意图前、驱动创建前、真实创建后的失效窗口。检查旧会话和省略监护参数不能绕过
+v6，创建前拒绝、创建后回滚、未完成意图保留，快照与实际内核规则一致。
+仅使用自建持久 TAP；故障入口不链接生产程序。两套构建各 34/34 单测和五项 sanitizer
+通过，详见 [业务与监护握手](../../docs/recovery_monitor_handshake.md)。
+
 ## 独立接口监护与进程退出窗口
 
 ```bash
@@ -13,8 +27,8 @@ sudo python3 tests/integration/recovery_monitor.py --build-dir build-native --na
 进程持有的文件锁仍标明新鲜度未验证。正常属性与 TC 更新不误判为接口重建。
 各场景验证业务快照和恢复文件未被监护修改，补开会话不能覆盖旧文件或待确认活动。
 仅使用自建持久 TAP，按创建时记录的索引核对后清理。33/33 单测、四项 sanitizer
-通过，详见 [独立接口监护](../../docs/recovery_monitor.md)。此阶段尚未接入业务握手与
-写入隔离，`show` 的成功退出码只表示查询成功，不表示允许恢复删除。
+通过，详见 [独立接口监护](../../docs/recovery_monitor.md)。此脚本验证未绑定业务的独立
+监护，绑定模式另见上述握手测试。`show` 的成功退出码只表示查询成功，不表示允许恢复删除。
 
 ## 持久逐次安装与真实创建窗口
 

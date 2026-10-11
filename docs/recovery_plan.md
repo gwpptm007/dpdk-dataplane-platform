@@ -92,7 +92,8 @@ sudo ./build/dppd-recovery plan /var/lib/dppd/hardware.recovery 23
 
 查询期间的事件丢失、中途修改和同名同索引重建已验证为拒绝候选。后续已增加
 [独立接口监护与会话证据](recovery_monitor.md)，业务退出后仍可观察接口变化；该证据
-尚未接入本命令。下一步实现业务握手、会话绑定与活性检查，再验证写入交接和删除流程。
+尚未接入本命令。[业务握手、会话绑定与活性检查](recovery_monitor_handshake.md) 已完成，
+下一步验证受控写入者与恢复交接，再将证据接入本命令和后续删除流程。
 remote、其他 PMD 和未登记端口不在本计划的过滤器枚举范围。
 目前完成外部清理后仍使用 [现有精确版本确认流程](recovery_guard.md#查看线索并恢复)。
 

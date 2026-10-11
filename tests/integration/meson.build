@@ -49,6 +49,11 @@ executable('test_recovery_plan_window', 'recovery_plan_window.c', dependencies: 
 executable('test_recovery_monitor_lost', '../../app/dppd_monitor/main.c', 'recovery_monitor_faults.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=dppd_recovery_watch_check'], install: false)
 
+# 暂停业务入口中的真实保护操作，验证最后一次监护检查阻止进入驱动
+executable('test_monitor_install_window', '../../app/dppd/main.c', 'monitor_install_window.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=dppd_recovery_guard_begin', '-Wl,--wrap=dppd_recovery_guard_begin_owned'], install: false)
+
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', required: false)
 if ring_pmd.found()
   executable(

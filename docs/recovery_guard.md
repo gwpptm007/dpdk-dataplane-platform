@@ -5,8 +5,9 @@
 规则快照仍为 v2；第一阶段新增独立恢复记录格式 v1 和离线工具 `dppd-recovery`。
 同日第二阶段新增 [TAP 本地残留只读核对](recovery_inspection.md)，之后新增
 [逐次安装记录](recovery_attempts.md)、[TAP 原生标识](tap_owner_cookie.md) 和
-[规则内容核验](tap_rule_verification.md)。恢复记录现使用 v5 并兼容读取 v1/v2/v3/v4，
-管理协议和规则快照格式不变。
+[规则内容核验](tap_rule_verification.md)。默认恢复记录为 v5，显式
+[监护握手](recovery_monitor_handshake.md) 将干净记录升级为 v6 并要求后续继续启用监护，
+兼容读取 v1–v6，管理协议和规则快照格式不变。
 
 这一步解决“旧进程已失去句柄，新进程却直接按空 backend 继续安装”的问题。
 TAP 现可只读枚举本地 multiq/ingress 残留；普通模式归属未知，原生标识模式可关联

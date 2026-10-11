@@ -88,6 +88,7 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"state-path", required_argument, NULL, 1004},
         {"recovery-path", required_argument, NULL, 1005},
         {"tap-owner-cookie", no_argument, NULL, 1006},
+        {"recovery-monitor", required_argument, NULL, 1007},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -169,6 +170,11 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         case 1006:
             cfg->tap_owner_cookie = true;
             break;
+        case 1007:
+            if (optarg == NULL || optarg[0] == '\0' || strlen(optarg) >= sizeof(cfg->recovery_monitor))
+                return DPPD_CONFIG_ERROR;
+            strcpy(cfg->recovery_monitor, optarg);
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -180,6 +186,10 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
     if (optind != argc)
         return DPPD_CONFIG_ERROR;
     if (cfg->tap_owner_cookie && cfg->recovery_path[0] == '\0')
+        return DPPD_CONFIG_ERROR;
+    if (cfg->recovery_monitor[0] != '\0' &&
+        (cfg->recovery_path[0] == '\0' || strcmp(cfg->recovery_monitor, cfg->recovery_path) == 0 ||
+            strcmp(cfg->recovery_monitor, cfg->state_path) == 0))
         return DPPD_CONFIG_ERROR;
     if (cfg->recovery_path[0] != '\0' &&
         (cfg->state_path[0] == '\0' || strcmp(cfg->recovery_path, cfg->state_path) == 0))
@@ -194,6 +204,12 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
 
     if (cfg == NULL || error == NULL || error_len == 0)
         return -1;
+    if (cfg->recovery_monitor[0] != '\0' &&
+        (cfg->recovery_path[0] == '\0' || strcmp(cfg->recovery_monitor, cfg->recovery_path) == 0 ||
+            strcmp(cfg->recovery_monitor, cfg->state_path) == 0)) {
+        snprintf(error, error_len, "recovery-monitor requires a distinct session file and recovery-path");
+        return -1;
+    }
     if (cfg->tap_owner_cookie && cfg->recovery_path[0] == '\0') {
         snprintf(error, error_len, "tap-owner-cookie requires recovery-path");
         return -1;
@@ -256,6 +272,7 @@ void dppd_config_print_usage(const char *program)
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");
     printf("  --recovery-path P   guard hardware replay after an unclean exit (requires state-path)\n");
     printf("  --tap-owner-cookie require native TAP owner cookie (patched driver and recovery-path)\n");
+    printf("  --recovery-monitor P require a live monitor session before hardware installation\n");
 }
 
 void dppd_config_dump(const struct dppd_config *cfg)
@@ -266,9 +283,10 @@ void dppd_config_dump(const struct dppd_config *cfg)
     for (i = 0; i < cfg->nb_ports; ++i)
         printf("%s%u", i == 0 ? "" : ",", cfg->ports[i]);
     printf(" queues=%u burst=%u mbufs/socket=%u cache=%u stats=%ums duration=%us"
-           " rules=%u control=%s state=%s recovery=%s tap-owner-cookie=%s promisc=%s pdump=%s\n",
+           " rules=%u control=%s state=%s recovery=%s monitor=%s tap-owner-cookie=%s promisc=%s pdump=%s\n",
         cfg->nb_queues, cfg->burst_size, cfg->mbufs_per_socket, cfg->mbuf_cache, cfg->stats_period_ms, cfg->duration_s,
         cfg->rule_capacity, cfg->control_socket, cfg->state_path[0] == '\0' ? "disabled" : cfg->state_path,
-        cfg->recovery_path[0] == '\0' ? "disabled" : cfg->recovery_path, cfg->tap_owner_cookie ? "on" : "off",
+        cfg->recovery_path[0] == '\0' ? "disabled" : cfg->recovery_path,
+        cfg->recovery_monitor[0] == '\0' ? "disabled" : cfg->recovery_monitor, cfg->tap_owner_cookie ? "on" : "off",
         cfg->promiscuous ? "on" : "off", cfg->enable_pdump ? "on" : "off");
 }

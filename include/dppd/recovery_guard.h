@@ -91,6 +91,8 @@ struct dppd_recovery_record {
     uint64_t last_attempt;
     uint32_t attempt_count;
     struct dppd_recovery_attempt attempts[DPPD_RECOVERY_ATTEMPT_LIMIT];
+    /** v6 在首次安装前保存监护会话，旧格式为零，清理后仍保留必须启用监护的格式约束 */
+    uint8_t monitor_session[DPPD_TAP_COOKIE_SIZE];
 };
 
 /**
@@ -101,12 +103,15 @@ struct dppd_recovery_guard {
     int fd;
     bool writable;
     bool faulted;
+    bool monitor_bound;
     char path[DPPD_STATE_PATH_CAPACITY];
     struct dppd_recovery_record record;
 };
 
 /** state_path 非空时允许首次创建并核对快照路径，为空时只打开已有记录供离线工具使用 */
 int dppd_recovery_guard_open(struct dppd_recovery_guard *guard, const char *path, const char *state_path);
+/** 仅在干净文件上绑定，调用方先完成实际握手，落盘失败不得开始安装 */
+int dppd_recovery_guard_bind_monitor(struct dppd_recovery_guard *guard, const uint8_t session[DPPD_TAP_COOKIE_SIZE]);
 /** 必须在驱动 create 之前成功，首次涉及该端口时先写入并 fsync，失败就不得安装 */
 int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device,
     const char *driver, uint64_t rule_id, uint64_t generation);

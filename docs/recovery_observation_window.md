@@ -69,8 +69,8 @@ observation-window status=no-change-observed error=0 link-changed=no tc-changed=
 4. 在连续性证据和写入约束同时成立后，再加入精确删除、删除结果落盘和失败后续接
 
 后续已落地 [独立接口监护与会话证据](recovery_monitor.md)，支持业务退出后继续观察和
-持久失效诊断。业务握手、会话强制绑定、新鲜度检查和写入隔离仍未实现，不能把当前
-观察记录当作这些约束已经成立。
+持久失效诊断，[业务握手与安装前后检查](recovery_monitor_handshake.md) 也已支持显式启用。
+受控写入者和恢复交接仍未实现，不能把当前观察记录或新鲜回复当作写入隔离已经成立。
 
 ## 验证
 

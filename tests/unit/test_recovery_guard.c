@@ -341,6 +341,40 @@ static void identity_and_compatibility(const char *path, const char *state)
     dppd_recovery_guard_close(&guard);
 }
 
+/** 只有显式绑定升级 v6，失败同步不得使内存提前生效，也不能回退成无需监护的文件 */
+static void monitor_binding(const char *path, const char *state)
+{
+    assert(unlink(path) == 0);
+    struct dppd_recovery_guard guard = {.fd = -1};
+    const uint8_t session[16] = {7};
+    const struct dppd_recovery_identity identity = {.ifindex = 17,
+        .ifname = "owned",
+        .boot_id = "6c307404-452c-475d-83b2-e5aaf3ae0102",
+        .netns_inode = 5};
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0);
+    fail_sync = syncs + 1;
+    assert(dppd_recovery_guard_bind_monitor(&guard, session) == -EIO);
+    assert(guard.faulted && !guard.monitor_bound && guard.record.format == 5);
+    fail_sync = 0;
+    assert(dppd_recovery_guard_bind_monitor(&guard, session) == -EUCLEAN);
+    dppd_recovery_guard_close(&guard);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.record.format == 6);
+    assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 1, 1, &identity) == -EACCES);
+    assert(dppd_recovery_guard_bind_monitor(&guard, session) == 0);
+    assert(dppd_recovery_guard_bind_monitor(&guard, session) == -EALREADY);
+    assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 1, 1, &identity) == 0);
+    uint64_t attempt;
+    assert(dppd_recovery_guard_begin(&guard, 0, 1, 1, &attempt) == 0);
+    assert(dppd_recovery_guard_created(&guard, attempt, 0, DPPD_EVIDENCE_NONE, 0, NULL) == 0);
+    dppd_recovery_guard_close(&guard);
+    assert(dppd_recovery_guard_open(&guard, path, NULL) == 0 && guard.record.format == 6);
+    assert(memcmp(guard.record.monitor_session, session, 16) == 0 && guard.record.attempt_count == 1);
+    assert(dppd_recovery_guard_bind_monitor(&guard, session) == -EUCLEAN);
+    assert(dppd_recovery_guard_acknowledge(&guard, guard.record.revision) == 0);
+    assert(guard.record.format == 6 && !dppd_tap_cookie_present(guard.record.monitor_session));
+    dppd_recovery_guard_close(&guard);
+}
+
 /** 所有路径都在测试私有目录内，测试结束后只删除自己创建的文件 */
 int main(void)
 {
@@ -355,6 +389,7 @@ int main(void)
     backend_contract(path, state);
     identity_and_compatibility(path, state);
     damaged_files(path, state, backup);
+    monitor_binding(path, state);
     assert(unlink(path) == 0 && rmdir(directory) == 0);
     return 0;
 }

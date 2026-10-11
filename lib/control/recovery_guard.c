@@ -89,6 +89,8 @@ static size_t encode(const struct dppd_recovery_record *record, unsigned char *b
     if (record->format >= 3) {
         put(bytes + RECORD_V2_SIZE, record->last_attempt, 8);
         put(bytes + RECORD_V2_SIZE + 8, record->attempt_count, 4);
+        if (record->format >= 6)
+            memcpy(bytes + RECORD_V2_SIZE + 16, record->monitor_session, DPPD_TAP_COOKIE_SIZE);
         for (uint32_t index = 0; index < record->attempt_count; ++index) {
             const struct dppd_recovery_attempt *attempt = &record->attempts[index];
             unsigned char *row = bytes + RECORD_V2_SIZE + 32 +
@@ -178,7 +180,7 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
     uint32_t format = (uint32_t)get(bytes + 8, 4);
     size_t stride = format == 1 ? RECORD_V1_PORT : RECORD_PORT;
 
-    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format < 1 || format > 5) ||
+    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format < 1 || format > 6) ||
         size !=
             (format == 1          ? RECORD_V1_SIZE
                     : format == 2 ? RECORD_V2_SIZE
@@ -227,6 +229,12 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
     if (format >= 3) {
         record->last_attempt = get(bytes + RECORD_V2_SIZE, 8);
         record->attempt_count = (uint32_t)get(bytes + RECORD_V2_SIZE + 8, 4);
+        if (format >= 6) {
+            memcpy(record->monitor_session, bytes + RECORD_V2_SIZE + 16, DPPD_TAP_COOKIE_SIZE);
+            if ((record->count != 0 && !dppd_tap_cookie_present(record->monitor_session)) ||
+                (dppd_tap_cookie_present(record->monitor_session) && record->revision == 0))
+                return -EBADMSG;
+        }
         if (record->attempt_count > DPPD_RECOVERY_ATTEMPT_LIMIT || (record->count == 0 && record->attempt_count != 0))
             return -EBADMSG;
         for (uint32_t index = 0; index < record->attempt_count; ++index) {
@@ -468,6 +476,26 @@ fail:
     return rc;
 }
 
+int dppd_recovery_guard_bind_monitor(struct dppd_recovery_guard *guard, const uint8_t session[DPPD_TAP_COOKIE_SIZE])
+{
+    if (guard == NULL || guard->fd < 0 || session == NULL || !dppd_tap_cookie_present(session))
+        return -EINVAL;
+    if (!guard->writable || guard->faulted || guard->record.count != 0 || guard->record.attempt_count != 0)
+        return -EUCLEAN;
+    if (guard->monitor_bound)
+        return -EALREADY;
+    if (guard->record.revision == UINT64_MAX)
+        return -EOVERFLOW;
+    struct dppd_recovery_record next = guard->record;
+    next.format = 6;
+    next.revision++;
+    memcpy(next.monitor_session, session, DPPD_TAP_COOKIE_SIZE);
+    int rc = save(guard, &next);
+    if (rc == 0)
+        guard->monitor_bound = true;
+    return rc;
+}
+
 /** 每个端口首次尝试前先持久化，之后同一身份可复用标记，软件路径完全不调用这里 */
 int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device,
     const char *driver, uint64_t rule_id, uint64_t generation, const struct dppd_recovery_identity *identity)
@@ -476,6 +504,9 @@ int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint
     struct dppd_recovery_port *port;
     int rc;
 
+    if (guard != NULL && guard->record.format >= 6 &&
+        (!guard->monitor_bound || !dppd_tap_cookie_present(guard->record.monitor_session)))
+        return -EACCES;
     if (guard == NULL || device == NULL || driver == NULL || device[0] == '\0' || driver[0] == '\0' ||
         strlen(device) >= DPPD_RECOVERY_DEVICE_SIZE || strlen(driver) >= DPPD_RECOVERY_DRIVER_SIZE || rule_id == 0 ||
         generation == 0)
@@ -567,7 +598,7 @@ static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id, ui
     *attempt = 0;
     if (cookie != NULL)
         memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
-    if (!guard->writable || guard->faulted || guard->record.format != 5)
+    if (!guard->writable || guard->faulted || guard->record.format < 5)
         return -EUCLEAN;
     if (guard->record.last_attempt == UINT64_MAX || guard->record.revision == UINT64_MAX)
         return -EOVERFLOW;
@@ -635,7 +666,7 @@ static int attempt_slot(const struct dppd_recovery_guard *guard, uint64_t attemp
 {
     if (guard == NULL || attempt == 0)
         return -EINVAL;
-    if (!guard->writable || guard->faulted || guard->record.format != 5)
+    if (!guard->writable || guard->faulted || guard->record.format < 5)
         return -EUCLEAN;
     if (guard->record.revision == UINT64_MAX)
         return -EOVERFLOW;
@@ -706,16 +737,20 @@ static int clear_record(struct dppd_recovery_guard *guard)
     struct dppd_recovery_record next = guard->record;
     if (guard->faulted)
         return -EUCLEAN;
-    if (next.count == 0)
+    if (next.count == 0 && !dppd_tap_cookie_present(next.monitor_session))
         return 0;
     if (next.revision == UINT64_MAX)
         return -EOVERFLOW;
     next.revision++;
     next.count = 0;
+    memset(next.monitor_session, 0, sizeof(next.monitor_session));
     memset(next.ports, 0, sizeof(next.ports));
     next.attempt_count = 0;
     memset(next.attempts, 0, sizeof(next.attempts));
-    return save(guard, &next);
+    int rc = save(guard, &next);
+    if (rc == 0)
+        guard->monitor_bound = false;
+    return rc;
 }
 
 /** 上一进程留下的标记不能由本次空 backend 的退出清理冒充已删除 */

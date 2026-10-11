@@ -16,6 +16,7 @@
 #include "dppd/runtime.h"
 #include "dppd/recovery_guard.h"
 #include "dppd/recovery_inspect.h"
+#include "dppd/monitor_channel.h"
 #include "dppd/telemetry.h"
 
 static volatile sig_atomic_t stop_signal;
@@ -24,6 +25,7 @@ static volatile sig_atomic_t stop_signal;
 struct recovery_context {
     struct dppd_recovery_guard *guard;
     const struct dppd_device_set *devices;
+    struct dppd_monitor_client *monitor;
     struct dppd_recovery_inspection before;
     uint16_t pending_port;
     int before_error;
@@ -53,6 +55,8 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
 
     if (port == NULL || endpoint == NULL || !port->identity.device_name_known)
         return -ENODEV;
+    if (recovery->monitor->error != 0)
+        return recovery->monitor->error;
     memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
     memset(recovery->pending_cookie, 0, sizeof(recovery->pending_cookie));
     /** 此标识仅用于无副作用的能力检查，真正创建的随机标识稍后生成并落盘 */
@@ -72,13 +76,21 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
         rc = rte_eth_dev_info_get(port_id, &info);
         if (rc == 0)
             rc = dppd_recovery_tap_identity(info.if_index, &identity);
+        if (rc != 0)
+            return recovery->monitor->fd >= 0 ? (recovery->monitor->error = rc) : rc;
         if (rc == 0 && recovery->native_owner)
             rc = dppd_tap_content_from_rule(rule, info.max_rx_queues, &recovery->pending_content);
+        if (rc == 0)
+            rc = dppd_monitor_client_identity(recovery->monitor, port_id, &identity);
+        if (rc == 0)
+            rc = dppd_monitor_client_check(recovery->monitor);
         if (rc != 0)
             return rc;
         rc = dppd_recovery_guard_prepare_identity(recovery->guard, port_id, port->identity.device_name,
             endpoint->driver_name, rule->id, rule->generation, &identity);
-    } else
+    } else if (recovery->monitor->fd >= 0)
+        return recovery->monitor->error = -ENOTSUP;
+    else
         rc = dppd_recovery_guard_prepare(recovery->guard, port_id, port->identity.device_name, endpoint->driver_name,
             rule->id, rule->generation);
     if (rc != 0)
@@ -93,7 +105,8 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
     memcpy(recovery->pending_cookie, cookie, sizeof(recovery->pending_cookie));
     /** 观察是附加线索，失败仍允许有意图保护的创建，之后明确记录无法观察 */
     recovery->before_error = observe_recovery_port(recovery, &recovery->before);
-    return 0;
+    /** 写盘与内核查询可能耗时，进入驱动前再取一次新回复，不能复用启动时的确认 */
+    return dppd_monitor_client_check(recovery->monitor);
 }
 
 /** 记录失败只报告一次并保持故障锁存，避免清理阶段反复刷屏或把不确定记录覆盖为干净 */
@@ -122,6 +135,9 @@ static int finish_recovery_create(void *context, uint64_t attempt, int create_er
         evidence == DPPD_EVIDENCE_SINGLE_ADDITION ? &candidate : NULL);
     if (rc != 0)
         recovery_record_error(recovery, rc);
+    /** 创建期间监护也可能退出，失败时保留真实 handle 交给事务回滚 */
+    if (rc == 0 && create_error == 0)
+        rc = dppd_monitor_client_check(recovery->monitor);
     /**
      * 驱动报告成功后还要读回唯一标识，防止内核忽略属性时把未标记规则当作受保护
      * 原始创建结果已经保存，返回错误会触发事务使用真实 handle 回滚
@@ -148,7 +164,7 @@ static int finish_recovery_create(void *context, uint64_t attempt, int create_er
     return rc;
 }
 
-/** 无论普通删除、回滚还是退出清理，都按同一个尝试编号记录实际驱动结果 */
+/** 已持有 handle 的删除不依赖监护回复，避免监护退出反而阻止本进程回收规则 */
 static void finish_recovery_remove(void *context, uint64_t attempt, int remove_error)
 {
     struct recovery_context *recovery = context;
@@ -176,6 +192,30 @@ static void sleep_control_loop(void)
         ;
 }
 
+/** EAL 探测之后、项目配置队列和重放之前核对全部端口，缺少任何一个都不接受会话 */
+static int bind_monitor(const struct dppd_config *config, struct dppd_recovery_guard *guard,
+    struct dppd_monitor_client *client)
+{
+    struct dppd_recovery_record ports = {.count = config->nb_ports};
+    char error[128];
+    if (dppd_config_validate(config, error, sizeof(error)) != 0)
+        return -EINVAL;
+    for (uint32_t index = 0; index < ports.count; ++index) {
+        struct rte_eth_dev_info info;
+        uint16_t port = config->ports[index];
+        int rc = rte_eth_dev_info_get(port, &info);
+        if (rc != 0)
+            return rc;
+        if (info.driver_name == NULL || strcmp(info.driver_name, "net_tap") != 0)
+            return -ENOTSUP;
+        ports.ports[index].port_id = port;
+        rc = dppd_recovery_tap_identity(info.if_index, &ports.ports[index].identity);
+        if (rc != 0)
+            return rc;
+    }
+    return dppd_monitor_client_open(client, config->recovery_monitor, guard, &ports);
+}
+
 int main(int argc, char **argv)
 {
     struct dppd_config config;
@@ -183,7 +223,10 @@ int main(int argc, char **argv)
     struct dppd_management_server management;
     struct dppd_runtime runtime;
     struct dppd_recovery_guard recovery_guard = {.fd = -1};
-    struct recovery_context recovery_context = {.guard = &recovery_guard, .devices = &runtime.devices};
+    struct dppd_monitor_client monitor_client = {.fd = -1};
+    struct recovery_context recovery_context = {.guard = &recovery_guard,
+        .devices = &runtime.devices,
+        .monitor = &monitor_client};
     uint64_t started_at;
     uint64_t next_stats;
     uint64_t timer_hz;
@@ -231,6 +274,18 @@ int main(int argc, char **argv)
                 "revision=%" PRIu64 " ports=%u; inspect with dppd-recovery show PATH\n",
                 recovery_guard.record.revision, recovery_guard.record.count);
             goto cleanup_eal;
+        }
+        if (recovery_guard.record.format >= 6 && config.recovery_monitor[0] == '\0') {
+            fprintf(stderr, "[dppd] this recovery record requires --recovery-monitor\n");
+            goto cleanup_eal;
+        }
+        if (config.recovery_monitor[0] != '\0') {
+            int monitor_rc = bind_monitor(&config, &recovery_guard, &monitor_client);
+            if (monitor_rc != 0) {
+                fprintf(stderr, "[dppd] recovery monitor handshake failed: %d\n", monitor_rc);
+                goto cleanup_eal;
+            }
+            printf("[dppd] recovery monitor bound; fresh replies required for hardware installation\n");
         }
     }
     /*
@@ -297,6 +352,11 @@ int main(int argc, char **argv)
          * 清理重试结束后更新诊断副本，成功进入 RESTART_REQUIRED 后仍必须退出重启
          */
         while (!stop_signal) {
+            loop_error = dppd_monitor_client_check(&monitor_client);
+            if (loop_error != 0) {
+                fprintf(stderr, "[dppd] recovery monitor unavailable during isolation: %d\n", loop_error);
+                break;
+            }
             /** 隔离仅停止软件转发，设备仍需监控，移除时应退出并清理而不是继续等待 */
             loop_error = dppd_devices_poll_links(&runtime.devices);
             if (loop_error != 0) {
@@ -320,6 +380,11 @@ int main(int argc, char **argv)
         goto cleanup_telemetry;
     }
 
+    loop_error = dppd_monitor_client_check(&monitor_client);
+    if (loop_error != 0) {
+        fprintf(stderr, "[dppd] recovery monitor unavailable before worker startup: %d\n", loop_error);
+        goto cleanup_telemetry;
+    }
     if (dppd_runtime_start(&runtime) != 0)
         goto cleanup_telemetry;
 
@@ -329,6 +394,12 @@ int main(int argc, char **argv)
     next_stats = started_at + (timer_hz * config.stats_period_ms) / 1000U;
     while (!stop_signal) {
         const uint64_t now = rte_get_timer_cycles();
+
+        loop_error = dppd_monitor_client_check(&monitor_client);
+        if (loop_error != 0) {
+            fprintf(stderr, "[dppd] recovery monitor unavailable; stopping workers: %d\n", loop_error);
+            break;
+        }
 
         /**
          * 进入恢复隔离后，不再按普通运行时长退出，也不继续周期性输出转发统计
@@ -422,6 +493,7 @@ cleanup_runtime:
     if (dppd_runtime_destroy(&runtime) != 0 || dppd_devices_removal_requested(&runtime.devices))
         rc = EXIT_FAILURE;
 cleanup_eal:
+    dppd_monitor_client_close(&monitor_client);
     /** 启动被旧标记阻断时同样只解锁，绝不能自动清除上一进程的线索 */
     dppd_recovery_guard_close(&recovery_guard);
     if (rte_eal_cleanup() != 0 && rc == EXIT_SUCCESS)

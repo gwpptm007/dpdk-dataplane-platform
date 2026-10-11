@@ -18,6 +18,9 @@ int main(void)
     char *with_recovery[] = {"dppd", "--state-path", "/tmp/state", "--recovery-path", "/tmp/recovery"};
     char *no_state[] = {"dppd", "--recovery-path", "/tmp/recovery"};
     char *owner_only[] = {"dppd", "--tap-owner-cookie"};
+    char *monitor_only[] = {"dppd", "--recovery-monitor", "/tmp/session"};
+    char *with_monitor[] = {"dppd", "--state-path", "/tmp/state", "--recovery-path", "/tmp/recovery",
+        "--recovery-monitor", "/tmp/session"};
     char *with_owner[] = {"dppd", "--tap-owner-cookie", "--state-path", "/tmp/state", "--recovery-path",
         "/tmp/recovery"};
 
@@ -26,6 +29,7 @@ int main(void)
     assert(config.state_path[0] == '\0');
     assert(config.recovery_path[0] == '\0');
     assert(!config.tap_owner_cookie);
+    assert(config.recovery_monitor[0] == '\0');
     assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
 
     assert(dppd_config_parse(5, with_state, &config) == DPPD_CONFIG_OK);
@@ -42,6 +46,17 @@ int main(void)
     assert(dppd_config_parse(3, no_state, &config) == DPPD_CONFIG_ERROR);
     with_recovery[4] = "/tmp/state";
     assert(dppd_config_parse(5, with_recovery, &config) == DPPD_CONFIG_ERROR);
+    assert(dppd_config_parse(3, monitor_only, &config) == DPPD_CONFIG_ERROR);
+    assert(dppd_config_parse(7, with_monitor, &config) == DPPD_CONFIG_OK);
+    assert(strcmp(config.recovery_monitor, "/tmp/session") == 0);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    with_monitor[6] = "/tmp/recovery";
+    assert(dppd_config_parse(7, with_monitor, &config) == DPPD_CONFIG_ERROR);
+    with_monitor[6] = "";
+    assert(dppd_config_parse(7, with_monitor, &config) == DPPD_CONFIG_ERROR);
+    dppd_config_defaults(&config);
+    strcpy(config.recovery_monitor, "/tmp/session");
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
     /** 原生标识必须有落盘目标，直接构造配置也不能绕过这个约束 */
     assert(dppd_config_parse(2, owner_only, &config) == DPPD_CONFIG_ERROR);
     dppd_config_defaults(&config);

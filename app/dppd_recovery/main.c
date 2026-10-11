@@ -304,6 +304,12 @@ int main(int argc, char **argv)
             guard.record.count);
         printf("snapshot=%s\n", guard.record.state_path);
         printf("format=%u\n", guard.record.format);
+        if (guard.record.format >= 6) {
+            printf("monitor-required=yes session=");
+            for (unsigned int index = 0; index < sizeof(guard.record.monitor_session); ++index)
+                printf("%02x", guard.record.monitor_session[index]);
+            printf(" freshness=unverified executable=no\n");
+        }
         if (guard.record.format >= 3)
             printf("attempts=%u last-attempt=%" PRIu64 " capacity=%u\n", guard.record.attempt_count,
                 guard.record.last_attempt, DPPD_RECOVERY_ATTEMPT_LIMIT);
