@@ -1,5 +1,21 @@
 # 集成验收
 
+## 独立接口监护与进程退出窗口
+
+```bash
+sudo python3 tests/integration/recovery_monitor.py --build-dir build
+sudo python3 tests/integration/recovery_monitor.py --build-dir build-native --native
+```
+
+2026-10-11，两种构建各九个场景通过：业务先退出、监护先退出、双方退出、业务退出后
+正常停止监护、单独正常停止、暂停期间同名同索引重建、改名、恢复文件替换和事件丢失。
+真实业务安装规则后强制退出，监护仍独立工作；监护强制退出的旧文件显示中断，暂停
+进程持有的文件锁仍标明新鲜度未验证。正常属性与 TC 更新不误判为接口重建。
+各场景验证业务快照和恢复文件未被监护修改，补开会话不能覆盖旧文件或待确认活动。
+仅使用自建持久 TAP，按创建时记录的索引核对后清理。33/33 单测、四项 sanitizer
+通过，详见 [独立接口监护](../../docs/recovery_monitor.md)。此阶段尚未接入业务握手与
+写入隔离，`show` 的成功退出码只表示查询成功，不表示允许恢复删除。
+
 ## 持久逐次安装与真实创建窗口
 
 ```bash

@@ -209,6 +209,11 @@ sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 按 PMD/设备的受支持方法完成外部清理，再使用查询返回的精确版本确认，随后重新启动。
 工具自身不执行硬件清理；文件锁、损坏记录、部署与确认流程见 [跨进程恢复保护](recovery_guard.md)。
 
+可在业务启动前运行独立 `dppd-monitor run RECOVERY_PATH STATE_PATH SESSION_PATH PORT:IFNAME ...`，
+持续观察预先创建的持久 TAP；`dppd-monitor show SESSION_PATH` 只读查看会话与失效原因。
+业务退出不会结束监护，监护被强制结束后的遗留活动记录显示为中断。当前尚未强制绑定
+业务安装，不证明允许清理；完整启动顺序、退出状态和文件格式见 [独立接口监护](recovery_monitor.md)。
+
 ## 本机规则管理
 
 `dppd` 启动后，使用同一次构建生成的 `dppctl` 访问管理 socket：

@@ -33,13 +33,17 @@ static int link_event(struct dppd_recovery_watch *watch, const struct nlmsghdr *
     }
     if (name == NULL)
         return -EBADMSG;
-    for (uint32_t index = 0; index < watch->count; ++index)
-        if (watch->links[index].ifindex == (uint32_t)link->ifi_index || strcmp(watch->links[index].ifname, name) == 0)
+    for (uint32_t index = 0; index < watch->count; ++index) {
+        bool same_index = watch->links[index].ifindex == (uint32_t)link->ifi_index;
+        bool same_name = strcmp(watch->links[index].ifname, name) == 0;
+        if ((same_index || same_name) &&
+            (!watch->lifetime_only || header->nlmsg_type == RTM_DELLINK || !same_index || !same_name))
             watch->link_changed = true;
+    }
     return 0;
 }
 
-/** TC 动作可能跨接口共享，因此同一命名空间的 TC 通知一律使本次观察失效 */
+/** TC 动作可能跨接口共享，查询窗口按整个命名空间记录变化，生命周期模式只检查消息是否可靠 */
 static int watch_message(struct dppd_recovery_watch *watch, const struct nlmsghdr *header)
 {
     if ((header->nlmsg_flags & NLM_F_DUMP_INTR) != 0)
@@ -102,6 +106,15 @@ int dppd_recovery_watch_open(struct dppd_recovery_watch *watch, const struct dpp
     return 0;
 }
 
+/** 仍接收并检查 TC 通知的消息边界，只是不把正常业务更新当作接口实例已经更换 */
+int dppd_recovery_watch_open_lifetime(struct dppd_recovery_watch *watch, const struct dppd_recovery_record *record)
+{
+    int rc = dppd_recovery_watch_open(watch, record);
+    if (rc == 0)
+        watch->lifetime_only = true;
+    return rc;
+}
+
 int dppd_recovery_watch_check(struct dppd_recovery_watch *watch)
 {
     if (watch == NULL)
@@ -125,7 +138,7 @@ int dppd_recovery_watch_check(struct dppd_recovery_watch *watch)
         ssize_t received = recvmsg(watch->fd, &message, MSG_DONTWAIT);
         if (received < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
-                return watch->link_changed || watch->tc_changed ? -ESTALE : 0;
+                return watch->link_changed || (watch->tc_changed && !watch->lifetime_only) ? -ESTALE : 0;
             return watch->error = -errno;
         }
         if (received == 0 || (size_t)received > sizeof(buffer.bytes) ||

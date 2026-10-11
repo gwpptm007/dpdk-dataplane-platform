@@ -59,7 +59,9 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 `dppd-recovery plan PATH REVISION` 可列出观察候选、拒绝原因和删除前提，跨登记端口
 检查重复标识，保持只读且不可执行，详见 [精确清理计划](docs/recovery_plan.md)。
 计划查询期间还会监听链路和 TC 变化，中途重建、修改或接收丢包时撤销候选，见
-[查询窗口监视](docs/recovery_observation_window.md)。历史连续性和删除时的写入隔离仍待实现。
+[查询窗口监视](docs/recovery_observation_window.md)。另有独立 `dppd-monitor` 在业务退出后
+继续观察 TAP 生命周期，保存失效原因并识别监护中断，见 [接口监护](docs/recovery_monitor.md)。
+业务握手、强制会话绑定、历史连续性证明和删除时的写入隔离仍待实现。
 
 ```bash
 bash scripts/build.sh

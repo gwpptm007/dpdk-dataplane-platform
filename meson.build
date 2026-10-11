@@ -23,6 +23,7 @@ dppd_sources = files(
   'lib/control/recovery_inspect.c',
   'lib/control/recovery_plan.c',
   'lib/control/recovery_watch.c',
+  'lib/control/recovery_monitor.c',
   'lib/control/tap_content.c',
   'lib/control/planner.c',
   'lib/control/transaction.c',
@@ -83,6 +84,8 @@ executable(
   dependencies: dppd_core_dep,
   install: false,
 )
+
+executable('dppd-monitor', 'app/dppd_monitor/main.c', dependencies: dppd_core_dep, install: false)
 
 if get_option('tests')
   subdir('tests/unit')

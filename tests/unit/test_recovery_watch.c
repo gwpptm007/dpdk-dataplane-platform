@@ -177,9 +177,53 @@ static void test_receive_errors(void)
     dppd_recovery_watch_close(NULL);
 }
 
+/** 生命周期监护允许正常业务更新，但删除后恢复原坐标也不能抹掉变化 */
+static void test_lifetime(void)
+{
+    struct dppd_recovery_record record = {.count = 1};
+    record.ports[0].identity.ifindex = 17;
+    strcpy(record.ports[0].identity.ifname, "owned");
+    fail_bind = false;
+    struct dppd_recovery_watch watch = {.fd = -1};
+    assert(dppd_recovery_watch_open_lifetime(&watch, &record) == 0 && watch.lifetime_only);
+    make_link(17, "owned");
+    receive_fault = 13;
+    receives = 0;
+    assert(dppd_recovery_watch_check(&watch) == 0 && !watch.link_changed);
+    notification.header.nlmsg_type = RTM_NEWTFILTER;
+    notification.header.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg));
+    receives = 0;
+    assert(dppd_recovery_watch_check(&watch) == 0 && watch.tc_changed);
+    make_link(17, "owned");
+    notification.header.nlmsg_type = RTM_DELLINK;
+    receives = 0;
+    assert(dppd_recovery_watch_check(&watch) == -ESTALE && watch.error == 0);
+    make_link(17, "owned");
+    receives = 0;
+    assert(dppd_recovery_watch_check(&watch) == -ESTALE);
+    dppd_recovery_watch_close(&watch);
+    const char *names[] = {"renamed", "owned"};
+    const uint32_t indexes[] = {17, 99};
+    for (unsigned int index = 0; index < 2; ++index) {
+        assert(dppd_recovery_watch_open_lifetime(&watch, &record) == 0);
+        make_link(indexes[index], names[index]);
+        receives = 0;
+        assert(dppd_recovery_watch_check(&watch) == -ESTALE);
+        dppd_recovery_watch_close(&watch);
+    }
+    assert(dppd_recovery_watch_open_lifetime(&watch, &record) == 0);
+    receive_fault = 1;
+    receives = 0;
+    assert(dppd_recovery_watch_check(&watch) == -ENOBUFS);
+    receive_fault = 0;
+    assert(dppd_recovery_watch_check(&watch) == -ENOBUFS);
+    dppd_recovery_watch_close(&watch);
+}
+
 int main(void)
 {
     test_events();
     test_receive_errors();
+    test_lifetime();
     return 0;
 }

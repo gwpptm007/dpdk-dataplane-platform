@@ -45,6 +45,10 @@ shared_library('dppd_recovery_attempt_faults', 'recovery_attempt_faults.c',
 executable('test_recovery_plan_window', 'recovery_plan_window.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=dppd_recovery_inspect', '-Wl,--wrap=recvmsg'], install: false)
 
+# 复用正式监护入口，只在测试程序的第二次事件检查处注入丢包
+executable('test_recovery_monitor_lost', '../../app/dppd_monitor/main.c', 'recovery_monitor_faults.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=dppd_recovery_watch_check'], install: false)
+
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', required: false)
 if ring_pmd.found()
   executable(
