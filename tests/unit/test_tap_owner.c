@@ -13,6 +13,9 @@
 #include "dppd/rte_flow_backend.h"
 
 static uint8_t expected[DPPD_TAP_COOKIE_SIZE];
+/** 固定预期值用于随机源测试，真实规则转换另有独立测试 */
+static const struct dppd_tap_content contents = {.version = 1, .action = 1,
+    .parent = 0x10000, .priority = 17, .protocol = 3};
 static unsigned int entropy_calls, validate_calls, create_calls;
 static int entropy_mode, driver_error;
 static bool sync_fail, expect_owner = true, tap_driver = true;
@@ -130,30 +133,34 @@ static void persistence(const char *path, const char *state)
     uint64_t attempt = 0;
     prepare(&guard, path, state);
     uint64_t revision = guard.record.revision;
+    /** 缺失或无效的预期内容必须在取随机数和写盘之前拒绝 */
+    assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, cookie, NULL) == -EINVAL);
+    assert(guard.record.revision == revision && entropy_calls == 0);
     for (entropy_mode = 1; entropy_mode <= 2; ++entropy_mode) {
         memset(cookie, 0xff, sizeof(cookie));
-        assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, cookie) ==
+        assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, cookie, &contents) ==
             (entropy_mode == 1 ? -EIO : -EAGAIN));
         assert(attempt == 0 && !dppd_tap_cookie_present(cookie));
         assert(guard.record.revision == revision && guard.record.last_attempt == 0);
     }
     entropy_mode = 4;
     entropy_calls = 0;
-    assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, expected) == 0);
+    assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, expected, &contents) == 0);
     assert(attempt == 1 && entropy_calls > 2 && dppd_tap_cookie_present(expected));
     entropy_mode = 3;
-    assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, cookie) == -EAGAIN);
+    assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, cookie, &contents) == -EAGAIN);
     assert(attempt == 0 && guard.record.last_attempt == 1);
     dppd_recovery_guard_close(&guard);
     assert(dppd_recovery_guard_open(&guard, path, NULL) == 0);
-    assert(guard.record.format == 4 && guard.record.attempts[0].phase == DPPD_RECOVERY_INTENT);
+    assert(guard.record.format == 5 && guard.record.attempts[0].phase == DPPD_RECOVERY_INTENT);
     assert(memcmp(guard.record.attempts[0].owner_cookie, expected, sizeof(expected)) == 0);
+    assert(guard.record.attempts[0].expected.version == 1 && guard.record.attempts[0].expected.priority == 17);
     assert(dppd_recovery_guard_acknowledge(&guard, guard.record.revision) == 0);
     dppd_recovery_guard_close(&guard);
     prepare(&guard, path, state);
     entropy_mode = 0;
     sync_fail = true;
-    assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, cookie) == -EIO);
+    assert(dppd_recovery_guard_begin_owned(&guard, 0, 1, 1, &attempt, cookie, &contents) == -EIO);
     assert(guard.faulted && attempt == 0 && !dppd_tap_cookie_present(cookie));
     assert(dppd_recovery_guard_clean(&guard) == -EUCLEAN);
     sync_fail = false;
@@ -208,7 +215,7 @@ static void compiler(struct dppd_rule *rule)
 static int before(void *context, uint16_t port, const struct dppd_rule *rule,
     uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
 {
-    int rc = dppd_recovery_guard_begin_owned(context, port, rule->id, rule->generation, attempt, cookie);
+    int rc = dppd_recovery_guard_begin_owned(context, port, rule->id, rule->generation, attempt, cookie, &contents);
     if (rc == 0)
         memcpy(expected, cookie, sizeof(expected));
     return rc;

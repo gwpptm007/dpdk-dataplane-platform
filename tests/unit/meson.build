@@ -150,6 +150,7 @@ test('cross-process recovery guard', recovery_guard_test)
 
 # 内核消息边界、未知身份和只读查询，TAP 实际残留由独立 root 集成测试覆盖
 recovery_inspect_test = executable('test_recovery_inspect', 'test_recovery_inspect.c',
+  '../../lib/control/tap_content.c', '../../lib/control/rule.c',
   include_directories: dppd_inc)
 test('TAP recovery inspection', recovery_inspect_test)
 
@@ -164,6 +165,10 @@ tap_owner_test = executable('test_tap_owner', 'test_tap_owner.c',
   link_args: ['-Wl,--wrap=getrandom', '-Wl,--wrap=fsync', '-Wl,--wrap=rte_eth_dev_info_get',
               '-Wl,--wrap=rte_flow_validate', '-Wl,--wrap=rte_flow_create', '-Wl,--wrap=rte_flow_destroy'])
 test('native TAP owner cookie', tap_owner_test)
+
+# 预期内容必须独立于内核读回结果，验证字节序、掩码规范化和优先级映射边界
+tap_content_test = executable('test_tap_content', 'test_tap_content.c', dependencies: dppd_core_dep)
+test('TAP expected rule content', tap_content_test)
 
 # 完成态环形历史、覆盖缺口、稳定分页、整数边界和真实隔离 socket 查询
 rule_history_test = executable('test_rule_history', 'test_rule_history.c',

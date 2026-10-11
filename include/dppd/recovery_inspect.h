@@ -38,5 +38,8 @@ bool dppd_recovery_filter_equal(const struct dppd_recovery_filter *left,
 /** 返回标识匹配数量，多个匹配仍有歧义，负值表示观察范围不可用 */
 int dppd_recovery_cookie_matches(const struct dppd_recovery_inspection *inspection,
     const uint8_t cookie[DPPD_TAP_COOKIE_SIZE]);
+/** scope 为真核对挂载位置和动作引用，否则核对匹配条件与动作内容 */
+int dppd_recovery_verify(const struct dppd_tap_content *expected,
+    const struct dppd_recovery_filter *filter, bool scope);
 
 #endif

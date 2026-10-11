@@ -30,6 +30,7 @@ struct recovery_context {
     bool record_error_reported;
     bool native_owner;
     uint8_t pending_cookie[DPPD_TAP_COOKIE_SIZE];
+    struct dppd_tap_content pending_content;
 };
 
 /** 从已落盘的端口身份读取观察范围，不再按可复用的 DPDK 名称推断内核接口 */
@@ -71,6 +72,8 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
         rc = rte_eth_dev_info_get(port_id, &info);
         if (rc == 0)
             rc = dppd_recovery_tap_identity(info.if_index, &identity);
+        if (rc == 0 && recovery->native_owner)
+            rc = dppd_tap_content_from_rule(rule, info.max_rx_queues, &recovery->pending_content);
         if (rc != 0)
             return rc;
         rc = dppd_recovery_guard_prepare_identity(recovery->guard, port_id, port->identity.device_name,
@@ -81,7 +84,7 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
     if (rc != 0)
         return rc;
     rc = recovery->native_owner ? dppd_recovery_guard_begin_owned(recovery->guard, port_id,
-        rule->id, rule->generation, attempt, cookie) :
+        rule->id, rule->generation, attempt, cookie, &recovery->pending_content) :
         dppd_recovery_guard_begin(recovery->guard, port_id, rule->id, rule->generation, attempt);
     if (rc != 0)
         return rc;
@@ -128,6 +131,18 @@ static int finish_recovery_create(void *context, uint64_t attempt, int create_er
         if (matches != 1) {
             fprintf(stderr, "[dppd] TAP owner readback not unique: %d; rolling back\n", matches);
             return matches < 0 ? matches : -EUCLEAN;
+        }
+        /** 唯一标识还不足以接受创建结果，内容或范围无法核实时用真实 handle 回滚 */
+        for (uint32_t i = 0; i < after.count; ++i) {
+            const struct dppd_recovery_filter *filter = &after.filters[i];
+            if (!filter->cookie_valid || memcmp(filter->cookie, recovery->pending_cookie, DPPD_TAP_COOKIE_SIZE) != 0)
+                continue;
+            int content = dppd_recovery_verify(&recovery->pending_content, filter, false);
+            int scope = dppd_recovery_verify(&recovery->pending_content, filter, true);
+            if (content != 0 || scope != 0) {
+                fprintf(stderr, "[dppd] TAP rule readback failed: content=%d scope=%d; rolling back\n", content, scope);
+                return -EUCLEAN;
+            }
         }
     }
     return rc;

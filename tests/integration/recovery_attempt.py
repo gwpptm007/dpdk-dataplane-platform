@@ -88,7 +88,8 @@ def run_case(build, mode, native=False):
                 check("owner-token attempt=1 cookie=" in show, show)
                 expected_status = "token-present owner=token-match" if mode == "after" else "token-absent owner=unknown"
                 check(f"status={expected_status}" in inspected, inspected)
-                check("content=unchecked" in inspected and "cleanup-confirmed=no" in inspected, inspected)
+                content = "match" if mode == "after" else "unavailable"
+                check(f"content={content} scope={content}" in inspected and "cleanup-confirmed=no" in inspected, inspected)
             else:
                 check("status=no-candidate owner=unknown" in inspected, inspected)
             # 即使当前本地列表为空，记录仍待确认，测试先明确删除全部自有接口再确认

@@ -37,7 +37,7 @@ static ssize_t test_receive(int fd, struct msghdr *message, int flags)
 struct test_message {
     struct nlmsghdr header;
     struct tcmsg tc;
-    unsigned char data[256];
+    unsigned char data[1024];
 };
 
 /** 测试消息按真实 Netlink 对齐规则拼装，允许精确破坏某个属性边界 */
@@ -178,6 +178,54 @@ static void cookie_messages(void)
     assert(dppd_recovery_cookie_matches(&inspection, cookie) == -ENODATA);
 }
 
+/** 构造合法动作后逐项加入未知字段、共享引用和行为变化，检查标识相同也不能误报匹配 */
+static void content_messages(void)
+{
+    const struct dppd_tap_content expected = {.version = 1, .action = 1,
+        .parent = TAP_MULTIQ, .priority = 26, .protocol = 3};
+    for (unsigned int mode = 0; mode < 12; ++mode) {
+        struct test_message options = {.header.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg))};
+        struct test_message action = options, actions = options, parameters = options, outer = options;
+        struct tc_gact gact = {.index = 123, .action = TC_ACT_SHOT, .refcnt = 1, .bindcnt = 1};
+        struct dppd_recovery_filter filter = {.parent = TAP_MULTIQ, .priority = 26, .protocol = 3};
+        if (mode == 1) gact.bindcnt = gact.refcnt = 2;
+        if (mode == 2) gact.refcnt = 2;
+        if (mode == 3) gact.action = TC_ACT_OK;
+        if (mode == 4) filter.priority++;
+        if (mode == 5) filter.chain = 1;
+        uint32_t value = 0;
+        append(&parameters, TCA_GACT_PARMS, &gact, sizeof(gact));
+        if (mode == 6) append(&parameters, TCA_GACT_PROB, &value, sizeof(value));
+        append(&action, TCA_ACT_KIND, "gact", 5);
+        append(&action, TCA_ACT_OPTIONS, parameters.data, parameters.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        if (mode == 7) append(&action, TCA_ACT_MAX + 99, &value, sizeof(value));
+        append(&actions, 1, action.data, action.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        append(&options, TCA_FLOWER_ACT, actions.data, actions.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        if (mode == 8) append(&options, TCA_FLOWER_MAX + 99, &value, sizeof(value));
+        if (mode == 9) append(&options, TCA_FLOWER_CLASSID, &value, sizeof(value));
+        if (mode == 10) {
+            uint16_t ether = htons(0x0800);
+            append(&options, TCA_FLOWER_KEY_ETH_TYPE, &ether, sizeof(ether));
+        }
+        if (mode == 11) {
+            value = TCA_CLS_FLAGS_SKIP_HW;
+            append(&options, TCA_FLOWER_FLAGS, &value, sizeof(value));
+        }
+        append(&outer, TCA_OPTIONS, options.data, options.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        read_content((const struct rtattr *)outer.data, &filter);
+        int content = dppd_recovery_verify(&expected, &filter, false);
+        int scope = dppd_recovery_verify(&expected, &filter, true);
+        if (mode == 0) assert(content == 0 && scope == 0);
+        else if (mode == 1) assert(content == 0 && scope == -EMLINK);
+        else if (mode == 2) assert(content == 0 && scope == -ENOTSUP);
+        else if (mode == 4 || mode == 5) assert(content == 0 && scope == -ESTALE);
+        else if (mode == 10) assert(content == -ESTALE && scope == 0);
+        else assert(content == -ENOTSUP && scope == -ENOTSUP);
+        const struct dppd_tap_content legacy = {0};
+        assert(dppd_recovery_verify(&legacy, &filter, false) == -ENODATA);
+    }
+}
+
 int main(void)
 {
     /** 正常单新增、同时多新增、旧对象变化和重复坐标必须分开判断 */
@@ -201,5 +249,6 @@ int main(void)
     transport_failures();
     unknown_identity();
     cookie_messages();
+    content_messages();
     return 0;
 }

@@ -53,6 +53,18 @@ static const char *evidence_name(enum dppd_recovery_evidence evidence)
     }
 }
 
+/** 核验结论独立于标识结论，旧记录缺少预期内容时不能报告匹配 */
+static const char *verification_name(int error)
+{
+    switch (error) {
+    case 0: return "match";
+    case -ENODATA: return "unchecked";
+    case -ESTALE: return "mismatch";
+    case -EMLINK: return "shared-action";
+    default: return "unsupported";
+    }
+}
+
 /** 逐次安装线索可以关联当前坐标，但删除后再创建同坐标的对象无法凭这些字段排除 */
 static void correlate_attempts(const struct dppd_recovery_record *record, uint16_t port_id,
     const struct dppd_recovery_inspection *inspection, int inspect_error)
@@ -61,17 +73,27 @@ static void correlate_attempts(const struct dppd_recovery_record *record, uint16
         const struct dppd_recovery_attempt *attempt = &record->attempts[index];
         const char *status = "no-candidate";
         const char *owner = "unknown";
+        const char *content = "unchecked", *scope = "unchecked";
         if (attempt->port_id != port_id)
             continue;
         if (attempt->phase == DPPD_RECOVERY_REMOVED)
             status = "removed-record";
         else if (dppd_tap_cookie_present(attempt->owner_cookie)) {
+            content = scope = attempt->expected.version != 0 ? "unavailable" : "unchecked";
             int matches = inspect_error != 0 ? inspect_error :
                 dppd_recovery_cookie_matches(inspection, attempt->owner_cookie);
             status = matches < 0 ? "inspection-unavailable" : matches == 1 ? "token-present" :
                 matches == 0 ? "token-absent" : "token-ambiguous";
-            if (matches == 1)
+            if (matches == 1) {
                 owner = "token-match";
+                for (uint32_t row = 0; row < inspection->count; ++row) {
+                    const struct dppd_recovery_filter *filter = &inspection->filters[row];
+                    if (!filter->cookie_valid || memcmp(filter->cookie, attempt->owner_cookie, DPPD_TAP_COOKIE_SIZE) != 0)
+                        continue;
+                    content = verification_name(dppd_recovery_verify(&attempt->expected, filter, false));
+                    scope = verification_name(dppd_recovery_verify(&attempt->expected, filter, true));
+                }
+            }
         }
         else if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION) {
             uint32_t matches = 0;
@@ -81,12 +103,12 @@ static void correlate_attempts(const struct dppd_recovery_record *record, uint16
                 matches == 0 ? "coordinate-absent" : "coordinate-ambiguous";
         }
         printf("correlation attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
-            " port=%u phase=%s evidence=%s status=%s owner=%s content=unchecked\n", attempt->id, attempt->rule_id,
-            attempt->generation, port_id, phase_name(attempt->phase), evidence_name(attempt->evidence), status, owner);
+            " port=%u phase=%s evidence=%s status=%s owner=%s content=%s scope=%s\n", attempt->id, attempt->rule_id,
+            attempt->generation, port_id, phase_name(attempt->phase), evidence_name(attempt->evidence), status, owner, content, scope);
     }
 }
 
-/** 标识匹配不验证完整规则内容，也不构成清理确认，恢复标记保持原样 */
+/** 标识、内容和范围分别展示，仍不是原子快照或清理确认，恢复标记保持原样 */
 static int inspect_record(const struct dppd_recovery_record *record, uint64_t revision)
 {
     int result = 0;

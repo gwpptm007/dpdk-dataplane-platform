@@ -20,7 +20,9 @@
 #define RECORD_V2_SIZE (RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + DPPD_MAX_PORTS * RECORD_PORT)
 #define RECORD_V3_ATTEMPT 96U
 #define RECORD_V3_SIZE (RECORD_V2_SIZE + 32U + DPPD_RECOVERY_ATTEMPT_LIMIT * RECORD_V3_ATTEMPT)
-#define RECORD_ATTEMPT 112U
+#define RECORD_V4_ATTEMPT 112U
+#define RECORD_V4_SIZE (RECORD_V2_SIZE + 32U + DPPD_RECOVERY_ATTEMPT_LIMIT * RECORD_V4_ATTEMPT)
+#define RECORD_ATTEMPT (RECORD_V4_ATTEMPT + DPPD_TAP_CONTENT_SIZE)
 #define RECORD_SIZE (RECORD_V2_SIZE + 32U + DPPD_RECOVERY_ATTEMPT_LIMIT * RECORD_ATTEMPT)
 static const unsigned char magic[8] = {'D', 'P', 'P', 'R', 'E', 'C', '1', 0};
 
@@ -56,7 +58,7 @@ static uint32_t checksum(const unsigned char *bytes, size_t size)
 static size_t encode(const struct dppd_recovery_record *record, unsigned char *bytes)
 {
     size_t size = record->format == 1 ? RECORD_V1_SIZE : record->format == 2 ? RECORD_V2_SIZE :
-        record->format == 3 ? RECORD_V3_SIZE : RECORD_SIZE;
+        record->format == 3 ? RECORD_V3_SIZE : record->format == 4 ? RECORD_V4_SIZE : RECORD_SIZE;
     size_t stride = record->format == 1 ? RECORD_V1_PORT : RECORD_PORT;
     memset(bytes, 0, RECORD_SIZE);
     memcpy(bytes, magic, sizeof(magic));
@@ -87,13 +89,15 @@ static size_t encode(const struct dppd_recovery_record *record, unsigned char *b
         for (uint32_t index = 0; index < record->attempt_count; ++index) {
             const struct dppd_recovery_attempt *attempt = &record->attempts[index];
             unsigned char *row = bytes + RECORD_V2_SIZE + 32 + index *
-                (record->format == 3 ? RECORD_V3_ATTEMPT : RECORD_ATTEMPT);
+                (record->format == 3 ? RECORD_V3_ATTEMPT : record->format == 4 ? RECORD_V4_ATTEMPT : RECORD_ATTEMPT);
             put(row, attempt->id, 8);
             put(row + 8, attempt->rule_id, 8);
             put(row + 16, attempt->generation, 8);
             put(row + 24, attempt->port_id, 2);
             if (record->format >= 4)
                 memcpy(row + 96, attempt->owner_cookie, DPPD_TAP_COOKIE_SIZE);
+            if (record->format >= 5)
+                dppd_tap_content_encode(&attempt->expected, row + RECORD_V4_ATTEMPT);
             row[26] = (unsigned char)attempt->phase;
             row[27] = (unsigned char)attempt->evidence;
             put(row + 28, (uint32_t)attempt->create_error, 4);
@@ -168,9 +172,9 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
     uint32_t format = (uint32_t)get(bytes + 8, 4);
     size_t stride = format == 1 ? RECORD_V1_PORT : RECORD_PORT;
 
-    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format < 1 || format > 4) ||
+    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format < 1 || format > 5) ||
         size != (format == 1 ? RECORD_V1_SIZE : format == 2 ? RECORD_V2_SIZE :
-            format == 3 ? RECORD_V3_SIZE : RECORD_SIZE) ||
+            format == 3 ? RECORD_V3_SIZE : format == 4 ? RECORD_V4_SIZE : RECORD_SIZE) ||
         get(bytes + 12, 4) != size || get(bytes + 28, 4) != checksum(bytes, size))
         return -EBADMSG;
     memset(record, 0, sizeof(*record));
@@ -219,13 +223,16 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
         for (uint32_t index = 0; index < record->attempt_count; ++index) {
             struct dppd_recovery_attempt *attempt = &record->attempts[index];
             const unsigned char *row = bytes + RECORD_V2_SIZE + 32 + index *
-                (record->format == 3 ? RECORD_V3_ATTEMPT : RECORD_ATTEMPT);
+                (format == 3 ? RECORD_V3_ATTEMPT : format == 4 ? RECORD_V4_ATTEMPT : RECORD_ATTEMPT);
             attempt->id = get(row, 8);
             attempt->rule_id = get(row + 8, 8);
             attempt->generation = get(row + 16, 8);
             attempt->port_id = (uint16_t)get(row + 24, 2);
             if (format >= 4)
                 memcpy(attempt->owner_cookie, row + 96, DPPD_TAP_COOKIE_SIZE);
+            if (format >= 5 && (dppd_tap_content_decode(row + RECORD_V4_ATTEMPT, &attempt->expected) != 0 ||
+                dppd_tap_cookie_present(attempt->owner_cookie) != (attempt->expected.version == 1)))
+                return -EBADMSG;
             attempt->phase = row[26];
             attempt->evidence = row[27];
             attempt->create_error = (int32_t)get(row + 28, 4);
@@ -381,7 +388,7 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
     if (rc != 0)
         goto fail;
     if (created) {
-        guard->record.format = 4;
+        guard->record.format = 5;
         strcpy(guard->record.state_path, state);
         rc = save(guard, &guard->record);
         if (rc != 0)
@@ -391,7 +398,8 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
             rc = -errno;
             goto fail;
         }
-        if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V3_SIZE && info.st_size != RECORD_V1_SIZE && info.st_size != RECORD_V2_SIZE) {
+        if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V4_SIZE && info.st_size != RECORD_V3_SIZE &&
+            info.st_size != RECORD_V1_SIZE && info.st_size != RECORD_V2_SIZE) {
             rc = -EBADMSG;
             goto fail;
         }
@@ -414,13 +422,13 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
         }
     }
     /** 旧待核对记录保持原格式，只有确认干净的旧文件才允许在新 daemon 启动时升级 */
-    if (state_path != NULL && guard->record.format < 4 && guard->record.count == 0) {
+    if (state_path != NULL && guard->record.format < 5 && guard->record.count == 0) {
         struct dppd_recovery_record upgraded = guard->record;
         if (upgraded.revision == UINT64_MAX) {
             rc = -EOVERFLOW;
             goto fail;
         }
-        upgraded.format = 4;
+        upgraded.format = 5;
         upgraded.revision++;
         rc = save(guard, &upgraded);
         if (rc != 0)
@@ -537,7 +545,8 @@ static int new_cookie(const struct dppd_recovery_record *record, uint8_t cookie[
 
 /** 单调编号与意图一起落盘，删除过的槽位可复用，未清理线索满时显式拒绝新安装 */
 static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id,
-    uint64_t rule_id, uint64_t generation, uint64_t *attempt, uint8_t *cookie)
+    uint64_t rule_id, uint64_t generation, uint64_t *attempt, uint8_t *cookie,
+    const struct dppd_tap_content *expected)
 {
     struct dppd_recovery_record next;
     bool known_port = false, known_tap = false;
@@ -547,7 +556,7 @@ static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id,
     *attempt = 0;
     if (cookie != NULL)
         memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
-    if (!guard->writable || guard->faulted || guard->record.format != 4)
+    if (!guard->writable || guard->faulted || guard->record.format != 5)
         return -EUCLEAN;
     if (guard->record.last_attempt == UINT64_MAX || guard->record.revision == UINT64_MAX)
         return -EOVERFLOW;
@@ -562,6 +571,8 @@ static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id,
         return -ENOENT;
     if (cookie != NULL && !known_tap)
         return -ENOTSUP;
+    if (cookie != NULL && (expected == NULL || expected->version != 1 || !dppd_tap_content_valid(expected)))
+        return -EINVAL;
     for (slot = 0; slot < guard->record.attempt_count; ++slot)
         if (guard->record.attempts[slot].phase == DPPD_RECOVERY_REMOVED)
             break;
@@ -573,6 +584,7 @@ static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id,
     next.attempts[slot] = (struct dppd_recovery_attempt){.id = ++next.last_attempt,
         .rule_id = rule_id, .generation = generation, .port_id = port_id, .phase = DPPD_RECOVERY_INTENT};
     if (cookie != NULL) {
+        next.attempts[slot].expected = *expected;
         int rc = new_cookie(&guard->record, next.attempts[slot].owner_cookie);
         if (rc != 0)
             return rc;
@@ -591,16 +603,17 @@ static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id,
 int dppd_recovery_guard_begin(struct dppd_recovery_guard *guard, uint16_t port_id,
     uint64_t rule_id, uint64_t generation, uint64_t *attempt)
 {
-    return begin_attempt(guard, port_id, rule_id, generation, attempt, NULL);
+    return begin_attempt(guard, port_id, rule_id, generation, attempt, NULL, NULL);
 }
 
 /** 成功返回表示随机标识已经与意图一起 fsync，调用方此后才可执行创建 */
 int dppd_recovery_guard_begin_owned(struct dppd_recovery_guard *guard, uint16_t port_id,
-    uint64_t rule_id, uint64_t generation, uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
+    uint64_t rule_id, uint64_t generation, uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE],
+    const struct dppd_tap_content *expected)
 {
     if (cookie == NULL)
         return -EINVAL;
-    return begin_attempt(guard, port_id, rule_id, generation, attempt, cookie);
+    return begin_attempt(guard, port_id, rule_id, generation, attempt, cookie, expected);
 }
 
 /** 更新必须引用本文件仍保留的精确尝试编号，不能凭可能重复的业务 ID 修改另一轮记录 */
@@ -608,7 +621,7 @@ static int attempt_slot(const struct dppd_recovery_guard *guard, uint64_t attemp
 {
     if (guard == NULL || attempt == 0)
         return -EINVAL;
-    if (!guard->writable || guard->faulted || guard->record.format != 4)
+    if (!guard->writable || guard->faulted || guard->record.format != 5)
         return -EUCLEAN;
     if (guard->record.revision == UINT64_MAX)
         return -EOVERFLOW;

@@ -18,8 +18,8 @@ int __wrap_fsync(int fd);
 /** 改坏字段后重新计算 CRC，确保拒绝来自语义和规范编码检查，而非仅依赖校验和 */
 static void damaged_attempts(const char *path)
 {
-    unsigned char original[37952], damaged[37952];
-    const unsigned int offsets[] = {26, 24, 28, 36, 56, 95, 112};
+    unsigned char original[54336], damaged[54336];
+    const unsigned int offsets[] = {26, 24, 28, 36, 56, 95, 96, 112, 176};
     struct dppd_recovery_guard guard;
     int fd = open(path, O_RDWR);
     assert(fd >= 0 && pread(fd, original, sizeof(original), 0) == sizeof(original));

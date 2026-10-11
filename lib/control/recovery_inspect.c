@@ -7,6 +7,8 @@
 #include <linux/if_tun.h>
 #include <linux/pkt_sched.h>
 #include <linux/pkt_cls.h>
+#include <linux/tc_act/tc_gact.h>
+#include <linux/tc_act/tc_skbedit.h>
 #include <linux/rtnetlink.h>
 #include <stdio.h>
 #include <string.h>
@@ -290,6 +292,161 @@ static int read_cookie(const struct rtattr *options, struct dppd_recovery_filter
 }
 
 /** 先枚举挂载点再读取过滤器，挂载点类型被替换时返回不支持，避免误报完整的空列表 */
+/**
+ * 内容核验采用允许列表，包括编译时头文件尚不认识的属性也不能跳过
+ * 基础解析负责消息完整性，这里把无法解释的语义报告为不支持
+ */
+static int supported_attributes(const void *data, size_t length, const unsigned int *allowed, size_t count)
+{
+    const struct rtattr *attribute = data;
+    while (length != 0) {
+        if (length < sizeof(*attribute) || attribute->rta_len < sizeof(*attribute) || RTA_ALIGN(attribute->rta_len) > length)
+            return -EBADMSG;
+        bool found = false;
+        for (size_t i = 0; i < count; ++i)
+            found |= attribute->rta_type == allowed[i];
+        if (!found)
+            return -ENOTSUP;
+        length -= RTA_ALIGN(attribute->rta_len);
+        attribute = (const struct rtattr *)((const char *)attribute + RTA_ALIGN(attribute->rta_len));
+    }
+    return 0;
+}
+
+/** 可选字段缺失时保留调用方的零值，存在时必须严格匹配长度 */
+static int read_value(const struct rtattr *attribute, void *value, size_t size)
+{
+    if (attribute == NULL)
+        return 0;
+    if (RTA_PAYLOAD(attribute) != size)
+        return -EBADMSG;
+    memcpy(value, RTA_DATA(attribute), size);
+    return 0;
+}
+
+/** 地址和掩码必须成对，掩码之外的位不参与行为比较 */
+static int read_pair(const struct rtattr *value, const struct rtattr *mask, void *output, void *output_mask, size_t size)
+{
+    if ((value == NULL) != (mask == NULL))
+        return -ENOTSUP;
+    if (read_value(value, output, size) != 0 || read_value(mask, output_mask, size) != 0)
+        return -EBADMSG;
+    for (size_t i = 0; i < size; ++i)
+        ((uint8_t *)output)[i] &= ((uint8_t *)output_mask)[i];
+    return 0;
+}
+
+/**
+ * 单个动作也可能被其他规则共用，引用数不明确时不能确认作用范围
+ * Linux 6.8 的 TCA_ACT_IN_HW_COUNT 编号为 10，兼容缺少此枚举名的旧用户态头文件
+ */
+static int read_action_content(const struct rtattr *list, struct dppd_recovery_filter *filter)
+{
+    enum { ACT_HW_COUNT = 10, ACT_TABLE_SIZE = 11 };
+    const unsigned int allowed[] = {TCA_ACT_KIND, TCA_ACT_OPTIONS, TCA_ACT_COOKIE, TCA_ACT_STATS,
+        TCA_ACT_PAD, TCA_ACT_HW_STATS, TCA_ACT_USED_HW_STATS, ACT_HW_COUNT};
+    const struct rtattr *attrs[ACT_TABLE_SIZE];
+    if (list == NULL || RTA_PAYLOAD(list) < sizeof(struct rtattr))
+        return -ENOTSUP;
+    const struct rtattr *action = RTA_DATA(list);
+    if (action->rta_type != 1 || RTA_ALIGN(action->rta_len) != RTA_PAYLOAD(list) ||
+        action->rta_len < sizeof(*action) ||
+        attributes(RTA_DATA(action), RTA_PAYLOAD(action), attrs, ACT_TABLE_SIZE) != 0 ||
+        supported_attributes(RTA_DATA(action), RTA_PAYLOAD(action), allowed, sizeof(allowed) / sizeof(allowed[0])) != 0)
+        return -ENOTSUP;
+    uint32_t hardware = 0;
+    if (read_value(attrs[ACT_HW_COUNT], &hardware, sizeof(hardware)) != 0 || hardware != 0)
+        return -ENOTSUP;
+    char kind[DPPD_RECOVERY_KIND_SIZE];
+    if (attribute_string(attrs[TCA_ACT_KIND], kind, sizeof(kind)) != 0 || attrs[TCA_ACT_OPTIONS] == NULL)
+        return -ENOTSUP;
+    const struct rtattr *options = attrs[TCA_ACT_OPTIONS];
+    struct tc_gact parameters = {0};
+    if (strcmp(kind, "gact") == 0) {
+        const unsigned int fields[] = {TCA_GACT_PARMS, TCA_GACT_TM, TCA_GACT_PAD};
+        const struct rtattr *values[TCA_GACT_MAX + 1];
+        if (attributes(RTA_DATA(options), RTA_PAYLOAD(options), values, TCA_GACT_MAX + 1) != 0 ||
+            supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), fields, sizeof(fields) / sizeof(fields[0])) != 0 ||
+            values[TCA_GACT_PARMS] == NULL || read_value(values[TCA_GACT_PARMS], &parameters, sizeof(parameters)) != 0 ||
+            parameters.action != TC_ACT_SHOT)
+            return -ENOTSUP;
+        filter->content.action = 1;
+    } else if (strcmp(kind, "skbedit") == 0) {
+        const unsigned int fields[] = {TCA_SKBEDIT_PARMS, TCA_SKBEDIT_QUEUE_MAPPING, TCA_SKBEDIT_TM, TCA_SKBEDIT_PAD};
+        const struct rtattr *values[TCA_SKBEDIT_MAX + 1];
+        struct tc_skbedit edit = {0};
+        if (attributes(RTA_DATA(options), RTA_PAYLOAD(options), values, TCA_SKBEDIT_MAX + 1) != 0 ||
+            supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), fields, sizeof(fields) / sizeof(fields[0])) != 0 ||
+            values[TCA_SKBEDIT_PARMS] == NULL || values[TCA_SKBEDIT_QUEUE_MAPPING] == NULL ||
+            read_value(values[TCA_SKBEDIT_PARMS], &edit, sizeof(edit)) != 0 || edit.action != TC_ACT_PIPE ||
+            read_value(values[TCA_SKBEDIT_QUEUE_MAPPING], &filter->content.queue, sizeof(filter->content.queue)) != 0)
+            return -ENOTSUP;
+        parameters.index = edit.index;
+        parameters.capab = edit.capab;
+        parameters.refcnt = edit.refcnt;
+        parameters.bindcnt = edit.bindcnt;
+        filter->content.action = 2;
+    } else
+        return -ENOTSUP;
+    filter->scope_error = parameters.bindcnt > 1 ? -EMLINK :
+        parameters.index == 0 || parameters.capab != 0 || parameters.refcnt != 1 || parameters.bindcnt != 1 ? -ENOTSUP : 0;
+    return 0;
+}
+
+/** 仅解释当前支持的 ETH、IPv4、UDP、TCP 字段，额外匹配条件会使内容核验失效 */
+static void read_content(const struct rtattr *options, struct dppd_recovery_filter *filter)
+{
+    const unsigned int allowed[] = {TCA_FLOWER_ACT, TCA_FLOWER_KEY_ETH_TYPE, TCA_FLOWER_KEY_IP_PROTO,
+        TCA_FLOWER_KEY_IPV4_SRC, TCA_FLOWER_KEY_IPV4_SRC_MASK, TCA_FLOWER_KEY_IPV4_DST, TCA_FLOWER_KEY_IPV4_DST_MASK,
+        TCA_FLOWER_KEY_UDP_SRC, TCA_FLOWER_KEY_UDP_SRC_MASK, TCA_FLOWER_KEY_UDP_DST, TCA_FLOWER_KEY_UDP_DST_MASK,
+        TCA_FLOWER_KEY_TCP_SRC, TCA_FLOWER_KEY_TCP_SRC_MASK, TCA_FLOWER_KEY_TCP_DST, TCA_FLOWER_KEY_TCP_DST_MASK,
+        TCA_FLOWER_FLAGS, TCA_FLOWER_IN_HW_COUNT};
+    const struct rtattr *fields[TCA_FLOWER_MAX + 1];
+    struct dppd_tap_content *c = &filter->content;
+    filter->content_error = filter->scope_error = -ENOTSUP;
+    if (options == NULL || attributes(RTA_DATA(options), RTA_PAYLOAD(options), fields, TCA_FLOWER_MAX + 1) != 0 ||
+        supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), allowed, sizeof(allowed) / sizeof(allowed[0])) != 0)
+        return;
+    uint32_t flags = 0, hardware = 0;
+    uint16_t ether = 0;
+    if (read_value(fields[TCA_FLOWER_FLAGS], &flags, sizeof(flags)) != 0 ||
+        read_value(fields[TCA_FLOWER_IN_HW_COUNT], &hardware, sizeof(hardware)) != 0 ||
+        (flags & ~TCA_CLS_FLAGS_NOT_IN_HW) != 0 || hardware != 0 ||
+        read_value(fields[TCA_FLOWER_KEY_ETH_TYPE], &ether, sizeof(ether)) != 0 ||
+        read_value(fields[TCA_FLOWER_KEY_IP_PROTO], &c->ip_proto, sizeof(c->ip_proto)) != 0 ||
+        read_pair(fields[TCA_FLOWER_KEY_IPV4_SRC], fields[TCA_FLOWER_KEY_IPV4_SRC_MASK],
+            &c->ipv4.src_be, &c->ipv4.src_mask_be, 4) != 0 ||
+        read_pair(fields[TCA_FLOWER_KEY_IPV4_DST], fields[TCA_FLOWER_KEY_IPV4_DST_MASK],
+            &c->ipv4.dst_be, &c->ipv4.dst_mask_be, 4) != 0)
+        return;
+    c->eth_type = ntohs(ether);
+    bool tcp = c->ip_proto == 6;
+    unsigned int src = tcp ? TCA_FLOWER_KEY_TCP_SRC : TCA_FLOWER_KEY_UDP_SRC;
+    unsigned int dst = tcp ? TCA_FLOWER_KEY_TCP_DST : TCA_FLOWER_KEY_UDP_DST;
+    unsigned int src_mask = tcp ? TCA_FLOWER_KEY_TCP_SRC_MASK : TCA_FLOWER_KEY_UDP_SRC_MASK;
+    unsigned int dst_mask = tcp ? TCA_FLOWER_KEY_TCP_DST_MASK : TCA_FLOWER_KEY_UDP_DST_MASK;
+    if (fields[tcp ? TCA_FLOWER_KEY_UDP_SRC : TCA_FLOWER_KEY_TCP_SRC] != NULL ||
+        fields[tcp ? TCA_FLOWER_KEY_UDP_DST : TCA_FLOWER_KEY_TCP_DST] != NULL ||
+        fields[tcp ? TCA_FLOWER_KEY_UDP_SRC_MASK : TCA_FLOWER_KEY_TCP_SRC_MASK] != NULL ||
+        fields[tcp ? TCA_FLOWER_KEY_UDP_DST_MASK : TCA_FLOWER_KEY_TCP_DST_MASK] != NULL ||
+        read_pair(fields[src], fields[src_mask], &c->l4.src_be, &c->l4.src_mask_be, 2) != 0 ||
+        read_pair(fields[dst], fields[dst_mask], &c->l4.dst_be, &c->l4.dst_mask_be, 2) != 0 ||
+        (c->ip_proto != 6 && c->ip_proto != 17 && (fields[src] != NULL || fields[dst] != NULL)) ||
+        (c->eth_type != 0 && c->eth_type != 0x0800) ||
+        (c->eth_type == 0 && (fields[TCA_FLOWER_KEY_IP_PROTO] != NULL || fields[TCA_FLOWER_KEY_IPV4_SRC] != NULL ||
+            fields[TCA_FLOWER_KEY_IPV4_DST] != NULL)))
+        return;
+    if (read_action_content(fields[TCA_FLOWER_ACT], filter) != 0)
+        return;
+    c->version = 1;
+    c->parent = filter->parent;
+    c->chain = filter->chain;
+    c->priority = filter->priority;
+    c->protocol = filter->protocol;
+    filter->content_error = 0;
+}
+
+/** 先枚举挂载点再读取过滤器，挂载点类型被替换时返回不支持 */
 static int read_tc(const struct nlmsghdr *header, void *context)
 {
     struct tc_query *query = context;
@@ -326,6 +483,8 @@ static int read_tc(const struct nlmsghdr *header, void *context)
     if (query->inspection->count == DPPD_RECOVERY_FILTER_LIMIT)
         return -E2BIG;
     struct dppd_recovery_filter *filter = &query->inspection->filters[query->inspection->count];
+    memset(filter, 0, sizeof(*filter));
+    filter->content_error = filter->scope_error = -ENOTSUP;
     if (attrs[TCA_CHAIN] != NULL) {
         if (RTA_PAYLOAD(attrs[TCA_CHAIN]) != sizeof(filter->chain))
             return -EBADMSG;
@@ -340,6 +499,11 @@ static int read_tc(const struct nlmsghdr *header, void *context)
         int rc = read_cookie(attrs[TCA_OPTIONS], filter);
         if (rc != 0)
             return rc;
+        read_content(attrs[TCA_OPTIONS], filter);
+        const unsigned int allowed[] = {TCA_KIND, TCA_OPTIONS, TCA_CHAIN, TCA_STATS, TCA_STATS2, TCA_XSTATS, TCA_PAD};
+        if (supported_attributes(TCA_RTA(message), TCA_PAYLOAD(header), allowed, sizeof(allowed) / sizeof(allowed[0])) != 0 ||
+            message->tcm_family != AF_UNSPEC || message->tcm__pad1 != 0 || message->tcm__pad2 != 0)
+            filter->scope_error = -ENOTSUP;
     }
     query->inspection->count++;
     return 0;
@@ -468,6 +632,23 @@ int dppd_recovery_cookie_matches(const struct dppd_recovery_inspection *inspecti
         matches += inspection->filters[index].cookie_valid &&
             memcmp(inspection->filters[index].cookie, cookie, DPPD_TAP_COOKIE_SIZE) == 0;
     return matches;
+}
+
+/** 内容与范围分开核对，标识相同但规则被修改时仍必须明确报告不一致 */
+int dppd_recovery_verify(const struct dppd_tap_content *expected,
+    const struct dppd_recovery_filter *filter, bool scope)
+{
+    uint8_t wanted[DPPD_TAP_CONTENT_SIZE], actual[DPPD_TAP_CONTENT_SIZE];
+    if (expected->version == 0)
+        return -ENODATA;
+    if (filter->content.version != 1)
+        return -ENOTSUP;
+    int error = scope ? filter->scope_error : filter->content_error;
+    if (error != 0)
+        return error;
+    dppd_tap_content_encode(expected, wanted);
+    dppd_tap_content_encode(&filter->content, actual);
+    return memcmp(wanted + (scope ? 36 : 0), actual + (scope ? 36 : 0), scope ? 12 : 36) == 0 ? 0 : -ESTALE;
 }
 
 /** 同一坐标重复、旧对象消失或新增多个对象都视为有歧义，单一新增也只是时间相关线索 */

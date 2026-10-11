@@ -4,8 +4,10 @@
 16 字节随机标识，标识先随安装意图写盘并完成 fsync，再由适配后的驱动放入同一次
 TC 创建消息。进程在内核创建成功、驱动尚未返回时被终止，离线检查也能按标识关联残留。
 
-这一步完成了本地 TAP 的原生标识写入和回读。完整规则内容、接口实例连续性、其他
-PMD 与自动精确删除尚未实现。`inspect` 仍只读，标识匹配不会解除恢复保护。
+本文保留 v4 阶段的标识方案和验证记录。当前新文件已升级为
+[v5 内容核验](tap_rule_verification.md)，支持本地 ETH/IPv4/UDP/TCP 条件、DROP/QUEUE
+动作和当前作用范围核验。接口实例连续性、其他 PMD 与自动精确删除尚未实现。
+`inspect` 仍只读，标识匹配不会解除恢复保护。
 
 ## 支持范围和启用方式
 
@@ -14,7 +16,7 @@ PMD 与自动精确删除尚未实现。`inspect` 仍只读，标识匹配不会
 Linux 6.8.0-138、DPDK 21.11.9、GCC 11.4、Meson 0.61.2。
 
 - 仅本地 `net_tap`、ingress 域、单个 DROP 或 QUEUE 动作
-- 支持原 TAP 驱动能接受的匹配条件，本轮实际验证 ETH/DROP 与 IPv4/QUEUE
+- v4 阶段实际验证 ETH/DROP 与 IPv4/QUEUE，当前 v5 的支持范围及 priority 限制见上述内容核验文档
 - 不支持 `remote=`、egress、transfer、RSS、COUNT、MARK 或多个业务动作
 - 同时配置 `--state-path`、独立的 `--recovery-path` 和 `--tap-owner-cookie`
 - 默认关闭，普通模式继续支持系统 DPDK；软件后端不调用原生标识接口
@@ -92,7 +94,7 @@ env LD_LIBRARY_PATH="$DPPD_TAP_LIBS" meson test -C build-tap-owner --print-error
 解析器逐层检查 flower 动作属性。损坏、重复属性、非 16 字节 cookie、带 cookie 的
 多动作或未知动作会让整次观察失败，避免漏掉无法解释的标识后错误宣称唯一匹配。
 
-所有结论仍带 `content=unchecked`，整体仍是 `cleanup-confirmed=no`。cookie 是关联
+v4 旧记录的结论仍带 `content=unchecked`，新 v5 记录另外核验内容和范围，整体仍是 `cleanup-confirmed=no`。cookie 是关联
 证据，不是身份认证：拥有网络管理权限的外部程序可以复制标识，或在保留标识时改写
 规则内容。接口索引、名称和命名空间检查也不是接口实例永不复用的证明。检查结果
 不允许直接自动删除，旧的外部清理与精确修订号确认流程继续适用。
@@ -140,5 +142,5 @@ sudo env LD_LIBRARY_PATH="$DPPD_TAP_LIBS" \
 ```
 
 故障夹具通过显式预加载模拟创建成功却没有标识；正式回读必须触发回滚并删除实际
-对象。夹具不链接生产程序。下一步是核验规则内容与对象完整作用范围，再设计按
-精确对象删除的恢复流程。
+对象。夹具不链接生产程序。本地内容和当前范围已在 v5 补齐，下一步是只读精确清理
+计划与删除前提设计，尚不执行跨进程自动删除。

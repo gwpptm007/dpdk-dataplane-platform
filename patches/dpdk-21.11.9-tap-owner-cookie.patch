@@ -27,7 +27,7 @@
  	if (tap_nlattr_nested_start(msg, TCA_ACT_OPTIONS) < 0)
  		return -1;
  	if (strcmp("gact", adata->id) == 0) {
-@@ -1025,6 +1031,50 @@
+@@ -1025,6 +1031,53 @@
   * @return
   *   0 on success, a negative errno value otherwise and rte_errno is set.
   */
@@ -47,6 +47,9 @@
 +	const struct rte_flow_action *entry;
 +	unsigned int markers = 0, fates = 0, unsupported = 0;
 +
++	/** 普通远端镜像由内部路径生成，可能不提供动作列表 */
++	if (actions == NULL)
++		return 0;
 +	for (entry = actions; entry->type != RTE_FLOW_ACTION_TYPE_END; ++entry) {
 +		if ((int)entry->type == DPPD_TAP_ACTION_OWNER_V1) {
 +			markers++;
@@ -78,7 +81,7 @@
  static int
  priv_flow_process(struct pmd_internals *pmd,
  		  const struct rte_flow_attr *attr,
-@@ -1041,6 +1091,10 @@
+@@ -1041,6 +1094,10 @@
  		.flow = flow,
  	};
  	int action = 0; /* Only one action authorized for now */
@@ -89,7 +92,7 @@
  
  	if (attr->transfer) {
  		rte_flow_error_set(
-@@ -1162,7 +1216,8 @@
+@@ -1162,7 +1219,8 @@
  	for (; actions->type != RTE_FLOW_ACTION_TYPE_END; ++actions) {
  		int err = 0;
  

@@ -28,6 +28,20 @@ struct rte_flow *rte_flow_create(uint16_t port, const struct rte_flow_attr *attr
         return NULL;
     }
     memcpy(&real_create, &symbol, sizeof(real_create));
+    /** 保留真实标识但把 DROP 换成 QUEUE，证明内容核验失败也会回滚真实内核对象 */
+    if (mode != NULL && strcmp(mode, "alter-content") == 0) {
+        struct rte_flow_action changed[DPPD_RULE_MAX_ACTIONS + 2U];
+        const struct rte_flow_action_queue queue = {.index = 0};
+        for (unsigned int index = 0; index < DPPD_RULE_MAX_ACTIONS + 2U; ++index) {
+            changed[index] = actions[index];
+            if (changed[index].type == RTE_FLOW_ACTION_TYPE_DROP)
+                changed[index] = (struct rte_flow_action){.type = RTE_FLOW_ACTION_TYPE_QUEUE, .conf = &queue};
+            if (changed[index].type == RTE_FLOW_ACTION_TYPE_END)
+                return real_create(port, attr, pattern, changed, error);
+        }
+        rte_errno = EINVAL;
+        return NULL;
+    }
     /** 模拟创建成功但标识没有进入内核，验证正式回读检查会使用真实 handle 回滚 */
     if (mode != NULL && strcmp(mode, "omit-owner") == 0) {
         struct rte_flow_action untagged[DPPD_RULE_MAX_ACTIONS + 2U];

@@ -227,8 +227,8 @@ static void damaged_files(const char *path, const char *state, const char *backu
 /** 将当前编码收窄为旧磁盘布局并重算 CRC，兼容测试必须经过实际文件解码 */
 static void legacy_file(const char *path, unsigned int format)
 {
-    unsigned char current[37952], legacy[33856] = {0};
-    size_t size = format == 1 ? 7712 : format == 2 ? 9248 : 33856;
+    unsigned char current[54336], legacy[37952] = {0};
+    size_t size = format == 1 ? 7712 : format == 2 ? 9248 : format == 3 ? 33856 : 37952;
     uint32_t crc = UINT32_MAX;
     int fd = open(path, O_RDWR);
     assert(fd >= 0 && pread(fd, current, sizeof(current), 0) == sizeof(current));
@@ -240,10 +240,11 @@ static void legacy_file(const char *path, unsigned int format)
     for (unsigned int index = 0; index < DPPD_MAX_PORTS; ++index)
         memcpy(legacy + 4128 + index * (format == 1 ? 224 : 320), current + 4128 + index * 320,
             format == 1 ? 216 : 320);
-    if (format == 3) {
+    if (format >= 3) {
+        size_t stride = format == 3 ? 96 : 112;
         memcpy(legacy + 9248, current + 9248, 32);
         for (unsigned int index = 0; index < DPPD_RECOVERY_ATTEMPT_LIMIT; ++index)
-            memcpy(legacy + 9280 + index * 96, current + 9280 + index * 112, 96);
+            memcpy(legacy + 9280 + index * stride, current + 9280 + index * 176, stride);
     }
     for (size_t index = 0; index < size; ++index) {
         crc ^= legacy[index];
@@ -264,7 +265,7 @@ static void identity_and_compatibility(const char *path, const char *state)
     struct dppd_recovery_identity identity = {.ifindex = 123, .ifname = "test-tap",
         .boot_id = "01234567-89ab-cdef-0123-456789abcdef", .netns_device = 4, .netns_inode = 567};
     struct stat info;
-    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.record.format == 4);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.record.format == 5);
     identity.boot_id[0] = 'z';
     assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 1, 1, &identity) == -EINVAL);
     identity.boot_id[0] = '0';
@@ -292,15 +293,15 @@ static void identity_and_compatibility(const char *path, const char *state)
     assert(stat(path, &info) == 0 && info.st_size == 7712);
     dppd_recovery_guard_close(&guard);
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
-    assert(guard.record.format == 4 && guard.record.revision == revision + 2);
-    assert(stat(path, &info) == 0 && info.st_size == 37952);
+    assert(guard.record.format == 5 && guard.record.revision == revision + 2);
+    assert(stat(path, &info) == 0 && info.st_size == 54336);
     dppd_recovery_guard_close(&guard);
     legacy_file(path, 2);
     assert(dppd_recovery_guard_open(&guard, path, NULL) == 0 && guard.record.format == 2);
     assert(guard.record.revision == revision + 2);
     dppd_recovery_guard_close(&guard);
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
-    assert(guard.record.format == 4 && guard.record.revision == revision + 3);
+    assert(guard.record.format == 5 && guard.record.revision == revision + 3);
     /** v3 待处理尝试不能在启动时升级，人工确认后升级仍保留单调编号 */
     uint64_t attempt;
     assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 3, 2, &identity) == 0);
@@ -314,7 +315,22 @@ static void identity_and_compatibility(const char *path, const char *state)
     assert(dppd_recovery_guard_acknowledge(&guard, guard.record.revision) == 0);
     dppd_recovery_guard_close(&guard);
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
-    assert(guard.record.format == 4 && guard.record.last_attempt == attempt && guard.record.attempt_count == 0);
+    assert(guard.record.format == 5 && guard.record.last_attempt == attempt && guard.record.attempt_count == 0);
+    /** v4 原生标识仍可读取，但没有预期内容时不能自动补成 v5 的核验依据 */
+    const struct dppd_tap_content expected = {.version = 1, .action = 1,
+        .parent = 0x10000, .priority = 17, .protocol = 3};
+    uint8_t cookie[DPPD_TAP_COOKIE_SIZE];
+    assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 4, 3, &identity) == 0);
+    assert(dppd_recovery_guard_begin_owned(&guard, 0, 4, 3, &attempt, cookie, &expected) == 0);
+    dppd_recovery_guard_close(&guard);
+    legacy_file(path, 4);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && !guard.writable && guard.record.format == 4);
+    assert(guard.record.attempts[0].expected.version == 0);
+    assert(memcmp(guard.record.attempts[0].owner_cookie, cookie, sizeof(cookie)) == 0);
+    assert(dppd_recovery_guard_acknowledge(&guard, guard.record.revision) == 0 && guard.record.format == 4);
+    dppd_recovery_guard_close(&guard);
+    assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable && guard.record.format == 5);
+    assert(guard.record.last_attempt == attempt);
     dppd_recovery_guard_close(&guard);
 }
 
