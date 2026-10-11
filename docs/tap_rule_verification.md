@@ -99,8 +99,8 @@ python3 tests/integration/recovery_attempt.py --build-dir build-native --native
 
 这一步仍不是自动清理授权：cookie 不防有权限的程序复制或伪造；当前读数不能证明
 接口从未销毁重建，也不能阻止检查之后被外部修改。共享动作检查只解释当前引用数，
-不承诺所有命名空间或其他 PMD 的完整范围。下一步是设计只读精确清理计划，列出满足
-条件的候选与拒绝原因，并解决接口实例和检查后变化的问题，再实现实际删除。
+不承诺所有命名空间或其他 PMD 的完整范围。后续已实现 [只读精确清理计划](recovery_plan.md)，
+列出满足条件的观察候选与拒绝原因；接口实例和检查后变化的问题仍待解决，实际删除尚未实现。
 
 实现依据包括仓库独立 DPDK 补丁，以及 Linux 6.8 的
 [flower 导出字段](https://github.com/torvalds/linux/blob/v6.8/net/sched/cls_flower.c)、

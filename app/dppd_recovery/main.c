@@ -5,12 +5,14 @@
 #include <string.h>
 #include "dppd/recovery_guard.h"
 #include "dppd/recovery_inspect.h"
+#include "dppd/recovery_plan.h"
 
-/** 离线工具不初始化 EAL，inspect 只读内核，确认命令仍明确要求操作者已完成外部清理 */
+/** 离线工具不初始化 EAL，inspect 和 plan 只读内核，确认命令要求已完成外部清理 */
 static int usage(const char *program)
 {
     fprintf(stderr, "usage: %s show PATH\n", program);
     fprintf(stderr, "       %s inspect PATH REVISION\n", program);
+    fprintf(stderr, "       %s plan PATH REVISION\n", program);
     fprintf(stderr, "       %s acknowledge-clean PATH REVISION --external-cleanup-complete\n", program);
     return EXIT_FAILURE;
 }
@@ -163,6 +165,84 @@ static int inspect_record(const struct dppd_recovery_record *record, uint64_t re
     return result;
 }
 
+/** 统一输出完整标识，不能用截断后的前缀定位内核对象 */
+static void print_cookie(const uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
+{
+    for (unsigned int byte = 0; byte < DPPD_TAP_COOKIE_SIZE; ++byte)
+        printf("%02x", cookie[byte]);
+}
+
+/**
+ * 先读取所有登记端口，再生成同一份计划，避免逐端口输出时漏掉跨端口复制的标识
+ * 大块内核列表放在堆上，退出时统一释放，整个过程不产生删除请求或清理确认
+ */
+static int plan_record(const struct dppd_recovery_record *record, uint64_t revision)
+{
+    struct dppd_recovery_plan plan;
+    int errors[DPPD_MAX_PORTS] = {0};
+    int result = 0;
+    if (record->revision != revision)
+        return -ESTALE;
+    struct dppd_recovery_inspection *inspections = calloc(record->count ? record->count : 1, sizeof(*inspections));
+    if (inspections == NULL)
+        return -ENOMEM;
+    for (uint32_t port = 0; port < record->count; ++port) {
+        errors[port] = dppd_recovery_inspect(&record->ports[port], &inspections[port]);
+        if (result == 0)
+            result = errors[port];
+    }
+    int rc = dppd_recovery_plan_build(record, inspections, errors, &plan);
+    if (rc != 0) {
+        free(inspections);
+        return rc;
+    }
+    printf("plan version=1 revision=%" PRIu64 " format=%u ports=%u attempts=%u mode=read-only inventory-complete=%s\n",
+        revision, record->format, record->count, record->attempt_count, plan.inventory_complete ? "yes" : "no");
+    printf("scope=tap-local-multiq-and-ingress remote-scope=excluded ownership=unproven "
+           "atomic-snapshot=no cleanup-confirmed=no executable=no\n");
+    printf("prerequisites interface-instance-continuity=unproven check-delete-exclusion=unavailable "
+           "token-authenticity=unproven deletion-support=unimplemented\n");
+    for (uint32_t port = 0; port < record->count; ++port) {
+        const struct dppd_recovery_port *source = &record->ports[port];
+        const struct dppd_recovery_identity *identity = &source->identity;
+        uint32_t attempts = 0;
+        for (uint32_t index = 0; index < record->attempt_count; ++index)
+            attempts += record->attempts[index].port_id == source->port_id;
+        printf("plan-port port=%u ifindex=%u ifname=%s boot=%s netns-device=%" PRIu64 " netns-inode=%" PRIu64
+               " status=%s error=%d attempts=%u reason=%s\n",
+            source->port_id, identity->ifindex, identity->ifindex ? identity->ifname : "unknown",
+            identity->ifindex ? identity->boot_id : "unknown", identity->netns_device, identity->netns_inode,
+            dppd_recovery_inspection_name(inspections[port].state), errors[port], attempts,
+            attempts ? "attempts-recorded" : "no-attempt-record");
+    }
+    for (uint32_t index = 0; index < record->attempt_count; ++index) {
+        const struct dppd_recovery_attempt *attempt = &record->attempts[index];
+        const struct dppd_recovery_plan_entry *entry = &plan.entries[index];
+        const char *decision = entry->reason == DPPD_PLAN_MATCH ? "candidate"
+            : entry->reason == DPPD_PLAN_REMOVED                ? "excluded"
+                                                                : "rejected";
+        printf("plan-attempt attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
+               " port=%u phase=%s decision=%s reason=%s token-matches=%u content=%s scope=%s executable=no\n",
+            attempt->id, attempt->rule_id, attempt->generation, attempt->port_id, phase_name(attempt->phase), decision,
+            dppd_recovery_plan_reason_name(entry->reason), entry->token_matches,
+            verification_name(entry->content_error), verification_name(entry->scope_error));
+        if (entry->token_matches != 1)
+            continue;
+        const struct dppd_recovery_filter *filter = &inspections[entry->matched_port].filters[entry->matched_filter];
+        printf("plan-object attempt=%" PRIu64
+               " observed-port=%u parent=%08x handle=%08x chain=%u priority=%u protocol=%04x kind=%s cookie=",
+            attempt->id, record->ports[entry->matched_port].port_id, filter->parent, filter->handle, filter->chain,
+            filter->priority, filter->protocol, filter->kind);
+        print_cookie(attempt->owner_cookie);
+        putchar('\n');
+    }
+    printf("plan-summary candidates=%u rejected=%u excluded=%u ports-without-attempts=%u unassociated-filters=%u "
+           "executable=no\n",
+        plan.candidates, plan.rejected, plan.excluded, plan.ports_without_attempts, plan.unassociated_filters);
+    free(inspections);
+    return result != 0 ? result : (plan.inventory_complete ? 0 : -ENODATA);
+}
+
 /** 查询和确认均持有排他锁，正在运行的 daemon 不允许离线工具改写或观察半成品 */
 int main(int argc, char **argv)
 {
@@ -170,11 +250,12 @@ int main(int argc, char **argv)
     uint64_t revision = 0;
     bool acknowledge = argc == 5 && strcmp(argv[1], "acknowledge-clean") == 0;
     bool inspect = argc == 4 && strcmp(argv[1], "inspect") == 0;
+    bool plan = argc == 4 && strcmp(argv[1], "plan") == 0;
     int rc;
 
-    if (!(argc == 3 && strcmp(argv[1], "show") == 0) && !acknowledge && !inspect)
+    if (!(argc == 3 && strcmp(argv[1], "show") == 0) && !acknowledge && !inspect && !plan)
         return usage(argv[0]);
-    if (inspect && revision_number(argv[3], &revision) != 0)
+    if ((inspect || plan) && revision_number(argv[3], &revision) != 0)
         return usage(argv[0]);
     if (acknowledge &&
         (strcmp(argv[4], "--external-cleanup-complete") != 0 || revision_number(argv[3], &revision) != 0))
@@ -184,7 +265,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "recovery record unavailable: %s (%d)\n", strerror(-rc), rc);
         return EXIT_FAILURE;
     }
-    if (inspect) {
+    if (plan) {
+        rc = plan_record(&guard.record, revision);
+        if (rc != 0)
+            fprintf(stderr, "recovery plan incomplete: %s (%d)\n", strerror(-rc), rc);
+    } else if (inspect) {
         rc = inspect_record(&guard.record, revision);
         if (rc != 0)
             fprintf(stderr, "recovery inspection incomplete: %s (%d)\n", strerror(-rc), rc);
@@ -223,8 +308,7 @@ int main(int argc, char **argv)
                 attempt->observation_error);
             if (dppd_tap_cookie_present(attempt->owner_cookie)) {
                 printf("owner-token attempt=%" PRIu64 " cookie=", attempt->id);
-                for (unsigned int byte = 0; byte < DPPD_TAP_COOKIE_SIZE; ++byte)
-                    printf("%02x", attempt->owner_cookie[byte]);
+                print_cookie(attempt->owner_cookie);
                 putchar('\n');
             }
             if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION)

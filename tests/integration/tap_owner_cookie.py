@@ -36,9 +36,9 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
             run("ip", "link", "delete", "dev", name)
             del owned[name]
 
-    def filters(name):
+    def filters(name, parent="1:"):
         """tc JSON 独立核对内核实际动作标识，跳过没有 handle 的分类器标题"""
-        return [row for row in json.loads(run("tc", "-j", "filter", "show", "dev", name, "parent", "1:"))
+        return [row for row in json.loads(run("tc", "-j", "filter", "show", "dev", name, "parent", parent))
                 if row.get("options", {}).get("handle")]
 
     with tempfile.TemporaryDirectory(prefix="dppd-owner-") as temporary:
@@ -134,6 +134,24 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                     check("cleanup-confirmed=no" in output and "content=unchecked" in output, output)
                     return output
 
+                def plan(rule=None, reason=None):
+                    """计划只能分析，逐次对照持久文件与真实过滤器，并检查没有删除授权"""
+                    before = [filters(name, parent) for name in interfaces for parent in ("1:", "ffff:")]
+                    output = run(build / "dppd-recovery", "plan", guard, revision)
+                    check(guard.read_bytes() == saved_guard and (directory / "storage/state.bin").read_bytes() == snapshot,
+                          "plan changed persisted files")
+                    after = [filters(name, parent) for name in interfaces for parent in ("1:", "ffff:")]
+                    check(after == before, "plan changed TC filters")
+                    check("cleanup-confirmed=no executable=no" in output and
+                          "interface-instance-continuity=unproven check-delete-exclusion=unavailable" in output, output)
+                    if rule is None:
+                        return output
+                    row = next(fields(line) for line in output.splitlines() if line.startswith("plan-attempt ") and
+                               fields(line)["rule"] == str(rule))
+                    check(row["reason"] == reason and row["executable"] == "no", output)
+                    check(row["decision"] == ("candidate" if reason == "observed-match" else "rejected"), output)
+                    return row
+
                 observed = inspect()
                 check(observed.count("status=token-present owner=token-match content=match scope=match") == 4, observed)
                 check("status=removed-record owner=unknown" in observed, observed)
@@ -143,6 +161,21 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                     check(len(action) == 1 and action[0].get("cookie", "").lower() == tokens[index]["cookie"],
                           str(actual))
                 check([filters(name) for name in interfaces] == actual, "inspection changed TC filters")
+                planned = plan()
+                check("candidates=4 rejected=0 excluded=1 ports-without-attempts=0 unassociated-filters=0" in planned,
+                      planned)
+                objects = [fields(line) for line in planned.splitlines() if line.startswith("plan-object ")]
+                check(len(objects) == 4, planned)
+                for item in objects:
+                    found = next(row for row in actual[int(item["observed-port"])]
+                                 if int(str(row["options"]["handle"]), 0) == int(item["handle"], 16))
+                    check(found["pref"] == int(item["priority"]) and
+                          found["options"]["actions"][0]["cookie"].lower() == item["cookie"], planned)
+                stale = run(build / "dppd-recovery", "plan", guard, int(revision) - 1, failure=True)
+                check("(-116)" in stale and "plan-attempt " not in stale, stale)
+                mismatch = run("unshare", "--net", build / "dppd-recovery", "plan", guard, revision, failure=True)
+                check("inventory-complete=no" in mismatch and mismatch.count("reason=inventory-incomplete") == 4 and
+                      "candidates=0 rejected=4 excluded=1" in mismatch, mismatch)
                 # 旧 v4 仍可关联原生标识，但缺少预期内容，检查不能自动升级或补猜
                 legacy = bytearray(saved_guard[:9280])
                 for slot in range(256):
@@ -155,7 +188,30 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                 legacy_path.chmod(0o600)
                 legacy_output = run(build / "dppd-recovery", "inspect", legacy_path, revision)
                 check(legacy_output.count("owner=token-match content=unchecked scope=unchecked") == 4, legacy_output)
+                legacy_plan = run(build / "dppd-recovery", "plan", legacy_path, revision)
+                check(legacy_plan.count("reason=missing-expected-content") == 4 and
+                      "candidates=0 rejected=4 excluded=1" in legacy_plan, legacy_plan)
                 check(legacy_path.read_bytes() == legacy, "inspection upgraded v4")
+
+                # 跨端口副本、只有错误端口留存和已删除标识重新出现，都不得混入候选
+                first = actual[0][0]
+                first_coordinate = ["dev", interfaces[0], "parent", "1:", "protocol", first["protocol"],
+                                    "pref", first["pref"], "handle", first["options"]["handle"], "flower"]
+                copied = ["dev", interfaces[1], "parent", "1:", "protocol", "all",
+                          "pref", 59999, "handle", "0xaba", "flower"]
+                run("tc", "filter", "add", *copied, "action", "drop", "cookie", tokens[0]["cookie"])
+                check(plan(980, "token-ambiguous")["token-matches"] == "2", "cross-port copy missed")
+                run("tc", "filter", "delete", *first_coordinate)
+                plan(980, "wrong-port")
+                run("tc", "filter", "add", *first_coordinate, "action", "drop", "cookie", tokens[0]["cookie"])
+                run("tc", "filter", "delete", *copied)
+                plan(980, "observed-match")
+                run("tc", "filter", "add", *copied, "action", "drop", "cookie", tokens[4]["cookie"])
+                plan(982, "removed-token-present")
+                run("tc", "filter", "delete", *copied)
+                run("tc", "filter", "add", *copied, "action", "drop")
+                check("unassociated-filters=1" in plan(), "foreign filter was not accounted for")
+                run("tc", "filter", "delete", *copied)
 
                 def correlation(rule):
                     """按业务规则选中诊断行，避免另一条匹配记录掩盖本次修改"""
@@ -181,6 +237,7 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                     expected_content = "mismatch" if key else "match"
                     line = correlation(983)
                     check(f"owner=token-match content={expected_content} scope=mismatch" in line, line)
+                    plan(983, "content-mismatch" if key else "scope-mismatch")
                     run("tc", "filter", "delete", *udp_new)
                 run("tc", "filter", "add", *udp_new, *original_match, "action", "drop", "cookie", tokens[2]["cookie"])
 
@@ -195,6 +252,7 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                         "queue_mapping", queue, "cookie", tokens[1]["cookie"])
                     line = correlation(981)
                     check(f"content={'match' if queue == 0 else 'mismatch'} scope=mismatch" in line, line)
+                    plan(981, "content-mismatch" if queue else "scope-mismatch")
                     run("tc", "filter", "delete", *queue_coordinate)
                 run("tc", "filter", "add", *queue_coordinate, "dst_ip", "198.18.0.2/32", "action", "skbedit",
                     "queue_mapping", 0, "cookie", tokens[1]["cookie"])
@@ -203,6 +261,7 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                 run("tc", "filter", "add", "dev", interfaces[0], "parent", "1:", "protocol", "all",
                     "pref", 60000, "handle", "0xabc", "flower", "action", "drop", "cookie", cookie)
                 check("status=token-ambiguous owner=unknown" in inspect(), "duplicate token accepted")
+                plan(980, "token-ambiguous")
                 run("tc", "filter", "delete", "dev", interfaces[0], "parent", "1:", "protocol", "all",
                     "pref", 60000, "handle", "0xabc", "flower")
                 # 删掉原对象后在相同坐标创建无标识对象，坐标仍在也不能认为原对象仍在
@@ -212,12 +271,15 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                 # 同一标识和坐标上的动作改变，不得继续报告内容匹配
                 run("tc", "filter", "replace", *coordinate, "action", "skbedit", "queue_mapping", 0, "cookie", cookie)
                 check("owner=token-match content=mismatch scope=match" in correlation(980), "changed action accepted")
+                plan(980, "content-mismatch")
                 run("tc", "filter", "replace", *coordinate, "action", "skbedit", "queue_mapping", 1, "cookie", cookie)
                 check("owner=token-match content=mismatch scope=match" in correlation(980), "changed queue accepted")
+                plan(980, "content-mismatch")
                 # 增加 MAC 条件超出允许列表，不能只比较已认识的字段
                 run("tc", "filter", "delete", *coordinate)
                 run("tc", "filter", "add", *coordinate, "dst_mac", "02:00:00:00:00:01", "action", "drop", "cookie", cookie)
                 check("owner=token-match content=unsupported scope=unsupported" in correlation(980), "extra match ignored")
+                plan(980, "content-unsupported")
                 run("tc", "filter", "delete", *coordinate)
                 run("tc", "filter", "add", *coordinate, "action", "drop", "cookie", cookie)
                 # 同一个动作再绑定到另一个规则，内容未改但作用范围已经扩大
@@ -225,6 +287,7 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                 run("tc", "filter", "add", "dev", interfaces[1], "parent", "1:", "protocol", "all",
                     "pref", 60001, "handle", "0xabd", "flower", "action", "gact", "index", action_index)
                 check("owner=token-match content=match scope=shared-action" in correlation(980), "shared action accepted")
+                plan(980, "token-ambiguous")
                 run("tc", "filter", "delete", "dev", interfaces[1], "parent", "1:", "protocol", "all",
                     "pref", 60001, "handle", "0xabd", "flower")
                 # 移动优先级后保留同一标识，内容相同也必须报告范围不符
@@ -237,11 +300,13 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                         moved[moved.index(field) + 1] = value
                     run("tc", "filter", "add", *moved, "action", "drop", "cookie", cookie)
                     check("owner=token-match content=match scope=mismatch" in correlation(980), "changed scope accepted")
+                    plan(980, "scope-mismatch")
                     run("tc", "filter", "delete", *moved)
                 run("tc", "filter", "add", *coordinate, "action", "drop", "cookie", cookie)
                 run("tc", "filter", "delete", *coordinate)
                 run("tc", "filter", "add", *coordinate, "action", "drop")
                 check("status=token-absent owner=unknown" in inspect(), "same-coordinate replacement misidentified")
+                plan(980, "token-absent")
                 check("state=external-reconciliation-required" in run(build / "dppd-recovery", "show", guard),
                       "inspection cleared recovery guard")
                 remove_interfaces()

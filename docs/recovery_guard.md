@@ -92,6 +92,8 @@ port=1 device=0000:02:00.0 driver=example first-rule=902 first-generation=3
 
 TAP 的新记录另外显示内核 `identity` 行，可使用 `inspect PATH REVISION` 读取当前
 本地 TC 对象。接口消失、空列表或检查成功均不解除保护，详见 [检查范围与结果](recovery_inspection.md)。
+`plan PATH REVISION` 进一步整理候选、拒绝原因和删除前提，仍不执行删除，也不确认
+清理，详见 [只读精确清理计划](recovery_plan.md)。
 
 按目标 PMD 和设备支持的方法完成外部核对、清理或复位，确认允许重新安装后，使用
 刚刚查看的版本显式确认。下面的命令仅登记这个事实，本身不执行清理或验证硬件状态：

@@ -79,6 +79,7 @@ def run_case(build):
             except Exception as error:
                 raise AssertionError(log.read_text()) from error
             run(build / "dppd-recovery", "inspect", guard, 2, error=errno.EBUSY)
+            run(build / "dppd-recovery", "plan", guard, 2, error=errno.EBUSY)
             # 额外规则属于测试工具而非 daemon，检查程序必须同样报告归属未知并保持不动
             run("tc", "filter", "add", "dev", interfaces[0], "parent", "1:", "protocol", "ip",
                 "pref", "60000", "handle", "0xabc", "flower", "dst_ip", "198.18.0.1", "action", "drop")
@@ -112,8 +113,17 @@ def run_case(build):
             check(len(candidates) == 2 and all(int(row["handle"], 16) != 0xabc for row in candidates),
                   "foreign fixture claimed as recorded candidate")
             check("cleanup-confirmed=no" in inspected, inspected)
+            planned = run(build / "dppd-recovery", "plan", guard, revision)
+            check(planned.count("reason=missing-token") == 2 and "candidates=0 rejected=2 excluded=0" in planned and
+                  f"unassociated-filters={sum(map(len, expected))}" in planned, planned)
             check([kernel_filters(name) for name in interfaces] == expected, "inspection changed kernel filters")
             run(build / "dppd-recovery", "inspect", guard, revision - 1, error=errno.ESTALE)
+            stale_plan = run(build / "dppd-recovery", "plan", guard, revision - 1, error=errno.ESTALE)
+            check(not stale_plan, "stale revision produced a plan")
+            for invalid_revision in ("-1", "+1", " 1", "1x", "", "18446744073709551616"):
+                run(build / "dppd-recovery", "plan", guard, invalid_revision, error=0)
+            run(build / "dppd-recovery", "plan", guard, error=0)
+            run(build / "dppd-recovery", "plan", guard, revision, "--execute", error=0)
             run(build / "dppd-recovery", "inspect", guard, "-1", error=0)
             mismatch = run("unshare", "--net", build / "dppd-recovery", "inspect", guard, revision, error=errno.EXDEV)
             check(mismatch.count("status=context-mismatch complete=no") == 2 and "filters=" not in mismatch, mismatch)
@@ -134,6 +144,9 @@ def run_case(build):
             check("format=1" in run(build / "dppd-recovery", "show", legacy_path), "legacy read failed")
             unknown = run(build / "dppd-recovery", "inspect", legacy_path, revision, error=errno.ENODATA)
             check(unknown.count("status=identity-unavailable complete=no") == 2 and "filters=" not in unknown, unknown)
+            unknown_plan = run(build / "dppd-recovery", "plan", legacy_path, revision, error=errno.ENODATA)
+            check("inventory-complete=no" in unknown_plan and "ports-without-attempts=2" in unknown_plan and
+                  unknown_plan.count("reason=no-attempt-record") == 2, unknown_plan)
             check(legacy_path.read_bytes() == legacy, "read-only tool upgraded legacy file")
             legacy_v2 = bytearray(original_guard[:9248])
             struct.pack_into("<II", legacy_v2, 8, 2, len(legacy_v2))
@@ -144,6 +157,9 @@ def run_case(build):
             old_inspection = run(build / "dppd-recovery", "inspect", legacy_path, revision)
             check(old_inspection.count("status=coordinates-match complete=yes") == 2 and
                   "correlation " not in old_inspection, old_inspection)
+            old_plan = run(build / "dppd-recovery", "plan", legacy_path, revision)
+            check("inventory-complete=yes" in old_plan and "ports-without-attempts=2" in old_plan and
+                  "candidates=0 rejected=0 excluded=0" in old_plan, old_plan)
             check(legacy_path.read_bytes() == legacy_v2, "read-only tool upgraded v2 file")
             # 删除原对象后以相同坐标重建外部规则，坐标相关性仍不能被提升为所有权
             chosen = candidates[0]
@@ -159,11 +175,15 @@ def run_case(build):
             create(interfaces[0])
             mismatch = run(build / "dppd-recovery", "inspect", guard, revision, error=errno.EXDEV)
             check("status=identity-mismatch complete=no" in mismatch, mismatch)
+            mismatch_plan = run(build / "dppd-recovery", "plan", guard, revision, error=errno.EXDEV)
+            check("inventory-complete=no" in mismatch_plan and "candidates=0" in mismatch_plan, mismatch_plan)
             for name in interfaces:
                 remove(name)
             absent = run(build / "dppd-recovery", "inspect", guard, revision)
             check(absent.count("status=interface-absent complete=yes") == 2, absent)
             check(absent.count("status=coordinate-absent owner=unknown") == 2, absent)
+            absent_plan = run(build / "dppd-recovery", "plan", guard, revision)
+            check("candidates=0" in absent_plan and "cleanup-confirmed=no executable=no" in absent_plan, absent_plan)
             check(guard.read_bytes() == original_guard and state.read_bytes() == original_state,
                   "interface absence incorrectly cleared recovery guard")
             check("state=external-reconciliation-required" in run(build / "dppd-recovery", "show", guard),
@@ -171,6 +191,10 @@ def run_case(build):
             # 仅在本测试两个接口确实删除之后，显式确认测试资源的外部清理
             run(build / "dppd-recovery", "acknowledge-clean", guard, revision, "--external-cleanup-complete")
             check("state=clean" in run(build / "dppd-recovery", "show", guard), "explicit acknowledgement failed")
+            cleaned = guard.read_bytes()
+            empty_plan = run(build / "dppd-recovery", "plan", guard, revision + 1)
+            check("ports=0 attempts=0 mode=read-only inventory-complete=yes" in empty_plan and
+                  "cleanup-confirmed=no executable=no" in empty_plan and guard.read_bytes() == cleaned, empty_plan)
         finally:
             if daemon is not None:
                 stop(daemon)

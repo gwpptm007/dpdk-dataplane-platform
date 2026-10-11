@@ -55,7 +55,9 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 适配后的 DPDK 21.11.9 TAP 可显式启用 `--tap-owner-cookie`，在创建前持久保存随机标识，
 随本地 DROP/QUEUE 一次写入内核并回读；创建前保存预期内容，创建后和离线检查均核对
 匹配条件、动作与作用范围，识别同标识修改和共享动作。其他 PMD、接口实例连续性证明
-和自动清理仍待实现，见 [TAP 内容核验](docs/tap_rule_verification.md)。
+和自动清理仍待实现，见 [TAP 内容核验](docs/tap_rule_verification.md)。新增
+`dppd-recovery plan PATH REVISION` 可列出观察候选、拒绝原因和删除前提，跨登记端口
+检查重复标识，保持只读且不可执行，详见 [精确清理计划](docs/recovery_plan.md)。
 
 ```bash
 bash scripts/build.sh

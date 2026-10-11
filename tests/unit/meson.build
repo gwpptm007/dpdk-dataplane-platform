@@ -154,6 +154,10 @@ recovery_inspect_test = executable('test_recovery_inspect', 'test_recovery_inspe
   include_directories: dppd_inc)
 test('TAP recovery inspection', recovery_inspect_test)
 
+# 只分析内核观察副本，验证跨端口歧义、内容与范围拒绝及不完整列表的整体拒绝
+recovery_plan_test = executable('test_recovery_plan', 'test_recovery_plan.c', dependencies: dppd_core_dep)
+test('read-only TAP recovery plan', recovery_plan_test)
+
 # 持久化意图、结果和删除事件，覆盖驱动前后写盘故障及清理时的真实 handle 回收
 recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attempt.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])

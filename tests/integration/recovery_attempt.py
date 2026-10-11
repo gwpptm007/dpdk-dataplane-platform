@@ -92,6 +92,13 @@ def run_case(build, mode, native=False):
                 check(f"content={content} scope={content}" in inspected and "cleanup-confirmed=no" in inspected, inspected)
             else:
                 check("status=no-candidate owner=unknown" in inspected, inspected)
+            saved_guard = guard.read_bytes()
+            planned = run(build / "dppd-recovery", "plan", guard, revision)
+            reason = "observed-match" if native and mode == "after" else "token-absent" if native else "missing-token"
+            decision = "candidate" if reason == "observed-match" else "rejected"
+            check(f"phase={phase} decision={decision} reason={reason}" in planned and "executable=no" in planned, planned)
+            check(guard.read_bytes() == saved_guard and (directory / "storage/state.bin").read_bytes() == saved,
+                  "plan changed crash evidence or snapshot")
             # 即使当前本地列表为空，记录仍待确认，测试先明确删除全部自有接口再确认
             remove_interfaces()
             run(build / "dppd-recovery", "acknowledge-clean", guard, revision, "--external-cleanup-complete")

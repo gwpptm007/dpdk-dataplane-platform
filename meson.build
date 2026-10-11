@@ -21,6 +21,7 @@ dppd_sources = files(
   'lib/control/persistence.c',
   'lib/control/recovery_guard.c',
   'lib/control/recovery_inspect.c',
+  'lib/control/recovery_plan.c',
   'lib/control/tap_content.c',
   'lib/control/planner.c',
   'lib/control/transaction.c',
