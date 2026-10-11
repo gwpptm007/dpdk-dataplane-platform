@@ -57,9 +57,22 @@ struct dppd_rule_latency_report {
 static inline uint64_t dppd_rule_latency_bucket_upper(unsigned int index)
 {
     static const uint64_t bounds[DPPD_RULE_LATENCY_BUCKETS] = {
-        1000, 5000, 10000, 50000, 100000, 500000, 1000000, 5000000,
-        10000000, 50000000, 100000000, 500000000, 1000000000,
-        UINT64_C(5000000000), UINT64_C(10000000000), UINT64_MAX,
+        1000,
+        5000,
+        10000,
+        50000,
+        100000,
+        500000,
+        1000000,
+        5000000,
+        10000000,
+        50000000,
+        100000000,
+        500000000,
+        1000000000,
+        UINT64_C(5000000000),
+        UINT64_C(10000000000),
+        UINT64_MAX,
     };
     return index < DPPD_RULE_LATENCY_BUCKETS ? bounds[index] : UINT64_MAX;
 }
@@ -72,8 +85,8 @@ static inline const char *dppd_rule_latency_scope_name(enum dppd_rule_latency_sc
 }
 
 /** 只接收后端已有的成功提交测量，不新增计时、分配或逐包操作 */
-void dppd_rule_latency_record(struct dppd_rule_latency_histogram *histogram,
-    bool timing_available, uint64_t duration_ns, uint32_t rule_count);
+void dppd_rule_latency_record(struct dppd_rule_latency_histogram *histogram, bool timing_available,
+    uint64_t duration_ns, uint32_t rule_count);
 /** 复制历史并计算可用摘要，调用方负责与该后端的控制面写者串行 */
 void dppd_rule_latency_summarize(const struct dppd_rule_latency_histogram *histogram,
     struct dppd_rule_latency_summary *summary);

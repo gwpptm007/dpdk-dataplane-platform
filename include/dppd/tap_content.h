@@ -21,8 +21,7 @@ struct dppd_tap_content {
 };
 
 /** 根据 DPDK 21.11 TAP 的映射计算预期值，超出可完整核验的范围立即拒绝 */
-int dppd_tap_content_from_rule(const struct dppd_rule *rule, uint16_t max_queues,
-    struct dppd_tap_content *content);
+int dppd_tap_content_from_rule(const struct dppd_rule *rule, uint16_t max_queues, struct dppd_tap_content *content);
 /** 固定编码不包含 C 结构体填充，预留字节统一为零 */
 void dppd_tap_content_encode(const struct dppd_tap_content *content, uint8_t bytes[DPPD_TAP_CONTENT_SIZE]);
 /** 同时检查字段组合和规范编码，未知版本或保留位不允许静默通过 */

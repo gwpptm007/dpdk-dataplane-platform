@@ -3,8 +3,7 @@
 #include <string.h>
 #include "dppd/software_backend.h"
 
-static struct dppd_rule make_rule(uint64_t id, uint32_t priority,
-                                  uint32_t mark_id, bool with_count)
+static struct dppd_rule make_rule(uint64_t id, uint32_t priority, uint32_t mark_id, bool with_count)
 {
     struct dppd_rule rule;
 
@@ -36,8 +35,7 @@ static struct dppd_rule make_rule(uint64_t id, uint32_t priority,
     return rule;
 }
 
-static void install(struct dppd_software_backend *backend,
-                    const struct dppd_rule *rule)
+static void install(struct dppd_software_backend *backend, const struct dppd_rule *rule)
 {
     struct dppd_transaction_item item;
     struct dppd_transaction transaction;
@@ -46,7 +44,7 @@ static void install(struct dppd_software_backend *backend,
     /*
      * 测试也经由正式 transaction 路径安装规则，而不直接构造 snapshot。这样能够同时
      * 覆盖 prepare token、不可变发布和 QSBR 回收前提；plan 中的 ID/generation 必须与
-     * rule 一致，否则 transaction 在 validate 阶段应拒绝该测试输入。
+     * rule 一致，否则 transaction 在 validate 阶段应拒绝该测试输入
      */
     memset(&item, 0, sizeof(item));
     memset(&backends, 0, sizeof(backends));
@@ -83,7 +81,7 @@ int main(void)
     /*
      * 模拟真实 worker：发布后的旧 snapshot 必须等到该静默点以后才可回收。每次 decide
      * 后显式报告静默点，既验证正常运行的调用顺序，也让后续发布可以回收不再被本测试
-     * reader 引用的旧版本。
+     * reader 引用的旧版本
      */
     assert(dppd_software_backend_worker_register(&backend, 0) == 0);
 
@@ -94,14 +92,13 @@ int main(void)
     dppd_software_backend_worker_quiescent(&backend, 0);
     assert(decision.matched && decision.drop && decision.has_mark);
     assert(decision.mark_id == 7);
-    assert(dppd_software_backend_query_count(&backend, 1, 1,
-                                              &hits, &bytes) == 0);
+    assert(dppd_software_backend_query_count(&backend, 1, 1, &hits, &bytes) == 0);
     assert(hits == 1 && bytes == 128);
 
     /*
      * 更小的 priority 优先，验证规则物理槽位顺序不会改变 classifier 语义。同时首条
      * counted 规则的 COUNT 不应因 snapshot 克隆而归零，因此仍断言 hits/bytes 保持在
-     * 首次命中后的值。
+     * 首次命中后的值
      */
     preferred = make_rule(2, 10, 9, false);
     install(&backend, &preferred);
@@ -109,16 +106,14 @@ int main(void)
     dppd_software_backend_worker_quiescent(&backend, 0);
     assert(decision.matched && decision.drop && decision.has_mark);
     assert(decision.mark_id == 9);
-    assert(dppd_software_backend_query_count(&backend, 1, 1,
-                                              &hits, &bytes) == 0);
+    assert(dppd_software_backend_query_count(&backend, 1, 1, &hits, &bytes) == 0);
     assert(hits == 1 && bytes == 128);
 
     assert(dppd_software_backend_remove_version(&backend, 2, 2) == 0);
     dppd_software_backend_decide(&backend, 5, &packet, &decision);
     dppd_software_backend_worker_quiescent(&backend, 0);
     assert(decision.mark_id == 7);
-    assert(dppd_software_backend_query_count(&backend, 1, 1,
-                                              &hits, &bytes) == 0);
+    assert(dppd_software_backend_query_count(&backend, 1, 1, &hits, &bytes) == 0);
     assert(hits == 2 && bytes == 256);
 
     unsupported = counted;

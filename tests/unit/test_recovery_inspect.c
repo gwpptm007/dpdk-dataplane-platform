@@ -20,16 +20,35 @@ static ssize_t test_receive(int fd, struct msghdr *message, int flags)
     *header = (struct nlmsghdr){.nlmsg_len = NLMSG_LENGTH(sizeof(int)), .nlmsg_seq = 1, .nlmsg_type = NLMSG_DONE};
     *(int *)NLMSG_DATA(header) = 0;
     switch (receive_fault) {
-    case 1: message->msg_flags = MSG_TRUNC; break;
-    case 2: sender->nl_pid = 123; break;
-    case 3: header->nlmsg_seq = 2; break;
-    case 4: header->nlmsg_flags = NLM_F_DUMP_INTR; break;
-    case 5: *(int *)NLMSG_DATA(header) = -ENOBUFS; break;
-    case 6: header->nlmsg_type = NLMSG_ERROR; break;
-    case 7: header->nlmsg_len = 1; return sizeof(*header);
-    case 8: errno = EAGAIN; return -1;
-    case 9: header->nlmsg_type = NLMSG_OVERRUN; break;
-    default: break;
+    case 1:
+        message->msg_flags = MSG_TRUNC;
+        break;
+    case 2:
+        sender->nl_pid = 123;
+        break;
+    case 3:
+        header->nlmsg_seq = 2;
+        break;
+    case 4:
+        header->nlmsg_flags = NLM_F_DUMP_INTR;
+        break;
+    case 5:
+        *(int *)NLMSG_DATA(header) = -ENOBUFS;
+        break;
+    case 6:
+        header->nlmsg_type = NLMSG_ERROR;
+        break;
+    case 7:
+        header->nlmsg_len = 1;
+        return sizeof(*header);
+    case 8:
+        errno = EAGAIN;
+        return -1;
+    case 9:
+        header->nlmsg_type = NLMSG_OVERRUN;
+        break;
+    default:
+        break;
     }
     return header->nlmsg_len;
 }
@@ -56,9 +75,11 @@ static void filter_messages(void)
 {
     struct dppd_recovery_inspection inspection = {0};
     struct tc_query query = {.index = 17, .parent = TAP_MULTIQ, .inspection = &inspection};
-    struct test_message message = {.header = {.nlmsg_type = RTM_NEWTFILTER,
-        .nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg))},
-        .tc = {.tcm_ifindex = 17, .tcm_parent = TAP_MULTIQ, .tcm_handle = 0x1234,
+    struct test_message message = {
+        .header = {.nlmsg_type = RTM_NEWTFILTER, .nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg))},
+        .tc = {.tcm_ifindex = 17,
+            .tcm_parent = TAP_MULTIQ,
+            .tcm_handle = 0x1234,
             .tcm_info = (55U << 16) | htons(0x800)}};
     uint32_t chain = 9;
     append(&message, TCA_KIND, "flower", 7);
@@ -92,8 +113,8 @@ static void filter_messages(void)
 static void qdisc_messages(void)
 {
     struct tc_query query = {.index = 17};
-    struct test_message message = {.header = {.nlmsg_type = RTM_NEWQDISC,
-        .nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg))},
+    struct test_message message = {
+        .header = {.nlmsg_type = RTM_NEWQDISC, .nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg))},
         .tc = {.tcm_ifindex = 17, .tcm_handle = TAP_MULTIQ}};
     append(&message, TCA_KIND, "multiq", 7);
     assert(read_tc(&message.header, &query) == 0 && query.multiq && !query.ingress);
@@ -110,8 +131,8 @@ static void qdisc_messages(void)
 /** 截断、错误发送者、错序号、dump 中断、丢包和超时均必须阻止成功返回 */
 static void transport_failures(void)
 {
-    static const int errors[] = {0, -EBADMSG, -EBADMSG, -EBADMSG, -EAGAIN,
-        -ENOBUFS, -EBADMSG, -EBADMSG, -EAGAIN, -EBADMSG};
+    static const int errors[] = {0, -EBADMSG, -EBADMSG, -EBADMSG, -EAGAIN, -ENOBUFS, -EBADMSG, -EBADMSG, -EAGAIN,
+        -EBADMSG};
     struct tc_query query = {.index = 1};
     for (receive_fault = 1; receive_fault < sizeof(errors) / sizeof(errors[0]); ++receive_fault)
         assert(query_tc(&query) == errors[receive_fault]);
@@ -181,28 +202,41 @@ static void cookie_messages(void)
 /** 构造合法动作后逐项加入未知字段、共享引用和行为变化，检查标识相同也不能误报匹配 */
 static void content_messages(void)
 {
-    const struct dppd_tap_content expected = {.version = 1, .action = 1,
-        .parent = TAP_MULTIQ, .priority = 26, .protocol = 3};
+    const struct dppd_tap_content expected = {.version = 1,
+        .action = 1,
+        .parent = TAP_MULTIQ,
+        .priority = 26,
+        .protocol = 3};
     for (unsigned int mode = 0; mode < 12; ++mode) {
         struct test_message options = {.header.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg))};
         struct test_message action = options, actions = options, parameters = options, outer = options;
         struct tc_gact gact = {.index = 123, .action = TC_ACT_SHOT, .refcnt = 1, .bindcnt = 1};
         struct dppd_recovery_filter filter = {.parent = TAP_MULTIQ, .priority = 26, .protocol = 3};
-        if (mode == 1) gact.bindcnt = gact.refcnt = 2;
-        if (mode == 2) gact.refcnt = 2;
-        if (mode == 3) gact.action = TC_ACT_OK;
-        if (mode == 4) filter.priority++;
-        if (mode == 5) filter.chain = 1;
+        if (mode == 1)
+            gact.bindcnt = gact.refcnt = 2;
+        if (mode == 2)
+            gact.refcnt = 2;
+        if (mode == 3)
+            gact.action = TC_ACT_OK;
+        if (mode == 4)
+            filter.priority++;
+        if (mode == 5)
+            filter.chain = 1;
         uint32_t value = 0;
         append(&parameters, TCA_GACT_PARMS, &gact, sizeof(gact));
-        if (mode == 6) append(&parameters, TCA_GACT_PROB, &value, sizeof(value));
+        if (mode == 6)
+            append(&parameters, TCA_GACT_PROB, &value, sizeof(value));
         append(&action, TCA_ACT_KIND, "gact", 5);
-        append(&action, TCA_ACT_OPTIONS, parameters.data, parameters.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
-        if (mode == 7) append(&action, TCA_ACT_MAX + 99, &value, sizeof(value));
+        append(&action, TCA_ACT_OPTIONS, parameters.data,
+            parameters.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
+        if (mode == 7)
+            append(&action, TCA_ACT_MAX + 99, &value, sizeof(value));
         append(&actions, 1, action.data, action.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
         append(&options, TCA_FLOWER_ACT, actions.data, actions.header.nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg)));
-        if (mode == 8) append(&options, TCA_FLOWER_MAX + 99, &value, sizeof(value));
-        if (mode == 9) append(&options, TCA_FLOWER_CLASSID, &value, sizeof(value));
+        if (mode == 8)
+            append(&options, TCA_FLOWER_MAX + 99, &value, sizeof(value));
+        if (mode == 9)
+            append(&options, TCA_FLOWER_CLASSID, &value, sizeof(value));
         if (mode == 10) {
             uint16_t ether = htons(0x0800);
             append(&options, TCA_FLOWER_KEY_ETH_TYPE, &ether, sizeof(ether));
@@ -215,12 +249,18 @@ static void content_messages(void)
         read_content((const struct rtattr *)outer.data, &filter);
         int content = dppd_recovery_verify(&expected, &filter, false);
         int scope = dppd_recovery_verify(&expected, &filter, true);
-        if (mode == 0) assert(content == 0 && scope == 0);
-        else if (mode == 1) assert(content == 0 && scope == -EMLINK);
-        else if (mode == 2) assert(content == 0 && scope == -ENOTSUP);
-        else if (mode == 4 || mode == 5) assert(content == 0 && scope == -ESTALE);
-        else if (mode == 10) assert(content == -ESTALE && scope == 0);
-        else assert(content == -ENOTSUP && scope == -ENOTSUP);
+        if (mode == 0)
+            assert(content == 0 && scope == 0);
+        else if (mode == 1)
+            assert(content == 0 && scope == -EMLINK);
+        else if (mode == 2)
+            assert(content == 0 && scope == -ENOTSUP);
+        else if (mode == 4 || mode == 5)
+            assert(content == 0 && scope == -ESTALE);
+        else if (mode == 10)
+            assert(content == -ESTALE && scope == 0);
+        else
+            assert(content == -ENOTSUP && scope == -ENOTSUP);
         const struct dppd_tap_content legacy = {0};
         assert(dppd_recovery_verify(&legacy, &filter, false) == -ENODATA);
     }

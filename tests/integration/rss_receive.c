@@ -39,7 +39,7 @@ int main(int argc, char **argv)
 
     if (rte_eal_init(argc, argv) < 0)
         return 1;
-    RTE_ETH_FOREACH_DEV(candidate) {
+    RTE_ETH_FOREACH_DEV (candidate) {
         if (port != UINT16_MAX) {
             fprintf(stderr, "allow exactly one data NIC with EAL -a\n");
             goto cleanup;
@@ -52,25 +52,21 @@ int main(int argc, char **argv)
     }
     if (rte_eth_dev_info_get(port, &info) != 0)
         goto cleanup;
-    printf("PMD=%s rx_queues=%u tx_queues=%u rss_capa=0x%" PRIx64 "\n",
-           info.driver_name, info.max_rx_queues, info.max_tx_queues,
-           info.flow_type_rss_offloads);
+    printf("PMD=%s rx_queues=%u tx_queues=%u rss_capa=0x%" PRIx64 "\n", info.driver_name, info.max_rx_queues,
+        info.max_tx_queues, info.flow_type_rss_offloads);
     if (info.max_rx_queues < QUEUES || info.max_tx_queues < QUEUES ||
         !(info.flow_type_rss_offloads & RTE_ETH_RSS_IPV4)) {
         fprintf(stderr, "two queues and IPv4 RSS are required\n");
         goto cleanup;
     }
-    pool = rte_pktmbuf_pool_create("rss_receive_pool", 8191, 0, 0,
-                                  RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
+    pool = rte_pktmbuf_pool_create("rss_receive_pool", 8191, 0, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
     if (pool == NULL)
         goto cleanup;
     conf.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
     conf.intr_conf.rxq = 1;
-    conf.rxmode.offloads = info.rx_offload_capa &
-        (RTE_ETH_RX_OFFLOAD_RSS_HASH | RTE_ETH_RX_OFFLOAD_CHECKSUM);
+    conf.rxmode.offloads = info.rx_offload_capa & (RTE_ETH_RX_OFFLOAD_RSS_HASH | RTE_ETH_RX_OFFLOAD_CHECKSUM);
     conf.rx_adv_conf.rss_conf.rss_hf =
-        (RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP | RTE_ETH_RSS_TCP) &
-        info.flow_type_rss_offloads;
+        (RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP | RTE_ETH_RSS_TCP) & info.flow_type_rss_offloads;
     if (rte_eth_dev_configure(port, QUEUES, QUEUES, &conf) != 0)
         goto cleanup;
     configured = 1;
@@ -79,17 +75,15 @@ int main(int argc, char **argv)
     if (rte_eth_dev_adjust_nb_rx_tx_desc(port, &rx_desc, &tx_desc) != 0)
         goto cleanup;
     for (uint16_t q = 0; q < QUEUES; ++q) {
-        if (rte_eth_rx_queue_setup(port, q, rx_desc, rte_socket_id(),
-                                  &rx_conf, pool) != 0 ||
-            rte_eth_tx_queue_setup(port, q, tx_desc, rte_socket_id(),
-                                  &info.default_txconf) != 0)
+        if (rte_eth_rx_queue_setup(port, q, rx_desc, rte_socket_id(), &rx_conf, pool) != 0 ||
+            rte_eth_tx_queue_setup(port, q, tx_desc, rte_socket_id(), &info.default_txconf) != 0)
             goto cleanup;
     }
     if (rte_eth_dev_start(port) != 0)
         goto cleanup;
     started = 1;
-    printf("RSS_RECEIVER_READY packets=%u flows=%u queues=%u rss=0x%" PRIx64 " source_ip=per-flow\n",
-           PACKETS, FLOWS, QUEUES, conf.rx_adv_conf.rss_conf.rss_hf);
+    printf("RSS_RECEIVER_READY packets=%u flows=%u queues=%u rss=0x%" PRIx64 " source_ip=per-flow\n", PACKETS, FLOWS,
+        QUEUES, conf.rx_adv_conf.rss_conf.rss_hf);
     fflush(stdout);
     deadline = rte_get_timer_cycles() + 60 * rte_get_timer_hz();
     while (received < PACKETS && rte_get_timer_cycles() < deadline) {
@@ -106,18 +100,14 @@ int main(int argc, char **argv)
                 if (data != NULL && memcmp(data + payload_offset, "DPPRSS01", 8) == 0) {
                     uint64_t flow = read_be(data + payload_offset + 8, 4);
                     uint64_t sequence = read_be(data + payload_offset + 12, 8);
-                    if (rte_pktmbuf_pkt_len(burst[i]) < payload_offset + 20 ||
-                        read_be(data + 12, 2) != 0x0800 || data[14] != 0x45 ||
-                        (data[23] != 17 && data[23] != 6) ||
+                    if (rte_pktmbuf_pkt_len(burst[i]) < payload_offset + 20 || read_be(data + 12, 2) != 0x0800 ||
+                        data[14] != 0x45 || (data[23] != 17 && data[23] != 6) ||
                         read_be(data + 16, 2) != payload_offset + 6 ||
                         (data[23] == 17 && read_be(data + 38, 2) != 28) ||
                         (data[23] == 6 && (data[46] != 0x50 || data[47] != 0x10)) ||
-                        read_be(data + 26, 4) != 0xc0a86402 + flow ||
-                        read_be(data + 30, 4) != 0xc0a86401 ||
-                        flow >= FLOWS || sequence >= PACKETS ||
-                        flow != sequence % FLOWS ||
-                        read_be(data + 34, 2) != 20000 + flow ||
-                        read_be(data + 36, 2) != 10000) {
+                        read_be(data + 26, 4) != 0xc0a86402 + flow || read_be(data + 30, 4) != 0xc0a86401 ||
+                        flow >= FLOWS || sequence >= PACKETS || flow != sequence % FLOWS ||
+                        read_be(data + 34, 2) != 20000 + flow || read_be(data + 36, 2) != 10000) {
                         ++errors;
                     } else if (seen[sequence]) {
                         ++errors;
@@ -127,8 +117,7 @@ int main(int argc, char **argv)
                         ++counts[q];
                         if (burst[i]->ol_flags & RTE_MBUF_F_RX_RSS_HASH) {
                             ++rss_packets;
-                            if (flow_seen[flow] &&
-                                (flow_queue[flow] != q || flow_hash[flow] != burst[i]->hash.rss))
+                            if (flow_seen[flow] && (flow_queue[flow] != q || flow_hash[flow] != burst[i]->hash.rss))
                                 ++errors;
                             flow_seen[flow] = 1;
                             flow_queue[flow] = q;
@@ -142,10 +131,9 @@ int main(int argc, char **argv)
             }
         }
     }
-    printf("RSS_RESULT received=%u missing=%u queue0=%u queue1=%u rss_hash_packets=%u errors=%u\n",
-           received, PACKETS - received, counts[0], counts[1], rss_packets, errors);
-    result = !(received == PACKETS && counts[0] > 0 && counts[1] > 0 &&
-               rss_packets == PACKETS && errors == 0);
+    printf("RSS_RESULT received=%u missing=%u queue0=%u queue1=%u rss_hash_packets=%u errors=%u\n", received,
+        PACKETS - received, counts[0], counts[1], rss_packets, errors);
+    result = !(received == PACKETS && counts[0] > 0 && counts[1] > 0 && rss_packets == PACKETS && errors == 0);
 cleanup:
     if (started)
         rte_eth_dev_stop(port);

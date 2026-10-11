@@ -60,22 +60,30 @@ static struct {
 static unsigned int registered_commands;
 
 /** 每个字段的构造错误都回传，不能展示一份被静默截断的成功 JSON */
-#define ADD_U64(name, value) do { \
-    int field_rc = rte_tel_data_add_dict_u64(data, name, value); \
-    if (field_rc != 0) return field_rc; \
-} while (0)
-#define ADD_INT(name, value) do { \
-    int field_rc = rte_tel_data_add_dict_int(data, name, value); \
-    if (field_rc != 0) return field_rc; \
-} while (0)
-#define ADD_STRING(name, value) do { \
-    int field_rc = rte_tel_data_add_dict_string(data, name, value); \
-    if (field_rc != 0) return field_rc; \
-} while (0)
-#define START_DICT() do { \
-    int field_rc = rte_tel_data_start_dict(data); \
-    if (field_rc != 0) return field_rc; \
-} while (0)
+#define ADD_U64(name, value)                                         \
+    do {                                                             \
+        int field_rc = rte_tel_data_add_dict_u64(data, name, value); \
+        if (field_rc != 0)                                           \
+            return field_rc;                                         \
+    } while (0)
+#define ADD_INT(name, value)                                         \
+    do {                                                             \
+        int field_rc = rte_tel_data_add_dict_int(data, name, value); \
+        if (field_rc != 0)                                           \
+            return field_rc;                                         \
+    } while (0)
+#define ADD_STRING(name, value)                                         \
+    do {                                                                \
+        int field_rc = rte_tel_data_add_dict_string(data, name, value); \
+        if (field_rc != 0)                                              \
+            return field_rc;                                            \
+    } while (0)
+#define START_DICT()                                  \
+    do {                                              \
+        int field_rc = rte_tel_data_start_dict(data); \
+        if (field_rc != 0)                            \
+            return field_rc;                          \
+    } while (0)
 
 /** 不接受空值、符号、空白或溢出，逗号只用于分隔明确规定的参数 */
 static int parse_number(const char **cursor, uint64_t *value)
@@ -101,8 +109,8 @@ static int parse_number(const char **cursor, uint64_t *value)
 }
 
 /** 只有拥有 control 的管理线程调用此函数，复制期间没有仓库写入者 */
-static int build_snapshot(const struct dppd_control_service *control,
-    struct telemetry_rule *rows, uint32_t capacity, struct telemetry_rules *summary)
+static int build_snapshot(const struct dppd_control_service *control, struct telemetry_rule *rows, uint32_t capacity,
+    struct telemetry_rules *summary)
 {
     uint64_t cursor = 0;
 
@@ -129,8 +137,8 @@ static int build_snapshot(const struct dppd_control_service *control,
         bool more;
         int rc;
 
-        rc = dppd_rule_repository_list(&control->rules, cursor, summary->generation,
-                                       &rule, 1, &count, &more, &generation);
+        rc = dppd_rule_repository_list(&control->rules, cursor, summary->generation, &rule, 1, &count, &more,
+            &generation);
         if (rc != 0 || count != 1)
             return -EUCLEAN;
         memset(row, 0, sizeof(*row));
@@ -295,10 +303,14 @@ static int rule_callback(const char *command, const char *parameters, struct rte
     ADD_U64("generation", row.generation);
     ADD_INT("port", row.port_id);
     ADD_INT("status_error", row.error);
-    ADD_STRING("backend", row.error != 0 ? "unknown" :
-        row.backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software" : "rte_flow");
-    ADD_STRING("fallback", row.fallback == DPPD_FALLBACK_SOFTWARE_ONLY ? "software-only" :
-        row.fallback == DPPD_FALLBACK_REQUIRE_HARDWARE ? "require-hardware" : "prefer-hardware");
+    ADD_STRING("backend",
+        row.error != 0                                  ? "unknown"
+            : row.backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software"
+                                                        : "rte_flow");
+    ADD_STRING("fallback",
+        row.fallback == DPPD_FALLBACK_SOFTWARE_ONLY          ? "software-only"
+            : row.fallback == DPPD_FALLBACK_REQUIRE_HARDWARE ? "require-hardware"
+                                                             : "prefer-hardware");
     ADD_INT("count_configured", row.error == 0 && row.installation.has_count);
     ADD_INT("timing_available", row.error == 0 && row.installation.timing_available);
     ADD_U64("install_duration_ns", row.installation.install_duration_ns);
@@ -346,8 +358,10 @@ static int failures_callback(const char *command, const char *parameters, struct
     ADD_INT("port_known", last->port_known);
     ADD_INT("port", last->install_port_id);
     ADD_INT("backend_known", last->backend_known);
-    ADD_STRING("backend", !last->backend_known ? "unknown" :
-        last->backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software" : "rte_flow");
+    ADD_STRING("backend",
+        !last->backend_known                              ? "unknown"
+            : last->backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software"
+                                                          : "rte_flow");
     ADD_INT("cause_error", last->cause_code);
     ADD_INT("response_error", last->response_code);
     ADD_INT("compensation_error", last->compensation_code);
@@ -357,24 +371,26 @@ static int failures_callback(const char *command, const char *parameters, struct
 }
 
 /** 一页四条使用索引前缀，完整值在栈中复制，不分配子容器或保留历史指针 */
-static int add_history_entry(struct rte_tel_data *data, unsigned int index,
-                            const struct dppd_rule_history_entry *entry)
+static int add_history_entry(struct rte_tel_data *data, unsigned int index, const struct dppd_rule_history_entry *entry)
 {
     const struct dppd_rule_failure_event *failure = &entry->failure;
     char name[64];
 
-#define ADD_EVENT_U64(field, value) do { \
-    snprintf(name, sizeof(name), "event_%u_" field, index); \
-    ADD_U64(name, value); \
-} while (0)
-#define ADD_EVENT_INT(field, value) do { \
-    snprintf(name, sizeof(name), "event_%u_" field, index); \
-    ADD_INT(name, value); \
-} while (0)
-#define ADD_EVENT_STRING(field, value) do { \
-    snprintf(name, sizeof(name), "event_%u_" field, index); \
-    ADD_STRING(name, value); \
-} while (0)
+#define ADD_EVENT_U64(field, value)                             \
+    do {                                                        \
+        snprintf(name, sizeof(name), "event_%u_" field, index); \
+        ADD_U64(name, value);                                   \
+    } while (0)
+#define ADD_EVENT_INT(field, value)                             \
+    do {                                                        \
+        snprintf(name, sizeof(name), "event_%u_" field, index); \
+        ADD_INT(name, value);                                   \
+    } while (0)
+#define ADD_EVENT_STRING(field, value)                          \
+    do {                                                        \
+        snprintf(name, sizeof(name), "event_%u_" field, index); \
+        ADD_STRING(name, value);                                \
+    } while (0)
     ADD_EVENT_U64("id", entry->event_id);
     ADD_EVENT_U64("sequence", failure->sequence);
     ADD_EVENT_U64("rule_id", failure->rule_id);
@@ -385,8 +401,10 @@ static int add_history_entry(struct rte_tel_data *data, unsigned int index,
     ADD_EVENT_STRING("operation", dppd_rule_operation_name(failure->operation));
     ADD_EVENT_STRING("stage", dppd_rule_failure_stage_name(failure->stage));
     ADD_EVENT_STRING("kind", dppd_rule_failure_kind_name(failure->kind));
-    ADD_EVENT_STRING("backend", !failure->backend_known ? "unknown" :
-        failure->backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software" : "rte_flow");
+    ADD_EVENT_STRING("backend",
+        !failure->backend_known                              ? "unknown"
+            : failure->backend == DPPD_PLAN_BACKEND_SOFTWARE ? "software"
+                                                             : "rte_flow");
     ADD_EVENT_INT("port", failure->install_port_id);
     ADD_EVENT_INT("port_known", failure->port_known);
     ADD_EVENT_INT("backend_known", failure->backend_known);
@@ -462,18 +480,27 @@ static int add_latency_scope(struct rte_tel_data *data, enum dppd_rule_latency_s
     const char *prefix = dppd_rule_latency_scope_name(scope);
     char name[64];
 
-#define ADD_HISTOGRAM(field) do { \
-    snprintf(name, sizeof(name), "%s_" #field, prefix); \
-    ADD_U64(name, histogram->field); \
-} while (0)
-    ADD_HISTOGRAM(samples); ADD_HISTOGRAM(unavailable); ADD_HISTOGRAM(rules);
-    ADD_HISTOGRAM(total_ns); ADD_HISTOGRAM(min_ns); ADD_HISTOGRAM(max_ns);
+#define ADD_HISTOGRAM(field)                                \
+    do {                                                    \
+        snprintf(name, sizeof(name), "%s_" #field, prefix); \
+        ADD_U64(name, histogram->field);                    \
+    } while (0)
+    ADD_HISTOGRAM(samples);
+    ADD_HISTOGRAM(unavailable);
+    ADD_HISTOGRAM(rules);
+    ADD_HISTOGRAM(total_ns);
+    ADD_HISTOGRAM(min_ns);
+    ADD_HISTOGRAM(max_ns);
 #undef ADD_HISTOGRAM
-#define ADD_SUMMARY(field) do { \
-    snprintf(name, sizeof(name), "%s_" #field, prefix); \
-    ADD_U64(name, summary->field); \
-} while (0)
-    ADD_SUMMARY(mean_ns); ADD_SUMMARY(p50_upper_ns); ADD_SUMMARY(p95_upper_ns); ADD_SUMMARY(p99_upper_ns);
+#define ADD_SUMMARY(field)                                  \
+    do {                                                    \
+        snprintf(name, sizeof(name), "%s_" #field, prefix); \
+        ADD_U64(name, summary->field);                      \
+    } while (0)
+    ADD_SUMMARY(mean_ns);
+    ADD_SUMMARY(p50_upper_ns);
+    ADD_SUMMARY(p95_upper_ns);
+    ADD_SUMMARY(p99_upper_ns);
 #undef ADD_SUMMARY
     snprintf(name, sizeof(name), "%s_mean_available", prefix);
     ADD_INT(name, summary->mean_available);
@@ -537,8 +564,7 @@ static int latency_callback(const char *command, const char *parameters, struct 
 }
 
 /** 注册失败时保留已完成的进度，重试只补剩余命令，所有回调在绑定前都返回不可用 */
-int dppd_telemetry_register(const struct dppd_runtime *runtime,
-                            const struct dppd_control_service *control)
+int dppd_telemetry_register(const struct dppd_runtime *runtime, const struct dppd_control_service *control)
 {
     static const struct {
         const char *name;
@@ -549,8 +575,10 @@ int dppd_telemetry_register(const struct dppd_runtime *runtime,
         {"/dppd/rules", rules_callback, "Rule summary and 64 IDs. Optional: after_id,repository_generation."},
         {"/dppd/rule", rule_callback, "Installed rule snapshot. Required: rule_id."},
         {"/dppd/rule_failures", failures_callback, "Control outcomes and last failure. No parameters."},
-        {"/dppd/rule_latency", latency_callback, "Successful commit history. Optional: software, software_batch or rte_flow."},
-        {"/dppd/rule_history", history_callback, "Last 64 failures, 4 per page. Optional: after_event_id,history_revision."},
+        {"/dppd/rule_latency", latency_callback,
+            "Successful commit history. Optional: software, software_batch or rte_flow."},
+        {"/dppd/rule_history", history_callback,
+            "Last 64 failures, 4 per page. Optional: after_event_id,history_revision."},
     };
     struct telemetry_rule *rows, *work;
     struct telemetry_rules summary;
@@ -573,8 +601,8 @@ int dppd_telemetry_register(const struct dppd_runtime *runtime,
     }
     rc = build_snapshot(control, rows, control->rules.capacity, &summary);
     while (rc == 0 && registered_commands < sizeof(commands) / sizeof(commands[0])) {
-        rc = rte_telemetry_register_cmd(commands[registered_commands].name,
-            commands[registered_commands].callback, commands[registered_commands].help);
+        rc = rte_telemetry_register_cmd(commands[registered_commands].name, commands[registered_commands].callback,
+            commands[registered_commands].help);
         if (rc == 0)
             registered_commands++;
     }
@@ -620,8 +648,7 @@ int dppd_telemetry_publish_rules(const struct dppd_control_service *control)
     if (previous.metrics.operations == control->observation.metrics.operations &&
         previous.history.revision == control->observation.history.revision &&
         previous.history.exhausted == control->observation.history.exhausted &&
-        previous.generation == control->rules.generation &&
-        previous.recovery == control->recovery_state &&
+        previous.generation == control->rules.generation && previous.recovery == control->recovery_state &&
         previous.recovery_error == control->recovery_last_error &&
         previous.persistence.enabled == (control->persistence_path != NULL) &&
         previous.persistence.dirty == control->persistence_dirty &&

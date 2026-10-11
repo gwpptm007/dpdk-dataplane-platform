@@ -13,8 +13,7 @@ static void test_status_arguments(void)
 {
     struct dppd_management_request request;
     char *args[] = {"rule-status", "100", "any", "extra"};
-    const char *invalid[] = {"0", "-1", "wrong", "18446744073709551615",
-                             "18446744073709551616"};
+    const char *invalid[] = {"0", "-1", "wrong", "18446744073709551615", "18446744073709551616"};
 
     assert(build_request(2, args, &request) == 0);
     assert(request.operation == DPPD_MANAGEMENT_RULE_STATUS);
@@ -73,9 +72,8 @@ static void test_probe_arguments(void)
     struct dppd_management_request request;
     char *profile[] = {"capability-show", "5", "extra"};
     char *drop[] = {"probe-drop", "100", "5", "17", "refresh", "extra"};
-    char *filter[] = {"probe-filter", "101", "6", "tcp", "192.0.2.0/24",
-                      "any", "any", "80", "queue:1", "count", "mark:7",
-                      "priority:19", "refresh"};
+    char *filter[] = {"probe-filter", "101", "6", "tcp", "192.0.2.0/24", "any", "any", "80", "queue:1", "count",
+        "mark:7", "priority:19", "refresh"};
 
     assert(build_request(2, profile, &request) == 0);
     assert(request.operation == DPPD_MANAGEMENT_CAPABILITY_GET);
@@ -182,8 +180,7 @@ int main(void)
     assert(build_request(2, stats, &request) == -EINVAL);
     stats[1] = "wrong";
     assert(build_request(2, stats, &request) == -EINVAL);
-    char *args[] = {"update-drop-batch", "5", "20", "prefer",
-                    "100", "1", "101", "2", "102", "3", "103", "4"};
+    char *args[] = {"update-drop-batch", "5", "20", "prefer", "100", "1", "101", "2", "102", "3", "103", "4"};
 
     /** 四个固定参数之后，每增加一组 ID 和旧版本，就多表达一条待更新规则 */
     for (int count = 8; count <= 12; count += 2) {

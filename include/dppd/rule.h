@@ -72,7 +72,7 @@ struct dppd_rule {
     uint64_t generation;
     /*
      * 规则安装目标属于 desired state，而不是临时的 API 参数。启动重放必须使用
-     * 原始 ethdev port，不能在多端口环境中猜测或默认成 port 0。
+     * 原始 ethdev port，不能在多端口环境中猜测或默认成 port 0
      */
     uint16_t install_port_id;
     enum dppd_rule_domain domain;

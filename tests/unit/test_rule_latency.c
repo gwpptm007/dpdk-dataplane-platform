@@ -53,8 +53,8 @@ void *__wrap_calloc(size_t count, size_t size)
 static void arm_clock(uint64_t duration, int failure)
 {
     clock_samples[0] = (struct timespec){.tv_sec = 10};
-    clock_samples[1] = (struct timespec){.tv_sec = 10 + (time_t)(duration / 1000000000U),
-        .tv_nsec = (long)(duration % 1000000000U)};
+    clock_samples[1] =
+        (struct timespec){.tv_sec = 10 + (time_t)(duration / 1000000000U), .tv_nsec = (long)(duration % 1000000000U)};
     clock_index = 0;
     clock_limit = failure == 0 ? 1U : 2U;
     clock_failure = failure;
@@ -63,22 +63,26 @@ static void arm_clock(uint64_t duration, int failure)
 /** 允许硬件提交，记录驱动访问数以证明历史查询不重新校验 */
 static int validate(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
-    (void)port; (void)rule; (void)error;
+    (void)port;
+    (void)rule;
+    (void)error;
     driver_calls++;
     return 0;
 }
 
 /** 创建错误不构成成功提交样本，成功时填写正式后端需要的对象身份 */
-static int create(uint16_t port, const struct dppd_rule *rule,
-    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+static int create(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     (void)error;
     driver_calls++;
     memset(handle, 0, sizeof(*handle));
     if (create_failure)
         return -EIO;
-    *handle = (struct dppd_flow_handle){.rule_id = rule->id, .rule_generation = rule->generation,
-        .port_id = port, .flow = (struct rte_flow *)(uintptr_t)(rule->id + 1U)};
+    *handle = (struct dppd_flow_handle){.rule_id = rule->id,
+        .rule_generation = rule->generation,
+        .port_id = port,
+        .flow = (struct rte_flow *)(uintptr_t)(rule->id + 1U)};
     return 0;
 }
 
@@ -183,7 +187,9 @@ static void socket_query(struct dppd_control_service *control, const struct dppd
     assert(dppd_management_start(&server, control, &devices, NULL, path) == 0);
     for (unsigned int attempt = 0; attempt < 3; ++attempt) {
         struct dppd_management_request request = {.version = DPPD_MANAGEMENT_VERSION,
-            .size = sizeof(request), .operation = DPPD_MANAGEMENT_RULE_LATENCY, .request_id = 99};
+            .size = sizeof(request),
+            .operation = DPPD_MANAGEMENT_RULE_LATENCY,
+            .request_id = 99};
         int client = socket(AF_UNIX, SOCK_SEQPACKET, 0);
 
         if (attempt == 0)

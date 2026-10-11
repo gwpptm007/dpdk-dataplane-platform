@@ -65,6 +65,7 @@ sudo ./build/dppd -l 0-2 -n 4 -- --ports 0,1 --queues 2 --burst 64 --promisc
 `-l/-n/-a` 等参数属于 EAL；`--` 后属于 dppd。`--ports 0,1,2,3` 表示建立 `0↔1`、`2↔3` 两组双向端口对。每个 queue 需要一个 EAL worker lcore，主 lcore 不参与轮询。
 
 完整环境准备、运行、telemetry 与抓包方式见 [构建与运行](docs/build_and_run.md)。架构语义和扩展边界见 [V3 架构](docs/architecture_v3.md)。
+代码排版、中文注释和格式检查命令见 [代码风格约定](docs/code_style.md)。
 
 ## 仓库边界
 

@@ -43,8 +43,7 @@ struct fixture {
     uint64_t queue_sent[2][MAX_QUEUES], queue_forwarded[2][MAX_QUEUES];
 };
 
-static struct rte_mbuf *make_packet(struct fixture *fixture, uint16_t destination,
-                                    uint16_t ingress, uint16_t queue)
+static struct rte_mbuf *make_packet(struct fixture *fixture, uint16_t destination, uint16_t ingress, uint16_t queue)
 {
     struct rte_mbuf *mbuf = rte_pktmbuf_alloc(fixture->pool);
     uint8_t *data;
@@ -76,8 +75,7 @@ static void enqueue_round(struct fixture *fixture)
     for (port = 0; port < fixture->count / 2; ++port) {
         for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
             for (i = 0; i < PACKETS_PER_PORT * (queue + 1U); ++i) {
-                struct rte_mbuf *mbuf = make_packet(fixture, (uint16_t)(8000 + i % 3 * 1000),
-                                                    (uint16_t)port, queue);
+                struct rte_mbuf *mbuf = make_packet(fixture, (uint16_t)(8000 + i % 3 * 1000), (uint16_t)port, queue);
                 assert(rte_ring_enqueue(fixture->rx[port][queue], mbuf) == 0);
                 fixture->sent++;
                 fixture->queue_sent[port][queue]++;
@@ -120,8 +118,7 @@ static void drain_round(struct fixture *fixture)
         }
         dppd_runtime_stats_read(&fixture->runtime, &stats);
         if (fixture->forwarded == expected_forwarded && stats.rx_packets == fixture->sent &&
-            stats.tx_packets == expected_forwarded &&
-            stats.policy_drops == fixture->sent - expected_forwarded)
+            stats.tx_packets == expected_forwarded && stats.policy_drops == fixture->sent - expected_forwarded)
             break;
         assert(fixture->forwarded <= expected_forwarded);
         assert(rte_get_timer_cycles() < deadline);
@@ -139,8 +136,7 @@ static void toggle(struct fixture *fixture)
 
     for (i = 0; i < fixture->count; ++i) {
         uint16_t *destination = &fixture->requests[i].rule.matches[2].spec.l4.dst_be;
-        *destination = *destination == rte_cpu_to_be_16(8000) ?
-            rte_cpu_to_be_16(9000) : rte_cpu_to_be_16(8000);
+        *destination = *destination == rte_cpu_to_be_16(8000) ? rte_cpu_to_be_16(9000) : rte_cpu_to_be_16(8000);
     }
 }
 
@@ -157,8 +153,7 @@ static void run_updates(struct fixture *fixture)
     for (round = 0; round < ROUNDS; ++round) {
         enqueue_round(fixture);
         toggle(fixture);
-        assert(dppd_control_update_batch(&fixture->control, fixture->requests,
-                                          fixture->count, results) == 0);
+        assert(dppd_control_update_batch(&fixture->control, fixture->requests, fixture->count, results) == 0);
         for (i = 0; i < fixture->count; ++i)
             fixture->requests[i].expected_generation = results[i].generation;
         drain_round(fixture);
@@ -170,41 +165,37 @@ static void run_updates(struct fixture *fixture)
         struct dppd_control_rule_status original_status[4], queried_status;
 
         for (i = 0; i < fixture->count; ++i) {
-            assert(dppd_software_backend_query_count(&fixture->control.software,
-                fixture->requests[i].rule.id, fixture->requests[i].expected_generation,
-                &before[i], &bytes) == 0);
+            assert(dppd_software_backend_query_count(&fixture->control.software, fixture->requests[i].rule.id,
+                       fixture->requests[i].expected_generation, &before[i], &bytes) == 0);
             /** 同时保存版本的安装记录，验证真实工作线程运行期间的分配失败不会重写记录 */
             assert(dppd_control_rule_status(&fixture->control, fixture->requests[i].rule.id,
-                fixture->requests[i].expected_generation, &original_status[i]) == 0);
+                       fixture->requests[i].expected_generation, &original_status[i]) == 0);
         }
         enqueue_round(fixture);
         toggle(fixture);
         fail_allocation = round;
-        assert(dppd_control_update_batch(&fixture->control, fixture->requests,
-                                          fixture->count, results) == -ENOMEM);
+        assert(dppd_control_update_batch(&fixture->control, fixture->requests, fixture->count, results) == -ENOMEM);
         assert(fail_allocation == 0 && fixture->control.rules.generation == revision);
         toggle(fixture);
         drain_round(fixture);
         for (i = 0; i < fixture->count; ++i) {
             assert(dppd_control_rule_status(&fixture->control, fixture->requests[i].rule.id,
-                fixture->requests[i].expected_generation, &queried_status) == 0);
+                       fixture->requests[i].expected_generation, &queried_status) == 0);
             assert(memcmp(&queried_status, &original_status[i], sizeof(queried_status)) == 0);
-            assert(dppd_software_backend_query_count(&fixture->control.software,
-                fixture->requests[i].rule.id, fixture->requests[i].expected_generation,
-                &hits, &bytes) == 0);
+            assert(dppd_software_backend_query_count(&fixture->control.software, fixture->requests[i].rule.id,
+                       fixture->requests[i].expected_generation, &hits, &bytes) == 0);
             assert(hits == before[i] + hits_per_round(fixture));
             assert(bytes == hits * 64);
         }
     }
     toggle(fixture);
-    assert(dppd_control_update_batch(&fixture->control, fixture->requests,
-                                      fixture->count, results) == 0);
+    assert(dppd_control_update_batch(&fixture->control, fixture->requests, fixture->count, results) == 0);
     for (i = 0; i < fixture->count; ++i) {
         uint64_t hits, bytes;
 
         fixture->requests[i].expected_generation = results[i].generation;
-        assert(dppd_software_backend_query_count(&fixture->control.software,
-            fixture->requests[i].rule.id, results[i].generation, &hits, &bytes) == 0);
+        assert(dppd_software_backend_query_count(&fixture->control.software, fixture->requests[i].rule.id,
+                   results[i].generation, &hits, &bytes) == 0);
         assert(hits == 0 && bytes == 0);
     }
     enqueue_round(fixture);
@@ -215,14 +206,14 @@ static void run_updates(struct fixture *fixture)
 
         /** 报文已经排空后反复读取状态，真实命中数必须保留，不能被只读查询重置 */
         for (unsigned int query = 0; query < 3; ++query) {
-            assert(dppd_control_rule_status(&fixture->control, fixture->requests[i].rule.id,
-                results[i].generation, &status) == 0);
+            assert(dppd_control_rule_status(&fixture->control, fixture->requests[i].rule.id, results[i].generation,
+                       &status) == 0);
             assert(status.backend == DPPD_PLAN_BACKEND_SOFTWARE);
             assert(status.installation.has_count && status.installation.timing_available);
             assert(status.installation.commit_rule_count == fixture->count);
         }
-        assert(dppd_software_backend_query_count(&fixture->control.software,
-            fixture->requests[i].rule.id, results[i].generation, &hits, &bytes) == 0);
+        assert(dppd_software_backend_query_count(&fixture->control.software, fixture->requests[i].rule.id,
+                   results[i].generation, &hits, &bytes) == 0);
         assert(hits == hits_per_round(fixture) && bytes == hits * 64);
     }
 }
@@ -250,8 +241,8 @@ static void verify_stats(struct fixture *fixture)
             assert(port.policy_drops == expected_rx * 2 / 3 && port.rule_drops == port.policy_drops);
             assert(port.no_route_drops == 0 && port.egress_drops == 0 && port.tx_drops == 0);
             request.payload.stats_query.queue_id = queue;
-            assert(dppd_management_handle(&fixture->control, &fixture->runtime.devices,
-                                          &fixture->runtime, &request, &response) == 0);
+            assert(dppd_management_handle(&fixture->control, &fixture->runtime.devices, &fixture->runtime, &request,
+                       &response) == 0);
             assert(response.status == 0 && memcmp(&response.payload.stats, &port, sizeof(port)) == 0);
             dppd_stats_accumulate(&port_sum, &port);
         }
@@ -284,10 +275,9 @@ static void verify_drop_reasons(struct fixture *fixture)
         const uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
 
         dppd_runtime_stats_read(&fixture->runtime, &before);
-        assert(dppd_runtime_stats_query(&fixture->runtime,
-            fixture->runtime.devices.ports[0].port_id, 0, &ingress) == 0);
-        assert(dppd_runtime_stats_query(&fixture->runtime,
-            fixture->runtime.devices.ports[1].port_id, 0, &egress) == 0);
+        assert(
+            dppd_runtime_stats_query(&fixture->runtime, fixture->runtime.devices.ports[0].port_id, 0, &ingress) == 0);
+        assert(dppd_runtime_stats_query(&fixture->runtime, fixture->runtime.devices.ports[1].port_id, 0, &egress) == 0);
         if (scenario == 0)
             assert(rte_pktmbuf_trim(mbuf, 54) == 0);
         else if (scenario == 1)
@@ -315,17 +305,16 @@ static void verify_drop_reasons(struct fixture *fixture)
         assert(after.tx_packets == before.tx_packets);
         assert(after.rx_malformed - before.rx_malformed == (scenario == 0 ? 1U : 0U));
         assert(after.no_route_drops - before.no_route_drops == (scenario == 1 ? 1U : 0U));
-        assert(after.egress_drops - before.egress_drops ==
-               (scenario == 2 || scenario == 4 ? 1U : 0U));
+        assert(after.egress_drops - before.egress_drops == (scenario == 2 || scenario == 4 ? 1U : 0U));
         assert(after.tx_queue_drops - before.tx_queue_drops == (scenario == 3 ? 1U : 0U));
         {
             struct dppd_stats_values current;
-            assert(dppd_runtime_stats_query(&fixture->runtime,
-                fixture->runtime.devices.ports[0].port_id, 0, &current) == 0);
+            assert(dppd_runtime_stats_query(&fixture->runtime, fixture->runtime.devices.ports[0].port_id, 0,
+                       &current) == 0);
             assert(current.rx_packets == ingress.rx_packets + 1);
             assert(current.tx_drops == ingress.tx_drops);
-            assert(dppd_runtime_stats_query(&fixture->runtime,
-                fixture->runtime.devices.ports[1].port_id, 0, &current) == 0);
+            assert(dppd_runtime_stats_query(&fixture->runtime, fixture->runtime.devices.ports[1].port_id, 0,
+                       &current) == 0);
             assert(current.tx_queue_drops == egress.tx_queue_drops + (scenario == 3 ? 1U : 0U));
         }
         fixture->runtime.snapshot = snapshot;
@@ -350,8 +339,8 @@ static void verify_health(struct fixture *fixture, bool ready)
     };
     struct dppd_management_response response;
 
-    assert(dppd_management_handle(&fixture->control, &fixture->runtime.devices,
-                                  &fixture->runtime, &request, &response) == 0);
+    assert(dppd_management_handle(&fixture->control, &fixture->runtime.devices, &fixture->runtime, &request,
+               &response) == 0);
     assert(response.status == 0 && response.payload.health.ready == ready);
     assert(response.payload.health.workers_expected == fixture->queues);
     assert(response.payload.health.workers_running == (ready ? fixture->queues : 0));
@@ -375,14 +364,13 @@ static void configure_test_queues(struct fixture *fixture)
         assert(rte_eth_dev_info_get(port->port_id, &info) == 0);
         assert(rte_eth_dev_configure(port->port_id, fixture->queues, fixture->queues, &config) == 0);
         for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
-            assert(rte_eth_rx_queue_setup(port->port_id, queue, 128, port->socket_id,
-                &info.default_rxconf, fixture->pool) == 0);
-            assert(rte_eth_tx_queue_setup(port->port_id, queue, 128, port->socket_id,
-                &info.default_txconf) == 0);
+            assert(rte_eth_rx_queue_setup(port->port_id, queue, 128, port->socket_id, &info.default_rxconf,
+                       fixture->pool) == 0);
+            assert(rte_eth_tx_queue_setup(port->port_id, queue, 128, port->socket_id, &info.default_txconf) == 0);
         }
         assert(rte_eth_dev_start(port->port_id) == 0);
     }
-    RTE_LCORE_FOREACH_WORKER(lcore) {
+    RTE_LCORE_FOREACH_WORKER (lcore) {
         struct dppd_worker *worker = &fixture->runtime.workers[1];
 
         if (lcore == fixture->runtime.workers[0].lcore_id)
@@ -425,16 +413,13 @@ static void run_case(uint32_t count, uint16_t queues)
 
         for (uint16_t queue = 0; queue < queues; ++queue) {
             snprintf(name, sizeof(name), "rx_%u_%u_%u_%u", count, queues, i, queue);
-            fixture.rx[i][queue] = rte_ring_create(name, 1024, rte_socket_id(),
-                                                    RING_F_SP_ENQ | RING_F_SC_DEQ);
+            fixture.rx[i][queue] = rte_ring_create(name, 1024, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
             snprintf(name, sizeof(name), "tx_%u_%u_%u_%u", count, queues, i, queue);
-            fixture.tx[i][queue] = rte_ring_create(name, 1024, rte_socket_id(),
-                                                    RING_F_SP_ENQ | RING_F_SC_DEQ);
+            fixture.tx[i][queue] = rte_ring_create(name, 1024, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
             assert(fixture.rx[i][queue] != NULL && fixture.tx[i][queue] != NULL);
         }
         snprintf(name, sizeof(name), "traffic_port_%u_%u_%u", count, queues, i);
-        port = rte_eth_from_rings(name, fixture.rx[i], queues, fixture.tx[i], queues,
-                                   rte_socket_id());
+        port = rte_eth_from_rings(name, fixture.rx[i], queues, fixture.tx[i], queues, rte_socket_id());
         assert(port >= 0);
         config.ports[i] = (uint16_t)port;
     }
@@ -459,8 +444,7 @@ static void run_case(uint32_t count, uint16_t queues)
         request->rule.actions[0].type = DPPD_ACTION_COUNT;
         request->rule.actions[1].type = DPPD_ACTION_DROP;
         request->install_port_id = config.ports[i / 2];
-        assert(dppd_control_apply(&fixture.control, request->install_port_id,
-                                  &request->rule, 0, &result) == 0);
+        assert(dppd_control_apply(&fixture.control, request->install_port_id, &request->rule, 0, &result) == 0);
         request->expected_generation = result.generation;
     }
     dppd_runtime_set_software_backend(&fixture.runtime, &fixture.control.software);
@@ -470,8 +454,8 @@ static void run_case(uint32_t count, uint16_t queues)
     dppd_runtime_request_stop(&fixture.runtime);
     assert(dppd_runtime_wait(&fixture.runtime) == 0);
     verify_health(&fixture, false);
-    assert(dppd_software_backend_contains_version(&fixture.control.software,
-        fixture.requests[0].rule.id, fixture.requests[0].expected_generation));
+    assert(dppd_software_backend_contains_version(&fixture.control.software, fixture.requests[0].rule.id,
+        fixture.requests[0].expected_generation));
     assert(fixture.control.software.retired == NULL);
     {
         char directory[] = "/tmp/dppd-traffic-replay-XXXXXX";
@@ -483,8 +467,7 @@ static void run_case(uint32_t count, uint16_t queues)
         assert(dppd_control_persistence_attach(&fixture.control, path) == 0);
         assert(dppd_control_persistence_flush(&fixture.control) == 0);
         assert(dppd_control_fini(&fixture.control) == 0);
-        assert(dppd_control_init(&fixture.control, &fixture.runtime.devices.topology,
-                                  count, NULL) == 0);
+        assert(dppd_control_init(&fixture.control, &fixture.runtime.devices.topology, count, NULL) == 0);
         assert(dppd_control_persistence_restore(&fixture.control, path) == 0);
         assert(fixture.control.rules.generation == generation);
         for (i = 0; i < count; ++i) {
@@ -492,14 +475,13 @@ static void run_case(uint32_t count, uint16_t queues)
             struct dppd_rule expected = fixture.requests[i].rule;
             uint64_t hits, bytes;
 
-            assert(dppd_rule_repository_get(&fixture.control.rules,
-                fixture.requests[i].rule.id, &stored) == 0);
+            assert(dppd_rule_repository_get(&fixture.control.rules, fixture.requests[i].rule.id, &stored) == 0);
             assert(stored.generation == fixture.requests[i].expected_generation);
             assert(stored.install_port_id == fixture.requests[i].install_port_id);
             expected.install_port_id = fixture.requests[i].install_port_id;
             assert(dppd_rule_equal(&stored, &expected));
-            assert(dppd_software_backend_query_count(&fixture.control.software,
-                stored.id, stored.generation, &hits, &bytes) == 0);
+            assert(dppd_software_backend_query_count(&fixture.control.software, stored.id, stored.generation, &hits,
+                       &bytes) == 0);
             assert(hits == 0 && bytes == 0);
         }
         dppd_runtime_set_software_backend(&fixture.runtime, &fixture.control.software);
@@ -510,15 +492,14 @@ static void run_case(uint32_t count, uint16_t queues)
         dppd_runtime_request_stop(&fixture.runtime);
         assert(dppd_runtime_wait(&fixture.runtime) == 0);
         verify_health(&fixture, false);
-        assert(dppd_software_backend_contains_version(&fixture.control.software,
-            fixture.requests[0].rule.id, fixture.requests[0].expected_generation));
+        assert(dppd_software_backend_contains_version(&fixture.control.software, fixture.requests[0].rule.id,
+            fixture.requests[0].expected_generation));
         assert(fixture.control.software.retired == NULL);
         for (i = 0; i < count; ++i) {
             uint64_t hits, bytes;
 
-            assert(dppd_software_backend_query_count(&fixture.control.software,
-                fixture.requests[i].rule.id, fixture.requests[i].expected_generation,
-                &hits, &bytes) == 0);
+            assert(dppd_software_backend_query_count(&fixture.control.software, fixture.requests[i].rule.id,
+                       fixture.requests[i].expected_generation, &hits, &bytes) == 0);
             assert(hits == hits_per_round(&fixture) && bytes == hits * 64);
         }
         verify_stats(&fixture);
@@ -529,10 +510,8 @@ static void run_case(uint32_t count, uint16_t queues)
          * 随后仍按正常所有权顺序回收规则、端口、环和缓冲池，检查没有遗留报文
          */
         assert(dppd_runtime_start(&fixture.runtime) == 0);
-        atomic_store_explicit(&fixture.runtime.devices.ports[1].removed, true,
-                              memory_order_release);
-        atomic_store_explicit(&fixture.runtime.devices.removal_requested, true,
-                              memory_order_release);
+        atomic_store_explicit(&fixture.runtime.devices.ports[1].removed, true, memory_order_release);
+        atomic_store_explicit(&fixture.runtime.devices.removal_requested, true, memory_order_release);
         assert(!atomic_load(&fixture.runtime.stop_requested));
         assert(dppd_runtime_wait(&fixture.runtime) == 0);
         assert(!atomic_load(&fixture.runtime.stop_requested));
@@ -551,11 +530,11 @@ static void run_case(uint32_t count, uint16_t queues)
             rte_ring_free(fixture.tx[i][queue]);
         }
     }
-    printf("PASS rules=%u queues=%u updates=%u rx=%" PRIu64 " forwarded=%" PRIu64
-           " dropped=%" PRIu64 " allocation-failures=%u replay=passed stats=passed"
+    printf("PASS rules=%u queues=%u updates=%u rx=%" PRIu64 " forwarded=%" PRIu64 " dropped=%" PRIu64
+           " allocation-failures=%u replay=passed stats=passed"
            " drop-reasons=passed removal-stop=passed health=passed mbuf-leaks=0\n",
-           count, queues, ROUNDS + 1, fixture.received, fixture.forwarded,
-           fixture.received - fixture.forwarded, count + 2);
+        count, queues, ROUNDS + 1, fixture.received, fixture.forwarded, fixture.received - fixture.forwarded,
+        count + 2);
 }
 
 int main(int argc, char **argv)

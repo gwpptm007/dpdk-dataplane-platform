@@ -42,8 +42,7 @@ void *__wrap_calloc(size_t count, size_t size)
 }
 
 /** 校验计数表示实际访问驱动的次数，缓存命中和画像查询都不能使它增加 */
-static int fake_validate(uint16_t port_id, const struct dppd_rule *rule,
-                         struct dppd_flow_error *error)
+static int fake_validate(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
     assert(port_id == 5 || port_id == 6);
     assert(rule->fallback != DPPD_FALLBACK_SOFTWARE_ONLY);
@@ -56,8 +55,8 @@ static int fake_validate(uint16_t port_id, const struct dppd_rule *rule,
 }
 
 /** 测试创建只产生一个本地假 handle，不创建真实网卡对象 */
-static int fake_create(uint16_t port_id, const struct dppd_rule *rule,
-                       struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+static int fake_create(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     (void)error;
     create_calls++;
@@ -86,7 +85,9 @@ static int fake_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *
 }
 
 static const struct dppd_flow_api api = {
-    .validate = fake_validate, .create = fake_create, .remove = fake_remove,
+    .validate = fake_validate,
+    .create = fake_create,
+    .remove = fake_remove,
 };
 static const struct dppd_topology topology = {
     .nb_endpoints = 2,
@@ -113,9 +114,8 @@ static struct dppd_rule make_rule(uint64_t id)
 }
 
 /** 返回正式控制接口的探测结果，验证它没有偷偷进行安装或占用事务编号 */
-static struct dppd_flow_probe_result probe(struct dppd_control_service *service,
-                                          uint16_t port_id, const struct dppd_rule *rule,
-                                          bool refresh)
+static struct dppd_flow_probe_result probe(struct dppd_control_service *service, uint16_t port_id,
+    const struct dppd_rule *rule, bool refresh)
 {
     struct dppd_flow_probe_result result;
     uint64_t transaction = service->next_transaction_id;
@@ -155,14 +155,28 @@ static void test_keys_and_expiry(void)
     for (unsigned int i = 0; i < 7; ++i) {
         changed = rule;
         switch (i) {
-        case 0: changed.id++; break;
-        case 1: changed.priority = 1; break;
-        case 2: changed.group = 1; break;
-        case 3: changed.domain = DPPD_RULE_DOMAIN_EGRESS; break;
-        case 4: changed.matches[1].spec.ipv4.src_mask_be = UINT32_MAX; break;
-        case 5: changed.matches[2].spec.l4.dst_be = 81; break;
-        case 6: changed.actions[1].type = DPPD_ACTION_QUEUE;
-                changed.actions[1].conf.queue_id = 1; break;
+        case 0:
+            changed.id++;
+            break;
+        case 1:
+            changed.priority = 1;
+            break;
+        case 2:
+            changed.group = 1;
+            break;
+        case 3:
+            changed.domain = DPPD_RULE_DOMAIN_EGRESS;
+            break;
+        case 4:
+            changed.matches[1].spec.ipv4.src_mask_be = UINT32_MAX;
+            break;
+        case 5:
+            changed.matches[2].spec.l4.dst_be = 81;
+            break;
+        case 6:
+            changed.actions[1].type = DPPD_ACTION_QUEUE;
+            changed.actions[1].conf.queue_id = 1;
+            break;
         }
         calls = validate_calls;
         assert(!probe(&service, 5, &changed, false).cached && validate_calls == calls + 1);

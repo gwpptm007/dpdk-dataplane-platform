@@ -33,10 +33,7 @@ static uint16_t read_be16(const uint8_t *data)
  * 检查从 offset 开始的 length 个字节既属于整包，也实际存在于当前连续缓冲区
  * 先检查偏移，再用减法检查剩余长度，避免 offset 加 length 时发生整数溢出
  */
-static int require_bytes(uint32_t offset,
-                         uint32_t length,
-                         uint32_t available_len,
-                         uint32_t packet_len)
+static int require_bytes(uint32_t offset, uint32_t length, uint32_t available_len, uint32_t packet_len)
 {
     if (offset > packet_len || length > packet_len - offset)
         return -1;
@@ -46,16 +43,13 @@ static int require_bytes(uint32_t offset,
 }
 
 /** 按以太网、VLAN、网络层、传输层逐层前进，只在边界检查成功后访问对应字段 */
-int dppd_packet_parse_buffer(const uint8_t *data,
-                             uint32_t available_len,
-                             uint32_t packet_len,
-                             struct dppd_packet *packet)
+int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
+    struct dppd_packet *packet)
 {
     uint32_t offset;
     uint16_t ether_type;
 
-    if (data == NULL || packet == NULL ||
-        require_bytes(0, DPPD_ETHER_HEADER_LEN, available_len, packet_len) != 0)
+    if (data == NULL || packet == NULL || require_bytes(0, DPPD_ETHER_HEADER_LEN, available_len, packet_len) != 0)
         return DPPD_PARSE_MALFORMED;
 
     /** 初始以太网头检查成功后才清零输出，后续未解析的字段保持默认值 */
@@ -66,8 +60,7 @@ int dppd_packet_parse_buffer(const uint8_t *data,
     offset = DPPD_ETHER_HEADER_LEN;
 
     /** 每层标签包含 TCI 和下一层协议类型，逐层跳过，最多读取两层 */
-    while ((ether_type == DPPD_ETHER_TYPE_VLAN || ether_type == DPPD_ETHER_TYPE_QINQ) &&
-           packet->vlan_depth < 2U) {
+    while ((ether_type == DPPD_ETHER_TYPE_VLAN || ether_type == DPPD_ETHER_TYPE_QINQ) && packet->vlan_depth < 2U) {
         if (require_bytes(offset, DPPD_VLAN_HEADER_LEN, available_len, packet_len) != 0)
             return DPPD_PARSE_MALFORMED;
         packet->vlan_tci[packet->vlan_depth++] = read_be16(data + offset);
@@ -106,8 +99,7 @@ int dppd_packet_parse_buffer(const uint8_t *data,
             return DPPD_PARSE_MALFORMED;
         /** IHL 以 4 字节为单位，含选项时大于 20 字节，必须确认整个 IP 头都可读取 */
         ihl = (uint8_t)((data[offset] & 0x0fU) * 4U);
-        if (ihl < DPPD_IPV4_MIN_HEADER_LEN ||
-            require_bytes(offset, ihl, available_len, packet_len) != 0)
+        if (ihl < DPPD_IPV4_MIN_HEADER_LEN || require_bytes(offset, ihl, available_len, packet_len) != 0)
             return DPPD_PARSE_MALFORMED;
 
         /**
@@ -156,9 +148,7 @@ int dppd_packet_parse_buffer(const uint8_t *data,
             packet->l4_len = DPPD_UDP_HEADER_LEN;
             /** 与地址字段一样，端口保留原始网络字节序，规则比较时使用相同表示 */
             memcpy(&packet->l4_src_port_be, data + offset, sizeof(packet->l4_src_port_be));
-            memcpy(&packet->l4_dst_port_be,
-                   data + offset + 2U,
-                   sizeof(packet->l4_dst_port_be));
+            memcpy(&packet->l4_dst_port_be, data + offset + 2U, sizeof(packet->l4_dst_port_be));
             return DPPD_PARSE_OK;
         }
 
@@ -180,9 +170,7 @@ int dppd_packet_parse_buffer(const uint8_t *data,
             packet->l4_type = DPPD_L4_TCP;
             packet->l4_len = tcp_length;
             memcpy(&packet->l4_src_port_be, data + offset, sizeof(packet->l4_src_port_be));
-            memcpy(&packet->l4_dst_port_be,
-                   data + offset + 2U,
-                   sizeof(packet->l4_dst_port_be));
+            memcpy(&packet->l4_dst_port_be, data + offset + 2U, sizeof(packet->l4_dst_port_be));
             return DPPD_PARSE_OK;
         }
 

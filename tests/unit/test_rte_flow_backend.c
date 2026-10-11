@@ -23,8 +23,7 @@ static void reset_fake(void)
     fake.fail_remove_at = -1;
 }
 
-static int fake_validate(uint16_t port_id, const struct dppd_rule *rule,
-                         struct dppd_flow_error *error)
+static int fake_validate(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
     int call = fake.validate_calls++;
 
@@ -34,9 +33,8 @@ static int fake_validate(uint16_t port_id, const struct dppd_rule *rule,
     return call == fake.fail_validate_at ? -ENOTSUP : 0;
 }
 
-static int fake_create(uint16_t port_id, const struct dppd_rule *rule,
-                       struct dppd_flow_handle *handle,
-                       struct dppd_flow_error *error)
+static int fake_create(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     int call = fake.create_calls++;
 
@@ -51,8 +49,7 @@ static int fake_create(uint16_t port_id, const struct dppd_rule *rule,
     return 0;
 }
 
-static int fake_remove(struct dppd_flow_handle *handle,
-                       struct dppd_flow_error *error)
+static int fake_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *error)
 {
     int call = fake.remove_calls++;
 
@@ -78,8 +75,7 @@ static struct dppd_rule rule(uint64_t id)
     return result;
 }
 
-static void items(struct dppd_transaction_item *result, uint32_t count,
-                  uint64_t first_id)
+static void items(struct dppd_transaction_item *result, uint32_t count, uint64_t first_id)
 {
     uint32_t i;
 

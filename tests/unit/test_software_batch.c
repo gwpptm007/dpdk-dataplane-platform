@@ -31,8 +31,12 @@ struct reader {
 static struct dppd_packet packet(void)
 {
     const uint8_t frame[42] = {
-        [12] = 0x08, [13] = 0x00, [14] = 0x45, [17] = 28,
-        [23] = 17, [39] = 8,
+        [12] = 0x08,
+        [13] = 0x00,
+        [14] = 0x45,
+        [17] = 28,
+        [23] = 17,
+        [39] = 8,
     };
     struct dppd_packet parsed;
 
@@ -49,8 +53,7 @@ static void *read_packets(void *arg)
     while (!atomic_load_explicit(&reader->stop, memory_order_acquire)) {
         struct dppd_software_decision decision;
 
-        dppd_software_backend_decide(reader->backend, (uint16_t)(5 + reader->id),
-                                     &parsed, &decision);
+        dppd_software_backend_decide(reader->backend, (uint16_t)(5 + reader->id), &parsed, &decision);
         assert(decision.matched && decision.drop && decision.has_mark);
         assert(decision.mark_id == 7);
         dppd_software_backend_worker_quiescent(reader->backend, reader->id);
@@ -60,9 +63,8 @@ static void *read_packets(void *arg)
     return NULL;
 }
 
-static void setup(struct dppd_control_service *service,
-                  struct dppd_control_batch_update_request requests[4],
-                  struct dppd_topology *topology, uint32_t count)
+static void setup(struct dppd_control_service *service, struct dppd_control_batch_update_request requests[4],
+    struct dppd_topology *topology, uint32_t count)
 {
     uint32_t i;
 
@@ -86,8 +88,7 @@ static void setup(struct dppd_control_service *service,
         rule.actions[0].conf.mark_id = i % 2 == 0 ? 7 : 9;
         rule.actions[1].type = DPPD_ACTION_COUNT;
         rule.actions[2].type = DPPD_ACTION_DROP;
-        assert(dppd_control_apply(service, i == count ? 7 : (uint16_t)(5 + i / 2),
-                                  &rule, 0, &result) == 0);
+        assert(dppd_control_apply(service, i == count ? 7 : (uint16_t)(5 + i / 2), &rule, 0, &result) == 0);
         if (i < count) {
             requests[i].rule = rule;
             requests[i].install_port_id = (uint16_t)(5 + i / 2);
@@ -102,8 +103,7 @@ static void toggle(struct dppd_control_batch_update_request requests[4], uint32_
 
     for (i = 0; i < count; ++i) {
         requests[i].rule.priority = requests[i].rule.priority == 10 ? 20 : 10;
-        requests[i].rule.actions[0].conf.mark_id =
-            requests[i].rule.priority == 10 ? 7 : 9;
+        requests[i].rule.actions[0].conf.mark_id = requests[i].rule.priority == 10 ? 7 : 9;
     }
 }
 
@@ -123,8 +123,7 @@ static void test_failures(uint32_t count)
     setup(&service, requests, &topology, count);
     /** 安装记录属于具体版本，后面的每个失败位置都必须保留这些原始记录 */
     for (i = 0; i <= count; ++i) {
-        assert(dppd_software_backend_install_info(&service.software, 100 + i, i + 1,
-                                                  &original_info[i]) == 0);
+        assert(dppd_software_backend_install_info(&service.software, 100 + i, i + 1, &original_info[i]) == 0);
     }
     assert(dppd_software_backend_worker_register(&service.software, 0) == 0);
     dppd_software_backend_decide(&service.software, 5, &parsed, &decision);
@@ -140,49 +139,40 @@ static void test_failures(uint32_t count)
         assert(service.rules.generation == count + 1);
         assert(service.recovery_state == DPPD_CONTROL_RECOVERY_READY);
         assert(dppd_software_backend_count(&service.software) == count + 1);
-        assert(dppd_software_backend_query_count(&service.software, 100, 1,
-                                                  &hits, &bytes) == 0);
+        assert(dppd_software_backend_query_count(&service.software, 100, 1, &hits, &bytes) == 0);
         assert(hits == 1 && bytes == parsed.packet_len);
         for (uint32_t j = 0; j < count; ++j) {
             struct dppd_rule stored;
 
             assert(dppd_rule_repository_get(&service.rules, 100 + j, &stored) == 0);
             assert(stored.generation == j + 1);
-            assert(dppd_software_backend_install_info(&service.software, 100 + j, j + 1,
-                                                      &queried_info) == 0);
+            assert(dppd_software_backend_install_info(&service.software, 100 + j, j + 1, &queried_info) == 0);
             assert(memcmp(&queried_info, &original_info[j], sizeof(queried_info)) == 0);
-            assert(dppd_software_backend_contains_version(&service.software,
-                                                           100 + j, j + 1));
+            assert(dppd_software_backend_contains_version(&service.software, 100 + j, j + 1));
         }
     }
     assert(dppd_control_update_batch(&service, requests, count, results) == 0);
     assert(atomic_load(&service.software.active) != original);
     assert(service.software.retired != NULL);
     /** 成功的一次整表发布对应一份整批耗时，所有新版本共享它，未更新版本保持原记录 */
-    assert(dppd_software_backend_install_info(&service.software, 100,
-                                              results[0].generation, &batch_info) == 0);
+    assert(dppd_software_backend_install_info(&service.software, 100, results[0].generation, &batch_info) == 0);
     assert(batch_info.timing_available && batch_info.commit_rule_count == count);
     for (i = 1; i < count; ++i) {
-        assert(dppd_software_backend_install_info(&service.software, 100 + i,
-                                                  results[i].generation, &queried_info) == 0);
+        assert(
+            dppd_software_backend_install_info(&service.software, 100 + i, results[i].generation, &queried_info) == 0);
         assert(queried_info.timing_available && queried_info.commit_rule_count == count);
         assert(queried_info.install_duration_ns == batch_info.install_duration_ns);
     }
-    assert(dppd_software_backend_install_info(&service.software, 100 + count,
-                                              count + 1, &queried_info) == 0);
+    assert(dppd_software_backend_install_info(&service.software, 100 + count, count + 1, &queried_info) == 0);
     assert(memcmp(&queried_info, &original_info[count], sizeof(queried_info)) == 0);
-    assert(dppd_software_backend_query_count(&service.software, 100,
-                                              results[0].generation, &hits, &bytes) == 0);
+    assert(dppd_software_backend_query_count(&service.software, 100, results[0].generation, &hits, &bytes) == 0);
     assert(hits == 0 && bytes == 0);
-    assert(dppd_software_backend_query_count(&service.software, 100 + count,
-                                              count + 1, &hits, &bytes) == 0);
+    assert(dppd_software_backend_query_count(&service.software, 100 + count, count + 1, &hits, &bytes) == 0);
     assert(hits == 1 && bytes == parsed.packet_len);
-    assert(dppd_software_backend_query_count(&service.software, 100, 1,
-                                              &hits, &bytes) == -ENOENT);
+    assert(dppd_software_backend_query_count(&service.software, 100, 1, &hits, &bytes) == -ENOENT);
     dppd_software_backend_decide(&service.software, 5, &parsed, &decision);
     assert(decision.drop && decision.mark_id == 7);
-    assert(dppd_software_backend_query_count(&service.software, 101,
-                                              results[1].generation, &hits, &bytes) == 0);
+    assert(dppd_software_backend_query_count(&service.software, 101, results[1].generation, &hits, &bytes) == 0);
     assert(hits == 1 && bytes == parsed.packet_len);
     dppd_software_backend_worker_unregister(&service.software, 0);
     /** 读者已退出使旧表可以回收，但安装状态查询本身仍不能触发回收或改变 active */
@@ -190,12 +180,10 @@ static void test_failures(uint32_t count)
         struct dppd_software_retired_snapshot *retired = service.software.retired;
         struct dppd_software_classifier_snapshot *active = atomic_load(&service.software.active);
 
-        assert(dppd_software_backend_install_info(&service.software, 100,
-                                                  results[0].generation, &queried_info) == 0);
+        assert(dppd_software_backend_install_info(&service.software, 100, results[0].generation, &queried_info) == 0);
         assert(service.software.retired == retired && atomic_load(&service.software.active) == active);
     }
-    assert(dppd_software_backend_contains_version(&service.software, 100,
-                                                   results[0].generation));
+    assert(dppd_software_backend_contains_version(&service.software, 100, results[0].generation));
     assert(service.software.retired == NULL);
     assert(dppd_control_fini(&service) == 0);
 }
@@ -225,8 +213,7 @@ static void test_concurrent(uint32_t count)
         for (i = 0; i < count; ++i)
             requests[i].expected_generation = results[i].generation;
         for (i = 0; i < count / 2; ++i) {
-            unsigned int sampled = atomic_load_explicit(&readers[i].samples,
-                                                         memory_order_acquire);
+            unsigned int sampled = atomic_load_explicit(&readers[i].samples, memory_order_acquire);
             while (atomic_load_explicit(&readers[i].samples, memory_order_acquire) == sampled)
                 sched_yield();
         }

@@ -53,20 +53,17 @@ struct dppd_transaction_backend {
     /** 只检查规则是否支持，不安装规则也不改变后端的资源占用 */
     int (*validate)(void *context, const struct dppd_transaction_item *item);
     /** 预留可撤销资源并返回 token；失败后仍需清理的资源也要留下可识别的 token */
-    int (*prepare)(void *context, const struct dppd_transaction_item *item,
-                   uintptr_t *token);
+    int (*prepare)(void *context, const struct dppd_transaction_item *item, uintptr_t *token);
     /** 使用已经准备好的资源正式安装规则，返回失败也可能已经产生部分副作用 */
-    int (*commit)(void *context, const struct dppd_transaction_item *item,
-                  uintptr_t token);
+    int (*commit)(void *context, const struct dppd_transaction_item *item, uintptr_t token);
     /** 撤销资源和安装副作用，commit_was_attempted 指明是否曾尝试正式提交 */
-    int (*rollback)(void *context, const struct dppd_transaction_item *item,
-                    uintptr_t token, bool commit_was_attempted);
+    int (
+        *rollback)(void *context, const struct dppd_transaction_item *item, uintptr_t token, bool commit_was_attempted);
     /**
      * 控制层确认不再需要回滚时，释放 prepare 创建的额外临时资源
      * 不删除实际规则，也不再引入可失败操作；没有额外资源的后端可以不提供此回调
      */
-    void (*finalize)(void *context, const struct dppd_transaction_item *item,
-                     uintptr_t token);
+    void (*finalize)(void *context, const struct dppd_transaction_item *item, uintptr_t token);
 };
 
 struct dppd_transaction_backends {
@@ -92,25 +89,20 @@ struct dppd_transaction {
     uint32_t rollback_item;
 };
 
-int dppd_transaction_init(struct dppd_transaction *transaction,
-                          uint64_t transaction_id,
-                          struct dppd_transaction_item *items,
-                          uint32_t nb_items);
-int dppd_transaction_run(struct dppd_transaction *transaction,
-                         const struct dppd_transaction_backends *backends);
+int dppd_transaction_init(struct dppd_transaction *transaction, uint64_t transaction_id,
+    struct dppd_transaction_item *items, uint32_t nb_items);
+int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends);
 /**
  * 逆序撤销已经完整提交但尚未 finalize 的事务，例如撤回本次更新中新安装的版本
  * 返回零才表示全部回滚动作成功，非零时调用方需要进一步处理恢复隔离
  */
-int dppd_transaction_rollback_committed(
-    struct dppd_transaction *transaction,
+int dppd_transaction_rollback_committed(struct dppd_transaction *transaction,
     const struct dppd_transaction_backends *backends);
 /**
  * 释放后端临时资源并结束事务，通常在规则账本发布成功后调用
  * 若已经发生无法补偿的错误，调用方决定进入隔离后也可用它释放不再使用的临时资源
  * finalize 不等于删除已安装规则，而且调用后不能再尝试 rollback_committed
  */
-int dppd_transaction_finalize(struct dppd_transaction *transaction,
-                              const struct dppd_transaction_backends *backends);
+int dppd_transaction_finalize(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends);
 
 #endif

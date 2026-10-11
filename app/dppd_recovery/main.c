@@ -34,11 +34,16 @@ static int revision_number(const char *text, uint64_t *revision)
 static const char *phase_name(enum dppd_recovery_phase phase)
 {
     switch (phase) {
-    case DPPD_RECOVERY_INTENT: return "intent";
-    case DPPD_RECOVERY_CREATED: return "created";
-    case DPPD_RECOVERY_CREATE_FAILED: return "create-failed";
-    case DPPD_RECOVERY_REMOVED: return "removed";
-    default: return "unknown";
+    case DPPD_RECOVERY_INTENT:
+        return "intent";
+    case DPPD_RECOVERY_CREATED:
+        return "created";
+    case DPPD_RECOVERY_CREATE_FAILED:
+        return "create-failed";
+    case DPPD_RECOVERY_REMOVED:
+        return "removed";
+    default:
+        return "unknown";
     }
 }
 
@@ -46,10 +51,14 @@ static const char *phase_name(enum dppd_recovery_phase phase)
 static const char *evidence_name(enum dppd_recovery_evidence evidence)
 {
     switch (evidence) {
-    case DPPD_EVIDENCE_SINGLE_ADDITION: return "single-addition";
-    case DPPD_EVIDENCE_AMBIGUOUS: return "ambiguous";
-    case DPPD_EVIDENCE_UNAVAILABLE: return "unavailable";
-    default: return "none";
+    case DPPD_EVIDENCE_SINGLE_ADDITION:
+        return "single-addition";
+    case DPPD_EVIDENCE_AMBIGUOUS:
+        return "ambiguous";
+    case DPPD_EVIDENCE_UNAVAILABLE:
+        return "unavailable";
+    default:
+        return "none";
     }
 }
 
@@ -57,11 +66,16 @@ static const char *evidence_name(enum dppd_recovery_evidence evidence)
 static const char *verification_name(int error)
 {
     switch (error) {
-    case 0: return "match";
-    case -ENODATA: return "unchecked";
-    case -ESTALE: return "mismatch";
-    case -EMLINK: return "shared-action";
-    default: return "unsupported";
+    case 0:
+        return "match";
+    case -ENODATA:
+        return "unchecked";
+    case -ESTALE:
+        return "mismatch";
+    case -EMLINK:
+        return "shared-action";
+    default:
+        return "unsupported";
     }
 }
 
@@ -80,31 +94,36 @@ static void correlate_attempts(const struct dppd_recovery_record *record, uint16
             status = "removed-record";
         else if (dppd_tap_cookie_present(attempt->owner_cookie)) {
             content = scope = attempt->expected.version != 0 ? "unavailable" : "unchecked";
-            int matches = inspect_error != 0 ? inspect_error :
-                dppd_recovery_cookie_matches(inspection, attempt->owner_cookie);
-            status = matches < 0 ? "inspection-unavailable" : matches == 1 ? "token-present" :
-                matches == 0 ? "token-absent" : "token-ambiguous";
+            int matches =
+                inspect_error != 0 ? inspect_error : dppd_recovery_cookie_matches(inspection, attempt->owner_cookie);
+            status = matches < 0 ? "inspection-unavailable"
+                : matches == 1   ? "token-present"
+                : matches == 0   ? "token-absent"
+                                 : "token-ambiguous";
             if (matches == 1) {
                 owner = "token-match";
                 for (uint32_t row = 0; row < inspection->count; ++row) {
                     const struct dppd_recovery_filter *filter = &inspection->filters[row];
-                    if (!filter->cookie_valid || memcmp(filter->cookie, attempt->owner_cookie, DPPD_TAP_COOKIE_SIZE) != 0)
+                    if (!filter->cookie_valid ||
+                        memcmp(filter->cookie, attempt->owner_cookie, DPPD_TAP_COOKIE_SIZE) != 0)
                         continue;
                     content = verification_name(dppd_recovery_verify(&attempt->expected, filter, false));
                     scope = verification_name(dppd_recovery_verify(&attempt->expected, filter, true));
                 }
             }
-        }
-        else if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION) {
+        } else if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION) {
             uint32_t matches = 0;
             for (uint32_t row = 0; row < inspection->count; ++row)
                 matches += dppd_recovery_filter_equal(&attempt->candidate, &inspection->filters[row]);
-            status = inspect_error != 0 ? "inspection-unavailable" : matches == 1 ? "coordinate-present" :
-                matches == 0 ? "coordinate-absent" : "coordinate-ambiguous";
+            status = inspect_error != 0 ? "inspection-unavailable"
+                : matches == 1          ? "coordinate-present"
+                : matches == 0          ? "coordinate-absent"
+                                        : "coordinate-ambiguous";
         }
         printf("correlation attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
-            " port=%u phase=%s evidence=%s status=%s owner=%s content=%s scope=%s\n", attempt->id, attempt->rule_id,
-            attempt->generation, port_id, phase_name(attempt->phase), evidence_name(attempt->evidence), status, owner, content, scope);
+               " port=%u phase=%s evidence=%s status=%s owner=%s content=%s scope=%s\n",
+            attempt->id, attempt->rule_id, attempt->generation, port_id, phase_name(attempt->phase),
+            evidence_name(attempt->evidence), status, owner, content, scope);
     }
 }
 
@@ -114,17 +133,17 @@ static int inspect_record(const struct dppd_recovery_record *record, uint64_t re
     int result = 0;
     if (record->revision != revision)
         return -ESTALE;
-    printf("inspection revision=%" PRIu64 " ports=%u mode=read-only scope=tap-local-multiq-and-ingress\n",
-        revision, record->count);
+    printf("inspection revision=%" PRIu64 " ports=%u mode=read-only scope=tap-local-multiq-and-ingress\n", revision,
+        record->count);
     printf("ownership=unproven remote-scope=excluded atomic-snapshot=no cleanup-confirmed=no\n");
     for (uint32_t index = 0; index < record->count; ++index) {
         const struct dppd_recovery_port *port = &record->ports[index];
         struct dppd_recovery_inspection inspection;
         int rc = dppd_recovery_inspect(port, &inspection);
-        printf("port=%u device=%s driver=%s ifindex=%u ifname=%s status=%s complete=%s error=%d",
-            port->port_id, port->device, port->driver, port->identity.ifindex,
-            port->identity.ifindex ? port->identity.ifname : "unknown",
-            dppd_recovery_inspection_name(inspection.state), rc == 0 ? "yes" : "no", rc);
+        printf("port=%u device=%s driver=%s ifindex=%u ifname=%s status=%s complete=%s error=%d", port->port_id,
+            port->device, port->driver, port->identity.ifindex,
+            port->identity.ifindex ? port->identity.ifname : "unknown", dppd_recovery_inspection_name(inspection.state),
+            rc == 0 ? "yes" : "no", rc);
         if (rc == 0)
             printf(" filters=%u", inspection.count);
         putchar('\n');
@@ -137,8 +156,8 @@ static int inspect_record(const struct dppd_recovery_record *record, uint64_t re
         for (uint32_t row = 0; row < inspection.count; ++row) {
             const struct dppd_recovery_filter *filter = &inspection.filters[row];
             printf("filter port=%u parent=%08x handle=%08x chain=%u priority=%u protocol=%04x kind=%s owner=unknown\n",
-                port->port_id, filter->parent, filter->handle, filter->chain,
-                filter->priority, filter->protocol, filter->kind);
+                port->port_id, filter->parent, filter->handle, filter->chain, filter->priority, filter->protocol,
+                filter->kind);
         }
     }
     return result;
@@ -157,8 +176,8 @@ int main(int argc, char **argv)
         return usage(argv[0]);
     if (inspect && revision_number(argv[3], &revision) != 0)
         return usage(argv[0]);
-    if (acknowledge && (strcmp(argv[4], "--external-cleanup-complete") != 0 ||
-        revision_number(argv[3], &revision) != 0))
+    if (acknowledge &&
+        (strcmp(argv[4], "--external-cleanup-complete") != 0 || revision_number(argv[3], &revision) != 0))
         return usage(argv[0]);
     rc = dppd_recovery_guard_open(&guard, argv[2], NULL);
     if (rc != 0) {
@@ -177,8 +196,8 @@ int main(int argc, char **argv)
             printf("external cleanup acknowledged revision=%" PRIu64 "\n", guard.record.revision);
     } else {
         printf("recovery state=%s revision=%" PRIu64 " ports=%u\n",
-            guard.record.count ? "external-reconciliation-required" : "clean",
-            guard.record.revision, guard.record.count);
+            guard.record.count ? "external-reconciliation-required" : "clean", guard.record.revision,
+            guard.record.count);
         printf("snapshot=%s\n", guard.record.state_path);
         printf("format=%u\n", guard.record.format);
         if (guard.record.format >= 3)
@@ -186,19 +205,22 @@ int main(int argc, char **argv)
                 guard.record.last_attempt, DPPD_RECOVERY_ATTEMPT_LIMIT);
         for (uint32_t index = 0; index < guard.record.count; ++index) {
             const struct dppd_recovery_port *port = &guard.record.ports[index];
-            printf("port=%u device=%s driver=%s first-rule=%" PRIu64 " first-generation=%" PRIu64 "\n",
-                port->port_id, port->device, port->driver, port->first_rule, port->first_generation);
+            printf("port=%u device=%s driver=%s first-rule=%" PRIu64 " first-generation=%" PRIu64 "\n", port->port_id,
+                port->device, port->driver, port->first_rule, port->first_generation);
             if (port->identity.ifindex != 0)
-                printf("identity port=%u ifindex=%u ifname=%s boot=%s netns-device=%" PRIu64 " netns-inode=%" PRIu64 "\n",
+                printf("identity port=%u ifindex=%u ifname=%s boot=%s netns-device=%" PRIu64 " netns-inode=%" PRIu64
+                       "\n",
                     port->port_id, port->identity.ifindex, port->identity.ifname, port->identity.boot_id,
                     port->identity.netns_device, port->identity.netns_inode);
         }
         for (uint32_t index = 0; index < guard.record.attempt_count; ++index) {
             const struct dppd_recovery_attempt *attempt = &guard.record.attempts[index];
-            printf("attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
+            printf(
+                "attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
                 " port=%u phase=%s create-error=%d remove-error=%d evidence=%s observation-error=%d ownership=unproven\n",
                 attempt->id, attempt->rule_id, attempt->generation, attempt->port_id, phase_name(attempt->phase),
-                attempt->create_error, attempt->remove_error, evidence_name(attempt->evidence), attempt->observation_error);
+                attempt->create_error, attempt->remove_error, evidence_name(attempt->evidence),
+                attempt->observation_error);
             if (dppd_tap_cookie_present(attempt->owner_cookie)) {
                 printf("owner-token attempt=%" PRIu64 " cookie=", attempt->id);
                 for (unsigned int byte = 0; byte < DPPD_TAP_COOKIE_SIZE; ++byte)
@@ -206,7 +228,8 @@ int main(int argc, char **argv)
                 putchar('\n');
             }
             if (attempt->evidence == DPPD_EVIDENCE_SINGLE_ADDITION)
-                printf("candidate attempt=%" PRIu64 " parent=%08x handle=%08x chain=%u priority=%u protocol=%04x kind=%s\n",
+                printf("candidate attempt=%" PRIu64
+                       " parent=%08x handle=%08x chain=%u priority=%u protocol=%04x kind=%s\n",
                     attempt->id, attempt->candidate.parent, attempt->candidate.handle, attempt->candidate.chain,
                     attempt->candidate.priority, attempt->candidate.protocol, attempt->candidate.kind);
         }

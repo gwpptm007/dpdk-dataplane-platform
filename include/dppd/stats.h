@@ -15,7 +15,6 @@ struct dppd_worker_stats {
 void dppd_stats_init(struct dppd_worker_stats *stats);
 void dppd_stats_add(struct dppd_worker_stats *stats, const struct dppd_stats_values *delta);
 void dppd_stats_read(const struct dppd_worker_stats *stats, struct dppd_stats_values *values);
-void dppd_stats_accumulate(struct dppd_stats_values *total,
-                           const struct dppd_stats_values *values);
+void dppd_stats_accumulate(struct dppd_stats_values *total, const struct dppd_stats_values *values);
 
 #endif

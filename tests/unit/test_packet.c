@@ -86,8 +86,7 @@ int main(void)
     length = make_udp_packet(data, 0);
     /** 把 IPv4 总长度改为超出实际报文的 200 字节，应识别为畸形报文 */
     put_be16(&data[16], 200);
-    assert(dppd_packet_parse_buffer(data, length, length, &packet) ==
-           DPPD_PARSE_MALFORMED);
+    assert(dppd_packet_parse_buffer(data, length, length, &packet) == DPPD_PARSE_MALFORMED);
 
     length = make_udp_packet(data, 0);
     /** 设置 MF 位模拟首片，解析成功但只标记为分片，不继续按完整 UDP 包解释 */
@@ -100,7 +99,6 @@ int main(void)
     /** 未支持的以太网协议应返回 UNSUPPORTED，与头部截断的 MALFORMED 区分 */
     memset(data, 0, sizeof(data));
     put_be16(&data[12], 0x88b5);
-    assert(dppd_packet_parse_buffer(data, 14, 14, &packet) ==
-           DPPD_PARSE_UNSUPPORTED);
+    assert(dppd_packet_parse_buffer(data, 14, 14, &packet) == DPPD_PARSE_UNSUPPORTED);
     return 0;
 }

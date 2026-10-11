@@ -34,10 +34,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
     /** 在进入驱动收包接口之前再次检查移除请求，减少通知后的设备访问 */
     if (dppd_devices_removal_requested(&runtime->devices))
         return;
-    nb_rx = rte_eth_rx_burst(ingress->port_id,
-                             worker->queue_id,
-                             rx,
-                             runtime->config.burst_size);
+    nb_rx = rte_eth_rx_burst(ingress->port_id, worker->queue_id, rx, runtime->config.burst_size);
     if (nb_rx == 0)
         return;
 
@@ -58,11 +55,8 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         else if (parse_status == DPPD_PARSE_UNSUPPORTED)
             delta.rx_unsupported++;
 
-        dppd_pipeline_decide(&runtime->snapshot, runtime->software_backend,
-                             ingress->port_id,
-                             parse_status,
-                             &packet,
-                             &decision);
+        dppd_pipeline_decide(&runtime->snapshot, runtime->software_backend, ingress->port_id, parse_status, &packet,
+            &decision);
         /** 畸形报文已有专门统计，其余拒绝转发的结果计入策略丢弃，随后释放报文 */
         if (decision.action != DPPD_PACKET_FORWARD) {
             if (decision.drop_reason != DPPD_DROP_MALFORMED)
@@ -76,8 +70,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         }
 
         /** 配对出口必须存在、与决策一致且未断开或移除，无法发送的报文由本线程释放 */
-        if (egress == NULL || decision.egress_port != egress->port_id ||
-            !dppd_port_tx_available(egress)) {
+        if (egress == NULL || decision.egress_port != egress->port_id || !dppd_port_tx_available(egress)) {
             delta.policy_drops++;
             delta.egress_drops++;
             rte_pktmbuf_free(rx[i]);
@@ -86,7 +79,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
 
         /**
          * 复用 DPDK 的 flow mark 元数据约定，令下游观察者无需区分该标记来自
-         * rte_flow 还是软件 classifier。这里不设置 TX offload，只声明 RX 侧标记。
+         * rte_flow 还是软件 classifier。这里不设置 TX offload，只声明 RX 侧标记
          */
         if (decision.has_mark) {
             rx[i]->hash.fdir.hi = decision.mark_id;
@@ -94,8 +87,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         }
 
         /** 出口不支持多段发送时先合并报文；合并失败就释放并计入发送丢弃 */
-        if (rx[i]->nb_segs > 1U &&
-            (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0) {
+        if (rx[i]->nb_segs > 1U && (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0) {
             if (rte_pktmbuf_linearize(rx[i]) != 0) {
                 delta.tx_drops++;
                 delta.tx_linearize_drops++;
@@ -114,18 +106,14 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
      * 这些报文尚未交给驱动，仍由当前线程持有，所以可以在此统计并释放
      * 原子检查只能减少通知后的访问，不能替代物理热拔插所需的总线访问保护
      */
-    if (nb_tx != 0 && (dppd_devices_removal_requested(&runtime->devices) ||
-                       !dppd_port_tx_available(egress))) {
+    if (nb_tx != 0 && (dppd_devices_removal_requested(&runtime->devices) || !dppd_port_tx_available(egress))) {
         delta.policy_drops += nb_tx;
         delta.egress_drops += nb_tx;
         free_packets(tx, nb_tx);
         nb_tx = 0;
     }
     if (nb_tx != 0) {
-        const uint16_t sent = rte_eth_tx_burst(egress->port_id,
-                                               worker->queue_id,
-                                               tx,
-                                               nb_tx);
+        const uint16_t sent = rte_eth_tx_burst(egress->port_id, worker->queue_id, tx, nb_tx);
 
         delta.tx_packets += sent;
         for (i = 0; i < sent; ++i)
@@ -174,8 +162,7 @@ int dppd_worker_main(void *arg)
      * 本实现统一在一轮端口扫描结束后报告安全点，此时各次规则匹配均已返回
      */
     if (runtime->software_backend != NULL &&
-        dppd_software_backend_worker_register(runtime->software_backend,
-                                              worker->queue_id) != 0) {
+        dppd_software_backend_worker_register(runtime->software_backend, worker->queue_id) != 0) {
         /** 尚未开始收发就注册失败，也要通知主线程，不能留下貌似已启动的空线程 */
         atomic_store_explicit(&worker->state, DPPD_WORKER_FAILED, memory_order_release);
         return -1;
@@ -186,18 +173,16 @@ int dppd_worker_main(void *arg)
 
     /** 移除回调直接通知所有工作线程退出，不依赖主线程先设置普通停止标记 */
     while (!atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) &&
-           !dppd_devices_removal_requested(&runtime->devices)) {
+        !dppd_devices_removal_requested(&runtime->devices)) {
         uint16_t i;
 
         for (i = 0; i < runtime->devices.nb_ports; ++i)
             process_ingress(worker, &runtime->devices.ports[i]);
         /** 即使所有端口都没有报文，也要报告安全点，避免空闲线程一直阻止旧表回收 */
-        dppd_software_backend_worker_quiescent(runtime->software_backend,
-                                                worker->queue_id);
+        dppd_software_backend_worker_quiescent(runtime->software_backend, worker->queue_id);
     }
     /** 停止读取规则后注销；主线程还需等待本线程返回，之后才能销毁共享后端 */
-    dppd_software_backend_worker_unregister(runtime->software_backend,
-                                            worker->queue_id);
+    dppd_software_backend_worker_unregister(runtime->software_backend, worker->queue_id);
     /** 先注销借用的规则读者，再发布已结束状态，资源释放仍须由主线程等待返回 */
     atomic_store_explicit(&worker->state, DPPD_WORKER_STOPPED, memory_order_release);
     return 0;

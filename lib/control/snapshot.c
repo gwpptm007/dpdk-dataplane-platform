@@ -3,13 +3,11 @@
 #include <stddef.h>
 #include <string.h>
 
-int dppd_snapshot_build_port_pairs(const struct dppd_config *cfg,
-                                   struct dppd_forwarding_snapshot *snapshot)
+int dppd_snapshot_build_port_pairs(const struct dppd_config *cfg, struct dppd_forwarding_snapshot *snapshot)
 {
     uint16_t i;
 
-    if (cfg == NULL || snapshot == NULL || cfg->nb_ports > DPPD_MAX_PORTS ||
-        (cfg->nb_ports & 1U) != 0)
+    if (cfg == NULL || snapshot == NULL || cfg->nb_ports > DPPD_MAX_PORTS || (cfg->nb_ports & 1U) != 0)
         return -1;
 
     memset(snapshot, 0, sizeof(*snapshot));
@@ -24,9 +22,8 @@ int dppd_snapshot_build_port_pairs(const struct dppd_config *cfg,
     return 0;
 }
 
-int dppd_snapshot_lookup_peer(const struct dppd_forwarding_snapshot *snapshot,
-                              uint16_t ingress_port,
-                              uint16_t *egress_port)
+int dppd_snapshot_lookup_peer(const struct dppd_forwarding_snapshot *snapshot, uint16_t ingress_port,
+    uint16_t *egress_port)
 {
     uint16_t i;
 
@@ -40,4 +37,3 @@ int dppd_snapshot_lookup_peer(const struct dppd_forwarding_snapshot *snapshot,
     }
     return -1;
 }
-

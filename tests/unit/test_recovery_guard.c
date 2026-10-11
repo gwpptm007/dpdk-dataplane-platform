@@ -35,20 +35,21 @@ static int prepare(void *context, uint16_t port, const struct dppd_rule *rule, u
 {
     memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
     *attempt = 0;
-    return dppd_recovery_guard_prepare(context, port, "0000:01:00.0", "test-driver",
-        rule->id, rule->generation);
+    return dppd_recovery_guard_prepare(context, port, "0000:01:00.0", "test-driver", rule->id, rule->generation);
 }
 
 /** 允许事务进入安装阶段，不代表任何真实 PMD 能力 */
 static int validate(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
-    (void)port; (void)rule; (void)error;
+    (void)port;
+    (void)rule;
+    (void)error;
     return 0;
 }
 
 /** 驱动边界必须看见已同步的待核对标记，部分失败可留下 handle 供退出清理测试 */
-static int create(uint16_t port, const struct dppd_rule *rule,
-    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+static int create(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     (void)error;
     assert(active_guard->record.count == 1 && !active_guard->faulted);
@@ -262,8 +263,11 @@ static void legacy_file(const char *path, unsigned int format)
 static void identity_and_compatibility(const char *path, const char *state)
 {
     struct dppd_recovery_guard guard;
-    struct dppd_recovery_identity identity = {.ifindex = 123, .ifname = "test-tap",
-        .boot_id = "01234567-89ab-cdef-0123-456789abcdef", .netns_device = 4, .netns_inode = 567};
+    struct dppd_recovery_identity identity = {.ifindex = 123,
+        .ifname = "test-tap",
+        .boot_id = "01234567-89ab-cdef-0123-456789abcdef",
+        .netns_device = 4,
+        .netns_inode = 567};
     struct stat info;
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.record.format == 5);
     identity.boot_id[0] = 'z';
@@ -317,8 +321,11 @@ static void identity_and_compatibility(const char *path, const char *state)
     assert(dppd_recovery_guard_open(&guard, path, state) == 0 && guard.writable);
     assert(guard.record.format == 5 && guard.record.last_attempt == attempt && guard.record.attempt_count == 0);
     /** v4 原生标识仍可读取，但没有预期内容时不能自动补成 v5 的核验依据 */
-    const struct dppd_tap_content expected = {.version = 1, .action = 1,
-        .parent = 0x10000, .priority = 17, .protocol = 3};
+    const struct dppd_tap_content expected = {.version = 1,
+        .action = 1,
+        .parent = 0x10000,
+        .priority = 17,
+        .protocol = 3};
     uint8_t cookie[DPPD_TAP_COOKIE_SIZE];
     assert(dppd_recovery_guard_prepare_identity(&guard, 0, "net_tap0", "net_tap", 4, 3, &identity) == 0);
     assert(dppd_recovery_guard_begin_owned(&guard, 0, 4, 3, &attempt, cookie, &expected) == 0);

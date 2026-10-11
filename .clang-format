@@ -1,0 +1,44 @@
+# 短表达式和参数优先放在一行，超过 120 列后再按语法结构换行
+BasedOnStyle: LLVM
+Language: Cpp
+ColumnLimit: 120
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+BreakBeforeBraces: Linux
+AlignAfterOpenBracket: DontAlign
+AlignOperands: DontAlign
+AlignEscapedNewlines: Left
+BinPackArguments: true
+BinPackParameters: true
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+PointerAlignment: Right
+IndentCaseLabels: false
+IndentPPDirectives: None
+# 保留包含顺序和中文注释的语义分行，避免格式整理改变宏展开环境
+SortIncludes: Never
+IncludeBlocks: Preserve
+ReflowComments: false
+BreakStringLiterals: false
+SpaceBeforeParens: ControlStatements
+MaxEmptyLinesToKeep: 1
+# 这些宏自身展开成完整语句，连续调用要各占一行，避免被误当作可拼接的表达式
+StatementMacros:
+  - DPPD_STATS_FIELDS
+  - DPPD_RULE_METRIC_FIELDS
+  - F
+  - X
+  - CAPTURE
+# DPDK 的遍历宏按 for 循环排版，循环体大括号直接跟在宏调用之后
+ForEachMacros:
+  - RTE_LCORE_FOREACH_WORKER
+  - RTE_ETH_FOREACH_DEV

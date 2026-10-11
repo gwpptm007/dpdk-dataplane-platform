@@ -92,7 +92,8 @@ static void retention(void)
 
             assert(entry->event_id == 67 + seen++ && entry->failure.sequence == entry->event_id * 2 - 1);
             assert(entry->failure.cause_code == -EIO && entry->failure.compensation_code == -EFAULT);
-            assert(entry->failure.response_code == -EUCLEAN && entry->failure.compensation_rule_id == entry->event_id + 1);
+            assert(
+                entry->failure.response_code == -EUCLEAN && entry->failure.compensation_rule_id == entry->event_id + 1);
             assert(entry->failure.applied == (entry->event_id % 5 == 0));
         }
         assert(dppd_rule_history_read(&observation.history, cursor, 130, &copied) == 0);
@@ -102,7 +103,8 @@ static void retention(void)
     assert(seen == 64 && cursor == 130);
     assert(dppd_rule_history_read(&observation.history, 65, 130, &page) == 0 && page.gap);
     assert(dppd_rule_history_read(&observation.history, 66, 130, &page) == 0 && !page.gap);
-    assert(dppd_rule_history_read(&observation.history, 130, 130, &page) == 0 && page.returned == 0 && page.next_after == 130);
+    assert(dppd_rule_history_read(&observation.history, 130, 130, &page) == 0 && page.returned == 0 &&
+        page.next_after == 130);
     assert(dppd_rule_history_read(&observation.history, UINT64_MAX, 130, &page) == 0 && page.next_after == UINT64_MAX);
     assert(dppd_rule_history_read(&observation.history, 0, 129, &page) == -ESTALE && page.returned == 0);
     assert(dppd_rule_history_read(&observation.history, 0, DPPD_RULE_HISTORY_REVISION_ANY, &page) == 0);
@@ -148,8 +150,10 @@ static void control_and_socket(void)
     struct dppd_management_server server;
     struct dppd_device_set devices = {0};
     struct dppd_control_apply_result applied;
-    struct dppd_rule value = {.id = UINT64_MAX, .fallback = DPPD_FALLBACK_SOFTWARE_ONLY,
-        .nb_matches = 1, .nb_actions = 1};
+    struct dppd_rule value = {.id = UINT64_MAX,
+        .fallback = DPPD_FALLBACK_SOFTWARE_ONLY,
+        .nb_matches = 1,
+        .nb_actions = 1};
     struct dppd_rule_history_page expected, copied;
     struct dppd_management_response response;
     struct sockaddr_un address = {.sun_family = AF_UNIX};
@@ -175,7 +179,9 @@ static void control_and_socket(void)
     assert(memcmp(&copied, &expected, sizeof(copied)) == 0);
     for (unsigned int attempt = 0; attempt < 4; ++attempt) {
         struct dppd_management_request request = {.version = DPPD_MANAGEMENT_VERSION,
-            .size = sizeof(request), .operation = DPPD_MANAGEMENT_RULE_HISTORY, .request_id = 23};
+            .size = sizeof(request),
+            .operation = DPPD_MANAGEMENT_RULE_HISTORY,
+            .request_id = 23};
         int client = socket(AF_UNIX, SOCK_SEQPACKET, 0);
 
         request.payload.rule_history.expected_revision = attempt == 3 ? 0 : 1;

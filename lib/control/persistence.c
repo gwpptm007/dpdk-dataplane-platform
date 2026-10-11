@@ -21,20 +21,25 @@
 #define DPPD_SNAPSHOT_RULE_HEADER_SIZE DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE
 #define DPPD_SNAPSHOT_MATCH_SIZE 20U
 #define DPPD_SNAPSHOT_ACTION_SIZE 8U
-#define DPPD_SNAPSHOT_V1_RECORD_SIZE \
-    (DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE + \
-     DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE + \
-     DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE)
-#define DPPD_SNAPSHOT_V2_RECORD_SIZE \
-    (DPPD_SNAPSHOT_RULE_HEADER_SIZE + \
-     DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE + \
-     DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE)
+#define DPPD_SNAPSHOT_V1_RECORD_SIZE                                                      \
+    (DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE + \
+        DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE)
+#define DPPD_SNAPSHOT_V2_RECORD_SIZE                                                   \
+    (DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE + \
+        DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE)
 #define DPPD_SNAPSHOT_RECORD_SIZE DPPD_SNAPSHOT_V2_RECORD_SIZE
 #define DPPD_SNAPSHOT_MAX_RULES 1000000U
 #define DPPD_SNAPSHOT_CHECKSUM_OFFSET 40U
 
 static const uint8_t snapshot_magic[8] = {
-    'D', 'P', 'P', 'R', 'U', 'L', 'E', '\0',
+    'D',
+    'P',
+    'P',
+    'R',
+    'U',
+    'L',
+    'E',
+    '\0',
 };
 
 static void put_u16_le(uint8_t *output, uint16_t value)
@@ -66,10 +71,7 @@ static uint16_t get_u16_le(const uint8_t *input)
 
 static uint32_t get_u32_le(const uint8_t *input)
 {
-    return (uint32_t)input[0] |
-           ((uint32_t)input[1] << 8) |
-           ((uint32_t)input[2] << 16) |
-           ((uint32_t)input[3] << 24);
+    return (uint32_t)input[0] | ((uint32_t)input[1] << 8) | ((uint32_t)input[2] << 16) | ((uint32_t)input[3] << 24);
 }
 
 static uint64_t get_u64_le(const uint8_t *input)
@@ -84,7 +86,7 @@ static uint64_t get_u64_le(const uint8_t *input)
 
 /*
  * 使用 CRC32/IEEE 检测截断、部分写入和静默损坏。CRC 不是认证机制；
- * snapshot 文件仍依赖目录权限，不能把它当作不可信输入的安全签名。
+ * snapshot 文件仍依赖目录权限，不能把它当作不可信输入的安全签名
  */
 static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t length)
 {
@@ -105,9 +107,8 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
     char validation_error[128];
     uint16_t i;
 
-    if (dppd_rule_validate(rule, validation_error,
-                           sizeof(validation_error)) != 0 ||
-        rule->id == 0 || rule->generation == 0)
+    if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0 || rule->id == 0 ||
+        rule->generation == 0)
         return -EINVAL;
     memset(output, 0, DPPD_SNAPSHOT_RECORD_SIZE);
     put_u64_le(output, rule->id);
@@ -119,17 +120,16 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
     put_u16_le(output + 32, rule->nb_matches);
     put_u16_le(output + 34, rule->nb_actions);
     put_u16_le(output + 36, rule->install_port_id);
-    /* 38..39 为 v2 record 保留字段，memset 已保证写出为 0。 */
+    /* 38..39 为 v2 record 保留字段，memset 已保证写出为 0 */
 
     for (i = 0; i < rule->nb_matches; ++i) {
         const struct dppd_match *match = &rule->matches[i];
-        uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE +
-            i * DPPD_SNAPSHOT_MATCH_SIZE;
+        uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + i * DPPD_SNAPSHOT_MATCH_SIZE;
 
         put_u32_le(encoded, (uint32_t)match->type);
         /*
          * IP/L4 字段在 IR 中已是网络字节序。这里复制协议字节而不是把它们当作
-         * host integer 编码，保证大小端主机读取后仍得到同一网络地址和端口。
+         * host integer 编码，保证大小端主机读取后仍得到同一网络地址和端口
          */
         switch (match->type) {
         case DPPD_MATCH_ETH:
@@ -157,8 +157,7 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
 
     for (i = 0; i < rule->nb_actions; ++i) {
         const struct dppd_action *action = &rule->actions[i];
-        uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE +
-            DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE +
+        uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE +
             i * DPPD_SNAPSHOT_ACTION_SIZE;
 
         put_u32_le(encoded, (uint32_t)action->type);
@@ -184,11 +183,10 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
 
 /*
  * v1 与 v2 的 match/action 编码完全相同，只是 v1 缺少 install_port_id 和
- * 两字节保留位。将布局参数化可保证迁移读取与正常读取共享同一套 IR 校验。
+ * 两字节保留位。将布局参数化可保证迁移读取与正常读取共享同一套 IR 校验
  */
-static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule,
-                              uint32_t rule_header_size,
-                              bool contains_install_port)
+static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint32_t rule_header_size,
+    bool contains_install_port)
 {
     char validation_error[128];
     uint16_t i;
@@ -204,17 +202,13 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule,
     rule->nb_actions = get_u16_le(input + 34);
     if (contains_install_port)
         rule->install_port_id = get_u16_le(input + 36);
-    if (rule->id == 0 || rule->generation == 0 ||
-        (contains_install_port && get_u16_le(input + 38) != 0) ||
-        rule->nb_matches > DPPD_RULE_MAX_ITEMS ||
-        rule->nb_actions > DPPD_RULE_MAX_ACTIONS)
+    if (rule->id == 0 || rule->generation == 0 || (contains_install_port && get_u16_le(input + 38) != 0) ||
+        rule->nb_matches > DPPD_RULE_MAX_ITEMS || rule->nb_actions > DPPD_RULE_MAX_ACTIONS)
         return -EBADMSG;
 
     for (i = 0; i < rule->nb_matches; ++i) {
         struct dppd_match *match = &rule->matches[i];
-        const uint8_t *encoded =
-            input + rule_header_size +
-            i * DPPD_SNAPSHOT_MATCH_SIZE;
+        const uint8_t *encoded = input + rule_header_size + i * DPPD_SNAPSHOT_MATCH_SIZE;
 
         match->type = (enum dppd_match_type)get_u32_le(encoded);
         switch (match->type) {
@@ -243,9 +237,8 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule,
 
     for (i = 0; i < rule->nb_actions; ++i) {
         struct dppd_action *action = &rule->actions[i];
-        const uint8_t *encoded = input + rule_header_size +
-            DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE +
-            i * DPPD_SNAPSHOT_ACTION_SIZE;
+        const uint8_t *encoded =
+            input + rule_header_size + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE + i * DPPD_SNAPSHOT_ACTION_SIZE;
 
         action->type = (enum dppd_action_type)get_u32_le(encoded);
         switch (action->type) {
@@ -265,12 +258,12 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule,
             return -EBADMSG;
         }
     }
-    if (dppd_rule_validate(rule, validation_error,
-                           sizeof(validation_error)) != 0)
+    if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0)
         return -EBADMSG;
     return 0;
 }
 
+/** 一次 write 可能只写出部分数据，持续推进指针直到写完，信号中断则重试 */
 static int write_all(int fd, const uint8_t *data, size_t length)
 {
     while (length != 0) {
@@ -289,6 +282,7 @@ static int write_all(int fd, const uint8_t *data, size_t length)
     return 0;
 }
 
+/** 必须读满指定长度才接受记录，提前遇到文件末尾说明快照被截断 */
 static int read_all(int fd, uint8_t *data, size_t length)
 {
     while (length != 0) {
@@ -307,6 +301,7 @@ static int read_all(int fd, uint8_t *data, size_t length)
     return 0;
 }
 
+/** 文件内容落盘之后还要同步父目录，确保重命名产生的新文件名也能在重启后保留 */
 static int fsync_parent_directory(const char *path)
 {
     char directory[PATH_MAX];
@@ -333,8 +328,11 @@ static int fsync_parent_directory(const char *path)
     return rc;
 }
 
-int dppd_persistence_save(const char *path,
-                          const struct dppd_rule_repository *repository)
+/**
+ * 先把完整快照写入同目录临时文件，再用重命名替换旧快照
+ * 替换之前失败可以保留旧文件，替换之后同步失败仍要报告错误，不能宣称已经可靠保存
+ */
+int dppd_persistence_save(const char *path, const struct dppd_rule_repository *repository)
 {
     struct dppd_rule *rules = NULL;
     uint8_t header[DPPD_SNAPSHOT_HEADER_SIZE];
@@ -350,8 +348,7 @@ int dppd_persistence_save(const char *path,
     int fd = -1;
     int rc;
 
-    if (path == NULL || path[0] == '\0' || repository == NULL ||
-        repository->records == NULL)
+    if (path == NULL || path[0] == '\0' || repository == NULL || repository->records == NULL)
         return -EINVAL;
     count = dppd_rule_repository_count(repository);
     generation = dppd_rule_repository_generation(repository);
@@ -368,9 +365,7 @@ int dppd_persistence_save(const char *path,
             rc = -ENOMEM;
             goto cleanup;
         }
-        rc = dppd_rule_repository_list(
-            repository, 0, generation, rules, count, &listed, &has_more,
-            &generation);
+        rc = dppd_rule_repository_list(repository, 0, generation, rules, count, &listed, &has_more, &generation);
         if (rc != 0)
             goto cleanup;
         if (listed != count || has_more) {
@@ -378,8 +373,7 @@ int dppd_persistence_save(const char *path,
             goto cleanup;
         }
         for (i = 0; i < count; ++i) {
-            rc = encode_rule(&rules[i],
-                             payload + i * DPPD_SNAPSHOT_RECORD_SIZE);
+            rc = encode_rule(&rules[i], payload + i * DPPD_SNAPSHOT_RECORD_SIZE);
             if (rc != 0)
                 goto cleanup;
         }
@@ -397,14 +391,13 @@ int dppd_persistence_save(const char *path,
     checksum = crc32_update(checksum, payload, (size_t)payload_size) ^ UINT32_MAX;
     put_u32_le(header + DPPD_SNAPSHOT_CHECKSUM_OFFSET, checksum);
 
-    if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld",
-                 path, (long)getpid()) >= (int)sizeof(temporary)) {
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path, (long)getpid()) >= (int)sizeof(temporary)) {
         rc = -ENAMETOOLONG;
         goto cleanup;
     }
     /*
      * O_EXCL 防止覆盖其他进程的临时文件；0600 避免规则内容在 rename 前短暂
-     * 暴露。临时文件位于目标同目录，保证 rename 在同一文件系统内原子完成。
+     * 暴露。临时文件位于目标同目录，保证 rename 在同一文件系统内原子完成
      */
     fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0) {
@@ -438,30 +431,24 @@ cleanup:
     return rc;
 }
 
-typedef int (*dppd_snapshot_rule_decoder)(const uint8_t *input,
-                                          struct dppd_rule *rule);
+typedef int (*dppd_snapshot_rule_decoder)(const uint8_t *input, struct dppd_rule *rule);
 
 static int decode_rule_v2(const uint8_t *input, struct dppd_rule *rule)
 {
-    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE,
-                              true);
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true);
 }
 
 static int decode_rule_v1(const uint8_t *input, struct dppd_rule *rule)
 {
-    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE,
-                              false);
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE, false);
 }
 
 /*
  * 版本选择在这里集中完成：正常启动只传入 v2，迁移工具才传入 v1。这样不会
- * 因为新增迁移能力而让守护进程误把缺少安装端口的旧快照当成可恢复状态。
+ * 因为新增迁移能力而让守护进程误把缺少安装端口的旧快照当成可恢复状态
  */
-static int load_snapshot_version(const char *path,
-                                 struct dppd_persisted_snapshot *snapshot,
-                                 uint32_t expected_version,
-                                 uint32_t expected_record_size,
-                                 dppd_snapshot_rule_decoder decode_rule)
+static int load_snapshot_version(const char *path, struct dppd_persisted_snapshot *snapshot, uint32_t expected_version,
+    uint32_t expected_record_size, dppd_snapshot_rule_decoder decode_rule)
 {
     uint8_t header[DPPD_SNAPSHOT_HEADER_SIZE];
     uint8_t checksum_header[DPPD_SNAPSHOT_HEADER_SIZE];
@@ -487,8 +474,7 @@ static int load_snapshot_version(const char *path,
         rc = -errno;
         goto cleanup;
     }
-    if (!S_ISREG(metadata.st_mode) ||
-        metadata.st_size < (off_t)sizeof(header)) {
+    if (!S_ISREG(metadata.st_mode) || metadata.st_size < (off_t)sizeof(header)) {
         rc = -EBADMSG;
         goto cleanup;
     }
@@ -501,14 +487,13 @@ static int load_snapshot_version(const char *path,
     }
     /*
      * v1 没有 install_port_id，无法无歧义重放。对已识别但不兼容的版本返回
-     * EPROTONOSUPPORT，和随机损坏使用的 EBADMSG 明确区分，便于迁移工具诊断。
+     * EPROTONOSUPPORT，和随机损坏使用的 EBADMSG 明确区分，便于迁移工具诊断
      */
     if (get_u32_le(header + 8) != expected_version) {
         rc = -EPROTONOSUPPORT;
         goto cleanup;
     }
-    if (get_u32_le(header + 12) != DPPD_SNAPSHOT_HEADER_SIZE ||
-        get_u32_le(header + 16) != expected_record_size ||
+    if (get_u32_le(header + 12) != DPPD_SNAPSHOT_HEADER_SIZE || get_u32_le(header + 16) != expected_record_size ||
         get_u32_le(header + 44) != 0) {
         rc = -EBADMSG;
         goto cleanup;
@@ -516,14 +501,12 @@ static int load_snapshot_version(const char *path,
     count = get_u32_le(header + 20);
     generation = get_u64_le(header + 24);
     payload_size = get_u64_le(header + 32);
-    if (count > DPPD_SNAPSHOT_MAX_RULES ||
-        payload_size != (uint64_t)count * expected_record_size) {
+    if (count > DPPD_SNAPSHOT_MAX_RULES || payload_size != (uint64_t)count * expected_record_size) {
         rc = -EBADMSG;
         goto cleanup;
     }
     expected_size = DPPD_SNAPSHOT_HEADER_SIZE + payload_size;
-    if (expected_size > INT64_MAX ||
-        metadata.st_size != (off_t)expected_size) {
+    if (expected_size > INT64_MAX || metadata.st_size != (off_t)expected_size) {
         rc = -EBADMSG;
         goto cleanup;
     }
@@ -540,21 +523,16 @@ static int load_snapshot_version(const char *path,
     }
 
     memcpy(checksum_header, header, sizeof(header));
-    stored_checksum = get_u32_le(
-        checksum_header + DPPD_SNAPSHOT_CHECKSUM_OFFSET);
+    stored_checksum = get_u32_le(checksum_header + DPPD_SNAPSHOT_CHECKSUM_OFFSET);
     put_u32_le(checksum_header + DPPD_SNAPSHOT_CHECKSUM_OFFSET, 0);
-    calculated_checksum =
-        crc32_update(UINT32_MAX, checksum_header, sizeof(checksum_header));
-    calculated_checksum =
-        crc32_update(calculated_checksum, payload, (size_t)payload_size) ^
-        UINT32_MAX;
+    calculated_checksum = crc32_update(UINT32_MAX, checksum_header, sizeof(checksum_header));
+    calculated_checksum = crc32_update(calculated_checksum, payload, (size_t)payload_size) ^ UINT32_MAX;
     if (stored_checksum != calculated_checksum) {
         rc = -EBADMSG;
         goto cleanup;
     }
     for (i = 0; i < count; ++i) {
-        rc = decode_rule(payload + i * expected_record_size,
-                         &snapshot->rules[i]);
+        rc = decode_rule(payload + i * expected_record_size, &snapshot->rules[i]);
         if (rc != 0)
             goto cleanup;
         if (snapshot->rules[i].generation > generation ||
@@ -576,20 +554,16 @@ cleanup:
     return rc;
 }
 
-int dppd_persistence_load(const char *path,
-                          struct dppd_persisted_snapshot *snapshot)
+int dppd_persistence_load(const char *path, struct dppd_persisted_snapshot *snapshot)
 {
-    return load_snapshot_version(path, snapshot, DPPD_SNAPSHOT_V2_VERSION,
-                                 DPPD_SNAPSHOT_V2_RECORD_SIZE,
-                                 decode_rule_v2);
+    return load_snapshot_version(path, snapshot, DPPD_SNAPSHOT_V2_VERSION, DPPD_SNAPSHOT_V2_RECORD_SIZE,
+        decode_rule_v2);
 }
 
-int dppd_persistence_load_v1_for_migration(
-    const char *path, struct dppd_persisted_snapshot *snapshot)
+int dppd_persistence_load_v1_for_migration(const char *path, struct dppd_persisted_snapshot *snapshot)
 {
-    return load_snapshot_version(path, snapshot, DPPD_SNAPSHOT_V1_VERSION,
-                                 DPPD_SNAPSHOT_V1_RECORD_SIZE,
-                                 decode_rule_v1);
+    return load_snapshot_version(path, snapshot, DPPD_SNAPSHOT_V1_VERSION, DPPD_SNAPSHOT_V1_RECORD_SIZE,
+        decode_rule_v1);
 }
 
 void dppd_persisted_snapshot_destroy(struct dppd_persisted_snapshot *snapshot)

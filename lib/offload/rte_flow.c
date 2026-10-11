@@ -8,6 +8,10 @@
 #include <rte_ethdev.h>
 #include <rte_flow.h>
 
+/**
+ * 匹配项和动作中的指针都指向此结构体里的配置，避免引用编译函数已经失效的局部变量
+ * 整个结构体必须保留到驱动的 validate 或 create 调用返回
+ */
 struct compiled_flow {
     struct rte_flow_attr attr;
     struct rte_flow_item pattern[DPPD_RULE_MAX_ITEMS + 1U];
@@ -27,10 +31,9 @@ struct compiled_flow {
     struct rte_flow_action_ethdev ethdev_action[DPPD_RULE_MAX_ACTIONS];
 };
 
-static int report_error(struct dppd_flow_error *output,
-                        int code,
-                        const char *operation,
-                        const struct rte_flow_error *flow_error)
+/** 优先保留驱动提供的具体原因，驱动没有说明时再按错误码补充文字 */
+static int report_error(struct dppd_flow_error *output, int code, const char *operation,
+    const struct rte_flow_error *flow_error)
 {
     const char *detail = NULL;
 
@@ -53,9 +56,8 @@ static void clear_error(struct dppd_flow_error *error)
         memset(error, 0, sizeof(*error));
 }
 
-static int compile_match(const struct dppd_match *match,
-                         uint16_t index,
-                         struct compiled_flow *compiled)
+/** 地址和端口在规则中已经是网络字节序，编译时直接复制，掩码决定哪些位参与匹配 */
+static int compile_match(const struct dppd_match *match, uint16_t index, struct compiled_flow *compiled)
 {
     struct rte_flow_item *item = &compiled->pattern[index];
 
@@ -102,10 +104,8 @@ static int compile_match(const struct dppd_match *match,
     }
 }
 
-static int compile_action(const struct dppd_action *source,
-                          uint16_t index,
-                          uint64_t rule_id,
-                          struct compiled_flow *compiled)
+static int compile_action(const struct dppd_action *source, uint16_t index, uint64_t rule_id,
+    struct compiled_flow *compiled)
 {
     struct rte_flow_action *action = &compiled->actions[index];
 
@@ -169,22 +169,18 @@ static int compile_rule(const struct dppd_rule *rule, struct compiled_flow *comp
     return 0;
 }
 
-static int validate_rule(const struct dppd_rule *rule,
-                         struct dppd_flow_error *error,
-                         const char *operation)
+static int validate_rule(const struct dppd_rule *rule, struct dppd_flow_error *error, const char *operation)
 {
     char validation_error[256];
 
     if (rule == NULL)
         return report_error(error, -EINVAL, operation, NULL);
     if (rule->fallback == DPPD_FALLBACK_SOFTWARE_ONLY)
-        return report_error(error, -ENOTSUP,
-                            "use software-only rule in hardware", NULL);
+        return report_error(error, -ENOTSUP, "use software-only rule in hardware", NULL);
     if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0) {
         if (error != NULL) {
             error->code = -EINVAL;
-            snprintf(error->message, sizeof(error->message),
-                     "invalid rule: %.241s", validation_error);
+            snprintf(error->message, sizeof(error->message), "invalid rule: %.241s", validation_error);
         }
         return -EINVAL;
     }
@@ -195,8 +191,8 @@ static int validate_rule(const struct dppd_rule *rule,
  * 普通规则保持原有动作，启用标识时追加独立的私有动作和新的 END
  * 在进入驱动前限定支持范围，完整的远端配置检查仍由适配后的 TAP 驱动执行
  */
-static int compile_owner(uint16_t port_id, const struct dppd_rule *rule,
-    const uint8_t *cookie, struct compiled_flow *compiled)
+static int compile_owner(uint16_t port_id, const struct dppd_rule *rule, const uint8_t *cookie,
+    struct compiled_flow *compiled)
 {
     struct rte_eth_dev_info info;
     if (cookie == NULL)
@@ -214,15 +210,14 @@ static int compile_owner(uint16_t port_id, const struct dppd_rule *rule,
     compiled->owner.version = 1;
     compiled->owner.size = sizeof(compiled->owner);
     memcpy(compiled->owner.cookie, cookie, DPPD_TAP_COOKIE_SIZE);
-    compiled->actions[rule->nb_actions] = (struct rte_flow_action){
-        .type = (enum rte_flow_action_type)DPPD_TAP_ACTION_OWNER_V1, .conf = &compiled->owner};
+    compiled->actions[rule->nb_actions] =
+        (struct rte_flow_action){.type = (enum rte_flow_action_type)DPPD_TAP_ACTION_OWNER_V1, .conf = &compiled->owner};
     compiled->actions[rule->nb_actions + 1].type = RTE_FLOW_ACTION_TYPE_END;
     return 0;
 }
 
-static int flow_validate(uint16_t port_id,
-                       const struct dppd_rule *rule, const uint8_t *cookie,
-                       struct dppd_flow_error *error)
+static int flow_validate(uint16_t port_id, const struct dppd_rule *rule, const uint8_t *cookie,
+    struct dppd_flow_error *error)
 {
     struct compiled_flow compiled;
     struct rte_flow_error flow_error;
@@ -239,20 +234,14 @@ static int flow_validate(uint16_t port_id,
         return report_error(error, rc, "compile", NULL);
 
     memset(&flow_error, 0, sizeof(flow_error));
-    rc = rte_flow_validate(port_id,
-                           &compiled.attr,
-                           compiled.pattern,
-                           compiled.actions,
-                           &flow_error);
+    rc = rte_flow_validate(port_id, &compiled.attr, compiled.pattern, compiled.actions, &flow_error);
     if (rc != 0)
         return report_error(error, rc, "validate", &flow_error);
     return 0;
 }
 
-static int flow_create(uint16_t port_id,
-                     const struct dppd_rule *rule, const uint8_t *cookie,
-                     struct dppd_flow_handle *handle,
-                     struct dppd_flow_error *error)
+static int flow_create(uint16_t port_id, const struct dppd_rule *rule, const uint8_t *cookie,
+    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
 {
     struct compiled_flow compiled;
     struct rte_flow_error flow_error;
@@ -274,11 +263,7 @@ static int flow_create(uint16_t port_id,
         return report_error(error, rc, "compile", NULL);
 
     memset(&flow_error, 0, sizeof(flow_error));
-    flow = rte_flow_create(port_id,
-                           &compiled.attr,
-                           compiled.pattern,
-                           compiled.actions,
-                           &flow_error);
+    flow = rte_flow_create(port_id, &compiled.attr, compiled.pattern, compiled.actions, &flow_error);
     if (flow == NULL) {
         rc = rte_errno != 0 ? -rte_errno : -EIO;
         return report_error(error, rc, "create", &flow_error);
@@ -303,15 +288,15 @@ int dppd_flow_validate(uint16_t port_id, const struct dppd_rule *rule, struct dp
     return flow_validate(port_id, rule, NULL, error);
 }
 
-int dppd_flow_create(uint16_t port_id, const struct dppd_rule *rule,
-    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+int dppd_flow_create(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     return flow_create(port_id, rule, NULL, handle, error);
 }
 
 /** 校验不安装任何对象，可在写入尝试记录前确认驱动是否认识私有动作 */
-int dppd_flow_validate_owned(uint16_t port_id, const struct dppd_rule *rule,
-    const uint8_t cookie[DPPD_TAP_COOKIE_SIZE], struct dppd_flow_error *error)
+int dppd_flow_validate_owned(uint16_t port_id, const struct dppd_rule *rule, const uint8_t cookie[DPPD_TAP_COOKIE_SIZE],
+    struct dppd_flow_error *error)
 {
     if (cookie == NULL)
         return report_error(error, -EINVAL, "owner cookie", NULL);
@@ -319,9 +304,8 @@ int dppd_flow_validate_owned(uint16_t port_id, const struct dppd_rule *rule,
 }
 
 /** 输出 handle 不用作输入，创建失败也不会读取调用方尚未初始化的字段 */
-int dppd_flow_create_owned(uint16_t port_id, const struct dppd_rule *rule,
-    const uint8_t cookie[DPPD_TAP_COOKIE_SIZE], struct dppd_flow_handle *handle,
-    struct dppd_flow_error *error)
+int dppd_flow_create_owned(uint16_t port_id, const struct dppd_rule *rule, const uint8_t cookie[DPPD_TAP_COOKIE_SIZE],
+    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
 {
     if (cookie == NULL) {
         if (handle != NULL)
@@ -331,10 +315,8 @@ int dppd_flow_create_owned(uint16_t port_id, const struct dppd_rule *rule,
     return flow_create(port_id, rule, cookie, handle, error);
 }
 
-int dppd_flow_install(uint16_t port_id,
-                      const struct dppd_rule *rule,
-                      struct dppd_flow_handle *handle,
-                      struct dppd_flow_error *error)
+int dppd_flow_install(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     int rc;
 
@@ -360,10 +342,8 @@ int dppd_flow_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *er
     return 0;
 }
 
-int dppd_flow_query_count(const struct dppd_flow_handle *handle,
-                          uint64_t *hits,
-                          uint64_t *bytes,
-                          struct dppd_flow_error *error)
+int dppd_flow_query_count(const struct dppd_flow_handle *handle, uint64_t *hits, uint64_t *bytes,
+    struct dppd_flow_error *error)
 {
     const struct rte_flow_action action = {
         .type = RTE_FLOW_ACTION_TYPE_COUNT,

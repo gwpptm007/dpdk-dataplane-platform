@@ -29,8 +29,7 @@ struct dppd_flow_probe_cache {
 };
 
 /** 只读查找，不为一次统计查询创建端口或改变缓存 */
-static const struct probe_port *find_port(const struct dppd_flow_probe_cache *cache,
-                                          uint16_t port_id)
+static const struct probe_port *find_port(const struct dppd_flow_probe_cache *cache, uint16_t port_id)
 {
     for (uint32_t i = 0; i < DPPD_MAX_PORTS; ++i) {
         if (cache->ports[i].occupied && cache->ports[i].port_id == port_id)
@@ -44,10 +43,8 @@ static bool monotonic_now(uint64_t *now_ns)
 {
     struct timespec now;
 
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 ||
-        now.tv_nsec < 0 || now.tv_nsec >= 1000000000L ||
-        (uint64_t)now.tv_sec >
-        (UINT64_MAX - (uint64_t)now.tv_nsec) / UINT64_C(1000000000))
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 || now.tv_nsec < 0 || now.tv_nsec >= 1000000000L ||
+        (uint64_t)now.tv_sec > (UINT64_MAX - (uint64_t)now.tv_nsec) / UINT64_C(1000000000))
         return false;
     *now_ns = (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
     return true;
@@ -112,8 +109,7 @@ int dppd_flow_probe_cache_clear(struct dppd_flow_probe_cache *cache, uint16_t po
     if (port == NULL)
         return -ENOENT;
     for (uint32_t i = 0; i < DPPD_FLOW_PROBE_CACHE_CAPACITY; ++i) {
-        if (cache->entries[i].occupied &&
-            cache->entries[i].rule.install_port_id == port_id)
+        if (cache->entries[i].occupied && cache->entries[i].rule.install_port_id == port_id)
             cache->entries[i].occupied = false;
     }
     if (++port->statistics.epoch == 0)
@@ -134,14 +130,13 @@ void dppd_flow_probe_cache_invalidate_all(struct dppd_flow_probe_cache *cache)
 }
 
 /** 正式安装校验和显式探测都累计真实驱动答复，缓存命中不重复累计为驱动调用 */
-void dppd_flow_probe_cache_observe(struct dppd_flow_probe_cache *cache, uint16_t port_id,
-                                  const struct dppd_rule *rule, int validation_code)
+void dppd_flow_probe_cache_observe(struct dppd_flow_probe_cache *cache, uint16_t port_id, const struct dppd_rule *rule,
+    int validation_code)
 {
     struct dppd_flow_probe_statistics *statistics;
     struct probe_port *port;
 
-    if (cache == NULL || rule == NULL ||
-        dppd_flow_probe_cache_register(cache, port_id) != 0)
+    if (cache == NULL || rule == NULL || dppd_flow_probe_cache_register(cache, port_id) != 0)
         return;
     port = (struct probe_port *)find_port(cache, port_id);
     statistics = &port->statistics;
@@ -151,13 +146,11 @@ void dppd_flow_probe_cache_observe(struct dppd_flow_probe_cache *cache, uint16_t
         if (rule->domain >= DPPD_RULE_DOMAIN_INGRESS && rule->domain <= DPPD_RULE_DOMAIN_TRANSFER)
             statistics->observed_domains |= 1U << rule->domain;
         for (uint16_t i = 0; i < rule->nb_matches && i < DPPD_RULE_MAX_ITEMS; ++i) {
-            if (rule->matches[i].type >= DPPD_MATCH_ETH &&
-                rule->matches[i].type <= DPPD_MATCH_REPRESENTED_PORT)
+            if (rule->matches[i].type >= DPPD_MATCH_ETH && rule->matches[i].type <= DPPD_MATCH_REPRESENTED_PORT)
                 statistics->observed_items |= 1U << rule->matches[i].type;
         }
         for (uint16_t i = 0; i < rule->nb_actions && i < DPPD_RULE_MAX_ACTIONS; ++i) {
-            if (rule->actions[i].type >= DPPD_ACTION_DROP &&
-                rule->actions[i].type <= DPPD_ACTION_REPRESENTED_PORT)
+            if (rule->actions[i].type >= DPPD_ACTION_DROP && rule->actions[i].type <= DPPD_ACTION_REPRESENTED_PORT)
                 statistics->observed_actions |= 1U << rule->actions[i].type;
         }
     } else if (validation_code == -ENOTSUP || validation_code == -ENOSYS) {
@@ -168,9 +161,8 @@ void dppd_flow_probe_cache_observe(struct dppd_flow_probe_cache *cache, uint16_t
 }
 
 /** 仅复制累计记录并数一下占用槽位，过期清理留给明确发起的探测操作 */
-int dppd_flow_probe_cache_statistics(const struct dppd_flow_probe_cache *cache,
-                                     uint16_t port_id,
-                                     struct dppd_flow_probe_statistics *statistics)
+int dppd_flow_probe_cache_statistics(const struct dppd_flow_probe_cache *cache, uint16_t port_id,
+    struct dppd_flow_probe_statistics *statistics)
 {
     const struct probe_port *port;
 
@@ -182,8 +174,7 @@ int dppd_flow_probe_cache_statistics(const struct dppd_flow_probe_cache *cache,
         return -ENOENT;
     *statistics = port->statistics;
     for (uint32_t i = 0; i < DPPD_FLOW_PROBE_CACHE_CAPACITY; ++i) {
-        if (cache->entries[i].occupied &&
-            cache->entries[i].rule.install_port_id == port_id)
+        if (cache->entries[i].occupied && cache->entries[i].rule.install_port_id == port_id)
             statistics->cache_entries++;
     }
     return 0;
@@ -194,9 +185,8 @@ int dppd_flow_probe_cache_statistics(const struct dppd_flow_probe_cache *cache,
  * 保留 ID 是因为 COUNT 编译会使用它，generation 和后端偏好不影响驱动规则语义
  * 比较使用已有的逐字段规则比较器，不把哈希碰撞或无效字节当作命中
  */
-int dppd_flow_probe_cache_query(struct dppd_flow_probe_cache *cache, uint16_t port_id,
-    const struct dppd_rule *rule, bool refresh,
-    int (*validate)(uint16_t, const struct dppd_rule *, struct dppd_flow_error *),
+int dppd_flow_probe_cache_query(struct dppd_flow_probe_cache *cache, uint16_t port_id, const struct dppd_rule *rule,
+    bool refresh, int (*validate)(uint16_t, const struct dppd_rule *, struct dppd_flow_error *),
     struct dppd_flow_probe_result *result)
 {
     struct dppd_rule candidate;
@@ -226,8 +216,7 @@ int dppd_flow_probe_cache_query(struct dppd_flow_probe_cache *cache, uint16_t po
         struct probe_entry *entry = &cache->entries[i];
 
         if (entry->occupied && clock_available &&
-            (now_ns < entry->recorded_ns ||
-             now_ns - entry->recorded_ns >= DPPD_FLOW_PROBE_CACHE_TTL_NS))
+            (now_ns < entry->recorded_ns || now_ns - entry->recorded_ns >= DPPD_FLOW_PROBE_CACHE_TTL_NS))
             entry->occupied = false;
         if (!entry->occupied) {
             if (slot == NULL)

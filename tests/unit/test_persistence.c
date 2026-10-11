@@ -58,12 +58,19 @@ static void write_all_or_die(int fd, const uint8_t *data, size_t length)
 /*
  * 手工构造最小合法 v1 文件，避免用当前 v2 写入器伪造兼容性测试。v1 的 rule
  * header 只有 36 字节，match/action 区紧随其后，故能检验迁移读取是否真的
- * 采用旧布局而非仅接受 version 字段。
+ * 采用旧布局而非仅接受 version 字段
  */
 static void write_v1_snapshot(const char *path)
 {
     static const uint8_t magic[8] = {
-        'D', 'P', 'P', 'R', 'U', 'L', 'E', '\0',
+        'D',
+        'P',
+        'P',
+        'R',
+        'U',
+        'L',
+        'E',
+        '\0',
     };
     uint8_t header[SNAPSHOT_HEADER_SIZE];
     uint8_t record[SNAPSHOT_V1_RECORD_SIZE];
@@ -86,8 +93,8 @@ static void write_v1_snapshot(const char *path)
     put_u32_le(record + 20, DPPD_FALLBACK_REQUIRE_HARDWARE);
     put_u32_le(record + 24, 2);
     put_u32_le(record + 28, 8);
-    record[32] = 1; /* 一个 ETH match，无额外字段。 */
-    record[34] = 1; /* 一个 DROP action，无额外字段。 */
+    record[32] = 1; /* 一个 ETH match，无额外字段 */
+    record[34] = 1; /* 一个 DROP action，无额外字段 */
     put_u32_le(record + 36, DPPD_MATCH_ETH);
     put_u32_le(record + 36 + 8 * 20, DPPD_ACTION_DROP);
 
@@ -148,19 +155,16 @@ int main(void)
     uint8_t byte;
     int fd;
 
-    snprintf(path, sizeof(path), "/tmp/dppd-persistence-%ld.bin",
-             (long)getpid());
-    snprintf(v1_path, sizeof(v1_path), "/tmp/dppd-persistence-v1-%ld.bin",
-             (long)getpid());
-    snprintf(migrated_path, sizeof(migrated_path),
-             "/tmp/dppd-persistence-v2-%ld.bin", (long)getpid());
+    snprintf(path, sizeof(path), "/tmp/dppd-persistence-%ld.bin", (long)getpid());
+    snprintf(v1_path, sizeof(v1_path), "/tmp/dppd-persistence-v1-%ld.bin", (long)getpid());
+    snprintf(migrated_path, sizeof(migrated_path), "/tmp/dppd-persistence-v2-%ld.bin", (long)getpid());
     unlink(path);
     unlink(v1_path);
     unlink(migrated_path);
     memset(&migrated_repository, 0, sizeof(migrated_repository));
     assert(dppd_rule_repository_init(&repository, 4) == 0);
 
-    /* 写入顺序故意与 ID 顺序相反，快照必须仍按稳定 ID 排序。 */
+    /* 写入顺序故意与 ID 顺序相反，快照必须仍按稳定 ID 排序 */
     rule = make_rule(20, 200);
     assert(dppd_rule_repository_apply(&repository, &rule, 0, &result) == 0);
     rule = make_rule(10, 100);
@@ -170,7 +174,7 @@ int main(void)
 
     assert(dppd_persistence_save(path, &repository) == 0);
 
-    /* v1 只能由迁移专用接口读取；正常启动入口仍必须拒绝该版本。 */
+    /* v1 只能由迁移专用接口读取；正常启动入口仍必须拒绝该版本 */
     write_v1_snapshot(v1_path);
     assert(dppd_persistence_load(v1_path, &snapshot) == -EPROTONOSUPPORT);
     assert(dppd_persistence_load_v1_for_migration(v1_path, &snapshot) == 0);
@@ -178,13 +182,11 @@ int main(void)
     assert(snapshot.rules[0].id == 77 && snapshot.rules[0].generation == 4);
     assert(snapshot.rules[0].install_port_id == 0);
 
-    /* 模拟工具的显式端口映射，restore/save 必须保留旧代际并写成 v2。 */
+    /* 模拟工具的显式端口映射，restore/save 必须保留旧代际并写成 v2 */
     snapshot.rules[0].install_port_id = 13;
-    assert(dppd_rule_repository_init(&migrated_repository,
-                                     snapshot.count) == 0);
-    assert(dppd_rule_repository_restore(&migrated_repository, snapshot.rules,
-                                        snapshot.count,
-                                        snapshot.repository_generation) == 0);
+    assert(dppd_rule_repository_init(&migrated_repository, snapshot.count) == 0);
+    assert(dppd_rule_repository_restore(&migrated_repository, snapshot.rules, snapshot.count,
+               snapshot.repository_generation) == 0);
     assert(dppd_persistence_save(migrated_path, &migrated_repository) == 0);
     dppd_persisted_snapshot_destroy(&snapshot);
     assert(dppd_persistence_load(migrated_path, &snapshot) == 0);
@@ -206,14 +208,13 @@ int main(void)
     assert(snapshot.rules[1].install_port_id == 7);
     assert(dppd_rule_equal(&snapshot.rules[0], &expected10));
     assert(dppd_rule_equal(&snapshot.rules[1], &expected20));
-    assert(snapshot.rules[0].matches[1].spec.ipv4.src_be ==
-           expected10.matches[1].spec.ipv4.src_be);
+    assert(snapshot.rules[0].matches[1].spec.ipv4.src_be == expected10.matches[1].spec.ipv4.src_be);
     assert(snapshot.rules[0].matches[2].spec.l4.dst_be == htons(443));
     dppd_persisted_snapshot_destroy(&snapshot);
 
     /*
      * v1 缺少 install_port_id，不能安全猜测目标端口。即使 magic 正确也必须返回
-     * 明确的版本不支持，而不是把旧记录按 v2 布局错位解码。
+     * 明确的版本不支持，而不是把旧记录按 v2 布局错位解码
      */
     fd = open(path, O_RDWR | O_CLOEXEC);
     assert(fd >= 0);
@@ -226,7 +227,7 @@ int main(void)
 
     /*
      * 修改 payload 的一个字节但保持文件长度不变，必须由 CRC 拒绝，不能把损坏
-     * 内容交给后续硬件重放阶段。
+     * 内容交给后续硬件重放阶段
      */
     fd = open(path, O_RDWR | O_CLOEXEC);
     assert(fd >= 0);
@@ -237,12 +238,12 @@ int main(void)
     close(fd);
     assert(dppd_persistence_load(path, &snapshot) == -EBADMSG);
 
-    /* 截断文件同样必须稳定返回格式损坏，而不是部分恢复规则。 */
+    /* 截断文件同样必须稳定返回格式损坏，而不是部分恢复规则 */
     assert(dppd_persistence_save(path, &repository) == 0);
     assert(truncate(path, 20) == 0);
     assert(dppd_persistence_load(path, &snapshot) == -EBADMSG);
 
-    /* 空 repository 也必须形成合法、可校验的 header-only snapshot。 */
+    /* 空 repository 也必须形成合法、可校验的 header-only snapshot */
     dppd_rule_repository_destroy(&repository);
     assert(dppd_rule_repository_init(&repository, 4) == 0);
     assert(dppd_persistence_save(path, &repository) == 0);

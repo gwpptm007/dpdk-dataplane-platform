@@ -6,8 +6,8 @@
  * 每个成功提交最多增加一个区间，时钟未知的提交只增加 unavailable 和涉及规则数
  * 先核对所有计数的空间，再整体更新，饱和时保留上一份一致的历史并冻结此组
  */
-void dppd_rule_latency_record(struct dppd_rule_latency_histogram *histogram,
-    bool timing_available, uint64_t duration_ns, uint32_t rule_count)
+void dppd_rule_latency_record(struct dppd_rule_latency_histogram *histogram, bool timing_available,
+    uint64_t duration_ns, uint32_t rule_count)
 {
     uint64_t *counter;
     unsigned int bucket = 0;
@@ -42,11 +42,9 @@ void dppd_rule_latency_record(struct dppd_rule_latency_histogram *histogram,
  * 按向上取整的样本排名定位区间，先除后乘避免 samples 接近 UINT64_MAX 时溢出
  * 最后一个区间没有固定有限上界，用该组已观察到的实际最大值作为上界
  */
-static uint64_t percentile_upper(const struct dppd_rule_latency_histogram *histogram,
-                                  unsigned int percentile)
+static uint64_t percentile_upper(const struct dppd_rule_latency_histogram *histogram, unsigned int percentile)
 {
-    uint64_t target = histogram->samples / 100U * percentile +
-        (histogram->samples % 100U * percentile + 99U) / 100U;
+    uint64_t target = histogram->samples / 100U * percentile + (histogram->samples % 100U * percentile + 99U) / 100U;
     uint64_t seen = 0;
 
     for (unsigned int bucket = 0; bucket < DPPD_RULE_LATENCY_BUCKETS; ++bucket) {

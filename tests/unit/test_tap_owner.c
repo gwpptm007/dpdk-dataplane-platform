@@ -14,8 +14,11 @@
 
 static uint8_t expected[DPPD_TAP_COOKIE_SIZE];
 /** 固定预期值用于随机源测试，真实规则转换另有独立测试 */
-static const struct dppd_tap_content contents = {.version = 1, .action = 1,
-    .parent = 0x10000, .priority = 17, .protocol = 3};
+static const struct dppd_tap_content contents = {.version = 1,
+    .action = 1,
+    .parent = 0x10000,
+    .priority = 17,
+    .protocol = 3};
 static unsigned int entropy_calls, validate_calls, create_calls;
 static int entropy_mode, driver_error;
 static bool sync_fail, expect_owner = true, tap_driver = true;
@@ -24,8 +27,8 @@ ssize_t __wrap_getrandom(void *buffer, size_t size, unsigned int flags);
 int __real_fsync(int fd);
 int __wrap_fsync(int fd);
 int __wrap_rte_eth_dev_info_get(uint16_t port, struct rte_eth_dev_info *info);
-int __wrap_rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr,
-    const struct rte_flow_item *items, const struct rte_flow_action *actions, struct rte_flow_error *error);
+int __wrap_rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr, const struct rte_flow_item *items,
+    const struct rte_flow_action *actions, struct rte_flow_error *error);
 struct rte_flow *__wrap_rte_flow_create(uint16_t port, const struct rte_flow_attr *attr,
     const struct rte_flow_item *items, const struct rte_flow_action *actions, struct rte_flow_error *error);
 int __wrap_rte_flow_destroy(uint16_t port, struct rte_flow *flow, struct rte_flow_error *error);
@@ -83,8 +86,8 @@ static void check_actions(const struct rte_flow_attr *attr, const struct rte_flo
         assert(actions[1].type == RTE_FLOW_ACTION_TYPE_END);
 }
 
-int __wrap_rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr,
-    const struct rte_flow_item *items, const struct rte_flow_action *actions, struct rte_flow_error *error)
+int __wrap_rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr, const struct rte_flow_item *items,
+    const struct rte_flow_action *actions, struct rte_flow_error *error)
 {
     (void)error;
     assert(port == 0);
@@ -119,8 +122,11 @@ int __wrap_rte_flow_destroy(uint16_t port, struct rte_flow *flow, struct rte_flo
 /** 磁盘记录中的身份无需真实网卡，内核身份采集另由真实 TAP 集成测试验证 */
 static void prepare(struct dppd_recovery_guard *guard, const char *path, const char *state)
 {
-    const struct dppd_recovery_identity identity = {.ifindex = 17, .ifname = "test-tap",
-        .boot_id = "01234567-89ab-cdef-0123-456789abcdef", .netns_device = 4, .netns_inode = 100};
+    const struct dppd_recovery_identity identity = {.ifindex = 17,
+        .ifname = "test-tap",
+        .boot_id = "01234567-89ab-cdef-0123-456789abcdef",
+        .netns_device = 4,
+        .netns_inode = 100};
     assert(dppd_recovery_guard_open(guard, path, state) == 0);
     assert(dppd_recovery_guard_prepare_identity(guard, 0, "net_tap0", "net_tap", 1, 1, &identity) == 0);
 }
@@ -212,8 +218,8 @@ static void compiler(struct dppd_rule *rule)
     expect_owner = true;
 }
 
-static int before(void *context, uint16_t port, const struct dppd_rule *rule,
-    uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
+static int before(void *context, uint16_t port, const struct dppd_rule *rule, uint64_t *attempt,
+    uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
 {
     int rc = dppd_recovery_guard_begin_owned(context, port, rule->id, rule->generation, attempt, cookie, &contents);
     if (rc == 0)
@@ -262,8 +268,12 @@ static void backend(const char *path, const char *state, const struct dppd_rule 
 int main(void)
 {
     char directory[] = "/tmp/dppd-owner-unit-XXXXXX", path[256], state[256];
-    struct dppd_rule rule = {.id = 1, .generation = 1, .nb_matches = 1, .nb_actions = 1,
-        .matches = {{.type = DPPD_MATCH_ETH}}, .actions = {{.type = DPPD_ACTION_DROP}}};
+    struct dppd_rule rule = {.id = 1,
+        .generation = 1,
+        .nb_matches = 1,
+        .nb_actions = 1,
+        .matches = {{.type = DPPD_MATCH_ETH}},
+        .actions = {{.type = DPPD_ACTION_DROP}}};
     assert(mkdtemp(directory) != NULL);
     snprintf(path, sizeof(path), "%s/recovery", directory);
     snprintf(state, sizeof(state), "%s/state", directory);

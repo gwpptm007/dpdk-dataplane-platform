@@ -51,8 +51,7 @@ static void set_clock(int failure)
 }
 
 /** 驱动接口只记录调用次数，不访问设备，状态查询必须保持这个次数不变 */
-static int fake_validate(uint16_t port_id, const struct dppd_rule *rule,
-                         struct dppd_flow_error *error)
+static int fake_validate(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
     (void)port_id;
     (void)rule;
@@ -62,8 +61,8 @@ static int fake_validate(uint16_t port_id, const struct dppd_rule *rule,
 }
 
 /** 模拟成功创建并填写真实接口要求的对象身份和 COUNT 配置 */
-static int fake_create(uint16_t port_id, const struct dppd_rule *rule,
-                       struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+static int fake_create(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     (void)error;
     driver_calls++;
@@ -89,7 +88,9 @@ static int fake_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *
 }
 
 static const struct dppd_flow_api api = {
-    .validate = fake_validate, .create = fake_create, .remove = fake_remove,
+    .validate = fake_validate,
+    .create = fake_create,
+    .remove = fake_remove,
 };
 static const struct dppd_topology topology = {
     .nb_endpoints = 2,
@@ -97,8 +98,7 @@ static const struct dppd_topology topology = {
 };
 
 /** 生成最小的合法入口 DROP 规则，是否有 COUNT 与后端选择分别由用例决定 */
-static struct dppd_rule make_rule(uint64_t id, enum dppd_fallback_policy fallback,
-                                  bool has_count)
+static struct dppd_rule make_rule(uint64_t id, enum dppd_fallback_policy fallback, bool has_count)
 {
     struct dppd_rule rule = {0};
 
@@ -114,8 +114,7 @@ static struct dppd_rule make_rule(uint64_t id, enum dppd_fallback_policy fallbac
 }
 
 /** 用真实管理 socket 往返状态请求，验证新增操作的报文映射和响应版本 */
-static void socket_status(struct dppd_control_service *service,
-                           const struct dppd_control_rule_status *expected)
+static void socket_status(struct dppd_control_service *service, const struct dppd_control_rule_status *expected)
 {
     struct dppd_management_server server;
     struct dppd_device_set devices = {0};
@@ -164,9 +163,8 @@ static void test_backends(void)
         struct dppd_control_service service;
         struct dppd_control_apply_result applied;
         struct dppd_control_rule_status original, queried;
-        struct dppd_rule rule = make_rule(100 + mode,
-            mode == 2 ? DPPD_FALLBACK_SOFTWARE_ONLY : DPPD_FALLBACK_PREFER_HARDWARE,
-            mode != 2);
+        struct dppd_rule rule =
+            make_rule(100 + mode, mode == 2 ? DPPD_FALLBACK_SOFTWARE_ONLY : DPPD_FALLBACK_PREFER_HARDWARE, mode != 2);
         uint64_t next_transaction;
         unsigned int calls;
 
@@ -183,23 +181,20 @@ static void test_backends(void)
         assert(original.installation.timing_available);
         assert(original.installation.install_duration_ns == 100);
         assert(original.installation.commit_rule_count == 1);
-        assert(original.backend == (mode == 0 ? DPPD_PLAN_BACKEND_RTE_FLOW :
-                                                DPPD_PLAN_BACKEND_SOFTWARE));
+        assert(original.backend == (mode == 0 ? DPPD_PLAN_BACKEND_RTE_FLOW : DPPD_PLAN_BACKEND_SOFTWARE));
         assert(original.fallback == rule.fallback);
         assert(!original.persistence.enabled && !original.persistence.dirty);
         calls = driver_calls;
         next_transaction = service.next_transaction_id;
         for (unsigned int i = 0; i < 5; ++i) {
-            assert(dppd_control_rule_status(&service, rule.id,
-                                            DPPD_RULE_GENERATION_ANY, &queried) == 0);
+            assert(dppd_control_rule_status(&service, rule.id, DPPD_RULE_GENERATION_ANY, &queried) == 0);
             assert(memcmp(&queried, &original, sizeof(queried)) == 0);
         }
         socket_status(&service, &original);
         assert(driver_calls == calls && service.next_transaction_id == next_transaction);
         assert(dppd_rule_repository_generation(&service.rules) == 1);
         assert(dppd_control_rule_status(&service, rule.id, 2, &queried) == -ESTALE);
-        assert(dppd_control_rule_status(&service, 999, DPPD_RULE_GENERATION_ANY,
-                                        &queried) == -ENOENT);
+        assert(dppd_control_rule_status(&service, 999, DPPD_RULE_GENERATION_ANY, &queried) == -ENOENT);
         assert(dppd_control_rule_status(&service, rule.id, 0, &queried) == -EINVAL);
         assert(dppd_control_rule_status(&service, 0, 1, &queried) == -EINVAL);
         assert(dppd_control_rule_status(&service, rule.id, 1, NULL) == -EINVAL);
@@ -222,9 +217,8 @@ static void test_clock_failures(void)
             struct dppd_control_service service;
             struct dppd_control_apply_result applied;
             struct dppd_control_rule_status status;
-            struct dppd_rule rule = make_rule(200,
-                software ? DPPD_FALLBACK_SOFTWARE_ONLY : DPPD_FALLBACK_REQUIRE_HARDWARE,
-                false);
+            struct dppd_rule rule =
+                make_rule(200, software ? DPPD_FALLBACK_SOFTWARE_ONLY : DPPD_FALLBACK_REQUIRE_HARDWARE, false);
 
             assert(dppd_control_init(&service, &topology, 4, &api) == 0);
             set_clock(failure);
@@ -258,8 +252,7 @@ static void test_batch_clock_failure(void)
         set_clock(failure);
         assert(dppd_control_update_batch(&service, requests, 2, results) == 0);
         for (unsigned int i = 0; i < 2; ++i) {
-            assert(dppd_control_rule_status(&service, 250 + i, results[i].generation,
-                                            &status) == 0);
+            assert(dppd_control_rule_status(&service, 250 + i, results[i].generation, &status) == 0);
             assert(!status.installation.timing_available);
             assert(status.installation.install_duration_ns == 0);
             assert(status.installation.commit_rule_count == 2);
@@ -300,8 +293,7 @@ static void test_inconsistency(void)
     assert(dppd_software_backend_remove_version(&service.software, 300, 1) == 0);
 
     /** 逐一破坏并恢复 handle 字段，确认状态查询不会把错误身份当作有效安装 */
-    handle = (struct dppd_flow_handle *)dppd_rte_flow_backend_find_version(
-        &service.rte_flow, 300, 1);
+    handle = (struct dppd_flow_handle *)dppd_rte_flow_backend_find_version(&service.rte_flow, 300, 1);
     assert(handle != NULL);
     saved = *handle;
     handle->rule_id++;

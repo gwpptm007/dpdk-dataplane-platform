@@ -12,32 +12,32 @@
 #define DPPD_CONTROL_BATCH_UPDATE_MAX 4U
 
 enum dppd_control_recovery_state {
-    /* 正常运行：desired repository 与 backend 的控制面不变量成立。 */
+    /* 正常运行：desired repository 与 backend 的控制面不变量成立 */
     DPPD_CONTROL_RECOVERY_READY = 0,
-    /* 启动重放或在线事务补偿失败，backend 可能仍留有本进程可定位的 flow handle。 */
+    /* 启动重放或在线事务补偿失败，backend 可能仍留有本进程可定位的 flow handle */
     DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED,
-    /* 残留对象已清除；必须重启后从 snapshot 重新建立完整 desired state。 */
+    /* 残留对象已清除；必须重启后从 snapshot 重新建立完整 desired state */
     DPPD_CONTROL_RECOVERY_RESTART_REQUIRED,
 };
 
 struct dppd_control_service {
     /*
-     * topology 在运行期由 runtime 持有且不可变；control 只借用该指针来规划规则，
-     * 因此 runtime 的销毁必须晚于 control_fini。
+     * topology 在运行期由 runtime 持有且不可变；control 只借用该指针来规划规则
+     * 因此 runtime 的销毁必须晚于 control_fini
      */
     const struct dppd_topology *topology;
-    /* desired state 的唯一真源；只有 backend actual state 已提交后才允许写入。 */
+    /* desired state 的唯一真源；只有 backend actual state 已提交后才允许写入 */
     struct dppd_rule_repository rules;
-    /* 硬件 rte_flow 与等价软件 classifier 分别保存 actual state，同一版本只能存在其一。 */
+    /* 硬件 rte_flow 与等价软件 classifier 分别保存 actual state，同一版本只能存在其一 */
     struct dppd_rte_flow_backend rte_flow;
     struct dppd_software_backend software;
     uint64_t next_transaction_id;
-    /* persistence path 由 service 动态持有；NULL 表示未启用自动 snapshot。 */
+    /* persistence path 由 service 动态持有；NULL 表示未启用自动 snapshot */
     char *persistence_path;
     uint64_t persisted_generation;
     int persistence_last_error;
     bool persistence_dirty;
-    /* 启动恢复或在线补偿失败时置位；普通 mutation 不能自行清除此状态。 */
+    /* 启动恢复或在线补偿失败时置位；普通 mutation 不能自行清除此状态 */
     enum dppd_control_recovery_state recovery_state;
     int recovery_last_error;
     /** 仅管理线程更新的请求指标，逐包路径不读取它，也不增加时钟、锁或内存分配 */
@@ -45,7 +45,7 @@ struct dppd_control_service {
 };
 
 struct dppd_control_apply_result {
-    /* CREATED/UPDATED/UNCHANGED：后者没有创建 backend 事务，transaction_id 为 0。 */
+    /* CREATED/UPDATED/UNCHANGED：后者没有创建 backend 事务，transaction_id 为 0 */
     enum dppd_rule_apply_status status;
     uint64_t generation;
     uint64_t transaction_id;
@@ -107,11 +107,11 @@ struct dppd_control_batch_update_request {
 };
 
 struct dppd_control_count_result {
-    /* 回显最终定位到的 desired rule，避免客户端把响应关联到错误对象。 */
+    /* 回显最终定位到的 desired rule，避免客户端把响应关联到错误对象 */
     uint64_t rule_id;
-    /* 实际查询的已发布 generation。 */
+    /* 实际查询的已发布 generation */
     uint64_t generation;
-    /* PMD 返回的累计命中包数和字节数；查询本身不清零。 */
+    /* PMD 返回的累计命中包数和字节数；查询本身不清零 */
     uint64_t hits;
     uint64_t bytes;
 };
@@ -141,20 +141,16 @@ struct dppd_control_recovery_status {
     int last_error;
 };
 
-int dppd_control_init(struct dppd_control_service *service,
-                      const struct dppd_topology *topology,
-                      uint32_t rule_capacity,
-                      const struct dppd_flow_api *flow_api);
+int dppd_control_init(struct dppd_control_service *service, const struct dppd_topology *topology,
+    uint32_t rule_capacity, const struct dppd_flow_api *flow_api);
 int dppd_control_fini(struct dppd_control_service *service);
 /** 只复制已完成请求的累计值和最近失败，不校验驱动、不查询 COUNT、不修改快照 */
-void dppd_control_rule_metrics(const struct dppd_control_service *service,
-                                struct dppd_rule_metrics *metrics);
+void dppd_control_rule_metrics(const struct dppd_control_service *service, struct dppd_rule_metrics *metrics);
 /** 只读最近失败历史，版本不匹配返回 ESTALE，恢复隔离期间也可读取 */
-int dppd_control_rule_history(const struct dppd_control_service *service,
-    uint64_t after_event_id, uint64_t expected_revision, struct dppd_rule_history_page *page);
+int dppd_control_rule_history(const struct dppd_control_service *service, uint64_t after_event_id,
+    uint64_t expected_revision, struct dppd_rule_history_page *page);
 /** 读取本进程成功提交的历史耗时分布，已删除或回滚的样本保留，隔离期间也可查询 */
-void dppd_control_rule_latency(const struct dppd_control_service *service,
-    struct dppd_rule_latency_report *report);
+void dppd_control_rule_latency(const struct dppd_control_service *service, struct dppd_rule_latency_report *report);
 /**
  * 不安装规则的完整规则探测，允许 ID 尚不存在，探测也不会分配 generation 或事务编号
  * 同时给出驱动校验和已实现的软件等价能力，缓存仅用于诊断，正式 apply 仍重新校验
@@ -162,41 +158,34 @@ void dppd_control_rule_latency(const struct dppd_control_service *service,
 int dppd_control_probe_rule(struct dppd_control_service *service, uint16_t install_port_id,
     const struct dppd_rule *rule, bool refresh, struct dppd_flow_probe_result *result);
 /*
- * attach 只建立后续 mutation 的保存关系，不读取也不覆盖文件。
+ * attach 只建立后续 mutation 的保存关系，不读取也不覆盖文件
  * 非零 repository generation 会被保守标记为 dirty，直到 flush/preflight 完整保存；
- * 调用方必须先完成 load/reconcile，或确认这是一个全新的 state path。
+ * 调用方必须先完成 load/reconcile，或确认这是一个全新的 state path
  */
-int dppd_control_persistence_attach(struct dppd_control_service *service,
-                                    const char *path);
+int dppd_control_persistence_attach(struct dppd_control_service *service, const char *path);
 /*
  * 启动时加载并 fail-closed 重放 snapshot。文件不存在时创建一个空 v2 snapshot；
- * 文件存在时必须全部规则完成 plan/硬件事务后才发布 repository 并启用后续自动保存。
+ * 文件存在时必须全部规则完成 plan/硬件事务后才发布 repository 并启用后续自动保存
  */
-int dppd_control_persistence_restore(struct dppd_control_service *service,
-                                     const char *path);
-/* 立即重试保存当前完整 repository；可用于清除 dirty state。 */
+int dppd_control_persistence_restore(struct dppd_control_service *service, const char *path);
+/* 立即重试保存当前完整 repository；可用于清除 dirty state */
 int dppd_control_persistence_flush(struct dppd_control_service *service);
-void dppd_control_persistence_status(
-    const struct dppd_control_service *service,
+void dppd_control_persistence_status(const struct dppd_control_service *service,
     struct dppd_control_persistence_status *status);
-void dppd_control_recovery_status(
-    const struct dppd_control_service *service,
+void dppd_control_recovery_status(const struct dppd_control_service *service,
     struct dppd_control_recovery_status *status);
 /*
  * 只允许恢复隔离模式调用。成功后进入 RESTART_REQUIRED，不恢复 worker 或发布空
- * repository；必须由主程序退出并重新走完整 snapshot 恢复。
+ * repository；必须由主程序退出并重新走完整 snapshot 恢复
  */
 int dppd_control_reconciliation_retry(struct dppd_control_service *service);
 /*
- * apply 的核心不变量：硬件事务成功后才发布 desired generation。
+ * apply 的核心不变量：硬件事务成功后才发布 desired generation
  * 相同规则为幂等重放；不同规则按新 generation 安装，旧 generation
- * 删除成功后才更新 repository。
+ * 删除成功后才更新 repository
  */
-int dppd_control_apply(struct dppd_control_service *service,
-                       uint16_t install_port_id,
-                       const struct dppd_rule *rule,
-                       uint64_t expected_generation,
-                       struct dppd_control_apply_result *result);
+int dppd_control_apply(struct dppd_control_service *service, uint16_t install_port_id, const struct dppd_rule *rule,
+    uint64_t expected_generation, struct dppd_control_apply_result *result);
 /**
  * 创建一批原先不存在的规则，先完成全部实际对象安装，再连续发布规则账本并保存快照
  * 安装失败会逆序尝试撤销本批资源，撤销失败返回 EUCLEAN 并进入恢复隔离
@@ -204,10 +193,8 @@ int dppd_control_apply(struct dppd_control_service *service,
  * 返回错误时不能把数组中已经填写的前几项当作部分成功回执
  * 还要区分保存失败：此时本批可能已生效，需要查看 dirty 状态而不能认定已经回滚
  */
-int dppd_control_create_batch(
-    struct dppd_control_service *service,
-    const struct dppd_control_batch_create_request *requests,
-    uint32_t request_count,
+int dppd_control_create_batch(struct dppd_control_service *service,
+    const struct dppd_control_batch_create_request *requests, uint32_t request_count,
     struct dppd_control_apply_result *results);
 /**
  * 删除一批旧版本精确匹配的已有规则，先验证全批，再删除实际对象，最后移除账本记录
@@ -215,10 +202,8 @@ int dppd_control_create_batch(
  * 无法完成补偿或账本状态失配时进入恢复隔离，结果数组仅在整个请求成功时有效
  * 全部删除生效后仍可能遇到快照保存失败，此时通过 dirty 状态处理，不能假定旧对象还在
  */
-int dppd_control_remove_batch(
-    struct dppd_control_service *service,
-    const struct dppd_control_batch_remove_request *requests,
-    uint32_t request_count,
+int dppd_control_remove_batch(struct dppd_control_service *service,
+    const struct dppd_control_batch_remove_request *requests, uint32_t request_count,
     struct dppd_control_batch_remove_result *results);
 /**
  * 原子替换两到四条已有规则，每条必须提供精确旧版本且不能重复 ID
@@ -235,32 +220,24 @@ int dppd_control_remove_batch(
  * 纯软件路径的每个报文使用完整旧表或新表，不保证多个报文或线程同时切换
  * 硬件及混合路径只保证规则账本整批发布；新软件版本 COUNT 从零开始
  */
-int dppd_control_update_batch(
-    struct dppd_control_service *service,
-    const struct dppd_control_batch_update_request *requests,
-    uint32_t request_count,
+int dppd_control_update_batch(struct dppd_control_service *service,
+    const struct dppd_control_batch_update_request *requests, uint32_t request_count,
     struct dppd_control_apply_result *results);
-int dppd_control_remove(struct dppd_control_service *service,
-                        uint64_t rule_id,
-                        uint64_t expected_generation,
-                        bool *removed,
-                        uint64_t *generation);
+int dppd_control_remove(struct dppd_control_service *service, uint64_t rule_id, uint64_t expected_generation,
+    bool *removed, uint64_t *generation);
 /*
- * expected_generation 与更新/删除采用同一并发语义。查询只读取当前已发布代，
- * 不允许通过旧 generation 访问更新窗口中已退休的硬件对象。
+ * expected_generation 与更新/删除采用同一并发语义。查询只读取当前已发布代
+ * 不允许通过旧 generation 访问更新窗口中已退休的硬件对象
  */
-int dppd_control_query_count(struct dppd_control_service *service,
-                             uint64_t rule_id,
-                             uint64_t expected_generation,
-                             struct dppd_control_count_result *result);
+int dppd_control_query_count(struct dppd_control_service *service, uint64_t rule_id, uint64_t expected_generation,
+    struct dppd_control_count_result *result);
 
 /**
  * 查询当前账本版本的安装状态，expected_generation 为精确非零版本或 ANY
  * 同一版本必须恰好安装在一个后端中，身份、端口或 COUNT 配置失配时返回 EUCLEAN
  * 查询只读内存，不调用驱动、不查询计数、不保存磁盘，恢复隔离期间仍拒绝普通规则查询
  */
-int dppd_control_rule_status(const struct dppd_control_service *service,
-                              uint64_t rule_id, uint64_t expected_generation,
-                              struct dppd_control_rule_status *result);
+int dppd_control_rule_status(const struct dppd_control_service *service, uint64_t rule_id, uint64_t expected_generation,
+    struct dppd_control_rule_status *result);
 
 #endif

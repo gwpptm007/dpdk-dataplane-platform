@@ -27,10 +27,10 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     atomic_init(&runtime->stop_requested, false);
 
     /*
-     * queue_id 按 worker_index 连续编号，不直接使用稀疏的 lcore_id。除便于 queue 配置外，
-     * 这也满足软件 backend 对 QSBR reader id 落在 [0, DPPD_MAX_WORKERS) 的要求。
+     * queue_id 按 worker_index 连续编号，不直接使用稀疏的 lcore_id。除便于 queue 配置外
+     * 这也满足软件 backend 对 QSBR reader id 落在 [0, DPPD_MAX_WORKERS) 的要求
      */
-    RTE_LCORE_FOREACH_WORKER(lcore_id) {
+    RTE_LCORE_FOREACH_WORKER (lcore_id) {
         struct dppd_worker *worker;
 
         if (worker_index == cfg->nb_queues)
@@ -46,9 +46,8 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         worker_index++;
     }
     if (worker_index != cfg->nb_queues) {
-        fprintf(stderr,
-                "[dppd] queues=%u requires %u worker lcores, only %u are enabled\n",
-                cfg->nb_queues, cfg->nb_queues, worker_index);
+        fprintf(stderr, "[dppd] queues=%u requires %u worker lcores, only %u are enabled\n", cfg->nb_queues,
+            cfg->nb_queues, worker_index);
         return -ENOSPC;
     }
     runtime->nb_workers = worker_index;
@@ -72,11 +71,9 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     return 0;
 }
 
-void dppd_runtime_set_software_backend(
-    struct dppd_runtime *runtime,
-    struct dppd_software_backend *software_backend)
+void dppd_runtime_set_software_backend(struct dppd_runtime *runtime, struct dppd_software_backend *software_backend)
 {
-    /* 不加锁是刻意的：调用契约要求只在 runtime_start 前绑定，运行期禁止热替换。 */
+    /* 不加锁是刻意的：调用契约要求只在 runtime_start 前绑定，运行期禁止热替换 */
     if (runtime != NULL)
         runtime->software_backend = software_backend;
 }
@@ -93,7 +90,7 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
         return -ENODEV;
 
     atomic_store_explicit(&runtime->stop_requested, false, memory_order_release);
-    /* worker 失败时先置 stop，再 wait 已经启动的 lcore，确保其 QSBR reader 都能注销。 */
+    /* worker 失败时先置 stop，再 wait 已经启动的 lcore，确保其 QSBR reader 都能注销 */
     for (i = 0; i < runtime->nb_workers; ++i) {
         struct dppd_worker *worker = &runtime->workers[i];
 
@@ -102,8 +99,7 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
         rc = rte_eal_remote_launch(dppd_worker_main, worker, worker->lcore_id);
         if (rc != 0) {
             atomic_store_explicit(&worker->state, DPPD_WORKER_FAILED, memory_order_release);
-            fprintf(stderr, "[dppd] cannot launch queue %u on lcore %u: %d\n",
-                    worker->queue_id, worker->lcore_id, rc);
+            fprintf(stderr, "[dppd] cannot launch queue %u on lcore %u: %d\n", worker->queue_id, worker->lcore_id, rc);
             dppd_runtime_request_stop(runtime);
             (void)dppd_runtime_wait(runtime);
             return rc;
@@ -122,13 +118,11 @@ int dppd_runtime_check_workers(const struct dppd_runtime *runtime)
 {
     if (runtime == NULL)
         return -EINVAL;
-    if (!runtime->workers_started ||
-        atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
+    if (!runtime->workers_started || atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
         dppd_devices_removal_requested(&runtime->devices))
         return 0;
     for (uint16_t i = 0; i < runtime->nb_workers; ++i) {
-        const unsigned int state = atomic_load_explicit(&runtime->workers[i].state,
-                                                         memory_order_acquire);
+        const unsigned int state = atomic_load_explicit(&runtime->workers[i].state, memory_order_acquire);
 
         if (state != DPPD_WORKER_STARTING && state != DPPD_WORKER_RUNNING) {
             /**
@@ -166,9 +160,7 @@ int dppd_runtime_wait(struct dppd_runtime *runtime)
         rc = rte_eal_wait_lcore(worker->lcore_id);
         worker->launched = false;
         /** 等待结果是最终依据，保留失败状态供清理前的诊断读取 */
-        atomic_store_explicit(&worker->state,
-                              rc == 0 ? DPPD_WORKER_STOPPED : DPPD_WORKER_FAILED,
-                              memory_order_release);
+        atomic_store_explicit(&worker->state, rc == 0 ? DPPD_WORKER_STOPPED : DPPD_WORKER_FAILED, memory_order_release);
         if (rc != 0 && result == 0)
             result = rc;
     }
@@ -176,8 +168,7 @@ int dppd_runtime_wait(struct dppd_runtime *runtime)
     return result;
 }
 
-void dppd_runtime_stats_read(const struct dppd_runtime *runtime,
-                             struct dppd_stats_values *total)
+void dppd_runtime_stats_read(const struct dppd_runtime *runtime, struct dppd_stats_values *total)
 {
     uint16_t i;
 
@@ -192,9 +183,8 @@ void dppd_runtime_stats_read(const struct dppd_runtime *runtime,
     }
 }
 
-int dppd_runtime_stats_query(const struct dppd_runtime *runtime,
-                              uint16_t port_id, uint16_t queue_id,
-                              struct dppd_stats_values *total)
+int dppd_runtime_stats_query(const struct dppd_runtime *runtime, uint16_t port_id, uint16_t queue_id,
+    struct dppd_stats_values *total)
 {
     uint16_t i, j;
     bool has_port = port_id == DPPD_STATS_ALL;
@@ -231,18 +221,17 @@ void dppd_runtime_stats_dump(const struct dppd_runtime *runtime)
     struct dppd_stats_values total;
 
     dppd_runtime_stats_read(runtime, &total);
-    printf("[dppd] rx=%" PRIu64 " (%" PRIu64 " bytes) tx=%" PRIu64
-           " (%" PRIu64 " bytes) malformed=%" PRIu64 " unsupported=%" PRIu64
-           " policy-drop=%" PRIu64 " tx-drop=%" PRIu64 "\n",
-           total.rx_packets, total.rx_bytes, total.tx_packets, total.tx_bytes,
-           total.rx_malformed, total.rx_unsupported, total.policy_drops, total.tx_drops);
+    printf("[dppd] rx=%" PRIu64 " (%" PRIu64 " bytes) tx=%" PRIu64 " (%" PRIu64 " bytes) malformed=%" PRIu64
+           " unsupported=%" PRIu64 " policy-drop=%" PRIu64 " tx-drop=%" PRIu64 "\n",
+        total.rx_packets, total.rx_bytes, total.tx_packets, total.tx_bytes, total.rx_malformed, total.rx_unsupported,
+        total.policy_drops, total.tx_drops);
 }
 
 int dppd_runtime_destroy(struct dppd_runtime *runtime)
 {
     if (runtime == NULL)
         return -EINVAL;
-    /* 先停止 worker，再销毁设备；否则 worker 仍可能访问已停止 port 或软件 backend。 */
+    /* 先停止 worker，再销毁设备；否则 worker 仍可能访问已停止 port 或软件 backend */
     if (runtime->workers_started) {
         dppd_runtime_request_stop(runtime);
         (void)dppd_runtime_wait(runtime);

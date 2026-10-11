@@ -13,21 +13,34 @@ enum dppd_rule_failure_kind dppd_rule_failure_classify(enum dppd_rule_failure_st
     if (stage == DPPD_RULE_STAGE_ISOLATION)
         return DPPD_RULE_FAILURE_ISOLATED;
     switch (code) {
-    case -EINVAL: case -EBADMSG: case -ERANGE:
+    case -EINVAL:
+    case -EBADMSG:
+    case -ERANGE:
         return DPPD_RULE_FAILURE_INPUT;
-    case -ESTALE: case -EEXIST: case -EALREADY:
+    case -ESTALE:
+    case -EEXIST:
+    case -EALREADY:
         return DPPD_RULE_FAILURE_CONFLICT;
     case -ENOENT:
         return DPPD_RULE_FAILURE_NOT_FOUND;
-    case -ENOTSUP: case -ENOSYS:
+    case -ENOTSUP:
+    case -ENOSYS:
         return DPPD_RULE_FAILURE_UNSUPPORTED;
-    case -ENOMEM: case -ENOSPC: case -EOVERFLOW:
+    case -ENOMEM:
+    case -ENOSPC:
+    case -EOVERFLOW:
         return DPPD_RULE_FAILURE_RESOURCE;
-    case -ENODEV: case -EIO: case -EFAULT:
+    case -ENODEV:
+    case -EIO:
+    case -EFAULT:
         return DPPD_RULE_FAILURE_DEVICE;
-    case -EAGAIN: case -EBUSY: case -ETIMEDOUT: case -EINTR:
+    case -EAGAIN:
+    case -EBUSY:
+    case -ETIMEDOUT:
+    case -EINTR:
         return DPPD_RULE_FAILURE_TEMPORARY;
-    case -EACCES: case -EPERM:
+    case -EACCES:
+    case -EPERM:
         return DPPD_RULE_FAILURE_PERMISSION;
     case -EUCLEAN:
         return DPPD_RULE_FAILURE_INCONSISTENT;
@@ -37,8 +50,7 @@ enum dppd_rule_failure_kind dppd_rule_failure_classify(enum dppd_rule_failure_st
 }
 
 /** 开始一次请求时只重置临时上下文，累计值与最近一次失败保留 */
-void dppd_rule_observation_begin(struct dppd_rule_observation *observation,
-                                 enum dppd_rule_operation operation)
+void dppd_rule_observation_begin(struct dppd_rule_observation *observation, enum dppd_rule_operation operation)
 {
     memset(&observation->context, 0, sizeof(observation->context));
     memset(&observation->failure, 0, sizeof(observation->failure));
@@ -71,8 +83,7 @@ void dppd_rule_observation_fault(struct dppd_rule_observation *observation, int 
 }
 
 /** 补偿失败另存首个错误和对应 ID，不能改写最初的创建或删除错误 */
-void dppd_rule_observation_compensation(struct dppd_rule_observation *observation,
-                                        int code, uint64_t rule_id)
+void dppd_rule_observation_compensation(struct dppd_rule_observation *observation, int code, uint64_t rule_id)
 {
     if (!observation->active || code == 0 || observation->failure.compensation_code != 0)
         return;
@@ -84,8 +95,7 @@ void dppd_rule_observation_compensation(struct dppd_rule_observation *observatio
  * 只在失败请求的最终错误与生效状态都已确定后追加，内部回滚不另记一条
  * 满容量只覆盖最旧记录，失败 ID 连续递增，成功操作不会留下空洞
  */
-static void history_append(struct dppd_rule_failure_history *history,
-                           const struct dppd_rule_failure_event *failure)
+static void history_append(struct dppd_rule_failure_history *history, const struct dppd_rule_failure_event *failure)
 {
     uint32_t index;
 
@@ -143,8 +153,8 @@ void dppd_rule_observation_finish(struct dppd_rule_observation *observation, int
  * 从环形窗口复制完整的小页，读取没有消费语义，重复查询得到相同记录
  * after 为零从保留窗口开头读取，已被覆盖的未读记录用 gap 明示，空页保留输入游标
  */
-int dppd_rule_history_read(const struct dppd_rule_failure_history *history,
-    uint64_t after_event_id, uint64_t expected_revision, struct dppd_rule_history_page *page)
+int dppd_rule_history_read(const struct dppd_rule_failure_history *history, uint64_t after_event_id,
+    uint64_t expected_revision, struct dppd_rule_history_page *page)
 {
     if (page == NULL)
         return -EINVAL;
@@ -163,13 +173,13 @@ int dppd_rule_history_read(const struct dppd_rule_failure_history *history,
     page->after_event_id = page->next_after = after_event_id;
     if (history->count != 0) {
         page->oldest_event_id = history->entries[history->head].event_id;
-        page->newest_event_id = history->entries[
-            (history->head + history->count - 1U) % DPPD_RULE_HISTORY_CAPACITY].event_id;
+        page->newest_event_id =
+            history->entries[(history->head + history->count - 1U) % DPPD_RULE_HISTORY_CAPACITY].event_id;
         page->gap = page->oldest_event_id > 1 && after_event_id < page->oldest_event_id - 1U;
     }
     for (uint32_t offset = 0; offset < history->count; ++offset) {
-        const struct dppd_rule_history_entry *entry = &history->entries[
-            (history->head + offset) % DPPD_RULE_HISTORY_CAPACITY];
+        const struct dppd_rule_history_entry *entry =
+            &history->entries[(history->head + offset) % DPPD_RULE_HISTORY_CAPACITY];
 
         if (entry->event_id <= after_event_id)
             continue;

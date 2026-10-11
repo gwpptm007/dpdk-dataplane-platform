@@ -63,16 +63,13 @@ int main(void)
     assert(dppd_rule_repository_apply(&repository, &rule, 0, &result) == -ENOSPC);
     assert(dppd_rule_repository_generation(&repository) == 2);
 
-    assert(dppd_rule_repository_remove(&repository, 1001, 1, &removed,
-                                       &deletion_generation) == -ESTALE);
-    assert(dppd_rule_repository_remove(&repository, 1001, 2, &removed,
-                                       &deletion_generation) == 0);
+    assert(dppd_rule_repository_remove(&repository, 1001, 1, &removed, &deletion_generation) == -ESTALE);
+    assert(dppd_rule_repository_remove(&repository, 1001, 2, &removed, &deletion_generation) == 0);
     assert(removed && deletion_generation == 3);
     assert(dppd_rule_repository_count(&repository) == 0);
     assert(dppd_rule_repository_get(&repository, 1001, &stored) == -ENOENT);
 
-    assert(dppd_rule_repository_remove(&repository, 1001, 0, &removed,
-                                       &deletion_generation) == 0);
+    assert(dppd_rule_repository_remove(&repository, 1001, 0, &removed, &deletion_generation) == 0);
     assert(!removed && deletion_generation == 3);
 
     rule = make_rule(0);
@@ -83,7 +80,7 @@ int main(void)
 
     /*
      * 列表顺序按 rule id 而不是内部槽位。特意用 30、10、20 的写入顺序验证
-     * cursor 稳定性，并模拟翻页间发生写入时 generation 冲突。
+     * cursor 稳定性，并模拟翻页间发生写入时 generation 冲突
      */
     assert(dppd_rule_repository_init(&repository, 5) == 0);
     rule = make_rule(30);
@@ -93,23 +90,19 @@ int main(void)
     rule = make_rule(20);
     assert(dppd_rule_repository_apply(&repository, &rule, 0, &result) == 0);
 
-    assert(dppd_rule_repository_list(
-               &repository, 0, DPPD_RULE_GENERATION_ANY, page, 2,
-               &page_count, &has_more, &page_generation) == 0);
+    assert(dppd_rule_repository_list(&repository, 0, DPPD_RULE_GENERATION_ANY, page, 2, &page_count, &has_more,
+               &page_generation) == 0);
     assert(page_generation == 3);
     assert(page_count == 2 && has_more);
     assert(page[0].id == 10 && page[1].id == 20);
 
-    assert(dppd_rule_repository_list(
-               &repository, 20, page_generation, page, 2,
-               &page_count, &has_more, &page_generation) == 0);
+    assert(dppd_rule_repository_list(&repository, 20, page_generation, page, 2, &page_count, &has_more,
+               &page_generation) == 0);
     assert(page_count == 1 && !has_more && page[0].id == 30);
 
     rule = make_rule(40);
     assert(dppd_rule_repository_apply(&repository, &rule, 0, &result) == 0);
-    assert(dppd_rule_repository_list(
-               &repository, 20, 3, page, 2, &page_count,
-               &has_more, &page_generation) == -ESTALE);
+    assert(dppd_rule_repository_list(&repository, 20, 3, page, 2, &page_count, &has_more, &page_generation) == -ESTALE);
     /**
      * 故意让第二条的旧版本或规则内容出错，确认第一条优先级没有提前写入
      * 全部条件正确后，第二条即使内容不变也必须取得连续的新版本
@@ -120,19 +113,16 @@ int main(void)
         uint64_t expected[2] = {2, 99};
 
         updates[0].priority = 42;
-        assert(dppd_rule_repository_update_batch(&repository, updates,
-                                                  expected, 2) == -ESTALE);
+        assert(dppd_rule_repository_update_batch(&repository, updates, expected, 2) == -ESTALE);
         assert(repository.generation == 4);
         assert(dppd_rule_repository_get(&repository, 10, &stored) == 0);
         assert(stored.generation == 2 && stored.priority == 0);
         expected[1] = 3;
         updates[1].id = 10;
-        assert(dppd_rule_repository_update_batch(&repository, updates,
-                                                  expected, 2) == -EEXIST);
+        assert(dppd_rule_repository_update_batch(&repository, updates, expected, 2) == -EEXIST);
         updates[1].id = 20;
         updates[1].nb_actions = 0;
-        assert(dppd_rule_repository_update_batch(&repository, updates,
-                                                  expected, 2) == -EINVAL);
+        assert(dppd_rule_repository_update_batch(&repository, updates, expected, 2) == -EINVAL);
         assert(repository.generation == 4);
         updates[1] = make_rule(20);
         assert(dppd_rule_repository_update_batch(&repository, updates, expected, 2) == 0);
@@ -142,8 +132,7 @@ int main(void)
         expected[0] = 5;
         expected[1] = 6;
         repository.generation = UINT64_MAX - 2;
-        assert(dppd_rule_repository_update_batch(&repository, updates,
-                                                  expected, 2) == -EOVERFLOW);
+        assert(dppd_rule_repository_update_batch(&repository, updates, expected, 2) == -EOVERFLOW);
         assert(dppd_rule_repository_get(&repository, 10, &stored) == 0);
         assert(stored.generation == 5);
     }

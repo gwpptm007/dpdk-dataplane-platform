@@ -7,14 +7,11 @@
 #include "../../app/dppd/main.c"
 #undef main
 
-int __real_dppd_software_backend_worker_register(struct dppd_software_backend *backend,
-                                                 unsigned int worker_id);
-int __wrap_dppd_software_backend_worker_register(struct dppd_software_backend *backend,
-                                                 unsigned int worker_id);
+int __real_dppd_software_backend_worker_register(struct dppd_software_backend *backend, unsigned int worker_id);
+int __wrap_dppd_software_backend_worker_register(struct dppd_software_backend *backend, unsigned int worker_id);
 
 /** 只让第一条队列注册失败，其他队列继续走真实接口，以便检查主线程是否会停止它们 */
-int __wrap_dppd_software_backend_worker_register(struct dppd_software_backend *backend,
-                                                 unsigned int worker_id)
+int __wrap_dppd_software_backend_worker_register(struct dppd_software_backend *backend, unsigned int worker_id)
 {
     const char *mode = getenv("DPPD_TEST_WORKER_FAILURE");
 

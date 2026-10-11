@@ -67,14 +67,13 @@ static inline bool dppd_port_tx_available(const struct dppd_port *port)
     const unsigned int state = atomic_load_explicit(&port->link_state, memory_order_acquire);
 
     return !atomic_load_explicit(&port->removed, memory_order_acquire) &&
-           (state == DPPD_LINK_UP || state == DPPD_LINK_UNSUPPORTED);
+        (state == DPPD_LINK_UP || state == DPPD_LINK_UNSUPPORTED);
 }
 /**
  * 调用前必须等待所有工作线程退出，函数依次注销回调、关闭端口并释放共享缓冲池
  * 返回首个清理错误；无法确认端口已关闭时保留缓冲池，防止驱动访问已释放的报文内存
  */
 int dppd_devices_stop(struct dppd_device_set *devices);
-const struct dppd_port *dppd_devices_find(const struct dppd_device_set *devices,
-                                          uint16_t port_id);
+const struct dppd_port *dppd_devices_find(const struct dppd_device_set *devices, uint16_t port_id);
 
 #endif

@@ -26,9 +26,7 @@ struct dppd_topology {
 };
 
 int dppd_topology_discover(const struct dppd_config *cfg, struct dppd_topology *topology);
-const struct dppd_endpoint *dppd_topology_find(const struct dppd_topology *topology,
-                                               uint16_t ethdev_port_id);
+const struct dppd_endpoint *dppd_topology_find(const struct dppd_topology *topology, uint16_t ethdev_port_id);
 void dppd_topology_dump(const struct dppd_topology *topology);
 
 #endif
-

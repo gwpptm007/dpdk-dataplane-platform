@@ -26,21 +26,19 @@ int dppd_topology_discover(const struct dppd_config *cfg, struct dppd_topology *
         endpoint->kind = DPPD_ENDPOINT_ETHDEV;
         if (info.dev_flags != NULL && ((*info.dev_flags & RTE_ETH_DEV_REPRESENTOR) != 0))
             endpoint->kind = DPPD_ENDPOINT_REPRESENTOR;
-        endpoint->has_switch_domain =
-            info.switch_info.domain_id != RTE_ETH_DEV_SWITCH_DOMAIN_ID_INVALID;
+        endpoint->has_switch_domain = info.switch_info.domain_id != RTE_ETH_DEV_SWITCH_DOMAIN_ID_INVALID;
         endpoint->switch_domain_id = info.switch_info.domain_id;
         endpoint->switch_port_id = info.switch_info.port_id;
         snprintf(endpoint->switch_name, sizeof(endpoint->switch_name), "%s",
-                 info.switch_info.name != NULL ? info.switch_info.name : "-");
+            info.switch_info.name != NULL ? info.switch_info.name : "-");
         snprintf(endpoint->driver_name, sizeof(endpoint->driver_name), "%s",
-                 info.driver_name != NULL ? info.driver_name : "unknown");
+            info.driver_name != NULL ? info.driver_name : "unknown");
         topology->nb_endpoints++;
     }
     return 0;
 }
 
-const struct dppd_endpoint *dppd_topology_find(const struct dppd_topology *topology,
-                                               uint16_t ethdev_port_id)
+const struct dppd_endpoint *dppd_topology_find(const struct dppd_topology *topology, uint16_t ethdev_port_id)
 {
     uint16_t i;
 
@@ -59,17 +57,12 @@ void dppd_topology_dump(const struct dppd_topology *topology)
 
     for (i = 0; i < topology->nb_endpoints; ++i) {
         const struct dppd_endpoint *endpoint = &topology->endpoints[i];
-        printf("[dppd] endpoint port=%u kind=%s driver=%s switch-domain=%s",
-               endpoint->ethdev_port_id,
-               endpoint->kind == DPPD_ENDPOINT_REPRESENTOR ? "representor" : "ethdev",
-               endpoint->driver_name,
-               endpoint->has_switch_domain ? "yes" : "no");
+        printf("[dppd] endpoint port=%u kind=%s driver=%s switch-domain=%s", endpoint->ethdev_port_id,
+            endpoint->kind == DPPD_ENDPOINT_REPRESENTOR ? "representor" : "ethdev", endpoint->driver_name,
+            endpoint->has_switch_domain ? "yes" : "no");
         if (endpoint->has_switch_domain)
-            printf(" domain=%u switch-port=%u switch=%s",
-                   endpoint->switch_domain_id,
-                   endpoint->switch_port_id,
-                   endpoint->switch_name);
+            printf(" domain=%u switch-port=%u switch=%s", endpoint->switch_domain_id, endpoint->switch_port_id,
+                endpoint->switch_name);
         printf("\n");
     }
 }
-

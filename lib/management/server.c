@@ -13,14 +13,13 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-/* 单次主循环最多消费的连接数，防止管理流量饿死统计、信号等控制任务。 */
+/* 单次主循环最多消费的连接数，防止管理流量饿死统计、信号等控制任务 */
 #define DPPD_MANAGEMENT_POLL_BUDGET 16U
-/* accept 后等待首个完整请求的上限；客户端必须采用 connect 后立即 send 的模式。 */
+/* accept 后等待首个完整请求的上限；客户端必须采用 connect 后立即 send 的模式 */
 #define DPPD_MANAGEMENT_CLIENT_WAIT_MS 20
 
-/* 统一初始化响应头和全部 padding，避免把栈中的未初始化数据发送给客户端。 */
-static void response_header(const struct dppd_management_request *request,
-                            struct dppd_management_response *response)
+/* 统一初始化响应头和全部 padding，避免把栈中的未初始化数据发送给客户端 */
+static void response_header(const struct dppd_management_request *request, struct dppd_management_response *response)
 {
     memset(response, 0, sizeof(*response));
     response->version = DPPD_MANAGEMENT_VERSION;
@@ -30,13 +29,12 @@ static void response_header(const struct dppd_management_request *request,
 }
 
 /*
- * 把进程内 device/topology 两份状态合并为不含指针的协议快照。
+ * 把进程内 device/topology 两份状态合并为不含指针的协议快照
  * device 记录队列和 offload 能力，topology 记录 representor/switch-domain 语义；
- * 两者缺少任意一份都说明该 port 不属于当前 dppd 管理范围。
+ * 两者缺少任意一份都说明该 port 不属于当前 dppd 管理范围
  */
-static int build_port_info(const struct dppd_device_set *devices,
-                           uint16_t port_id,
-                           struct dppd_management_port_info *output)
+static int build_port_info(const struct dppd_device_set *devices, uint16_t port_id,
+    struct dppd_management_port_info *output)
 {
     const struct dppd_endpoint *endpoint;
     const struct dppd_port *port;
@@ -50,7 +48,7 @@ static int build_port_info(const struct dppd_device_set *devices,
 
     /*
      * response_header 已清零整个响应，此处仍只逐字段赋值，禁止 memcpy 内部结构：
-     * dppd_port 的布局含未来可变字段，不能成为管理协议 ABI。
+     * dppd_port 的布局含未来可变字段，不能成为管理协议 ABI
      */
     output->port_id = port->port_id;
     output->peer_port_id = port->peer_port_id;
@@ -72,17 +70,14 @@ static int build_port_info(const struct dppd_device_set *devices,
     output->configured_rss_hf = port->configured_rss_hf;
     output->configured_tx_offloads = port->configured_tx_offloads;
     output->link_state = (uint8_t)atomic_load_explicit(&port->link_state, memory_order_acquire);
-    memcpy(output->switch_name, endpoint->switch_name,
-           sizeof(output->switch_name));
-    memcpy(output->driver_name, endpoint->driver_name,
-           sizeof(output->driver_name));
+    memcpy(output->switch_name, endpoint->switch_name, sizeof(output->switch_name));
+    memcpy(output->driver_name, endpoint->driver_name, sizeof(output->driver_name));
     return 0;
 }
 
 /** 合并启动设备信息和内存校验记录，画像查询不会触发新的网卡访问或探测 */
-static int build_capability_profile(const struct dppd_control_service *control,
-    const struct dppd_device_set *devices, uint16_t port_id,
-    struct dppd_management_capability_profile *output)
+static int build_capability_profile(const struct dppd_control_service *control, const struct dppd_device_set *devices,
+    uint16_t port_id, struct dppd_management_capability_profile *output)
 {
     const struct dppd_port *port;
     int rc;
@@ -102,9 +97,8 @@ static int build_capability_profile(const struct dppd_control_service *control,
  * 因此恢复隔离期间仍可安全响应，部署脚本能区分主线程存活与转发服务已就绪
  * 链路和线程是独立原子采样，查询结果不承诺这些状态在未来持续不变
  */
-static void build_health(const struct dppd_control_service *control,
-                          const struct dppd_runtime *runtime,
-                          struct dppd_management_health *output)
+static void build_health(const struct dppd_control_service *control, const struct dppd_runtime *runtime,
+    struct dppd_management_health *output)
 {
     struct dppd_control_persistence_status persistence;
 
@@ -131,15 +125,13 @@ static void build_health(const struct dppd_control_service *control,
     if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire))
         output->blockers |= DPPD_HEALTH_STOP_REQUESTED;
     for (uint16_t i = 0; i < runtime->nb_workers; ++i) {
-        const unsigned int state = atomic_load_explicit(&runtime->workers[i].state,
-                                                         memory_order_acquire);
+        const unsigned int state = atomic_load_explicit(&runtime->workers[i].state, memory_order_acquire);
 
         output->workers_running += state == DPPD_WORKER_RUNNING;
         output->workers_failed += state == DPPD_WORKER_FAILED;
     }
     /** 检查实际队列数和启动状态，避免配置了两条队列却只有一条线程运行也报告就绪 */
-    if (!runtime->workers_started || output->workers_expected == 0 ||
-        runtime->nb_workers != output->workers_expected ||
+    if (!runtime->workers_started || output->workers_expected == 0 || runtime->nb_workers != output->workers_expected ||
         output->workers_running != output->workers_expected)
         output->blockers |= DPPD_HEALTH_WORKERS_NOT_RUNNING;
     if (output->workers_failed != 0)
@@ -147,8 +139,7 @@ static void build_health(const struct dppd_control_service *control,
 
     for (uint16_t i = 0; i < runtime->devices.nb_ports; ++i) {
         const struct dppd_port *port = &runtime->devices.ports[i];
-        const unsigned int link = atomic_load_explicit(&port->link_state,
-                                                        memory_order_acquire);
+        const unsigned int link = atomic_load_explicit(&port->link_state, memory_order_acquire);
 
         output->ports_started += port->configured && port->started;
         if (atomic_load_explicit(&port->removed, memory_order_acquire))
@@ -180,8 +171,7 @@ static void build_health(const struct dppd_control_service *control,
     output->ready = output->blockers == 0;
 }
 
-static void build_rule_summary(const struct dppd_rule *rule,
-                               struct dppd_management_rule_summary *summary)
+static void build_rule_summary(const struct dppd_rule *rule, struct dppd_management_rule_summary *summary)
 {
     uint16_t i;
 
@@ -196,7 +186,7 @@ static void build_rule_summary(const struct dppd_rule *rule,
     summary->install_port_id = rule->install_port_id;
     /*
      * mask 仅表达“包含哪些类型”，不表达顺序和具体参数；完整 canonical rule
-     * 仍必须通过 get 读取。enum 范围已由 repository apply 前的 rule 校验保证。
+     * 仍必须通过 get 读取。enum 范围已由 repository apply 前的 rule 校验保证
      */
     for (i = 0; i < rule->nb_matches; ++i)
         summary->match_mask |= 1U << rule->matches[i].type;
@@ -204,11 +194,9 @@ static void build_rule_summary(const struct dppd_rule *rule,
         summary->action_mask |= 1U << rule->actions[i].type;
 }
 
-int dppd_management_handle(struct dppd_control_service *control,
-                           const struct dppd_device_set *devices,
-                           const struct dppd_runtime *runtime,
-                           const struct dppd_management_request *request,
-                           struct dppd_management_response *response)
+int dppd_management_handle(struct dppd_control_service *control, const struct dppd_device_set *devices,
+    const struct dppd_runtime *runtime, const struct dppd_management_request *request,
+    struct dppd_management_response *response)
 {
     int rc;
 
@@ -216,11 +204,10 @@ int dppd_management_handle(struct dppd_control_service *control,
         return -EINVAL;
     response_header(request, response);
     /*
-     * size 必须精确匹配而不是仅检查“至少多大”。当前 payload 是本地 C ABI，
-     * 接受更大或更小的结构都会让 union 字段偏移与 daemon 的解释不一致。
+     * size 必须精确匹配而不是仅检查“至少多大”。当前 payload 是本地 C ABI
+     * 接受更大或更小的结构都会让 union 字段偏移与 daemon 的解释不一致
      */
-    if (request->version != DPPD_MANAGEMENT_VERSION ||
-        request->size != sizeof(*request)) {
+    if (request->version != DPPD_MANAGEMENT_VERSION || request->size != sizeof(*request)) {
         response->status = -EPROTO;
         return 0;
     }
@@ -229,12 +216,9 @@ int dppd_management_handle(struct dppd_control_service *control,
      * 只允许恢复状态、重试、只读健康、能力画像和失败/耗时历史，防止空账本被误认为可以正常运行
      */
     if (control->recovery_state != DPPD_CONTROL_RECOVERY_READY &&
-        request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS &&
-        request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY &&
-        request->operation != DPPD_MANAGEMENT_HEALTH_GET &&
-        request->operation != DPPD_MANAGEMENT_CAPABILITY_GET &&
-        request->operation != DPPD_MANAGEMENT_RULE_METRICS &&
-        request->operation != DPPD_MANAGEMENT_RULE_LATENCY &&
+        request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS && request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY &&
+        request->operation != DPPD_MANAGEMENT_HEALTH_GET && request->operation != DPPD_MANAGEMENT_CAPABILITY_GET &&
+        request->operation != DPPD_MANAGEMENT_RULE_METRICS && request->operation != DPPD_MANAGEMENT_RULE_LATENCY &&
         request->operation != DPPD_MANAGEMENT_RULE_HISTORY) {
         response->status = -EUCLEAN;
         return 0;
@@ -268,50 +252,41 @@ int dppd_management_handle(struct dppd_control_service *control,
             rc = -ENODEV;
         else
             rc = dppd_runtime_stats_query(runtime, request->payload.stats_query.port_id,
-                                          request->payload.stats_query.queue_id,
-                                          &response->payload.stats);
+                request->payload.stats_query.queue_id, &response->payload.stats);
         break;
     case DPPD_MANAGEMENT_PING:
-        /* ping 不触碰硬件，仅返回 desired state 的轻量健康信息。 */
-        response->payload.pong.repository_generation =
-            dppd_rule_repository_generation(&control->rules);
-        response->payload.pong.rule_count =
-            dppd_rule_repository_count(&control->rules);
+        /* ping 不触碰硬件，仅返回 desired state 的轻量健康信息 */
+        response->payload.pong.repository_generation = dppd_rule_repository_generation(&control->rules);
+        response->payload.pong.rule_count = dppd_rule_repository_count(&control->rules);
         rc = 0;
         break;
     case DPPD_MANAGEMENT_RULE_APPLY:
         /*
          * apply 的原子边界由 control service 保证：硬件事务成功后才发布
-         * repository generation，失败时 response.status 直接携带底层 -errno。
+         * repository generation，失败时 response.status 直接携带底层 -errno
          */
-        rc = dppd_control_apply(control,
-                                request->payload.apply.install_port_id,
-                                &request->payload.apply.rule,
-                                request->payload.apply.expected_generation,
-                                &response->payload.apply);
+        rc = dppd_control_apply(control, request->payload.apply.install_port_id, &request->payload.apply.rule,
+            request->payload.apply.expected_generation, &response->payload.apply);
         break;
     case DPPD_MANAGEMENT_RULE_CREATE_BATCH:
         /*
-         * 防止本地 ABI 数组越界；这里不逐条验证规则，也不尝试在协议层拼装部分结果。
+         * 防止本地 ABI 数组越界；这里不逐条验证规则，也不尝试在协议层拼装部分结果
          * 规则语义、预检和 actual/desired 的原子边界都属于 control 层，任何错误统一
-         * 写入 response.status，客户端以整个请求为失败处理。
+         * 写入 response.status，客户端以整个请求为失败处理
          */
         if (request->payload.create_batch.count == 0 ||
-            request->payload.create_batch.count >
-                DPPD_MANAGEMENT_BATCH_CREATE_MAX) {
+            request->payload.create_batch.count > DPPD_MANAGEMENT_BATCH_CREATE_MAX) {
             rc = -EINVAL;
             break;
         }
         /*
          * 预先回显 count 只定义成功响应的数组长度；若 control 返回错误，客户端必须先
          * 检查 status，不能据此读取任何单项结果。这样未来扩展 per-item 诊断也不会
-         * 改变“批量请求只有一个提交结论”的语义。
+         * 改变“批量请求只有一个提交结论”的语义
          */
         response->payload.create_batch.count = request->payload.create_batch.count;
-        rc = dppd_control_create_batch(
-            control, request->payload.create_batch.rules,
-            request->payload.create_batch.count,
-            response->payload.create_batch.rules);
+        rc = dppd_control_create_batch(control, request->payload.create_batch.rules,
+            request->payload.create_batch.count, response->payload.create_batch.rules);
         break;
     case DPPD_MANAGEMENT_RULE_UPDATE_BATCH: {
         /**
@@ -323,15 +298,12 @@ int dppd_management_handle(struct dppd_control_service *control,
 
         if (request->payload.update_batch.count < 2 ||
             request->payload.update_batch.count > DPPD_MANAGEMENT_BATCH_UPDATE_MAX ||
-            memcmp(request->payload.update_batch.reserved, zero_reserved,
-                   sizeof(zero_reserved)) != 0) {
+            memcmp(request->payload.update_batch.reserved, zero_reserved, sizeof(zero_reserved)) != 0) {
             rc = -EINVAL;
             break;
         }
-        rc = dppd_control_update_batch(
-            control, request->payload.update_batch.rules,
-            request->payload.update_batch.count,
-            response->payload.update_batch.rules);
+        rc = dppd_control_update_batch(control, request->payload.update_batch.rules,
+            request->payload.update_batch.count, response->payload.update_batch.rules);
         /**
          * 只在整批成功时返回结果数量，失败时清空整个结果区域
          * 防止客户端把失败过程中留下的某个 generation 误认为已经成功的单条回执
@@ -340,48 +312,39 @@ int dppd_management_handle(struct dppd_control_service *control,
         if (rc == 0)
             response->payload.update_batch.count = request->payload.update_batch.count;
         else
-            memset(&response->payload.update_batch, 0,
-                   sizeof(response->payload.update_batch));
+            memset(&response->payload.update_batch, 0, sizeof(response->payload.update_batch));
         break;
     }
     case DPPD_MANAGEMENT_RULE_GET:
-        /* get 只读取 desired repository，不通过 rte_flow 反查硬件对象。 */
-        rc = dppd_rule_repository_get(&control->rules,
-                                      request->payload.get.rule_id,
-                                      &response->payload.rule);
+        /* get 只读取 desired repository，不通过 rte_flow 反查硬件对象 */
+        rc = dppd_rule_repository_get(&control->rules, request->payload.get.rule_id, &response->payload.rule);
         break;
     case DPPD_MANAGEMENT_RULE_DELETE:
-        /* 删除同样携带 expected_generation，避免旧客户端误删已更新规则。 */
-        rc = dppd_control_remove(control,
-                                 request->payload.delete_rule.rule_id,
-                                 request->payload.delete_rule.expected_generation,
-                                 &response->payload.delete_rule.removed,
-                                 &response->payload.delete_rule.generation);
+        /* 删除同样携带 expected_generation，避免旧客户端误删已更新规则 */
+        rc = dppd_control_remove(control, request->payload.delete_rule.rule_id,
+            request->payload.delete_rule.expected_generation, &response->payload.delete_rule.removed,
+            &response->payload.delete_rule.generation);
         break;
     case DPPD_MANAGEMENT_RULE_DELETE_BATCH:
         /*
          * 与 create_batch 一样，协议层只防御固定数组边界。控制层负责精确 generation
-         * 预检、actual 删除补偿与 recovery 隔离；不能在此把单条 delete 循环成伪批量。
+         * 预检、actual 删除补偿与 recovery 隔离；不能在此把单条 delete 循环成伪批量
          */
         if (request->payload.delete_batch.count < 2 ||
-            request->payload.delete_batch.count >
-                DPPD_MANAGEMENT_BATCH_REMOVE_MAX) {
+            request->payload.delete_batch.count > DPPD_MANAGEMENT_BATCH_REMOVE_MAX) {
             rc = -EINVAL;
             break;
         }
         response->payload.delete_batch.count = request->payload.delete_batch.count;
-        rc = dppd_control_remove_batch(
-            control, request->payload.delete_batch.rules,
-            request->payload.delete_batch.count,
-            response->payload.delete_batch.rules);
+        rc = dppd_control_remove_batch(control, request->payload.delete_batch.rules,
+            request->payload.delete_batch.count, response->payload.delete_batch.rules);
         break;
     case DPPD_MANAGEMENT_PORT_GET:
         /*
          * 这是启动时能力快照，不在每次查询时调用 PMD；既避免主循环中的设备探测
-         * 开销，也保证客户端看到的是 dppd 实际完成配置后的稳定状态。
+         * 开销，也保证客户端看到的是 dppd 实际完成配置后的稳定状态
          */
-        rc = build_port_info(devices, request->payload.port_get.port_id,
-                             &response->payload.port);
+        rc = build_port_info(devices, request->payload.port_get.port_id, &response->payload.port);
         break;
     case DPPD_MANAGEMENT_CAPABILITY_GET:
     case DPPD_MANAGEMENT_CAPABILITY_CLEAR: {
@@ -392,20 +355,19 @@ int dppd_management_handle(struct dppd_control_service *control,
             break;
         }
         rc = build_capability_profile(control, devices, request->payload.capability.port_id,
-                                       &response->payload.capability);
+            &response->payload.capability);
         if (rc == 0 && request->operation == DPPD_MANAGEMENT_CAPABILITY_CLEAR) {
-            rc = dppd_flow_probe_cache_clear(control->rte_flow.probes,
-                                             request->payload.capability.port_id);
+            rc = dppd_flow_probe_cache_clear(control->rte_flow.probes, request->payload.capability.port_id);
             if (rc == 0)
                 rc = build_capability_profile(control, devices, request->payload.capability.port_id,
-                                               &response->payload.capability);
+                    &response->payload.capability);
         }
         break;
     }
     case DPPD_MANAGEMENT_CAPABILITY_PROBE: {
         const uint8_t empty[5] = {0};
-        const struct dppd_port *port = devices == NULL ? NULL :
-            dppd_devices_find(devices, request->payload.probe.install_port_id);
+        const struct dppd_port *port =
+            devices == NULL ? NULL : dppd_devices_find(devices, request->payload.probe.install_port_id);
 
         if (memcmp(request->payload.probe.reserved, empty, sizeof(empty)) != 0)
             rc = -EINVAL;
@@ -413,29 +375,25 @@ int dppd_management_handle(struct dppd_control_service *control,
             rc = -ENOENT;
         /** 已知停止或移除的设备不得再发起驱动探测，画像查询仍只读缓存 */
         else if (!port->started || dppd_devices_removal_requested(devices) ||
-                 atomic_load_explicit(&port->removed, memory_order_acquire))
+            atomic_load_explicit(&port->removed, memory_order_acquire))
             rc = -ENODEV;
         else
-            rc = dppd_control_probe_rule(control, request->payload.probe.install_port_id,
-                &request->payload.probe.rule, request->payload.probe.refresh, &response->payload.probe);
+            rc = dppd_control_probe_rule(control, request->payload.probe.install_port_id, &request->payload.probe.rule,
+                request->payload.probe.refresh, &response->payload.probe);
         break;
     }
     case DPPD_MANAGEMENT_RULE_STATUS:
         /** 只复制控制面安装记录，隔离检查沿用普通规则查询的入口限制 */
-        rc = dppd_control_rule_status(
-            control, request->payload.rule_status.rule_id,
-            request->payload.rule_status.expected_generation,
-            &response->payload.rule_status);
+        rc = dppd_control_rule_status(control, request->payload.rule_status.rule_id,
+            request->payload.rule_status.expected_generation, &response->payload.rule_status);
         break;
     case DPPD_MANAGEMENT_RULE_COUNT_QUERY:
         /*
-         * COUNT 查询不改变 repository generation，也不重置 PMD counter。
-         * hits/bytes 是否可用最终由目标 PMD 的 rte_flow_query() 决定。
+         * COUNT 查询不改变 repository generation，也不重置 PMD counter
+         * hits/bytes 是否可用最终由目标 PMD 的 rte_flow_query() 决定
          */
-        rc = dppd_control_query_count(
-            control, request->payload.count_query.rule_id,
-            request->payload.count_query.expected_generation,
-            &response->payload.count);
+        rc = dppd_control_query_count(control, request->payload.count_query.rule_id,
+            request->payload.count_query.expected_generation, &response->payload.count);
         break;
     case DPPD_MANAGEMENT_RULE_LIST: {
         struct dppd_rule rules[DPPD_MANAGEMENT_RULE_PAGE_SIZE];
@@ -444,11 +402,9 @@ int dppd_management_handle(struct dppd_control_service *control,
         bool has_more = false;
         uint32_t i;
 
-        rc = dppd_rule_repository_list(
-            &control->rules, request->payload.list.after_rule_id,
-            request->payload.list.expected_repository_generation, rules,
-            DPPD_MANAGEMENT_RULE_PAGE_SIZE, &count, &has_more,
-            &page->repository_generation);
+        rc = dppd_rule_repository_list(&control->rules, request->payload.list.after_rule_id,
+            request->payload.list.expected_repository_generation, rules, DPPD_MANAGEMENT_RULE_PAGE_SIZE, &count,
+            &has_more, &page->repository_generation);
         if (rc != 0)
             break;
         page->total_count = dppd_rule_repository_count(&control->rules);
@@ -463,32 +419,30 @@ int dppd_management_handle(struct dppd_control_service *control,
     }
     case DPPD_MANAGEMENT_PERSISTENCE_STATUS:
         /*
-         * 状态查询只读取 control service 中已经发布的字段，不触发磁盘 I/O。
-         * last_error 保留最近一次落盘失败的负 errno，便于 CLI 给出直接故障原因。
+         * 状态查询只读取 control service 中已经发布的字段，不触发磁盘 I/O
+         * last_error 保留最近一次落盘失败的负 errno，便于 CLI 给出直接故障原因
          */
-        dppd_control_persistence_status(control,
-                                        &response->payload.persistence);
+        dppd_control_persistence_status(control, &response->payload.persistence);
         rc = 0;
         break;
     case DPPD_MANAGEMENT_PERSISTENCE_FLUSH:
         /*
-         * flush 不修改硬件或 repository，只把当前完整 desired state 重新落盘。
-         * 无论成功与否都填充状态 payload；成功响应可直接展示最新 generation，
-         * 失败时 response.status 仍保留底层存储的负 errno。
+         * flush 不修改硬件或 repository，只把当前完整 desired state 重新落盘
+         * 无论成功与否都填充状态 payload；成功响应可直接展示最新 generation
+         * 失败时 response.status 仍保留底层存储的负 errno
          */
         rc = dppd_control_persistence_flush(control);
-        dppd_control_persistence_status(control,
-                                        &response->payload.persistence);
+        dppd_control_persistence_status(control, &response->payload.persistence);
         break;
     case DPPD_MANAGEMENT_RECOVERY_STATUS:
-        /* 只读快照，不触碰任何 backend 对象，隔离模式和正常模式均可查询。 */
+        /* 只读快照，不触碰任何 backend 对象，隔离模式和正常模式均可查询 */
         dppd_control_recovery_status(control, &response->payload.recovery);
         rc = 0;
         break;
     case DPPD_MANAGEMENT_RECOVERY_RETRY:
         /*
-         * retry 只尝试删除本进程仍持有 handle 的遗留对象；成功后由主循环退出，
-         * 后续重启重新执行完整 snapshot 恢复，而不在此处发布空 repository。
+         * retry 只尝试删除本进程仍持有 handle 的遗留对象；成功后由主循环退出
+         * 后续重启重新执行完整 snapshot 恢复，而不在此处发布空 repository
          */
         rc = dppd_control_reconciliation_retry(control);
         dppd_control_recovery_status(control, &response->payload.recovery);
@@ -497,35 +451,31 @@ int dppd_management_handle(struct dppd_control_service *control,
         rc = -ENOTSUP;
         break;
     }
-    /* transport 已经成功解析请求，因此业务错误放入响应而不作为本函数返回值。 */
+    /* transport 已经成功解析请求，因此业务错误放入响应而不作为本函数返回值 */
     response->status = rc;
     return 0;
 }
 
-int dppd_management_start(struct dppd_management_server *server,
-                          struct dppd_control_service *control,
-                          const struct dppd_device_set *devices,
-                          const struct dppd_runtime *runtime,
-                          const char *socket_path)
+int dppd_management_start(struct dppd_management_server *server, struct dppd_control_service *control,
+    const struct dppd_device_set *devices, const struct dppd_runtime *runtime, const char *socket_path)
 {
     struct sockaddr_un address;
     size_t path_length;
     int fd;
 
-    if (server == NULL || control == NULL || devices == NULL ||
-        socket_path == NULL)
+    if (server == NULL || control == NULL || devices == NULL || socket_path == NULL)
         return -EINVAL;
     path_length = strlen(socket_path);
     if (path_length == 0 || path_length > DPPD_MANAGEMENT_SOCKET_PATH_MAX)
         return -ENAMETOOLONG;
-    /* 先建立明确的未启动状态，保证后续任一步失败都不会留下可误关闭的 fd。 */
+    /* 先建立明确的未启动状态，保证后续任一步失败都不会留下可误关闭的 fd */
     memset(server, 0, sizeof(*server));
     server->socket_fd = -1;
     server->runtime = runtime;
 
     /*
      * SOCK_SEQPACKET 让一次 send 对应一次 recv，避免自行设计流式 framing；
-     * NONBLOCK 防止管理客户端卡住主循环；CLOEXEC 防止未来启动子进程时泄漏 fd。
+     * NONBLOCK 防止管理客户端卡住主循环；CLOEXEC 防止未来启动子进程时泄漏 fd
      */
     fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0)
@@ -534,22 +484,22 @@ int dppd_management_start(struct dppd_management_server *server,
     address.sun_family = AF_UNIX;
     memcpy(address.sun_path, socket_path, path_length + 1U);
     /*
-     * 不在 bind 前无条件 unlink：配置错误或另一个存活 daemon 使用同一路径时，
-     * 擅自删除会绕过单实例保护。异常退出留下的路径需由部署层确认后清理。
+     * 不在 bind 前无条件 unlink：配置错误或另一个存活 daemon 使用同一路径时
+     * 擅自删除会绕过单实例保护。异常退出留下的路径需由部署层确认后清理
      */
     if (bind(fd, (const struct sockaddr *)&address, sizeof(address)) != 0) {
         const int error = -errno;
         close(fd);
         return error;
     }
-    /* socket 默认仅允许启动 dppd 的用户访问，避免未授权规则变更。 */
+    /* socket 默认仅允许启动 dppd 的用户访问，避免未授权规则变更 */
     if (chmod(socket_path, S_IRUSR | S_IWUSR) != 0 || listen(fd, 16) != 0) {
         const int error = -errno;
         close(fd);
         unlink(socket_path);
         return error;
     }
-    /* 只有 bind/chmod/listen 全部成功后才发布 started 状态。 */
+    /* 只有 bind/chmod/listen 全部成功后才发布 started 状态 */
     server->socket_fd = fd;
     server->control = control;
     server->devices = devices;
@@ -566,7 +516,7 @@ int dppd_management_poll(struct dppd_management_server *server)
     if (server == NULL || !server->started)
         return -EINVAL;
 
-    /* 每轮设置预算，避免持续连接让统计、信号和退出处理长期得不到调度。 */
+    /* 每轮设置预算，避免持续连接让统计、信号和退出处理长期得不到调度 */
     while (handled < DPPD_MANAGEMENT_POLL_BUDGET) {
         struct dppd_management_request request;
         struct dppd_management_response response;
@@ -575,9 +525,8 @@ int dppd_management_poll(struct dppd_management_server *server)
         int client;
         int poll_rc;
 
-        /* 客户端 fd 同样保持非阻塞并禁止跨 exec 继承。 */
-        client = accept4(server->socket_fd, NULL, NULL,
-                         SOCK_NONBLOCK | SOCK_CLOEXEC);
+        /* 客户端 fd 同样保持非阻塞并禁止跨 exec 继承 */
+        client = accept4(server->socket_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 return 0;
@@ -589,7 +538,7 @@ int dppd_management_poll(struct dppd_management_server *server)
 
         /*
          * 监听 socket 可读只表示连接已排队，不保证请求数据已经到达。这里最多等待
-         * 20ms，既消除 connect/send 竞态，也避免异常客户端卡住 daemon 主循环。
+         * 20ms，既消除 connect/send 竞态，也避免异常客户端卡住 daemon 主循环
          */
         ready.fd = client;
         ready.events = POLLIN;
@@ -604,17 +553,14 @@ int dppd_management_poll(struct dppd_management_server *server)
             continue;
         }
 
-        /*
-         * 每个连接只收一个固定大小请求。SEQPACKET 消息过短表示客户端结构不兼容；
-         * 消息过长时 recv 返回缓冲区大小并截断，因此 version/size 校验仍会拒绝它。
+        /**
+         * 每个连接只收一个固定大小请求，长度不同就拒绝，不尝试解释不完整的结构体
+         * MSG_TRUNC 会返回消息原始长度，因此过长请求也不会被误当成大小正确的请求
          */
         memset(&request, 0, sizeof(request));
-        /* MSG_TRUNC 让过长数据包返回原始长度，从而不会把被截断前缀误当成合法请求。 */
         received = recv(client, &request, sizeof(request), MSG_TRUNC);
         if (received == (ssize_t)sizeof(request)) {
-            (void)dppd_management_handle(server->control, server->devices,
-                                         server->runtime,
-                                         &request, &response);
+            (void)dppd_management_handle(server->control, server->devices, server->runtime, &request, &response);
         } else {
             memset(&response, 0, sizeof(response));
             response.version = DPPD_MANAGEMENT_VERSION;
@@ -623,10 +569,9 @@ int dppd_management_poll(struct dppd_management_server *server)
         }
         /*
          * 客户端提前退出属于连接级事件，不应终止 daemon；MSG_NOSIGNAL 避免
-         * 对已关闭 peer 发送时触发 SIGPIPE。响应很小，SEQPACKET 要么整包发送要么失败。
+         * 对已关闭 peer 发送时触发 SIGPIPE。响应很小，SEQPACKET 要么整包发送要么失败
          */
-        if (send(client, &response, sizeof(response), MSG_NOSIGNAL) < 0 &&
-            errno != EPIPE && errno != ECONNRESET) {
+        if (send(client, &response, sizeof(response), MSG_NOSIGNAL) < 0 && errno != EPIPE && errno != ECONNRESET) {
             const int error = -errno;
             close(client);
             return error;
@@ -648,8 +593,8 @@ void dppd_management_stop(struct dppd_management_server *server)
     if (server == NULL || !server->started)
         return;
     /*
-     * 先关闭监听 fd，再删除路径，新的客户端不会在退出窗口建立有效连接。
-     * started 检查使该函数可安全用于正常退出和多层 goto 清理路径。
+     * 先关闭监听 fd，再删除路径，新的客户端不会在退出窗口建立有效连接
+     * started 检查使该函数可安全用于正常退出和多层 goto 清理路径
      */
     close(server->socket_fd);
     unlink(server->socket_path);

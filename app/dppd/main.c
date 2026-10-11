@@ -43,8 +43,8 @@ static int observe_recovery_port(struct recovery_context *context, struct dppd_r
 }
 
 /** 不能只凭可重用的端口号记录身份，无法取得设备名称时拒绝这次硬件安装 */
-static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_rule *rule,
-    uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
+static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_rule *rule, uint64_t *attempt,
+    uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
 {
     struct recovery_context *recovery = context;
     const struct dppd_port *port = dppd_devices_find(recovery->devices, port_id);
@@ -79,13 +79,14 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
         rc = dppd_recovery_guard_prepare_identity(recovery->guard, port_id, port->identity.device_name,
             endpoint->driver_name, rule->id, rule->generation, &identity);
     } else
-        rc = dppd_recovery_guard_prepare(recovery->guard, port_id, port->identity.device_name,
-            endpoint->driver_name, rule->id, rule->generation);
+        rc = dppd_recovery_guard_prepare(recovery->guard, port_id, port->identity.device_name, endpoint->driver_name,
+            rule->id, rule->generation);
     if (rc != 0)
         return rc;
-    rc = recovery->native_owner ? dppd_recovery_guard_begin_owned(recovery->guard, port_id,
-        rule->id, rule->generation, attempt, cookie, &recovery->pending_content) :
-        dppd_recovery_guard_begin(recovery->guard, port_id, rule->id, rule->generation, attempt);
+    rc = recovery->native_owner
+        ? dppd_recovery_guard_begin_owned(recovery->guard, port_id, rule->id, rule->generation, attempt, cookie,
+              &recovery->pending_content)
+        : dppd_recovery_guard_begin(recovery->guard, port_id, rule->id, rule->generation, attempt);
     if (rc != 0)
         return rc;
     recovery->pending_port = port_id;
@@ -112,8 +113,8 @@ static int finish_recovery_create(void *context, uint64_t attempt, int create_er
     struct dppd_recovery_inspection after = {0};
     struct dppd_recovery_filter candidate;
     enum dppd_recovery_evidence evidence = DPPD_EVIDENCE_UNAVAILABLE;
-    int after_error = recovery->native_owner || recovery->before_error == 0 ?
-        observe_recovery_port(recovery, &after) : recovery->before_error;
+    int after_error = recovery->native_owner || recovery->before_error == 0 ? observe_recovery_port(recovery, &after)
+                                                                            : recovery->before_error;
     int observed = recovery->before_error != 0 ? recovery->before_error : after_error;
     if (observed == 0)
         evidence = dppd_recovery_compare(&recovery->before, &after, &candidate);
@@ -126,8 +127,7 @@ static int finish_recovery_create(void *context, uint64_t attempt, int create_er
      * 原始创建结果已经保存，返回错误会触发事务使用真实 handle 回滚
      */
     if (rc == 0 && create_error == 0 && recovery->native_owner) {
-        int matches = after_error != 0 ? after_error :
-            dppd_recovery_cookie_matches(&after, recovery->pending_cookie);
+        int matches = after_error != 0 ? after_error : dppd_recovery_cookie_matches(&after, recovery->pending_cookie);
         if (matches != 1) {
             fprintf(stderr, "[dppd] TAP owner readback not unique: %d; rolling back\n", matches);
             return matches < 0 ? matches : -EUCLEAN;
@@ -159,7 +159,7 @@ static void finish_recovery_remove(void *context, uint64_t attempt, int remove_e
 
 static void handle_signal(int signal_number)
 {
-    /* 信号处理器只写 sig_atomic_t，实际资源回收全部回到主线程执行。 */
+    /* 信号处理器只写 sig_atomic_t，实际资源回收全部回到主线程执行 */
     (void)signal_number;
     stop_signal = 1;
 }
@@ -171,7 +171,7 @@ static void sleep_control_loop(void)
         .tv_nsec = 100000000L,
     };
 
-    /* 被非退出信号打断时睡完剩余时间；退出信号到达后立即返回主循环。 */
+    /* 被非退出信号打断时睡完剩余时间；退出信号到达后立即返回主循环 */
     while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR && !stop_signal)
         ;
 }
@@ -193,7 +193,7 @@ int main(int argc, char **argv)
     int rc = EXIT_FAILURE;
     bool recovery_isolation = false;
 
-    /* EAL 必须先消费 -l/-a/--vdev 等参数，后续只解析 -- 后的应用参数。 */
+    /* EAL 必须先消费 -l/-a/--vdev 等参数，后续只解析 -- 后的应用参数 */
     eal_consumed = rte_eal_init(argc, argv);
     if (eal_consumed < 0) {
         fprintf(stderr, "[dppd] EAL initialization failed\n");
@@ -226,7 +226,8 @@ int main(int argc, char **argv)
             goto cleanup_eal;
         }
         if (recovery_guard.record.count != 0) {
-            fprintf(stderr, "[dppd] prior hardware activity requires external reconciliation: "
+            fprintf(stderr,
+                "[dppd] prior hardware activity requires external reconciliation: "
                 "revision=%" PRIu64 " ports=%u; inspect with dppd-recovery show PATH\n",
                 recovery_guard.record.revision, recovery_guard.record.count);
             goto cleanup_eal;
@@ -234,19 +235,18 @@ int main(int argc, char **argv)
     }
     /*
      * 初始化依赖顺序：先发现并启动 ethdev，得到拓扑；control 引用该拓扑；
-     * management 再引用 control。goto 清理标签严格按相反顺序释放。
+     * management 再引用 control。goto 清理标签严格按相反顺序释放
      */
     if (dppd_runtime_init(&runtime, &config) != 0)
         goto cleanup_eal;
-    if (dppd_control_init(&control, &runtime.devices.topology,
-                          config.rule_capacity, NULL) != 0) {
+    if (dppd_control_init(&control, &runtime.devices.topology, config.rule_capacity, NULL) != 0) {
         fprintf(stderr, "[dppd] control service initialization failed\n");
         goto cleanup_runtime;
     }
     /*
      * worker 只借用 control 持有的 backend；退出时 main 的清理顺序会先停止并 wait 所有
      * worker（使其注销 QSBR reader），再调用 control_fini 释放 snapshot/QSBR。这里不能
-     * 绑定临时对象，也不能在 runtime_start 后替换该地址。
+     * 绑定临时对象，也不能在 runtime_start 后替换该地址
      */
     dppd_runtime_set_software_backend(&runtime, &control.software);
     /** 启动重放也会安装硬件规则，所以必须在读取并重放快照之前绑定保护 */
@@ -258,43 +258,30 @@ int main(int argc, char **argv)
         control.rte_flow.after_remove = finish_recovery_remove;
     }
     if (config.state_path[0] != '\0') {
-        int restore_rc = dppd_control_persistence_restore(&control,
-                                                          config.state_path);
+        int restore_rc = dppd_control_persistence_restore(&control, config.state_path);
 
         if (restore_rc != 0) {
-            if (restore_rc != -EUCLEAN ||
-                control.recovery_state !=
-                    DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED) {
-                fprintf(stderr,
-                        "[dppd] rule snapshot restore failed: path=%s error=%s (%d)\n",
-                        config.state_path,
-                        restore_rc < 0 && restore_rc >= -4095 ?
-                            strerror(-restore_rc) : "unknown",
-                        restore_rc);
+            if (restore_rc != -EUCLEAN || control.recovery_state != DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED) {
+                fprintf(stderr, "[dppd] rule snapshot restore failed: path=%s error=%s (%d)\n", config.state_path,
+                    restore_rc < 0 && restore_rc >= -4095 ? strerror(-restore_rc) : "unknown", restore_rc);
                 goto cleanup_control;
             }
             /*
              * transaction 回滚未完成：绝不能启动 worker 或开放普通规则接口，但保留
-             * 当前进程的 backend handle，供受限的 reconcile-retry 再次删除。
+             * 当前进程的 backend handle，供受限的 reconcile-retry 再次删除
              */
             recovery_isolation = true;
             fprintf(stderr,
-                    "[dppd] snapshot rollback incomplete; entering recovery isolation "
-                    "for path=%s\n",
-                    config.state_path);
+                "[dppd] snapshot rollback incomplete; entering recovery isolation "
+                "for path=%s\n",
+                config.state_path);
         }
         if (!recovery_isolation)
-            printf("[dppd] rule snapshot ready: path=%s generation=%" PRIu64
-                   " rules=%u\n",
-                   config.state_path,
-                   dppd_rule_repository_generation(&control.rules),
-                   dppd_rule_repository_count(&control.rules));
+            printf("[dppd] rule snapshot ready: path=%s generation=%" PRIu64 " rules=%u\n", config.state_path,
+                dppd_rule_repository_generation(&control.rules), dppd_rule_repository_count(&control.rules));
     }
-    if (dppd_management_start(&management, &control, &runtime.devices,
-                               &runtime,
-                              config.control_socket) != 0) {
-        fprintf(stderr, "[dppd] management socket initialization failed: %s\n",
-                config.control_socket);
+    if (dppd_management_start(&management, &control, &runtime.devices, &runtime, config.control_socket) != 0) {
+        fprintf(stderr, "[dppd] management socket initialization failed: %s\n", config.control_socket);
         goto cleanup_control;
     }
     signal(SIGINT, handle_signal);
@@ -318,17 +305,13 @@ int main(int argc, char **argv)
             }
             loop_error = dppd_management_poll(&management);
             if (loop_error != 0) {
-                fprintf(stderr,
-                        "[dppd] recovery management processing failed: %d\n",
-                        loop_error);
+                fprintf(stderr, "[dppd] recovery management processing failed: %d\n", loop_error);
                 break;
             }
             if (dppd_telemetry_publish_rules(&control) != 0)
                 fprintf(stderr, "[dppd] rule telemetry snapshot unavailable\n");
-            if (control.recovery_state ==
-                DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {
-                fprintf(stderr,
-                        "[dppd] residual flows cleared; exiting for clean snapshot replay\n");
+            if (control.recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {
+                fprintf(stderr, "[dppd] residual flows cleared; exiting for clean snapshot replay\n");
                 loop_error = -EUCLEAN;
                 break;
             }
@@ -340,7 +323,7 @@ int main(int argc, char **argv)
     if (dppd_runtime_start(&runtime) != 0)
         goto cleanup_telemetry;
 
-    /* 使用 DPDK 单调 timer cycle，避免系统时间调整影响 duration 与统计周期。 */
+    /* 使用 DPDK 单调 timer cycle，避免系统时间调整影响 duration 与统计周期 */
     timer_hz = rte_get_timer_hz();
     started_at = rte_get_timer_cycles();
     next_stats = started_at + (timer_hz * config.stats_period_ms) / 1000U;
@@ -351,8 +334,7 @@ int main(int argc, char **argv)
          * 进入恢复隔离后，不再按普通运行时长退出，也不继续周期性输出转发统计
          * 这样用户仍有机会查看残留对象并发起清理，避免定时退出丢失本进程的 handle
          */
-        if (!recovery_isolation && config.duration_s != 0 &&
-            now - started_at >= timer_hz * config.duration_s)
+        if (!recovery_isolation && config.duration_s != 0 && now - started_at >= timer_hz * config.duration_s)
             break;
         loop_error = dppd_devices_poll_links(&runtime.devices);
         if (loop_error != 0) {
@@ -374,12 +356,11 @@ int main(int argc, char **argv)
         }
         /*
          * 管理请求只在主线程串行执行，repository 与硬件事务无需额外加锁；
-         * poll 内部有连接预算，保证本循环仍能周期性观察 stop_signal。
+         * poll 内部有连接预算，保证本循环仍能周期性观察 stop_signal
          */
         loop_error = dppd_management_poll(&management);
         if (loop_error != 0) {
-            fprintf(stderr, "[dppd] management request processing failed: %d\n",
-                    loop_error);
+            fprintf(stderr, "[dppd] management request processing failed: %d\n", loop_error);
             break;
         }
         /** 整轮请求处理完再发布，不让独立查询线程看到整批更新的中间账本 */
@@ -412,7 +393,7 @@ int main(int argc, char **argv)
         sleep_control_loop();
     }
 
-    /* 主循环结束后立即封住入口，防止客户端在 worker 停止窗口继续排队。 */
+    /* 主循环结束后立即封住入口，防止客户端在 worker 停止窗口继续排队 */
     dppd_management_stop(&management);
     dppd_runtime_request_stop(&runtime);
     if (dppd_runtime_wait(&runtime) != 0)
@@ -423,24 +404,22 @@ int main(int argc, char **argv)
         rc = EXIT_SUCCESS;
 
 cleanup_telemetry:
-    /* 标签按“只清理已成功初始化的层”组织，适用于启动失败和正常退出。 */
+    /* 标签按“只清理已成功初始化的层”组织，适用于启动失败和正常退出 */
     dppd_telemetry_unregister_runtime();
 cleanup_management:
-    /* 先关闭入口，再回收已安装 flow，避免退出阶段接收新事务。 */
+    /* 先关闭入口，再回收已安装 flow，避免退出阶段接收新事务 */
     dppd_management_stop(&management);
 cleanup_control:
     if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)
         rc = EXIT_FAILURE;
     /** backend 真正释放才证明已删除所有本进程 handle，失败时保留磁盘标记等待下次核对 */
-    if (recovery_guard.fd >= 0 && control.rte_flow.objects == NULL &&
-        dppd_recovery_guard_clean(&recovery_guard) != 0) {
+    if (recovery_guard.fd >= 0 && control.rte_flow.objects == NULL && dppd_recovery_guard_clean(&recovery_guard) != 0) {
         fprintf(stderr, "[dppd] recovery guard could not record completed cleanup\n");
         rc = EXIT_FAILURE;
     }
 cleanup_runtime:
     /** 清理失败或退出期间才收到移除通知，都必须保留失败退出码 */
-    if (dppd_runtime_destroy(&runtime) != 0 ||
-        dppd_devices_removal_requested(&runtime.devices))
+    if (dppd_runtime_destroy(&runtime) != 0 || dppd_devices_removal_requested(&runtime.devices))
         rc = EXIT_FAILURE;
 cleanup_eal:
     /** 启动被旧标记阻断时同样只解锁，绝不能自动清除上一进程的线索 */

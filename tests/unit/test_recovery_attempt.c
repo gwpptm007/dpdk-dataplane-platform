@@ -86,21 +86,25 @@ static void removed(void *context, uint64_t attempt, int error)
 
 static int validate(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
-    (void)port; (void)rule; (void)error;
+    (void)port;
+    (void)rule;
+    (void)error;
     return 0;
 }
 
 /** 驱动执行之前磁盘意图已经成功同步，即使随后报告创建错误也可以留下待清理 handle */
-static int create(uint16_t port, const struct dppd_rule *rule,
-    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+static int create(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     (void)error;
     assert(current_guard->record.attempt_count == 1);
     assert(current_guard->record.attempts[0].phase == DPPD_RECOVERY_INTENT);
     assert(!current_guard->faulted);
     creates++;
-    *handle = (struct dppd_flow_handle){.port_id = port, .rule_id = rule->id,
-        .rule_generation = rule->generation, .flow = (struct rte_flow *)(uintptr_t)1};
+    *handle = (struct dppd_flow_handle){.port_id = port,
+        .rule_id = rule->id,
+        .rule_generation = rule->generation,
+        .flow = (struct rte_flow *)(uintptr_t)1};
     return partial_failure ? -EFAULT : 0;
 }
 
@@ -163,10 +167,16 @@ static void backend_faults(const char *path, const char *state)
 static void lifecycle(const char *path, const char *state)
 {
     struct dppd_recovery_guard guard;
-    struct dppd_recovery_identity identity = {.ifindex = 10, .ifname = "test-tap",
-        .boot_id = "01234567-89ab-cdef-0123-456789abcdef", .netns_device = 4, .netns_inode = 100};
-    struct dppd_recovery_filter candidate = {.parent = 0x10000, .handle = 0xabc,
-        .priority = 10, .protocol = 3, .kind = "flower"};
+    struct dppd_recovery_identity identity = {.ifindex = 10,
+        .ifname = "test-tap",
+        .boot_id = "01234567-89ab-cdef-0123-456789abcdef",
+        .netns_device = 4,
+        .netns_inode = 100};
+    struct dppd_recovery_filter candidate = {.parent = 0x10000,
+        .handle = 0xabc,
+        .priority = 10,
+        .protocol = 3,
+        .kind = "flower"};
     uint64_t first, second;
     assert(dppd_recovery_guard_open(&guard, path, state) == 0);
     assert(dppd_recovery_guard_begin(&guard, 0, 9, 7, &first) == -ENOENT);

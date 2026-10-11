@@ -3,24 +3,20 @@
 #include <errno.h>
 #include <string.h>
 
-static int reject(struct dppd_execution_plan *plan,
-                  enum dppd_plan_reason reason,
-                  int error)
+static int reject(struct dppd_execution_plan *plan, enum dppd_plan_reason reason, int error)
 {
     plan->reason = reason;
     return error;
 }
 
-static int validate_transfer_domain(const struct dppd_planner_context *context,
-                                    const struct dppd_rule *rule,
-                                    struct dppd_execution_plan *plan)
+static int validate_transfer_domain(const struct dppd_planner_context *context, const struct dppd_rule *rule,
+    struct dppd_execution_plan *plan)
 {
     const struct dppd_endpoint *install_endpoint;
     uint16_t domain_id;
     uint16_t i;
 
-    install_endpoint = dppd_topology_find(context->topology,
-                                          context->install_port_id);
+    install_endpoint = dppd_topology_find(context->topology, context->install_port_id);
     if (install_endpoint == NULL)
         return reject(plan, DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND, -ENOENT);
     if (!install_endpoint->has_switch_domain)
@@ -32,45 +28,37 @@ static int validate_transfer_domain(const struct dppd_planner_context *context,
 
         if (rule->matches[i].type != DPPD_MATCH_REPRESENTED_PORT)
             continue;
-        endpoint = dppd_topology_find(context->topology,
-                                      rule->matches[i].spec.ethdev_port_id);
+        endpoint = dppd_topology_find(context->topology, rule->matches[i].spec.ethdev_port_id);
         if (endpoint == NULL)
             return reject(plan, DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND, -ENOENT);
         if (!endpoint->has_switch_domain)
-            return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISSING,
-                          -ENOTSUP);
+            return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISSING, -ENOTSUP);
         if (endpoint->switch_domain_id != domain_id)
-            return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISMATCH,
-                          -EXDEV);
+            return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISMATCH, -EXDEV);
     }
     for (i = 0; i < rule->nb_actions; ++i) {
         const struct dppd_endpoint *endpoint;
 
         if (rule->actions[i].type != DPPD_ACTION_REPRESENTED_PORT)
             continue;
-        endpoint = dppd_topology_find(context->topology,
-                                      rule->actions[i].conf.ethdev_port_id);
+        endpoint = dppd_topology_find(context->topology, rule->actions[i].conf.ethdev_port_id);
         if (endpoint == NULL)
             return reject(plan, DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND, -ENOENT);
         if (!endpoint->has_switch_domain)
-            return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISSING,
-                          -ENOTSUP);
+            return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISSING, -ENOTSUP);
         if (endpoint->switch_domain_id != domain_id)
-            return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISMATCH,
-                          -EXDEV);
+            return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISMATCH, -EXDEV);
     }
     return 0;
 }
 
-int dppd_plan_rule(const struct dppd_planner_context *context,
-                   const struct dppd_rule *rule,
-                   struct dppd_execution_plan *plan)
+int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd_rule *rule,
+    struct dppd_execution_plan *plan)
 {
     char validation_error[128];
     int rc;
 
-    if (context == NULL || context->topology == NULL ||
-        rule == NULL || plan == NULL)
+    if (context == NULL || context->topology == NULL || rule == NULL || plan == NULL)
         return -EINVAL;
     memset(plan, 0, sizeof(*plan));
     plan->rule_id = rule->id;
@@ -84,18 +72,16 @@ int dppd_plan_rule(const struct dppd_planner_context *context,
 
     if (rule->fallback == DPPD_FALLBACK_SOFTWARE_ONLY) {
         if (!context->software_equivalent)
-            return reject(plan, DPPD_PLAN_REASON_SOFTWARE_UNAVAILABLE,
-                          -ENOTSUP);
+            return reject(plan, DPPD_PLAN_REASON_SOFTWARE_UNAVAILABLE, -ENOTSUP);
         if (rule->domain == DPPD_RULE_DOMAIN_TRANSFER)
-            return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK,
-                          -ENOTSUP);
+            return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);
         plan->backend = DPPD_PLAN_BACKEND_SOFTWARE;
         plan->reason = DPPD_PLAN_REASON_SOFTWARE_REQUESTED;
         return 0;
     }
 
     if (context->hardware_available) {
-        /* hardware_available 仅代表存在候选 backend，真实支持仍需 validate。 */
+        /* hardware_available 仅代表存在候选 backend，真实支持仍需 validate */
         if (rule->domain == DPPD_RULE_DOMAIN_TRANSFER) {
             rc = validate_transfer_domain(context, rule, plan);
             if (rc != 0)
@@ -110,7 +96,7 @@ int dppd_plan_rule(const struct dppd_planner_context *context,
     if (rule->fallback == DPPD_FALLBACK_REQUIRE_HARDWARE)
         return reject(plan, DPPD_PLAN_REASON_HARDWARE_UNAVAILABLE, -ENOTSUP);
     if (!context->software_equivalent)
-        /* 没有等价软件语义时，PREFER_HARDWARE 也不能静默降级。 */
+        /* 没有等价软件语义时，PREFER_HARDWARE 也不能静默降级 */
         return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);
     if (rule->domain == DPPD_RULE_DOMAIN_TRANSFER)
         return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);

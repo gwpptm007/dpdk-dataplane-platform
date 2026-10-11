@@ -11,10 +11,14 @@ enum dppd_link_state {
 static inline const char *dppd_link_state_name(unsigned int state)
 {
     switch (state) {
-    case DPPD_LINK_UP: return "up";
-    case DPPD_LINK_DOWN: return "down";
-    case DPPD_LINK_UNSUPPORTED: return "unsupported";
-    default: return "unknown";
+    case DPPD_LINK_UP:
+        return "up";
+    case DPPD_LINK_DOWN:
+        return "down";
+    case DPPD_LINK_UNSUPPORTED:
+        return "unsupported";
+    default:
+        return "unknown";
     }
 }
 

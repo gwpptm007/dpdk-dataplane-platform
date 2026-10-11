@@ -69,10 +69,8 @@ struct dppd_packet {
  * 每次读取头部都会同时检查两个长度；所需头部不完整时返回 MALFORMED
  * 本函数不验证校验和、不重组分片，也不解析应用层内容，packet 必须为有效输出对象
  */
-int dppd_packet_parse_buffer(const uint8_t *data,
-                             uint32_t available_len,
-                             uint32_t packet_len,
-                             struct dppd_packet *packet);
+int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
+    struct dppd_packet *packet);
 /** 从单段或多段 mbuf 提取有限长度的连续报文头后解析，不修改、不释放原始报文 */
 int dppd_packet_parse_mbuf(const struct rte_mbuf *mbuf, struct dppd_packet *packet);
 

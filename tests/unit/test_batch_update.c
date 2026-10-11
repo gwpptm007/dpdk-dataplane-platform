@@ -27,13 +27,11 @@ static struct {
 static void observe(void)
 {
     if (fake.observed != NULL)
-        assert(dppd_rule_repository_generation(&fake.observed->rules) ==
-               fake.expected_revision);
+        assert(dppd_rule_repository_generation(&fake.observed->rules) == fake.expected_revision);
 }
 
 /** unsupported 模拟 net_ring 一类不提供 flow 能力的驱动，供 PREFER 软件回退用例使用 */
-static int validate(uint16_t port, const struct dppd_rule *rule,
-                    struct dppd_flow_error *error)
+static int validate(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
     (void)port;
     (void)rule;
@@ -47,8 +45,8 @@ static int validate(uint16_t port, const struct dppd_rule *rule,
  * 在指定的创建调用返回 EIO，其他调用只填写模拟 handle，不接触物理网卡
  * 用规则 ID 构造的指针仅充当非空标记，测试不会解引用或释放这段虚拟地址
  */
-static int create(uint16_t port, const struct dppd_rule *rule,
-                  struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+static int create(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     (void)error;
     observe();
@@ -77,7 +75,9 @@ static int remove_flow(struct dppd_flow_handle *handle, struct dppd_flow_error *
 }
 
 static const struct dppd_flow_api api = {
-    .validate = validate, .create = create, .remove = remove_flow,
+    .validate = validate,
+    .create = create,
+    .remove = remove_flow,
 };
 static struct dppd_topology topology;
 
@@ -86,9 +86,8 @@ static struct dppd_topology topology;
  * 构造更新请求时改变优先级并交换安装端口，用来验证替换的是完整规则而不仅是版本号
  * 基线创建完成之后才开启 observe，因为创建基线本身就需要正常推进仓库版本
  */
-static void setup(struct dppd_control_service *service,
-                  struct dppd_control_batch_update_request requests[4],
-                  uint32_t capacity, uint32_t count, bool software)
+static void setup(struct dppd_control_service *service, struct dppd_control_batch_update_request requests[4],
+    uint32_t capacity, uint32_t count, bool software)
 {
     uint32_t i;
 
@@ -100,14 +99,12 @@ static void setup(struct dppd_control_service *service,
         struct dppd_rule rule = {0};
 
         rule.id = 100 + i;
-        rule.fallback = software ? DPPD_FALLBACK_SOFTWARE_ONLY :
-                                   DPPD_FALLBACK_PREFER_HARDWARE;
+        rule.fallback = software ? DPPD_FALLBACK_SOFTWARE_ONLY : DPPD_FALLBACK_PREFER_HARDWARE;
         rule.nb_matches = 1;
         rule.matches[0].type = DPPD_MATCH_ETH;
         rule.nb_actions = 1;
         rule.actions[0].type = DPPD_ACTION_DROP;
-        assert(dppd_control_apply(service, (uint16_t)(5 + i % 2), &rule,
-                                  0, &result) == 0);
+        assert(dppd_control_apply(service, (uint16_t)(5 + i % 2), &rule, 0, &result) == 0);
         requests[i].rule = rule;
         requests[i].rule.priority = 10 + i;
         requests[i].install_port_id = (uint16_t)(6 - i % 2);
@@ -146,11 +143,9 @@ static void assert_old(struct dppd_control_service *service, bool software)
         assert(stored.generation == i + 1 && stored.priority == 0);
         assert(stored.install_port_id == 5 + i);
         if (software)
-            assert(dppd_software_backend_contains_version(&service->software,
-                                                           100 + i, i + 1));
+            assert(dppd_software_backend_contains_version(&service->software, 100 + i, i + 1));
         else
-            assert(dppd_rte_flow_backend_find_version(&service->rte_flow,
-                                                       100 + i, i + 1) != NULL);
+            assert(dppd_rte_flow_backend_find_version(&service->rte_flow, 100 + i, i + 1) != NULL);
     }
 }
 
@@ -180,17 +175,14 @@ static void test_success(uint32_t count, bool software, bool fallback)
         assert(dppd_rule_repository_get(&service.rules, 100 + i, &stored) == 0);
         assert(stored.priority == 10 + i);
         assert(stored.install_port_id == requests[i].install_port_id);
-        assert(dppd_rte_flow_backend_find_version(&service.rte_flow,
-                                                   100 + i, i + 1) == NULL);
-        assert(!dppd_software_backend_contains_version(&service.software,
-                                                        100 + i, i + 1));
+        assert(dppd_rte_flow_backend_find_version(&service.rte_flow, 100 + i, i + 1) == NULL);
+        assert(!dppd_software_backend_contains_version(&service.software, 100 + i, i + 1));
         if (software || fallback) {
             assert(results[i].plan.backend == DPPD_PLAN_BACKEND_SOFTWARE);
-            assert(dppd_software_backend_contains_version(&service.software,
-                                                           100 + i, stored.generation));
+            assert(dppd_software_backend_contains_version(&service.software, 100 + i, stored.generation));
         } else {
-            const struct dppd_flow_handle *handle = dppd_rte_flow_backend_find_version(
-                &service.rte_flow, 100 + i, stored.generation);
+            const struct dppd_flow_handle *handle =
+                dppd_rte_flow_backend_find_version(&service.rte_flow, 100 + i, stored.generation);
             assert(handle != NULL && handle->port_id == requests[i].install_port_id);
         }
     }

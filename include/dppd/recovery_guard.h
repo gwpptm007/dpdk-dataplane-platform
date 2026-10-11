@@ -106,25 +106,23 @@ struct dppd_recovery_guard {
 };
 
 /** state_path 非空时允许首次创建并核对快照路径，为空时只打开已有记录供离线工具使用 */
-int dppd_recovery_guard_open(struct dppd_recovery_guard *guard,
-    const char *path, const char *state_path);
+int dppd_recovery_guard_open(struct dppd_recovery_guard *guard, const char *path, const char *state_path);
 /** 必须在驱动 create 之前成功，首次涉及该端口时先写入并 fsync，失败就不得安装 */
-int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port_id,
-    const char *device, const char *driver, uint64_t rule_id, uint64_t generation);
+int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device,
+    const char *driver, uint64_t rule_id, uint64_t generation);
 /** 有可靠 TAP 定位时与端口线索一次落盘，同一端口身份发生变化时拒绝继续安装 */
-int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint16_t port_id,
-    const char *device, const char *driver, uint64_t rule_id, uint64_t generation,
-    const struct dppd_recovery_identity *identity);
+int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device,
+    const char *driver, uint64_t rule_id, uint64_t generation, const struct dppd_recovery_identity *identity);
 /** 仅本进程已确认全部 flow 删除后调用，软件状态是否成功保存由原持久化机制另行报告 */
 int dppd_recovery_guard_clean(struct dppd_recovery_guard *guard);
 /** 离线确认外部清理已经完成，精确版本防止确认旧记录，此函数本身不执行设备清理 */
 int dppd_recovery_guard_acknowledge(struct dppd_recovery_guard *guard, uint64_t revision);
 /** 端口已登记后为本次驱动调用先写入意图，写盘失败或记录满时不能进入驱动 */
-int dppd_recovery_guard_begin(struct dppd_recovery_guard *guard, uint16_t port_id,
-    uint64_t rule_id, uint64_t generation, uint64_t *attempt);
+int dppd_recovery_guard_begin(struct dppd_recovery_guard *guard, uint16_t port_id, uint64_t rule_id,
+    uint64_t generation, uint64_t *attempt);
 /** 为已核对身份的 TAP 生成随机标识，写盘成功才向驱动调用方返回 */
-int dppd_recovery_guard_begin_owned(struct dppd_recovery_guard *guard, uint16_t port_id,
-    uint64_t rule_id, uint64_t generation, uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE],
+int dppd_recovery_guard_begin_owned(struct dppd_recovery_guard *guard, uint16_t port_id, uint64_t rule_id,
+    uint64_t generation, uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE],
     const struct dppd_tap_content *expected);
 /** 保存真实创建结果与可选候选坐标，失败时调用方仍持有 handle 并执行原事务回滚 */
 int dppd_recovery_guard_created(struct dppd_recovery_guard *guard, uint64_t attempt, int create_error,

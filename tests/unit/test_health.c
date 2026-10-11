@@ -30,8 +30,7 @@ static void reset_runtime(struct dppd_runtime *runtime)
 }
 
 /** 经过正式协议分发器查询，确认业务上未就绪不会被错误包装成传输或协议失败 */
-static struct dppd_management_health query(struct dppd_control_service *control,
-                                           const struct dppd_runtime *runtime)
+static struct dppd_management_health query(struct dppd_control_service *control, const struct dppd_runtime *runtime)
 {
     const struct dppd_management_request request = {
         .version = DPPD_MANAGEMENT_VERSION,
@@ -41,8 +40,8 @@ static struct dppd_management_health query(struct dppd_control_service *control,
     };
     struct dppd_management_response response;
 
-    assert(dppd_management_handle(control, runtime == NULL ? NULL : &runtime->devices,
-                                  runtime, &request, &response) == 0);
+    assert(
+        dppd_management_handle(control, runtime == NULL ? NULL : &runtime->devices, runtime, &request, &response) == 0);
     assert(response.status == 0 && response.request_id == 42);
     return response.payload.health;
 }
@@ -163,14 +162,12 @@ int main(void)
         };
         struct dppd_management_response response;
 
-        assert(dppd_management_handle(&control, &runtime.devices, &runtime,
-                                      &request, &response) == 0);
+        assert(dppd_management_handle(&control, &runtime.devices, &runtime, &request, &response) == 0);
         assert(response.status == -EUCLEAN);
         /** 上一版客户端必须明确收到 EPROTO，不能按旧协议解释新的健康操作 */
         request.version = 9;
         request.operation = DPPD_MANAGEMENT_HEALTH_GET;
-        assert(dppd_management_handle(&control, &runtime.devices, &runtime,
-                                      &request, &response) == 0);
+        assert(dppd_management_handle(&control, &runtime.devices, &runtime, &request, &response) == 0);
         assert(response.status == -EPROTO);
     }
     control.persistence_dirty = false;

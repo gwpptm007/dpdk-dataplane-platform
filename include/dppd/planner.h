@@ -42,10 +42,9 @@ struct dppd_execution_plan {
     bool fallback_used;
 };
 
-/* planner 只作可解释决策；硬件最终能力仍以 backend validate 结果为准。 */
-int dppd_plan_rule(const struct dppd_planner_context *context,
-                   const struct dppd_rule *rule,
-                   struct dppd_execution_plan *plan);
+/* planner 只作可解释决策；硬件最终能力仍以 backend validate 结果为准 */
+int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd_rule *rule,
+    struct dppd_execution_plan *plan);
 const char *dppd_plan_reason_name(enum dppd_plan_reason reason);
 
 #endif

@@ -25,8 +25,7 @@ static inline void dppd_install_timer_start(struct dppd_install_timer *timer)
  * 后端提交成功后计算纳秒差值，返回值说明这次测量是否有效
  * 借位处理跨秒情况，拒绝倒退或超出整数范围的结果，失败时统一输出零
  */
-static inline bool dppd_install_timer_finish(const struct dppd_install_timer *timer,
-                                             uint64_t *duration_ns)
+static inline bool dppd_install_timer_finish(const struct dppd_install_timer *timer, uint64_t *duration_ns)
 {
     struct timespec ended;
     uint64_t seconds;
@@ -36,8 +35,7 @@ static inline bool dppd_install_timer_finish(const struct dppd_install_timer *ti
     if (!timer->available || clock_gettime(CLOCK_MONOTONIC, &ended) != 0)
         return false;
     if (ended.tv_sec < timer->started.tv_sec ||
-        (ended.tv_sec == timer->started.tv_sec &&
-         ended.tv_nsec < timer->started.tv_nsec))
+        (ended.tv_sec == timer->started.tv_sec && ended.tv_nsec < timer->started.tv_nsec))
         return false;
     seconds = (uint64_t)ended.tv_sec - (uint64_t)timer->started.tv_sec;
     nanoseconds = ended.tv_nsec - timer->started.tv_nsec;

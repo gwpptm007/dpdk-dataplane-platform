@@ -61,10 +61,8 @@ static int fail(struct rte_flow_error *error, int code, const char *message)
  * 这不是硬件能力探测，传入的匹配条件和动作不会被用于任何真实网卡安装
  * 未开启测试场景时返回不支持，避免把没有配置的测试库误当成可用后端
  */
-int rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr,
-                      const struct rte_flow_item pattern[],
-                      const struct rte_flow_action actions[],
-                      struct rte_flow_error *error)
+int rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr, const struct rte_flow_item pattern[],
+    const struct rte_flow_action actions[], struct rte_flow_error *error)
 {
     (void)port;
     (void)attr;
@@ -81,10 +79,8 @@ int rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr,
  * 场景二让两个新版本都建成，在第五次调用失败，表示删除失败后的旧版本恢复没有成功
  * 其他创建调用只分配一个带端口号的测试对象，由 destroy 负责归还
  */
-struct rte_flow *rte_flow_create(uint16_t port, const struct rte_flow_attr *attr,
-                                const struct rte_flow_item pattern[],
-                                const struct rte_flow_action actions[],
-                                struct rte_flow_error *error)
+struct rte_flow *rte_flow_create(uint16_t port, const struct rte_flow_attr *attr, const struct rte_flow_item pattern[],
+    const struct rte_flow_action actions[], struct rte_flow_error *error)
 {
     struct test_flow *flow;
     int selected = mode();
@@ -93,8 +89,8 @@ struct rte_flow *rte_flow_create(uint16_t port, const struct rte_flow_attr *attr
     (void)pattern;
     (void)actions;
     ++creates;
-    if (selected == 0 || (selected == 1 && creates == 4) ||
-        (selected == 2 && creates == 5) || (selected == 3 && creates == 2)) {
+    if (selected == 0 || (selected == 1 && creates == 4) || (selected == 2 && creates == 5) ||
+        (selected == 3 && creates == 2)) {
         fail(error, EIO, "injected flow create failure");
         return NULL;
     }
@@ -127,8 +123,8 @@ int rte_flow_destroy(uint16_t port, struct rte_flow *handle, struct rte_flow_err
      * 创建调用达到第四次才开启删除故障，保证错误确实出现在在线更新期间
      * 重启后只重放两条旧规则，此条件不会满足，因此重放验证可以正常退出
      */
-    if (creates >= 4 && ((selected == 1 && (destroys == 1 || destroys == 2)) ||
-                         (selected == 2 && (destroys == 2 || destroys == 5))))
+    if (creates >= 4 &&
+        ((selected == 1 && (destroys == 1 || destroys == 2)) || (selected == 2 && (destroys == 2 || destroys == 5))))
         return fail(error, EFAULT, "injected flow destroy failure");
     if (flow == NULL || flow->port != port || live == 0)
         return fail(error, EINVAL, "invalid test flow handle");

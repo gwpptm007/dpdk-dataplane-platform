@@ -74,7 +74,10 @@ static int exchange(struct nlmsghdr *request, bool dump, message_reader reader, 
 {
     struct sockaddr_nl kernel = {.nl_family = AF_NETLINK};
     struct timeval timeout = {.tv_sec = 2};
-    union { struct nlmsghdr aligned; unsigned char bytes[32768]; } buffer;
+    union {
+        struct nlmsghdr aligned;
+        unsigned char bytes[32768];
+    } buffer;
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
     int rc = 0;
     if (fd < 0)
@@ -97,15 +100,17 @@ static int exchange(struct nlmsghdr *request, bool dump, message_reader reader, 
     for (unsigned int batch = 0; batch < 128; ++batch) {
         struct sockaddr_nl sender = {0};
         struct iovec vector = {.iov_base = buffer.bytes, .iov_len = sizeof(buffer.bytes)};
-        struct msghdr message = {.msg_name = &sender, .msg_namelen = sizeof(sender),
-            .msg_iov = &vector, .msg_iovlen = 1};
+        struct msghdr message = {.msg_name = &sender,
+            .msg_namelen = sizeof(sender),
+            .msg_iov = &vector,
+            .msg_iovlen = 1};
         ssize_t received = recvmsg(fd, &message, 0);
         if (received < 0) {
             rc = -errno;
             goto done;
         }
-        if (received == 0 || (message.msg_flags & MSG_TRUNC) != 0 ||
-            message.msg_namelen != sizeof(sender) || sender.nl_family != AF_NETLINK || sender.nl_pid != 0) {
+        if (received == 0 || (message.msg_flags & MSG_TRUNC) != 0 || message.msg_namelen != sizeof(sender) ||
+            sender.nl_family != AF_NETLINK || sender.nl_pid != 0) {
             rc = -EBADMSG;
             goto done;
         }
@@ -165,19 +170,19 @@ static int read_link(const struct nlmsghdr *header, void *context)
     if (header->nlmsg_type != RTM_NEWLINK || NLMSG_PAYLOAD(header, 0) < sizeof(struct ifinfomsg))
         return -EBADMSG;
     const struct ifinfomsg *message = NLMSG_DATA(header);
-    if (message->ifi_index <= 0 || attributes(IFLA_RTA(message), IFLA_PAYLOAD(header), attrs,
-        IFLA_MAX + 1) != 0 || attribute_string(attrs[IFLA_IFNAME], link->name, sizeof(link->name)) != 0)
+    if (message->ifi_index <= 0 || attributes(IFLA_RTA(message), IFLA_PAYLOAD(header), attrs, IFLA_MAX + 1) != 0 ||
+        attribute_string(attrs[IFLA_IFNAME], link->name, sizeof(link->name)) != 0)
         return -EBADMSG;
     link->index = (uint32_t)message->ifi_index;
     if (attrs[IFLA_LINKINFO] == NULL)
         return 0;
-    if (attributes(RTA_DATA(attrs[IFLA_LINKINFO]), RTA_PAYLOAD(attrs[IFLA_LINKINFO]),
-        info, IFLA_INFO_MAX + 1) != 0 || attribute_string(info[IFLA_INFO_KIND], kind, sizeof(kind)) != 0)
+    if (attributes(RTA_DATA(attrs[IFLA_LINKINFO]), RTA_PAYLOAD(attrs[IFLA_LINKINFO]), info, IFLA_INFO_MAX + 1) != 0 ||
+        attribute_string(info[IFLA_INFO_KIND], kind, sizeof(kind)) != 0)
         return -EBADMSG;
     if (strcmp(kind, "tun") != 0 || info[IFLA_INFO_DATA] == NULL)
         return 0;
-    if (attributes(RTA_DATA(info[IFLA_INFO_DATA]), RTA_PAYLOAD(info[IFLA_INFO_DATA]),
-        tun, IFLA_TUN_MAX + 1) != 0 || tun[IFLA_TUN_TYPE] == NULL || RTA_PAYLOAD(tun[IFLA_TUN_TYPE]) != 1)
+    if (attributes(RTA_DATA(info[IFLA_INFO_DATA]), RTA_PAYLOAD(info[IFLA_INFO_DATA]), tun, IFLA_TUN_MAX + 1) != 0 ||
+        tun[IFLA_TUN_TYPE] == NULL || RTA_PAYLOAD(tun[IFLA_TUN_TYPE]) != 1)
         return -EBADMSG;
     link->tap = *(const unsigned char *)RTA_DATA(tun[IFLA_TUN_TYPE]) == IFF_TAP;
     return 0;
@@ -217,8 +222,8 @@ static int current_context(struct dppd_recovery_identity *identity)
         return -EBADMSG;
     for (size_t index = 0; index < 36; ++index) {
         bool hyphen = index == 8 || index == 13 || index == 18 || index == 23;
-        if (hyphen ? line[index] != '-' : !((line[index] >= '0' && line[index] <= '9') ||
-            (line[index] >= 'a' && line[index] <= 'f')))
+        if (hyphen ? line[index] != '-'
+                   : !((line[index] >= '0' && line[index] <= '9') || (line[index] >= 'a' && line[index] <= 'f')))
             return -EBADMSG;
     }
     line[36] = '\0';
@@ -291,7 +296,6 @@ static int read_cookie(const struct rtattr *options, struct dppd_recovery_filter
     return 0;
 }
 
-/** 先枚举挂载点再读取过滤器，挂载点类型被替换时返回不支持，避免误报完整的空列表 */
 /**
  * 内容核验采用允许列表，包括编译时头文件尚不认识的属性也不能跳过
  * 基础解析负责消息完整性，这里把无法解释的语义报告为不支持
@@ -300,7 +304,8 @@ static int supported_attributes(const void *data, size_t length, const unsigned 
 {
     const struct rtattr *attribute = data;
     while (length != 0) {
-        if (length < sizeof(*attribute) || attribute->rta_len < sizeof(*attribute) || RTA_ALIGN(attribute->rta_len) > length)
+        if (length < sizeof(*attribute) || attribute->rta_len < sizeof(*attribute) ||
+            RTA_ALIGN(attribute->rta_len) > length)
             return -EBADMSG;
         bool found = false;
         for (size_t i = 0; i < count; ++i)
@@ -325,7 +330,8 @@ static int read_value(const struct rtattr *attribute, void *value, size_t size)
 }
 
 /** 地址和掩码必须成对，掩码之外的位不参与行为比较 */
-static int read_pair(const struct rtattr *value, const struct rtattr *mask, void *output, void *output_mask, size_t size)
+static int read_pair(const struct rtattr *value, const struct rtattr *mask, void *output, void *output_mask,
+    size_t size)
 {
     if ((value == NULL) != (mask == NULL))
         return -ENOTSUP;
@@ -343,14 +349,13 @@ static int read_pair(const struct rtattr *value, const struct rtattr *mask, void
 static int read_action_content(const struct rtattr *list, struct dppd_recovery_filter *filter)
 {
     enum { ACT_HW_COUNT = 10, ACT_TABLE_SIZE = 11 };
-    const unsigned int allowed[] = {TCA_ACT_KIND, TCA_ACT_OPTIONS, TCA_ACT_COOKIE, TCA_ACT_STATS,
-        TCA_ACT_PAD, TCA_ACT_HW_STATS, TCA_ACT_USED_HW_STATS, ACT_HW_COUNT};
+    const unsigned int allowed[] = {TCA_ACT_KIND, TCA_ACT_OPTIONS, TCA_ACT_COOKIE, TCA_ACT_STATS, TCA_ACT_PAD,
+        TCA_ACT_HW_STATS, TCA_ACT_USED_HW_STATS, ACT_HW_COUNT};
     const struct rtattr *attrs[ACT_TABLE_SIZE];
     if (list == NULL || RTA_PAYLOAD(list) < sizeof(struct rtattr))
         return -ENOTSUP;
     const struct rtattr *action = RTA_DATA(list);
-    if (action->rta_type != 1 || RTA_ALIGN(action->rta_len) != RTA_PAYLOAD(list) ||
-        action->rta_len < sizeof(*action) ||
+    if (action->rta_type != 1 || RTA_ALIGN(action->rta_len) != RTA_PAYLOAD(list) || action->rta_len < sizeof(*action) ||
         attributes(RTA_DATA(action), RTA_PAYLOAD(action), attrs, ACT_TABLE_SIZE) != 0 ||
         supported_attributes(RTA_DATA(action), RTA_PAYLOAD(action), allowed, sizeof(allowed) / sizeof(allowed[0])) != 0)
         return -ENOTSUP;
@@ -366,8 +371,10 @@ static int read_action_content(const struct rtattr *list, struct dppd_recovery_f
         const unsigned int fields[] = {TCA_GACT_PARMS, TCA_GACT_TM, TCA_GACT_PAD};
         const struct rtattr *values[TCA_GACT_MAX + 1];
         if (attributes(RTA_DATA(options), RTA_PAYLOAD(options), values, TCA_GACT_MAX + 1) != 0 ||
-            supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), fields, sizeof(fields) / sizeof(fields[0])) != 0 ||
-            values[TCA_GACT_PARMS] == NULL || read_value(values[TCA_GACT_PARMS], &parameters, sizeof(parameters)) != 0 ||
+            supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), fields, sizeof(fields) / sizeof(fields[0])) !=
+                0 ||
+            values[TCA_GACT_PARMS] == NULL ||
+            read_value(values[TCA_GACT_PARMS], &parameters, sizeof(parameters)) != 0 ||
             parameters.action != TC_ACT_SHOT)
             return -ENOTSUP;
         filter->content.action = 1;
@@ -376,7 +383,8 @@ static int read_action_content(const struct rtattr *list, struct dppd_recovery_f
         const struct rtattr *values[TCA_SKBEDIT_MAX + 1];
         struct tc_skbedit edit = {0};
         if (attributes(RTA_DATA(options), RTA_PAYLOAD(options), values, TCA_SKBEDIT_MAX + 1) != 0 ||
-            supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), fields, sizeof(fields) / sizeof(fields[0])) != 0 ||
+            supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), fields, sizeof(fields) / sizeof(fields[0])) !=
+                0 ||
             values[TCA_SKBEDIT_PARMS] == NULL || values[TCA_SKBEDIT_QUEUE_MAPPING] == NULL ||
             read_value(values[TCA_SKBEDIT_PARMS], &edit, sizeof(edit)) != 0 || edit.action != TC_ACT_PIPE ||
             read_value(values[TCA_SKBEDIT_QUEUE_MAPPING], &filter->content.queue, sizeof(filter->content.queue)) != 0)
@@ -388,8 +396,13 @@ static int read_action_content(const struct rtattr *list, struct dppd_recovery_f
         filter->content.action = 2;
     } else
         return -ENOTSUP;
-    filter->scope_error = parameters.bindcnt > 1 ? -EMLINK :
-        parameters.index == 0 || parameters.capab != 0 || parameters.refcnt != 1 || parameters.bindcnt != 1 ? -ENOTSUP : 0;
+    /** 动作绑定到多条规则时明确报告共享，其余引用情况不清楚时也不能确认独占范围 */
+    if (parameters.bindcnt > 1)
+        filter->scope_error = -EMLINK;
+    else if (parameters.index == 0 || parameters.capab != 0 || parameters.refcnt != 1 || parameters.bindcnt != 1)
+        filter->scope_error = -ENOTSUP;
+    else
+        filter->scope_error = 0;
     return 0;
 }
 
@@ -405,7 +418,8 @@ static void read_content(const struct rtattr *options, struct dppd_recovery_filt
     struct dppd_tap_content *c = &filter->content;
     filter->content_error = filter->scope_error = -ENOTSUP;
     if (options == NULL || attributes(RTA_DATA(options), RTA_PAYLOAD(options), fields, TCA_FLOWER_MAX + 1) != 0 ||
-        supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), allowed, sizeof(allowed) / sizeof(allowed[0])) != 0)
+        supported_attributes(RTA_DATA(options), RTA_PAYLOAD(options), allowed, sizeof(allowed) / sizeof(allowed[0])) !=
+            0)
         return;
     uint32_t flags = 0, hardware = 0;
     uint16_t ether = 0;
@@ -414,10 +428,10 @@ static void read_content(const struct rtattr *options, struct dppd_recovery_filt
         (flags & ~TCA_CLS_FLAGS_NOT_IN_HW) != 0 || hardware != 0 ||
         read_value(fields[TCA_FLOWER_KEY_ETH_TYPE], &ether, sizeof(ether)) != 0 ||
         read_value(fields[TCA_FLOWER_KEY_IP_PROTO], &c->ip_proto, sizeof(c->ip_proto)) != 0 ||
-        read_pair(fields[TCA_FLOWER_KEY_IPV4_SRC], fields[TCA_FLOWER_KEY_IPV4_SRC_MASK],
-            &c->ipv4.src_be, &c->ipv4.src_mask_be, 4) != 0 ||
-        read_pair(fields[TCA_FLOWER_KEY_IPV4_DST], fields[TCA_FLOWER_KEY_IPV4_DST_MASK],
-            &c->ipv4.dst_be, &c->ipv4.dst_mask_be, 4) != 0)
+        read_pair(fields[TCA_FLOWER_KEY_IPV4_SRC], fields[TCA_FLOWER_KEY_IPV4_SRC_MASK], &c->ipv4.src_be,
+            &c->ipv4.src_mask_be, 4) != 0 ||
+        read_pair(fields[TCA_FLOWER_KEY_IPV4_DST], fields[TCA_FLOWER_KEY_IPV4_DST_MASK], &c->ipv4.dst_be,
+            &c->ipv4.dst_mask_be, 4) != 0)
         return;
     c->eth_type = ntohs(ether);
     bool tcp = c->ip_proto == 6;
@@ -433,8 +447,9 @@ static void read_content(const struct rtattr *options, struct dppd_recovery_filt
         read_pair(fields[dst], fields[dst_mask], &c->l4.dst_be, &c->l4.dst_mask_be, 2) != 0 ||
         (c->ip_proto != 6 && c->ip_proto != 17 && (fields[src] != NULL || fields[dst] != NULL)) ||
         (c->eth_type != 0 && c->eth_type != 0x0800) ||
-        (c->eth_type == 0 && (fields[TCA_FLOWER_KEY_IP_PROTO] != NULL || fields[TCA_FLOWER_KEY_IPV4_SRC] != NULL ||
-            fields[TCA_FLOWER_KEY_IPV4_DST] != NULL)))
+        (c->eth_type == 0 &&
+            (fields[TCA_FLOWER_KEY_IP_PROTO] != NULL || fields[TCA_FLOWER_KEY_IPV4_SRC] != NULL ||
+                fields[TCA_FLOWER_KEY_IPV4_DST] != NULL)))
         return;
     if (read_action_content(fields[TCA_FLOWER_ACT], filter) != 0)
         return;
@@ -459,8 +474,8 @@ static int read_tc(const struct nlmsghdr *header, void *context)
     /** qdisc dump 在部分内核返回所有接口，按明确索引筛选，不把其他接口混入结果 */
     if (query->inspection == NULL && (uint32_t)message->tcm_ifindex != query->index)
         return 0;
-    if ((uint32_t)message->tcm_ifindex != query->index || (query->inspection != NULL &&
-        message->tcm_parent != query->parent))
+    if ((uint32_t)message->tcm_ifindex != query->index ||
+        (query->inspection != NULL && message->tcm_parent != query->parent))
         return -EBADMSG;
     if (attributes(TCA_RTA(message), TCA_PAYLOAD(header), attrs, TCA_MAX + 1) != 0 ||
         attribute_string(attrs[TCA_KIND], kind, sizeof(kind)) != 0)
@@ -501,7 +516,8 @@ static int read_tc(const struct nlmsghdr *header, void *context)
             return rc;
         read_content(attrs[TCA_OPTIONS], filter);
         const unsigned int allowed[] = {TCA_KIND, TCA_OPTIONS, TCA_CHAIN, TCA_STATS, TCA_STATS2, TCA_XSTATS, TCA_PAD};
-        if (supported_attributes(TCA_RTA(message), TCA_PAYLOAD(header), allowed, sizeof(allowed) / sizeof(allowed[0])) != 0 ||
+        if (supported_attributes(TCA_RTA(message), TCA_PAYLOAD(header), allowed,
+                sizeof(allowed) / sizeof(allowed[0])) != 0 ||
             message->tcm_family != AF_UNSPEC || message->tcm__pad1 != 0 || message->tcm__pad2 != 0)
             filter->scope_error = -ENOTSUP;
     }
@@ -512,9 +528,11 @@ static int read_tc(const struct nlmsghdr *header, void *context)
 /** dump 仅使用 GET 请求，不发送 NEW、DEL、flush 或设备复位指令 */
 static int query_tc(struct tc_query *query)
 {
-    struct { struct nlmsghdr header; struct tcmsg message; } request = {
-        .header = {.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg)),
-            .nlmsg_type = query->inspection == NULL ? RTM_GETQDISC : RTM_GETTFILTER},
+    struct {
+        struct nlmsghdr header;
+        struct tcmsg message;
+    } request = {.header = {.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg)),
+                     .nlmsg_type = query->inspection == NULL ? RTM_GETQDISC : RTM_GETTFILTER},
         .message = {.tcm_family = AF_UNSPEC, .tcm_ifindex = (int)query->index, .tcm_parent = query->parent}};
     return exchange(&request.header, true, read_tc, query);
 }
@@ -564,8 +582,8 @@ int dppd_recovery_inspect(const struct dppd_recovery_port *port, struct dppd_rec
     rc = current_context(&current);
     if (rc != 0)
         return rc;
-    if (strcmp(current.boot_id, port->identity.boot_id) != 0 ||
-        current.netns_device != port->identity.netns_device || current.netns_inode != port->identity.netns_inode) {
+    if (strcmp(current.boot_id, port->identity.boot_id) != 0 || current.netns_device != port->identity.netns_device ||
+        current.netns_inode != port->identity.netns_inode) {
         inspection->state = DPPD_INSPECT_CONTEXT_MISMATCH;
         return -EXDEV;
     }
@@ -601,19 +619,25 @@ int dppd_recovery_inspect(const struct dppd_recovery_port *port, struct dppd_rec
 const char *dppd_recovery_inspection_name(enum dppd_recovery_inspection_state state)
 {
     switch (state) {
-    case DPPD_INSPECT_UNSUPPORTED: return "unsupported-driver";
-    case DPPD_INSPECT_NO_IDENTITY: return "identity-unavailable";
-    case DPPD_INSPECT_CONTEXT_MISMATCH: return "context-mismatch";
-    case DPPD_INSPECT_IDENTITY_MISMATCH: return "identity-mismatch";
-    case DPPD_INSPECT_ABSENT: return "interface-absent";
-    case DPPD_INSPECT_PRESENT: return "coordinates-match";
-    default: return "unavailable";
+    case DPPD_INSPECT_UNSUPPORTED:
+        return "unsupported-driver";
+    case DPPD_INSPECT_NO_IDENTITY:
+        return "identity-unavailable";
+    case DPPD_INSPECT_CONTEXT_MISMATCH:
+        return "context-mismatch";
+    case DPPD_INSPECT_IDENTITY_MISMATCH:
+        return "identity-mismatch";
+    case DPPD_INSPECT_ABSENT:
+        return "interface-absent";
+    case DPPD_INSPECT_PRESENT:
+        return "coordinates-match";
+    default:
+        return "unavailable";
     }
 }
 
 /** 坐标比较不涉及指针和结构体填充，也不比较内核动态计数 */
-bool dppd_recovery_filter_equal(const struct dppd_recovery_filter *left,
-    const struct dppd_recovery_filter *right)
+bool dppd_recovery_filter_equal(const struct dppd_recovery_filter *left, const struct dppd_recovery_filter *right)
 {
     return left->parent == right->parent && left->handle == right->handle && left->chain == right->chain &&
         left->priority == right->priority && left->protocol == right->protocol && strcmp(left->kind, right->kind) == 0;
@@ -635,8 +659,7 @@ int dppd_recovery_cookie_matches(const struct dppd_recovery_inspection *inspecti
 }
 
 /** 内容与范围分开核对，标识相同但规则被修改时仍必须明确报告不一致 */
-int dppd_recovery_verify(const struct dppd_tap_content *expected,
-    const struct dppd_recovery_filter *filter, bool scope)
+int dppd_recovery_verify(const struct dppd_tap_content *expected, const struct dppd_recovery_filter *filter, bool scope)
 {
     uint8_t wanted[DPPD_TAP_CONTENT_SIZE], actual[DPPD_TAP_CONTENT_SIZE];
     if (expected->version == 0)

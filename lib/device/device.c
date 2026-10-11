@@ -15,8 +15,7 @@
 #define DPPD_DEFAULT_TX_DESC 1024U
 
 /** 设备名称查询要求缓冲区至少达到 DPDK 规定的长度，编译时检查未来版本的变化 */
-_Static_assert(DPPD_CAPABILITY_NAME_SIZE >= RTE_ETH_NAME_MAX_LEN,
-               "capability device name buffer is too small");
+_Static_assert(DPPD_CAPABILITY_NAME_SIZE >= RTE_ETH_NAME_MAX_LEN, "capability device name buffer is too small");
 
 /**
  * 保存本次启动环境的设备身份与描述符上限，固件查询不支持时保留未知状态
@@ -28,13 +27,11 @@ static void capture_identity(struct dppd_port *port, const struct rte_eth_dev_in
     int rc;
 
     memset(identity, 0, sizeof(*identity));
-    identity->device_name_known =
-        rte_eth_dev_get_name_by_port(port->port_id, identity->device_name) == 0;
+    identity->device_name_known = rte_eth_dev_get_name_by_port(port->port_id, identity->device_name) == 0;
     if (!identity->device_name_known)
         identity->device_name[0] = '\0';
     snprintf(identity->dpdk_version, sizeof(identity->dpdk_version), "%s", rte_version());
-    rc = rte_eth_dev_fw_version_get(port->port_id, identity->firmware_version,
-                                    sizeof(identity->firmware_version));
+    rc = rte_eth_dev_fw_version_get(port->port_id, identity->firmware_version, sizeof(identity->firmware_version));
     identity->firmware_known = rc == 0 && identity->firmware_version[0] != '\0';
     identity->firmware_error = rc > 0 ? -ENOSPC : rc;
     if (!identity->firmware_known)
@@ -63,8 +60,7 @@ static void request_removal(struct dppd_device_set *devices, struct dppd_port *p
  * 不在回调中停止设备、等待工作线程或释放内存，实际清理由主线程按顺序完成
  * 端口编号和数量在注册回调前初始化，并保持到全部回调成功注销之后
  */
-static int handle_removal(uint16_t port_id, enum rte_eth_event_type event,
-                          void *context, void *ret_param)
+static int handle_removal(uint16_t port_id, enum rte_eth_event_type event, void *context, void *ret_param)
 {
     struct dppd_device_set *devices = context;
 
@@ -94,8 +90,7 @@ static int create_socket_pools(struct dppd_device_set *devices, const struct dpp
     uint16_t i;
 
     if (cfg->mbuf_cache > RTE_MEMPOOL_CACHE_MAX_SIZE) {
-        fprintf(stderr, "[dppd] mbuf cache %u exceeds DPDK maximum %u\n",
-                cfg->mbuf_cache, RTE_MEMPOOL_CACHE_MAX_SIZE);
+        fprintf(stderr, "[dppd] mbuf cache %u exceeds DPDK maximum %u\n", cfg->mbuf_cache, RTE_MEMPOOL_CACHE_MAX_SIZE);
         return -EINVAL;
     }
 
@@ -106,24 +101,17 @@ static int create_socket_pools(struct dppd_device_set *devices, const struct dpp
         if (devices->pools[socket_id] != NULL)
             continue;
         snprintf(name, sizeof(name), "dppd_mbuf_s%d", socket_id);
-        devices->pools[socket_id] = rte_pktmbuf_pool_create(name,
-                                                            cfg->mbufs_per_socket,
-                                                            cfg->mbuf_cache,
-                                                            0,
-                                                            RTE_MBUF_DEFAULT_BUF_SIZE,
-                                                            socket_id);
+        devices->pools[socket_id] = rte_pktmbuf_pool_create(name, cfg->mbufs_per_socket, cfg->mbuf_cache, 0,
+            RTE_MBUF_DEFAULT_BUF_SIZE, socket_id);
         if (devices->pools[socket_id] == NULL) {
-            fprintf(stderr, "[dppd] cannot create mbuf pool on socket %d: %s\n",
-                    socket_id, rte_strerror(rte_errno));
+            fprintf(stderr, "[dppd] cannot create mbuf pool on socket %d: %s\n", socket_id, rte_strerror(rte_errno));
             return -rte_errno;
         }
     }
     return 0;
 }
 
-static int configure_port(struct dppd_port *port,
-                          const struct dppd_config *cfg,
-                          struct rte_mempool *pool)
+static int configure_port(struct dppd_port *port, const struct dppd_config *cfg, struct rte_mempool *pool)
 {
     struct rte_eth_dev_info info;
     struct rte_eth_conf port_conf;
@@ -149,22 +137,17 @@ static int configure_port(struct dppd_port *port,
     port->capabilities.tx_offloads = info.tx_offload_capa;
     port->capabilities.device_capabilities = info.dev_capa;
     /** 仅在驱动明确支持移除中断时启用，避免不支持该能力的虚拟端口配置失败 */
-    port_conf.intr_conf.rmv = info.dev_flags != NULL &&
-        (*info.dev_flags & RTE_ETH_DEV_INTR_RMV) != 0;
-    if (cfg->nb_queues > port->capabilities.max_rx_queues ||
-        cfg->nb_queues > port->capabilities.max_tx_queues) {
-        fprintf(stderr,
-                "[dppd] port %u supports at most rx=%u tx=%u queues, requested=%u\n",
-                port->port_id, info.max_rx_queues, info.max_tx_queues, cfg->nb_queues);
+    port_conf.intr_conf.rmv = info.dev_flags != NULL && (*info.dev_flags & RTE_ETH_DEV_INTR_RMV) != 0;
+    if (cfg->nb_queues > port->capabilities.max_rx_queues || cfg->nb_queues > port->capabilities.max_tx_queues) {
+        fprintf(stderr, "[dppd] port %u supports at most rx=%u tx=%u queues, requested=%u\n", port->port_id,
+            info.max_rx_queues, info.max_tx_queues, cfg->nb_queues);
         return -ENOTSUP;
     }
 
     requested_rss = RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP | RTE_ETH_RSS_TCP;
-    port->configured_rss_hf = cfg->nb_queues > 1U ?
-        requested_rss & port->capabilities.rss_offloads : 0;
+    port->configured_rss_hf = cfg->nb_queues > 1U ? requested_rss & port->capabilities.rss_offloads : 0;
     if (cfg->nb_queues > 1U && port->configured_rss_hf == 0) {
-        fprintf(stderr, "[dppd] port %u cannot provide RSS for multiple queues\n",
-                port->port_id);
+        fprintf(stderr, "[dppd] port %u cannot provide RSS for multiple queues\n", port->port_id);
         return -ENOTSUP;
     }
     if (cfg->nb_queues > 1U) {
@@ -174,8 +157,7 @@ static int configure_port(struct dppd_port *port,
         port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_NONE;
     }
 
-    port->configured_tx_offloads =
-        port->capabilities.tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+    port->configured_tx_offloads = port->capabilities.tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
     port_conf.txmode.offloads = port->configured_tx_offloads;
 
     rc = rte_eth_dev_configure(port->port_id, cfg->nb_queues, cfg->nb_queues, &port_conf);
@@ -195,19 +177,10 @@ static int configure_port(struct dppd_port *port,
     tx_conf = info.default_txconf;
     tx_conf.offloads = port_conf.txmode.offloads;
     for (queue = 0; queue < cfg->nb_queues; ++queue) {
-        rc = rte_eth_rx_queue_setup(port->port_id,
-                                     queue,
-                                     rx_desc,
-                                     port->socket_id,
-                                     &rx_conf,
-                                     pool);
+        rc = rte_eth_rx_queue_setup(port->port_id, queue, rx_desc, port->socket_id, &rx_conf, pool);
         if (rc != 0)
             return rc;
-        rc = rte_eth_tx_queue_setup(port->port_id,
-                                     queue,
-                                     tx_desc,
-                                     port->socket_id,
-                                     &tx_conf);
+        rc = rte_eth_tx_queue_setup(port->port_id, queue, tx_desc, port->socket_id, &tx_conf);
         if (rc != 0)
             return rc;
     }
@@ -226,16 +199,11 @@ static int configure_port(struct dppd_port *port,
     if (rc != 0)
         return rc;
 
-    printf("[dppd] port=%u peer=%u socket=%d queues=%u rss=0x%" PRIx64
-           " tx-offloads=0x%" PRIx64 " mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
-           port->port_id,
-           port->peer_port_id,
-           port->socket_id,
-           cfg->nb_queues,
-           port->configured_rss_hf,
-           port->configured_tx_offloads,
-           port->mac.addr_bytes[0], port->mac.addr_bytes[1], port->mac.addr_bytes[2],
-           port->mac.addr_bytes[3], port->mac.addr_bytes[4], port->mac.addr_bytes[5]);
+    printf("[dppd] port=%u peer=%u socket=%d queues=%u rss=0x%" PRIx64 " tx-offloads=0x%" PRIx64
+           " mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+        port->port_id, port->peer_port_id, port->socket_id, cfg->nb_queues, port->configured_rss_hf,
+        port->configured_tx_offloads, port->mac.addr_bytes[0], port->mac.addr_bytes[1], port->mac.addr_bytes[2],
+        port->mac.addr_bytes[3], port->mac.addr_bytes[4], port->mac.addr_bytes[5]);
     return 0;
 }
 
@@ -279,11 +247,9 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
     for (i = 0; i < cfg->nb_ports; ++i) {
         struct dppd_port *port = &devices->ports[i];
 
-        rc = rte_eth_dev_callback_register(port->port_id, RTE_ETH_EVENT_INTR_RMV,
-                                            handle_removal, devices);
+        rc = rte_eth_dev_callback_register(port->port_id, RTE_ETH_EVENT_INTR_RMV, handle_removal, devices);
         if (rc != 0) {
-            fprintf(stderr, "[dppd] port=%u removal callback registration failed: %d\n",
-                    port->port_id, rc);
+            fprintf(stderr, "[dppd] port=%u removal callback registration failed: %d\n", port->port_id, rc);
             goto fail;
         }
         port->removal_callback_registered = true;
@@ -294,8 +260,7 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
         }
         rc = configure_port(port, cfg, devices->pools[port->socket_id]);
         if (rc != 0) {
-            fprintf(stderr, "[dppd] failed to configure port %u: %s (%d)\n",
-                    port->port_id, rte_strerror(-rc), rc);
+            fprintf(stderr, "[dppd] failed to configure port %u: %s (%d)\n", port->port_id, rte_strerror(-rc), rc);
             goto fail;
         }
     }
@@ -330,8 +295,7 @@ int dppd_devices_poll_links(struct dppd_device_set *devices)
          * 先检查设备身份和移除状态，再判断是否跳过链路查询
          * 即使 PMD 不支持 link API，也必须独立发现设备失效，不能永远跳过移除检测
          */
-        if (atomic_load_explicit(&port->removed, memory_order_acquire) ||
-            !rte_eth_dev_is_valid_port(port->port_id) ||
+        if (atomic_load_explicit(&port->removed, memory_order_acquire) || !rte_eth_dev_is_valid_port(port->port_id) ||
             rte_eth_dev_is_removed(port->port_id)) {
             request_removal(devices, port);
             fprintf(stderr, "[dppd] port=%u device removal detected\n", port->port_id);
@@ -352,8 +316,7 @@ int dppd_devices_poll_links(struct dppd_device_set *devices)
         }
         atomic_store_explicit(&port->link_state, next, memory_order_release);
         if (previous != next)
-            fprintf(stderr, "[dppd] port=%u link=%s\n",
-                    port->port_id, dppd_link_state_name(next));
+            fprintf(stderr, "[dppd] port=%u link=%s\n", port->port_id, dppd_link_state_name(next));
     }
     /** 覆盖遍历期间收到事件或尚未启动的端口已移除的情况，避免错误返回正常状态 */
     return dppd_devices_removal_requested(devices) ? -ENODEV : 0;
@@ -380,8 +343,7 @@ int dppd_devices_stop(struct dppd_device_set *devices)
             continue;
         /** EAGAIN 表示回调仍在执行，短暂休眠后重试，避免忙等并保证上下文仍然有效 */
         do {
-            rc = rte_eth_dev_callback_unregister(port->port_id, RTE_ETH_EVENT_INTR_RMV,
-                                                  handle_removal, devices);
+            rc = rte_eth_dev_callback_unregister(port->port_id, RTE_ETH_EVENT_INTR_RMV, handle_removal, devices);
             if (rc == -EAGAIN) {
                 struct timespec remaining = {.tv_nsec = 1000000L};
 
@@ -391,8 +353,7 @@ int dppd_devices_stop(struct dppd_device_set *devices)
         } while (rc == -EAGAIN);
         if (rc != 0) {
             /** 其他注销错误不能当作成功，保留设备和缓冲池供调用方报告故障 */
-            fprintf(stderr, "[dppd] port=%u removal callback unregister failed: %d\n",
-                    port->port_id, rc);
+            fprintf(stderr, "[dppd] port=%u removal callback unregister failed: %d\n", port->port_id, rc);
             return rc;
         }
         port->removal_callback_registered = false;
@@ -413,8 +374,7 @@ int dppd_devices_stop(struct dppd_device_set *devices)
             /** stop 失败后仍尝试 close，成功关闭后才有机会安全归还该端口使用的资源 */
             rc = rte_eth_dev_close(port->port_id);
             if (rc != 0) {
-                fprintf(stderr, "[dppd] port=%u device close failed: %d; retaining mbuf pools\n",
-                        port->port_id, rc);
+                fprintf(stderr, "[dppd] port=%u device close failed: %d; retaining mbuf pools\n", port->port_id, rc);
                 if (result == 0)
                     result = rc;
                 all_closed = false;
@@ -432,8 +392,8 @@ int dppd_devices_stop(struct dppd_device_set *devices)
             const struct rte_mempool *pool = devices->pools[socket_id];
             const unsigned int available = rte_mempool_avail_count(pool);
 
-            printf("[dppd] mbuf pool socket=%d available=%u capacity=%u in-use=%u\n",
-                   socket_id, available, pool->size, pool->size - available);
+            printf("[dppd] mbuf pool socket=%d available=%u capacity=%u in-use=%u\n", socket_id, available, pool->size,
+                pool->size - available);
             rte_mempool_free(devices->pools[socket_id]);
             devices->pools[socket_id] = NULL;
         }
@@ -442,8 +402,7 @@ int dppd_devices_stop(struct dppd_device_set *devices)
     return result;
 }
 
-const struct dppd_port *dppd_devices_find(const struct dppd_device_set *devices,
-                                          uint16_t port_id)
+const struct dppd_port *dppd_devices_find(const struct dppd_device_set *devices, uint16_t port_id)
 {
     uint16_t i;
 

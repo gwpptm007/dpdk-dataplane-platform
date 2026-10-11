@@ -44,10 +44,10 @@ int __real_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name
 int __wrap_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name, int value);
 int __real_rte_tel_data_add_array_u64(struct rte_tel_data *data, uint64_t value);
 int __wrap_rte_tel_data_add_array_u64(struct rte_tel_data *data, uint64_t value);
-int __real_rte_tel_data_add_dict_container(struct rte_tel_data *data, const char *name,
-    struct rte_tel_data *value, int keep);
-int __wrap_rte_tel_data_add_dict_container(struct rte_tel_data *data, const char *name,
-    struct rte_tel_data *value, int keep);
+int __real_rte_tel_data_add_dict_container(struct rte_tel_data *data, const char *name, struct rte_tel_data *value,
+    int keep);
+int __wrap_rte_tel_data_add_dict_container(struct rte_tel_data *data, const char *name, struct rte_tel_data *value,
+    int keep);
 void __wrap_dppd_runtime_stats_read(const struct dppd_runtime *runtime, struct dppd_stats_values *stats);
 
 /** 分配故障只影响调用线程，后台读者的 DPDK 容器仍由共享库正常分配 */
@@ -76,11 +76,26 @@ int __wrap_rte_tel_data_add_dict_u64(struct rte_tel_data *data, const char *name
 {
     if (fail_field != 0 && --fail_field == 0)
         return -E2BIG;
-#define CAPTURE(field) if (strcmp(name, #field) == 0) output.field = value;
-    CAPTURE(publication) CAPTURE(repository_generation) CAPTURE(generation)
-    CAPTURE(operations) CAPTURE(succeeded) CAPTURE(failed) CAPTURE(total) CAPTURE(returned)
-    CAPTURE(software_samples) CAPTURE(software_batch_samples) CAPTURE(software_batch_rules) CAPTURE(rte_flow_samples)
-    CAPTURE(revision) CAPTURE(overwritten) CAPTURE(oldest_event_id) CAPTURE(newest_event_id) CAPTURE(next_after)
+#define CAPTURE(field)             \
+    if (strcmp(name, #field) == 0) \
+        output.field = value;
+    CAPTURE(publication)
+    CAPTURE(repository_generation)
+    CAPTURE(generation)
+    CAPTURE(operations)
+    CAPTURE(succeeded)
+    CAPTURE(failed)
+    CAPTURE(total)
+    CAPTURE(returned)
+    CAPTURE(software_samples)
+    CAPTURE(software_batch_samples)
+    CAPTURE(software_batch_rules)
+    CAPTURE(rte_flow_samples)
+    CAPTURE(revision)
+    CAPTURE(overwritten)
+    CAPTURE(oldest_event_id)
+    CAPTURE(newest_event_id)
+    CAPTURE(next_after)
 #undef CAPTURE
     for (unsigned int index = 0; index < DPPD_RULE_HISTORY_PAGE_SIZE; ++index) {
         char expected[64];
@@ -118,8 +133,8 @@ int __wrap_rte_tel_data_add_array_u64(struct rte_tel_data *data, uint64_t value)
 }
 
 /** 正式服务会在 JSON 序列化后释放子容器，直接调用回调的测试负责模拟这一释放 */
-int __wrap_rte_tel_data_add_dict_container(struct rte_tel_data *data, const char *name,
-    struct rte_tel_data *value, int keep)
+int __wrap_rte_tel_data_add_dict_container(struct rte_tel_data *data, const char *name, struct rte_tel_data *value,
+    int keep)
 {
     int rc = __real_rte_tel_data_add_dict_container(data, name, value, keep);
 
@@ -163,13 +178,15 @@ static int query(unsigned int command, const char *parameters)
 /** 驱动校验成功，创建是否等待由屏障控制，验证查询无需等 PMD 操作结束 */
 static int validate(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
-    (void)port; (void)rule; (void)error;
+    (void)port;
+    (void)rule;
+    (void)error;
     return 0;
 }
 
 /** 暂停真实控制路径的创建调用，查询线程应仍能读到上一份完整发布 */
-static int create(uint16_t port, const struct dppd_rule *rule,
-    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+static int create(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     (void)error;
     pthread_mutex_lock(&barrier_lock);
@@ -180,8 +197,10 @@ static int create(uint16_t port, const struct dppd_rule *rule,
             pthread_cond_wait(&barrier_condition, &barrier_lock);
     }
     pthread_mutex_unlock(&barrier_lock);
-    *handle = (struct dppd_flow_handle){.rule_id = rule->id, .rule_generation = rule->generation,
-        .port_id = port, .flow = (struct rte_flow *)(uintptr_t)1};
+    *handle = (struct dppd_flow_handle){.rule_id = rule->id,
+        .rule_generation = rule->generation,
+        .port_id = port,
+        .flow = (struct rte_flow *)(uintptr_t)1};
     return 0;
 }
 
@@ -223,7 +242,7 @@ static void *read_snapshots(void *unused)
         assert(output.total <= 64 && output.returned <= 4 && output.overwritten + output.total == output.revision);
         for (unsigned int index = 0; index < output.returned; ++index)
             assert(output.event_ids[index] == output.oldest_event_id + index &&
-                   output.event_sequences[index] == output.event_ids[index] + 70);
+                output.event_sequences[index] == output.event_ids[index] + 70);
         atomic_fetch_add(&samples, 1);
     } while (!atomic_load(&stop_reader));
     return NULL;

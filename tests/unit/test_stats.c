@@ -56,20 +56,16 @@ int main(void)
     request.operation = DPPD_MANAGEMENT_STATS_QUERY;
     request.payload.stats_query.port_id = 9;
     request.payload.stats_query.queue_id = 2;
-    assert(dppd_management_handle(&control, &runtime.devices, &runtime,
-                                  &request, &response) == 0);
+    assert(dppd_management_handle(&control, &runtime.devices, &runtime, &request, &response) == 0);
     assert(response.status == 0 && response.payload.stats.rx_packets == 4);
     request.payload.stats_query.reserved = 1;
-    assert(dppd_management_handle(&control, &runtime.devices, &runtime,
-                                  &request, &response) == 0);
+    assert(dppd_management_handle(&control, &runtime.devices, &runtime, &request, &response) == 0);
     assert(response.status == -EINVAL);
     request.payload.stats_query.reserved = 0;
-    assert(dppd_management_handle(&control, &runtime.devices, NULL,
-                                  &request, &response) == 0);
+    assert(dppd_management_handle(&control, &runtime.devices, NULL, &request, &response) == 0);
     assert(response.status == -ENODEV);
     request.version = 7;
-    assert(dppd_management_handle(&control, &runtime.devices, &runtime,
-                                  &request, &response) == 0);
+    assert(dppd_management_handle(&control, &runtime.devices, &runtime, &request, &response) == 0);
     assert(response.status == -EPROTO);
     {
         struct dppd_management_server server;
@@ -79,8 +75,7 @@ int main(void)
 
         assert(client >= 0);
         snprintf(path, sizeof(path), "/tmp/dppd-stats-%ld.sock", (long)getpid());
-        assert(dppd_management_start(&server, &control, &runtime.devices,
-                                     &runtime, path) == 0);
+        assert(dppd_management_start(&server, &control, &runtime.devices, &runtime, path) == 0);
         address.sun_family = AF_UNIX;
         strcpy(address.sun_path, path);
         assert(connect(client, (struct sockaddr *)&address, sizeof(address)) == 0);

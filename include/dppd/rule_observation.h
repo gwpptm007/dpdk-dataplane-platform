@@ -133,8 +133,14 @@ struct dppd_rule_history_page {
 
 /** 字段清单供管理 CLI 与 telemetry 共用，累计单位是公开控制请求而不是报文 */
 #define DPPD_RULE_METRIC_FIELDS(X) \
-    X(operations) X(succeeded) X(failed) X(unchanged) X(applied) \
-    X(fallback_rules) X(compensation_failures) X(failed_after_apply)
+    X(operations)                  \
+    X(succeeded)                   \
+    X(failed)                      \
+    X(unchanged)                   \
+    X(applied)                     \
+    X(fallback_rules)              \
+    X(compensation_failures)       \
+    X(failed_after_apply)
 
 /** 本进程累计值和最近一次失败，成功请求与只读查询都不会清除最后的失败记录 */
 struct dppd_rule_metrics {
@@ -161,37 +167,34 @@ struct dppd_rule_observation {
 /** 名称在 CLI 和 JSON 中保持一致，非法枚举明确显示 unknown */
 static inline const char *dppd_rule_failure_kind_name(enum dppd_rule_failure_kind value)
 {
-    static const char *const names[] = {"none", "invalid-input", "conflict", "not-found",
-        "unsupported", "resource", "device", "temporary", "permission", "persistence",
-        "inconsistent", "isolated", "internal"};
+    static const char *const names[] = {"none", "invalid-input", "conflict", "not-found", "unsupported", "resource",
+        "device", "temporary", "permission", "persistence", "inconsistent", "isolated", "internal"};
     return (unsigned int)value < DPPD_RULE_FAILURE_KIND_COUNT ? names[value] : "unknown";
 }
 
 /** 阶段名称描述失败边界，不表示后端已完成对应动作 */
 static inline const char *dppd_rule_failure_stage_name(enum dppd_rule_failure_stage value)
 {
-    static const char *const names[] = {"none", "preflight", "plan", "validate", "prepare",
-        "commit", "remove", "publish", "persist", "compensate", "load", "reconcile", "isolation"};
+    static const char *const names[] = {"none", "preflight", "plan", "validate", "prepare", "commit", "remove",
+        "publish", "persist", "compensate", "load", "reconcile", "isolation"};
     return (unsigned int)value < sizeof(names) / sizeof(names[0]) ? names[value] : "unknown";
 }
 
 /** apply 包含单规则新建、更新和幂等重放，批量操作各有独立名称 */
 static inline const char *dppd_rule_operation_name(enum dppd_rule_operation value)
 {
-    static const char *const names[] = {"none", "apply", "create-batch", "update-batch",
-        "remove", "remove-batch", "restore", "flush", "reconcile"};
+    static const char *const names[] = {"none", "apply", "create-batch", "update-batch", "remove", "remove-batch",
+        "restore", "flush", "reconcile"};
     return (unsigned int)value < sizeof(names) / sizeof(names[0]) ? names[value] : "unknown";
 }
 
 enum dppd_rule_failure_kind dppd_rule_failure_classify(enum dppd_rule_failure_stage stage, int code);
-void dppd_rule_observation_begin(struct dppd_rule_observation *observation,
-                                 enum dppd_rule_operation operation);
+void dppd_rule_observation_begin(struct dppd_rule_observation *observation, enum dppd_rule_operation operation);
 void dppd_rule_observation_fault(struct dppd_rule_observation *observation, int code);
-void dppd_rule_observation_compensation(struct dppd_rule_observation *observation,
-                                        int code, uint64_t rule_id);
+void dppd_rule_observation_compensation(struct dppd_rule_observation *observation, int code, uint64_t rule_id);
 void dppd_rule_observation_finish(struct dppd_rule_observation *observation, int result);
 /** 只读指定窗口的一页，不分配、不读时钟、不改变游标或累计值，调用方负责与写者串行 */
-int dppd_rule_history_read(const struct dppd_rule_failure_history *history,
-    uint64_t after_event_id, uint64_t expected_revision, struct dppd_rule_history_page *page);
+int dppd_rule_history_read(const struct dppd_rule_failure_history *history, uint64_t after_event_id,
+    uint64_t expected_revision, struct dppd_rule_history_page *page);
 
 #endif

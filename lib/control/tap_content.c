@@ -51,13 +51,11 @@ bool dppd_tap_content_valid(const struct dppd_tap_content *c)
     if (c->version == 0)
         return memcmp(bytes, zero, sizeof(bytes)) == 0;
     if (c->version != 1 || (c->eth_type != 0 && c->eth_type != 0x0800) ||
-        (c->ip_proto != 0 && c->ip_proto != 6 && c->ip_proto != 17) ||
-        (c->action != 1 && c->action != 2) || (c->action == 1 && c->queue != 0) ||
-        c->parent != 0x10000 || c->chain != 0 || c->priority == 0 || c->protocol != 3 ||
-        (c->ipv4.src_be & c->ipv4.src_mask_be) != c->ipv4.src_be ||
+        (c->ip_proto != 0 && c->ip_proto != 6 && c->ip_proto != 17) || (c->action != 1 && c->action != 2) ||
+        (c->action == 1 && c->queue != 0) || c->parent != 0x10000 || c->chain != 0 || c->priority == 0 ||
+        c->protocol != 3 || (c->ipv4.src_be & c->ipv4.src_mask_be) != c->ipv4.src_be ||
         (c->ipv4.dst_be & c->ipv4.dst_mask_be) != c->ipv4.dst_be ||
-        (c->l4.src_be & c->l4.src_mask_be) != c->l4.src_be ||
-        (c->l4.dst_be & c->l4.dst_mask_be) != c->l4.dst_be ||
+        (c->l4.src_be & c->l4.src_mask_be) != c->l4.src_be || (c->l4.dst_be & c->l4.dst_mask_be) != c->l4.dst_be ||
         (c->l4.src_mask_be != 0 && c->l4.src_mask_be != UINT16_MAX) ||
         (c->l4.dst_mask_be != 0 && c->l4.dst_mask_be != UINT16_MAX))
         return false;
@@ -93,23 +91,24 @@ int dppd_tap_content_decode(const uint8_t bytes[DPPD_TAP_CONTENT_SIZE], struct d
 }
 
 /** 在驱动调用前生成预期值，不依赖之后读回的对象，崩溃窗口也能核对原始意图 */
-int dppd_tap_content_from_rule(const struct dppd_rule *rule, uint16_t max_queues,
-    struct dppd_tap_content *c)
+int dppd_tap_content_from_rule(const struct dppd_rule *rule, uint16_t max_queues, struct dppd_tap_content *c)
 {
     if (rule == NULL || c == NULL || dppd_rule_validate(rule, NULL, 0) != 0)
         return -EINVAL;
     memset(c, 0, sizeof(*c));
-    if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || rule->nb_actions != 1 ||
-        rule->group > 15 || max_queues == 0 || max_queues > 4094 || rule->priority > 4094U - max_queues)
+    if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || rule->nb_actions != 1 || rule->group > 15 || max_queues == 0 ||
+        max_queues > 4094 || rule->priority > 4094U - max_queues)
         return -ENOTSUP;
     c->version = 1;
     c->parent = 0x10000;
     c->protocol = 3;
+    /** 高 4 位保留组号，低 12 位放优先级，先让出驱动内部规则使用的编号 */
     c->priority = (uint16_t)((rule->group << 12) | (rule->priority + max_queues + 1U));
     for (uint16_t i = 0; i < rule->nb_matches; ++i) {
         const struct dppd_match *match = &rule->matches[i];
         switch (match->type) {
-        case DPPD_MATCH_ETH: break;
+        case DPPD_MATCH_ETH:
+            break;
         case DPPD_MATCH_IPV4:
             c->eth_type = 0x0800;
             c->ipv4 = match->spec.ipv4;
@@ -123,7 +122,8 @@ int dppd_tap_content_from_rule(const struct dppd_rule *rule, uint16_t max_queues
             c->l4.src_be &= c->l4.src_mask_be;
             c->l4.dst_be &= c->l4.dst_mask_be;
             break;
-        default: return -ENOTSUP;
+        default:
+            return -ENOTSUP;
         }
     }
     if (rule->actions[0].type == DPPD_ACTION_DROP)

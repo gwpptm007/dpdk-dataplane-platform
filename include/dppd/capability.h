@@ -100,15 +100,13 @@ int dppd_flow_probe_cache_clear(struct dppd_flow_probe_cache *cache, uint16_t po
 /** 创建或删除可能改变共享资源，任何一次尝试都保守清空全部端口的结果 */
 void dppd_flow_probe_cache_invalidate_all(struct dppd_flow_probe_cache *cache);
 /** 正式校验只累计事实，不缓存答复，也不读取时钟 */
-void dppd_flow_probe_cache_observe(struct dppd_flow_probe_cache *cache, uint16_t port_id,
-                                  const struct dppd_rule *rule, int validation_code);
-int dppd_flow_probe_cache_statistics(const struct dppd_flow_probe_cache *cache,
-                                     uint16_t port_id,
-                                     struct dppd_flow_probe_statistics *statistics);
+void dppd_flow_probe_cache_observe(struct dppd_flow_probe_cache *cache, uint16_t port_id, const struct dppd_rule *rule,
+    int validation_code);
+int dppd_flow_probe_cache_statistics(const struct dppd_flow_probe_cache *cache, uint16_t port_id,
+    struct dppd_flow_probe_statistics *statistics);
 /** refresh 为真时绕过旧结果，只做驱动校验，不创建或删除规则 */
-int dppd_flow_probe_cache_query(struct dppd_flow_probe_cache *cache, uint16_t port_id,
-    const struct dppd_rule *rule, bool refresh,
-    int (*validate)(uint16_t, const struct dppd_rule *, struct dppd_flow_error *),
+int dppd_flow_probe_cache_query(struct dppd_flow_probe_cache *cache, uint16_t port_id, const struct dppd_rule *rule,
+    bool refresh, int (*validate)(uint16_t, const struct dppd_rule *, struct dppd_flow_error *),
     struct dppd_flow_probe_result *result);
 
 #endif

@@ -37,15 +37,16 @@ static bool thread_started;
 static atomic_bool thread_stop;
 
 /** 用 memcpy 保存 dlsym 结果并检查指针大小，缺少所需符号时明确终止测试 */
-#define RESOLVE(function, symbol_name) do { \
-    void *symbol = dlsym(RTLD_NEXT, symbol_name); \
-    _Static_assert(sizeof(function) == sizeof(symbol), "function pointer size"); \
-    memcpy(&(function), &symbol, sizeof(function)); \
-    if ((function) == NULL) { \
-        fprintf(stderr, "[removal-fixture] missing symbol %s\n", symbol_name); \
-        _exit(90); \
-    } \
-} while (0)
+#define RESOLVE(function, symbol_name)                                               \
+    do {                                                                             \
+        void *symbol = dlsym(RTLD_NEXT, symbol_name);                                \
+        _Static_assert(sizeof(function) == sizeof(symbol), "function pointer size"); \
+        memcpy(&(function), &symbol, sizeof(function));                              \
+        if ((function) == NULL) {                                                    \
+            fprintf(stderr, "[removal-fixture] missing symbol %s\n", symbol_name);   \
+            _exit(90);                                                               \
+        }                                                                            \
+    } while (0)
 
 /** RTLD_NEXT 找到被本库拦截前的真实 DPDK 实现，避免代理再次调用自己 */
 static void resolve_symbols(void)
@@ -96,8 +97,7 @@ static void pause_ms(long milliseconds)
  * 这段时间真实注销接口会返回 EAGAIN，可证明清理确实等待在途回调结束
  * 启动期间同步分发的场景不延时，专门覆盖注册尚未返回时已经收到事件的情况
  */
-static int proxy_callback(uint16_t port_id, enum rte_eth_event_type event,
-                           void *context, void *ret_param)
+static int proxy_callback(uint16_t port_id, enum rte_eth_event_type event, void *context, void *ret_param)
 {
     struct callback_entry *entry = context;
     const int rc = entry->function(port_id, event, entry->context, ret_param);
@@ -117,8 +117,7 @@ static void dispatch_event(uint16_t port_id)
     char name[RTE_ETH_NAME_MAX_LEN];
     struct rte_eth_dev *device;
 
-    if (rte_eth_dev_get_name_by_port(port_id, name) != 0 ||
-        (device = allocated_real(name)) == NULL) {
+    if (rte_eth_dev_get_name_by_port(port_id, name) != 0 || (device = allocated_real(name)) == NULL) {
         fprintf(stderr, "[removal-fixture] cannot find port=%u\n", port_id);
         _exit(91);
     }
@@ -144,8 +143,8 @@ static void *wait_for_event(void *unused)
  * 仅代理移除事件，其余事件交给真实接口
  * 可模拟注册失败、注册过程中立即移除，以及运行中由独立线程分发移除事件
  */
-int rte_eth_dev_callback_register(uint16_t port_id, enum rte_eth_event_type event,
-                                  rte_eth_dev_cb_fn function, void *context)
+int rte_eth_dev_callback_register(uint16_t port_id, enum rte_eth_event_type event, rte_eth_dev_cb_fn function,
+    void *context)
 {
     int rc;
 
@@ -177,14 +176,14 @@ int rte_eth_dev_callback_register(uint16_t port_id, enum rte_eth_event_type even
  * 把生产回调参数还原成登记时使用的代理参数，再调用真实注销接口
  * 注销成功后等待测试线程结束，保证生产代码随后 close 时没有测试线程仍借用端口
  */
-int rte_eth_dev_callback_unregister(uint16_t port_id, enum rte_eth_event_type event,
-                                    rte_eth_dev_cb_fn function, void *context)
+int rte_eth_dev_callback_unregister(uint16_t port_id, enum rte_eth_event_type event, rte_eth_dev_cb_fn function,
+    void *context)
 {
     int rc;
 
     pthread_once(&symbols_once, resolve_symbols);
-    if (event != RTE_ETH_EVENT_INTR_RMV || port_id >= RTE_MAX_ETHPORTS ||
-        entries[port_id].function != function || entries[port_id].context != context)
+    if (event != RTE_ETH_EVENT_INTR_RMV || port_id >= RTE_MAX_ETHPORTS || entries[port_id].function != function ||
+        entries[port_id].context != context)
         return unregister_real(port_id, event, function, context);
     rc = unregister_real(port_id, event, proxy_callback, &entries[port_id]);
     if (rc == 0 && port_id == target_port() && thread_started) {
@@ -203,8 +202,7 @@ int rte_eth_dev_callback_unregister(uint16_t port_id, enum rte_eth_event_type ev
 int rte_eth_dev_is_removed(uint16_t port_id)
 {
     pthread_once(&symbols_once, resolve_symbols);
-    if (port_id == target_port() && triggered() &&
-        (mode_is("probe") || mode_is("probe-no-link")))
+    if (port_id == target_port() && triggered() && (mode_is("probe") || mode_is("probe-no-link")))
         return 1;
     return removed_real(port_id);
 }

@@ -4,8 +4,7 @@
 #include <stddef.h>
 
 /** 根据规划结果选择软件或硬件的操作接口，让事务流程不用分别编写两套安装逻辑 */
-static const struct dppd_transaction_backend *backend_for(
-    const struct dppd_transaction_backends *backends,
+static const struct dppd_transaction_backend *backend_for(const struct dppd_transaction_backends *backends,
     enum dppd_plan_backend backend)
 {
     switch (backend) {
@@ -23,9 +22,8 @@ static const struct dppd_transaction_backend *backend_for(
  */
 static int backend_valid(const struct dppd_transaction_backend *backend)
 {
-    return backend != NULL && backend->validate != NULL &&
-           backend->prepare != NULL && backend->commit != NULL &&
-           backend->rollback != NULL;
+    return backend != NULL && backend->validate != NULL && backend->prepare != NULL && backend->commit != NULL &&
+        backend->rollback != NULL;
 }
 
 /**
@@ -33,9 +31,8 @@ static int backend_valid(const struct dppd_transaction_backend *backend)
  * commit_attempts 表示有多少条规则已经调用过 commit，包括调用了但返回错误的那一条
  * 这个信息帮助后端区分“只预留了资源”和“可能已经产生安装副作用”
  */
-static void rollback_items(struct dppd_transaction *transaction,
-                           const struct dppd_transaction_backends *backends,
-                           uint32_t commit_attempts)
+static void rollback_items(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends,
+    uint32_t commit_attempts)
 {
     uint32_t i = transaction->nb_items;
 
@@ -53,17 +50,14 @@ static void rollback_items(struct dppd_transaction *transaction,
          * 只经过校验的条目没有占用资源，不需要回滚
          * 失败条目若留下非零 token，说明仍有需要清理的资源，不能仅因为 FAILED 就跳过
          */
-        if (item->state != DPPD_TRANSACTION_ITEM_PREPARED &&
-            item->state != DPPD_TRANSACTION_ITEM_COMMITTED &&
+        if (item->state != DPPD_TRANSACTION_ITEM_PREPARED && item->state != DPPD_TRANSACTION_ITEM_COMMITTED &&
             item->state != DPPD_TRANSACTION_ITEM_FAILED)
             continue;
-        if (item->state == DPPD_TRANSACTION_ITEM_FAILED &&
-            item->backend_token == 0)
+        if (item->state == DPPD_TRANSACTION_ITEM_FAILED && item->backend_token == 0)
             continue;
         backend = backend_for(backends, item->plan.backend);
         commit_was_attempted = i < commit_attempts;
-        rc = backend->rollback(backend->context, item, item->backend_token,
-                               commit_was_attempted);
+        rc = backend->rollback(backend->context, item, item->backend_token, commit_was_attempted);
         if (rc == 0)
             item->state = DPPD_TRANSACTION_ITEM_ROLLED_BACK;
         /** 保留第一个清理错误，同时继续尝试清理其余条目，便于上层判断是否必须隔离 */
@@ -72,9 +66,7 @@ static void rollback_items(struct dppd_transaction *transaction,
             transaction->rollback_item = i;
         }
     }
-    transaction->state = transaction->rollback_code == 0 ?
-                         DPPD_TRANSACTION_ROLLED_BACK :
-                         DPPD_TRANSACTION_FAILED;
+    transaction->state = transaction->rollback_code == 0 ? DPPD_TRANSACTION_ROLLED_BACK : DPPD_TRANSACTION_FAILED;
 }
 
 /**
@@ -82,15 +74,12 @@ static void rollback_items(struct dppd_transaction *transaction,
  * 调用方持有 items 的内存，必须让它存活到事务结束
  * 这里会清空旧 token，因此不能用 init 代替尚未完成的事务清理
  */
-int dppd_transaction_init(struct dppd_transaction *transaction,
-                          uint64_t transaction_id,
-                          struct dppd_transaction_item *items,
-                          uint32_t nb_items)
+int dppd_transaction_init(struct dppd_transaction *transaction, uint64_t transaction_id,
+    struct dppd_transaction_item *items, uint32_t nb_items)
 {
     uint32_t i;
 
-    if (transaction == NULL || transaction_id == 0 ||
-        items == NULL || nb_items == 0)
+    if (transaction == NULL || transaction_id == 0 || items == NULL || nb_items == 0)
         return -EINVAL;
     transaction->id = transaction_id;
     transaction->state = DPPD_TRANSACTION_NEW;
@@ -115,14 +104,12 @@ int dppd_transaction_init(struct dppd_transaction *transaction,
  * 返回值说明原操作为什么失败，rollback_code 另行说明清理是否也失败
  * 返回成功仅表示后端对象已安装，规则账本发布和快照保存仍由控制层负责
  */
-int dppd_transaction_run(struct dppd_transaction *transaction,
-                         const struct dppd_transaction_backends *backends)
+int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends)
 {
     uint32_t i;
     int rc;
 
-    if (transaction == NULL || backends == NULL ||
-        transaction->state != DPPD_TRANSACTION_NEW)
+    if (transaction == NULL || backends == NULL || transaction->state != DPPD_TRANSACTION_NEW)
         return -EINVAL;
 
     transaction->state = DPPD_TRANSACTION_VALIDATING;
@@ -132,8 +119,7 @@ int dppd_transaction_run(struct dppd_transaction *transaction,
      */
     for (i = 0; i < transaction->nb_items; ++i) {
         struct dppd_transaction_item *item = &transaction->items[i];
-        const struct dppd_transaction_backend *backend =
-            backend_for(backends, item->plan.backend);
+        const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);
 
         if (item->rule.id == 0 || item->plan.rule_id != item->rule.id ||
             item->plan.rule_generation != item->rule.generation)
@@ -162,8 +148,7 @@ int dppd_transaction_run(struct dppd_transaction *transaction,
      */
     for (i = 0; i < transaction->nb_items; ++i) {
         struct dppd_transaction_item *item = &transaction->items[i];
-        const struct dppd_transaction_backend *backend =
-            backend_for(backends, item->plan.backend);
+        const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);
 
         rc = backend->prepare(backend->context, item, &item->backend_token);
         if (rc != 0) {
@@ -185,8 +170,7 @@ int dppd_transaction_run(struct dppd_transaction *transaction,
      */
     for (i = 0; i < transaction->nb_items; ++i) {
         struct dppd_transaction_item *item = &transaction->items[i];
-        const struct dppd_transaction_backend *backend =
-            backend_for(backends, item->plan.backend);
+        const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);
 
         rc = backend->commit(backend->context, item, item->backend_token);
         if (rc != 0) {
@@ -210,12 +194,10 @@ int dppd_transaction_run(struct dppd_transaction *transaction,
  * 例如批量更新的新版本全部装好后，旧版本删除失败，就需要撤销整批新版本
  * 已经 finalize 的事务不再拥有回滚资源，因此不允许通过这个入口继续撤销
  */
-int dppd_transaction_rollback_committed(
-    struct dppd_transaction *transaction,
+int dppd_transaction_rollback_committed(struct dppd_transaction *transaction,
     const struct dppd_transaction_backends *backends)
 {
-    if (transaction == NULL || backends == NULL ||
-        transaction->state != DPPD_TRANSACTION_COMMITTED)
+    if (transaction == NULL || backends == NULL || transaction->state != DPPD_TRANSACTION_COMMITTED)
         return -EINVAL;
     rollback_items(transaction, backends, transaction->nb_items);
     return transaction->rollback_code;
@@ -227,21 +209,17 @@ int dppd_transaction_rollback_committed(
  * 逐项清零 token，表示调用方已经放弃再次提交或回滚本次事务的可能
  * finalize 回调不能报错，因此后端必须把它设计成单纯的临时资源释放动作
  */
-int dppd_transaction_finalize(struct dppd_transaction *transaction,
-                              const struct dppd_transaction_backends *backends)
+int dppd_transaction_finalize(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends)
 {
     uint32_t i;
 
-    if (transaction == NULL || backends == NULL ||
-        transaction->state != DPPD_TRANSACTION_COMMITTED)
+    if (transaction == NULL || backends == NULL || transaction->state != DPPD_TRANSACTION_COMMITTED)
         return -EINVAL;
     for (i = 0; i < transaction->nb_items; ++i) {
         struct dppd_transaction_item *item = &transaction->items[i];
-        const struct dppd_transaction_backend *backend =
-            backend_for(backends, item->plan.backend);
+        const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);
 
-        if (item->state != DPPD_TRANSACTION_ITEM_COMMITTED ||
-            !backend_valid(backend))
+        if (item->state != DPPD_TRANSACTION_ITEM_COMMITTED || !backend_valid(backend))
             return -EUCLEAN;
         /** 后端没有额外清理回调时也要清空 token，并让整个事务进入不可回滚的终态 */
         if (backend->finalize != NULL)

@@ -31,14 +31,16 @@ void *__wrap_calloc(size_t count, size_t size)
 /** 校验错误可独立于创建错误配置，便于区分支持能力失败和安装副作用失败 */
 static int validate(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
-    (void)port; (void)rule; (void)error;
+    (void)port;
+    (void)rule;
+    (void)error;
     driver.validates++;
     return driver.validate_error;
 }
 
 /** 部分创建失败仍可以留下 handle，上层必须清理，不能把错误当成没有安装过对象 */
-static int create(uint16_t port, const struct dppd_rule *rule,
-    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+static int create(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
+    struct dppd_flow_error *error)
 {
     bool fail = (int)driver.creates++ == driver.fail_create;
 
@@ -64,10 +66,13 @@ static int remove_flow(struct dppd_flow_handle *handle, struct dppd_flow_error *
 }
 
 static const struct dppd_flow_api api = {
-    .validate = validate, .create = create, .remove = remove_flow,
+    .validate = validate,
+    .create = create,
+    .remove = remove_flow,
 };
 static const struct dppd_topology topology = {
-    .nb_endpoints = 2, .endpoints = {{.ethdev_port_id = 5}, {.ethdev_port_id = 6}},
+    .nb_endpoints = 2,
+    .endpoints = {{.ethdev_port_id = 5}, {.ethdev_port_id = 6}},
 };
 
 /** 每个场景用独立 service，避免前一次故障或累计值掩盖本次断言 */
@@ -89,8 +94,7 @@ static struct dppd_rule rule(uint64_t id, enum dppd_fallback_policy policy)
 }
 
 /** 历史只数成功的后端提交，时钟不可用也算提交，但不能作为零耗时测量 */
-static uint64_t successful_commits(const struct dppd_control_service *control,
-                                 enum dppd_rule_latency_scope scope)
+static uint64_t successful_commits(const struct dppd_control_service *control, enum dppd_rule_latency_scope scope)
 {
     struct dppd_rule_latency_report report;
 
@@ -101,12 +105,20 @@ static uint64_t successful_commits(const struct dppd_control_service *control,
 /** 错误分类依赖原始 errno，保存与隔离阶段优先表达业务原因 */
 static void classify_errors(void)
 {
-    const struct {int code; enum dppd_rule_failure_kind kind;} cases[] = {
-        {0, DPPD_RULE_FAILURE_NONE}, {-EINVAL, DPPD_RULE_FAILURE_INPUT},
-        {-ESTALE, DPPD_RULE_FAILURE_CONFLICT}, {-ENOENT, DPPD_RULE_FAILURE_NOT_FOUND},
-        {-ENOTSUP, DPPD_RULE_FAILURE_UNSUPPORTED}, {-ENOMEM, DPPD_RULE_FAILURE_RESOURCE},
-        {-EFAULT, DPPD_RULE_FAILURE_DEVICE}, {-EAGAIN, DPPD_RULE_FAILURE_TEMPORARY},
-        {-EACCES, DPPD_RULE_FAILURE_PERMISSION}, {-EUCLEAN, DPPD_RULE_FAILURE_INCONSISTENT},
+    const struct {
+        int code;
+        enum dppd_rule_failure_kind kind;
+    } cases[] = {
+        {0, DPPD_RULE_FAILURE_NONE},
+        {-EINVAL, DPPD_RULE_FAILURE_INPUT},
+        {-ESTALE, DPPD_RULE_FAILURE_CONFLICT},
+        {-ENOENT, DPPD_RULE_FAILURE_NOT_FOUND},
+        {-ENOTSUP, DPPD_RULE_FAILURE_UNSUPPORTED},
+        {-ENOMEM, DPPD_RULE_FAILURE_RESOURCE},
+        {-EFAULT, DPPD_RULE_FAILURE_DEVICE},
+        {-EAGAIN, DPPD_RULE_FAILURE_TEMPORARY},
+        {-EACCES, DPPD_RULE_FAILURE_PERMISSION},
+        {-EUCLEAN, DPPD_RULE_FAILURE_INCONSISTENT},
         {-EPROTO, DPPD_RULE_FAILURE_INTERNAL},
     };
     struct dppd_rule_observation observation = {0};
@@ -174,7 +186,8 @@ static void partial_create_isolation(void)
     struct dppd_control_apply_result result;
     struct dppd_rule value = rule(20, DPPD_FALLBACK_REQUIRE_HARDWARE);
     struct dppd_management_request request = {.version = DPPD_MANAGEMENT_VERSION,
-        .size = sizeof(request), .operation = DPPD_MANAGEMENT_RULE_METRICS};
+        .size = sizeof(request),
+        .operation = DPPD_MANAGEMENT_RULE_METRICS};
     struct dppd_management_response response;
     struct dppd_rule_metrics metrics;
 
@@ -241,8 +254,8 @@ static void batch_compensation(void)
     /** 删除第二条失败后重建第一条也失败，仍须保留删除错误和重建错误各自的身份 */
     setup(&control, 4);
     assert(dppd_control_create_batch(&control, requests, 2, results) == 0);
-    struct dppd_control_batch_remove_request deletes[2] = {
-        {.rule_id = 30, .expected_generation = 1}, {.rule_id = 31, .expected_generation = 2}};
+    struct dppd_control_batch_remove_request deletes[2] = {{.rule_id = 30, .expected_generation = 1},
+        {.rule_id = 31, .expected_generation = 2}};
     struct dppd_control_batch_remove_result removed[2];
     driver.fail_remove = 1;
     driver.fail_create = 2;

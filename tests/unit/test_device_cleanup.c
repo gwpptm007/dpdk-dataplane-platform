@@ -44,11 +44,11 @@ void __wrap_rte_mempool_free(struct rte_mempool *value)
     frees++;
 }
 
-int __wrap_rte_eth_dev_callback_unregister(uint16_t port_id, enum rte_eth_event_type event,
-                                           rte_eth_dev_cb_fn function, void *context);
+int __wrap_rte_eth_dev_callback_unregister(uint16_t port_id, enum rte_eth_event_type event, rte_eth_dev_cb_fn function,
+    void *context);
 /** 注销必须发生在 stop、close 和 free 之前，可先返回数次 EAGAIN 模拟在途回调 */
-int __wrap_rte_eth_dev_callback_unregister(uint16_t port_id, enum rte_eth_event_type event,
-                                           rte_eth_dev_cb_fn function, void *context)
+int __wrap_rte_eth_dev_callback_unregister(uint16_t port_id, enum rte_eth_event_type event, rte_eth_dev_cb_fn function,
+    void *context)
 {
     assert(port_id == 7 && event == RTE_ETH_EVENT_INTR_RMV);
     assert(function != NULL && context != NULL);
