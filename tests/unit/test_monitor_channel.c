@@ -15,6 +15,44 @@ static int counted(void *context)
     return 0;
 }
 
+static void interrupted(int number)
+{
+    (void)number;
+}
+
+/** 多次信号打断后仍能收到正常回复，持续信号也不能让等待超过原截止时间 */
+static void interrupted_wait(void)
+{
+    struct sigaction action = {.sa_handler = interrupted}, previous;
+    sigemptyset(&action.sa_mask);
+    assert(sigaction(SIGUSR1, &action, &previous) == 0);
+    for (unsigned int mode = 0; mode < 2; ++mode) {
+        int sockets[2];
+        assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) == 0);
+        pid_t child = fork();
+        assert(child >= 0);
+        if (child == 0) {
+            close(sockets[0]);
+            for (unsigned int index = 0; index < (mode == 0 ? 10U : 100U); ++index) {
+                usleep(10000);
+                assert(kill(getppid(), SIGUSR1) == 0);
+            }
+            assert(send(sockets[1], "r", 1, MSG_NOSIGNAL) == 1);
+            _exit(0);
+        }
+        close(sockets[1]);
+        uint64_t started, finished;
+        assert(milliseconds(&started) == 0);
+        assert(wait_ready(sockets[0], POLLIN, started + (mode == 0 ? 1000U : 150U)) == (mode == 0 ? 0 : -ETIMEDOUT));
+        assert(milliseconds(&finished) == 0 && finished - started < (mode == 0 ? 1500U : 500U));
+        if (mode != 0)
+            assert(kill(child, SIGKILL) == 0);
+        assert(waitpid(child, NULL, 0) == child);
+        close(sockets[0]);
+    }
+    assert(sigaction(SIGUSR1, &previous, NULL) == 0);
+}
+
 /** 坏消息只关闭自己的连接，静默占用槽位的客户端到期后释放，正常请求仍先检查事件 */
 static void server_boundaries(void)
 {
@@ -26,19 +64,46 @@ static void server_boundaries(void)
     socklen_t length = address_for(record.session, &address);
     const unsigned char nonce[16] = {1};
     unsigned int checks = 0;
-    for (unsigned int fault = 0; fault <= 7; ++fault) {
+    for (unsigned int fault = 0; fault <= 8; ++fault) {
         unsigned char request[MESSAGE_SIZE], reply[MESSAGE_SIZE];
         make_request(&record, nonce, request);
-        const size_t offsets[] = {0, 8, 12, 16, 32, 48, 56};
-        if (fault < 7)
+        const size_t offsets[] = {0, 8, 12, 16, 32, 48, 56, 64};
+        if (fault < 8)
             request[offsets[fault]] ^= 1;
         int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
         assert(fd >= 0 && connect(fd, (struct sockaddr *)&address, length) == 0);
         assert(send(fd, request, sizeof(request), MSG_NOSIGNAL) == sizeof(request));
         assert(dppd_monitor_server_poll(&server, &record, counted, &checks) == 0);
         ssize_t received = recv(fd, reply, sizeof(reply), MSG_DONTWAIT);
-        assert(received == (fault == 7 ? (ssize_t)sizeof(reply) : 0));
-        assert(checks == (fault == 7 ? 1U : 0U));
+        assert(received == (fault == 8 ? (ssize_t)sizeof(reply) : 0));
+        /* 合法的结构才进入事件检查，错误版本号由权限检查继续拒绝 */
+        assert(checks == (fault >= 7 ? fault - 6 : 0U));
+        close(fd);
+    }
+    /* 多余或被截断的描述符不能通过校验，接收到的每个副本都必须及时关闭 */
+    for (unsigned int descriptors = 2; descriptors <= 5; ++descriptors) {
+        unsigned char request[MESSAGE_SIZE];
+        make_request(&record, nonce, request);
+        int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        assert(fd >= 0 && connect(fd, (struct sockaddr *)&address, length) == 0);
+        union {
+            struct cmsghdr alignment;
+            unsigned char bytes[CMSG_SPACE(5 * sizeof(int))];
+        } control = {0};
+        struct iovec payload = {.iov_base = request, .iov_len = sizeof(request)};
+        struct msghdr message = {.msg_iov = &payload,
+            .msg_iovlen = 1,
+            .msg_control = control.bytes,
+            .msg_controllen = CMSG_SPACE(descriptors * sizeof(int))};
+        struct cmsghdr *item = CMSG_FIRSTHDR(&message);
+        item->cmsg_level = SOL_SOCKET;
+        item->cmsg_type = SCM_RIGHTS;
+        item->cmsg_len = CMSG_LEN(descriptors * sizeof(int));
+        for (unsigned int index = 0; index < descriptors; ++index)
+            memcpy((unsigned char *)CMSG_DATA(item) + index * sizeof(int), &fd, sizeof(fd));
+        assert(sendmsg(fd, &message, MSG_NOSIGNAL) == sizeof(request));
+        assert(dppd_monitor_server_poll(&server, &record, counted, &checks) == 0 && checks == 2);
+        assert(recv(fd, request, sizeof(request), MSG_DONTWAIT) == 0);
         close(fd);
     }
     int idle[DPPD_MONITOR_CLIENT_LIMIT];
@@ -46,12 +111,12 @@ static void server_boundaries(void)
         idle[index] = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
         assert(idle[index] >= 0 && connect(idle[index], (struct sockaddr *)&address, length) == 0);
     }
-    assert(dppd_monitor_server_poll(&server, &record, counted, &checks) == 0 && checks == 1);
+    assert(dppd_monitor_server_poll(&server, &record, counted, &checks) == 0 && checks == 2);
     for (unsigned int index = 0; index < DPPD_MONITOR_CLIENT_LIMIT; ++index) {
         assert(server.clients[index] >= 0);
         server.expires[index] = 0;
     }
-    assert(dppd_monitor_server_poll(&server, &record, counted, &checks) == 0 && checks == 1);
+    assert(dppd_monitor_server_poll(&server, &record, counted, &checks) == 0 && checks == 2);
     for (unsigned int index = 0; index < DPPD_MONITOR_CLIENT_LIMIT; ++index) {
         assert(server.clients[index] == -1);
         close(idle[index]);
@@ -203,6 +268,7 @@ static void identities(void)
 
 int main(void)
 {
+    interrupted_wait();
     server_boundaries();
     identities();
     for (int mode = 0; mode <= 6; ++mode)

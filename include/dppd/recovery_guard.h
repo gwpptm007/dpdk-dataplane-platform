@@ -110,6 +110,8 @@ struct dppd_recovery_guard {
 
 /** state_path 非空时允许首次创建并核对快照路径，为空时只打开已有记录供离线工具使用 */
 int dppd_recovery_guard_open(struct dppd_recovery_guard *guard, const char *path, const char *state_path);
+/** 核验传入描述符确实持有该文件的排他锁，只读解码，不接管或释放调用方的锁 */
+int dppd_recovery_guard_read_locked(int fd, const char *path, struct dppd_recovery_record *record);
 /** 仅在干净文件上绑定，调用方先完成实际握手，落盘失败不得开始安装 */
 int dppd_recovery_guard_bind_monitor(struct dppd_recovery_guard *guard, const uint8_t session[DPPD_TAP_COOKIE_SIZE]);
 /** 必须在驱动 create 之前成功，首次涉及该端口时先写入并 fsync，失败就不得安装 */

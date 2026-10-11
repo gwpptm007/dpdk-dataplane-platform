@@ -63,7 +63,9 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 继续观察 TAP 生命周期，保存失效原因并识别监护中断，见 [接口监护](docs/recovery_monitor.md)。
 业务可加 `--recovery-monitor SESSION_PATH`，启动及安装前后核对身份与新鲜回复，
 会话持久绑定至恢复记录 v6，失效后停止安装并退出，见 [监护握手](docs/recovery_monitor_handshake.md)。
-受控写入者、历史连续性证明和删除时的写入交接仍待实现。
+已增加独占业务登记和 `handoff-check PATH REVISION SESSION_PATH` 只读交接检查，
+业务确认退出后才允许单个恢复租约，详见 [写入者与恢复交接](docs/recovery_writer_handoff.md)。
+外部写入权限隔离、完整历史证明及自动删除仍待实现。
 
 ```bash
 bash scripts/build.sh

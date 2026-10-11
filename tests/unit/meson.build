@@ -170,6 +170,10 @@ test('independent recovery monitor evidence', recovery_monitor_test)
 monitor_channel_test = executable('test_monitor_channel', 'test_monitor_channel.c', dependencies: dppd_core_dep)
 test('recovery monitor handshake', monitor_channel_test)
 
+# 内核进程身份、描述符传递和同一文件锁共同约束交接，暂停或主动解锁不能绕过
+monitor_handoff_test = executable('test_monitor_handoff', 'test_monitor_handoff.c', dependencies: dppd_core_dep)
+test('cooperative writer recovery handoff', monitor_handoff_test)
+
 # 持久化意图、结果和删除事件，覆盖驱动前后写盘故障及清理时的真实 handle 回收
 recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attempt.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])

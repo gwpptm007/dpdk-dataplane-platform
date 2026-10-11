@@ -325,6 +325,58 @@ static int same_file(struct dppd_recovery_guard *guard)
     return 0;
 }
 
+static int load_record(int fd, struct dppd_recovery_record *record)
+{
+    unsigned char bytes[RECORD_SIZE];
+    struct stat info;
+    if (fstat(fd, &info) != 0)
+        return -errno;
+    if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V4_SIZE && info.st_size != RECORD_V3_SIZE &&
+        info.st_size != RECORD_V1_SIZE && info.st_size != RECORD_V2_SIZE)
+        return -EBADMSG;
+    size_t done = 0;
+    while (done < (size_t)info.st_size) {
+        ssize_t received = pread(fd, bytes + done, (size_t)info.st_size - done, (off_t)done);
+        if (received < 0 && errno == EINTR)
+            continue;
+        if (received <= 0)
+            return received < 0 ? -errno : -EBADMSG;
+        done += (size_t)received;
+    }
+    return decode(bytes, (size_t)info.st_size, record);
+}
+
+int dppd_recovery_guard_read_locked(int fd, const char *path, struct dppd_recovery_record *record)
+{
+    if (fd < 0 || path == NULL || record == NULL)
+        return -EINVAL;
+    struct dppd_recovery_guard held = {.fd = fd};
+    int rc = canonical_path(path, held.path);
+    if (rc == 0)
+        rc = same_file(&held);
+    if (rc != 0)
+        return rc;
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0)
+        return -errno;
+    if ((flags & O_ACCMODE) != O_RDWR)
+        return -EACCES;
+    /* 独立打开应被锁挡住，再核对传入的同一文件描述是否能保持排他锁 */
+    int probe = open(held.path, O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (probe < 0)
+        return -errno;
+    int locked = flock(probe, LOCK_EX | LOCK_NB);
+    rc = locked == 0 ? -EACCES : errno == EWOULDBLOCK ? 0 : -errno;
+    close(probe);
+    if (rc == 0 && flock(fd, LOCK_EX | LOCK_NB) != 0)
+        rc = -errno;
+    if (rc == 0)
+        rc = load_record(fd, record);
+    if (rc == 0)
+        rc = same_file(&held);
+    return rc;
+}
+
 /**
  * 在持锁的同一个 inode 上完整写入并同步，避免 rename 后其他进程取得另一个文件锁
  * 中途失败或崩溃可能留下坏文件，下次必须拒绝启动，不把不完整写入当作清理成功
@@ -373,10 +425,7 @@ void dppd_recovery_guard_close(struct dppd_recovery_guard *guard)
 int dppd_recovery_guard_open(struct dppd_recovery_guard *guard, const char *path, const char *state_path)
 {
     char state[DPPD_STATE_PATH_CAPACITY], parent[DPPD_STATE_PATH_CAPACITY];
-    unsigned char bytes[RECORD_SIZE];
-    struct stat info;
     bool created = false;
-    size_t done = 0;
     int rc, directory;
 
     if (guard == NULL)
@@ -413,26 +462,7 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard, const char *path
         if (rc != 0)
             goto fail;
     } else {
-        if (fstat(guard->fd, &info) != 0) {
-            rc = -errno;
-            goto fail;
-        }
-        if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V4_SIZE && info.st_size != RECORD_V3_SIZE &&
-            info.st_size != RECORD_V1_SIZE && info.st_size != RECORD_V2_SIZE) {
-            rc = -EBADMSG;
-            goto fail;
-        }
-        while (done < (size_t)info.st_size) {
-            ssize_t received = pread(guard->fd, bytes + done, (size_t)info.st_size - done, (off_t)done);
-            if (received < 0 && errno == EINTR)
-                continue;
-            if (received <= 0) {
-                rc = received < 0 ? -errno : -EBADMSG;
-                goto fail;
-            }
-            done += (size_t)received;
-        }
-        rc = decode(bytes, (size_t)info.st_size, &guard->record);
+        rc = load_record(guard->fd, &guard->record);
         if (rc != 0)
             goto fail;
         if (state_path != NULL && strcmp(state, guard->record.state_path) != 0) {

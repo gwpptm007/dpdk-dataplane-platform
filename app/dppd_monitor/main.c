@@ -171,17 +171,18 @@ static int run_monitor(int argc, char **argv)
         .record = &store.record,
         .reason = DPPD_MONITOR_STOP_REQUESTED};
     while (!stopping) {
-        struct pollfd events[2 + DPPD_MONITOR_CLIENT_LIMIT] = {{.fd = watch.fd, .events = POLLIN},
-            {.fd = server.fd, .events = POLLIN}};
+        struct pollfd events[4 + DPPD_MONITOR_CLIENT_LIMIT] = {{.fd = watch.fd, .events = POLLIN},
+            {.fd = server.fd, .events = POLLIN}, {.fd = server.recovery_fd, .events = POLLIN},
+            {.fd = server.recovery_pidfd, .events = POLLIN}};
         bool available = false;
         for (unsigned int index = 0; index < DPPD_MONITOR_CLIENT_LIMIT; ++index) {
-            events[index + 2] = (struct pollfd){.fd = server.clients[index], .events = POLLIN};
+            events[index + 4] = (struct pollfd){.fd = server.clients[index], .events = POLLIN};
             available |= server.clients[index] < 0;
         }
         /* 槽位已满时等待现有连接或到期检查，避免监听队列反复唤醒形成空转 */
         if (!available)
             events[1].events = 0;
-        int ready = poll(events, 2 + DPPD_MONITOR_CLIENT_LIMIT, 250);
+        int ready = poll(events, 4 + DPPD_MONITOR_CLIENT_LIMIT, 250);
         if (ready < 0 && errno == EINTR)
             continue;
         if (ready < 0 || (events[0].revents & (POLLNVAL | POLLHUP)) != 0 ||

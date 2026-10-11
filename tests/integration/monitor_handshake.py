@@ -19,7 +19,7 @@ from recovery_isolation import wait_for
 def run_case(build, mode, native):
     environment = clean_environment()
     owned = {}
-    monitor = daemon = client = None
+    monitor = daemon = client = alternate = None
 
     def run(*args, error=None):
         result = subprocess.run(list(map(str, args)), env=environment, text=True, capture_output=True, timeout=10)
@@ -106,6 +106,8 @@ def run_case(build, mode, native):
                 run("ip", "tuntap", "add", "dev", name, "mode", "tap", "multi_queue")
                 owned[name] = Path(f"/sys/class/net/{name}/ifindex").read_text()
             monitor = start_monitor(session)
+            if mode == "handoff-wrong-session":
+                alternate = start_monitor(directory / "session-alternate")
             initial = guard.read_bytes()
             if mode == "paused-start":
                 pause(monitor)
@@ -149,7 +151,85 @@ def run_case(build, mode, native):
                     run(build / "dppctl", "--socket", sock, "apply-drop", "980", "0", "0", "9", "require")
                     check(len(filters()) == 1, "business flow absent")
                     saved = state.read_bytes()
-                    if mode == "business-crash":
+                    if mode.startswith("handoff-"):
+                        revision = str(int.from_bytes(guard.read_bytes()[16:24], "little"))
+                        if mode == "handoff-live":
+                            run(build / "dppd-recovery", "handoff-check", guard, revision, session, error=errno.EBUSY)
+                        kill(daemon)
+                        residual = guard.read_bytes()
+                        revision = str(int.from_bytes(residual[16:24], "little"))
+                        check(monitor.poll() is None and len(filters()) == 1, "residual or independent monitor lost")
+
+                        def handoff(target=session, error=None):
+                            return run(build / "dppd-recovery", "handoff-check", guard, revision, target, error=error)
+
+                        if mode == "handoff-wrong-session":
+                            handoff(directory / "session-alternate", errno.EXDEV)
+                        elif mode == "handoff-paused":
+                            pause(monitor)
+                            started = time.monotonic()
+                            handoff(error=errno.ETIMEDOUT)
+                            check(time.monotonic() - started < 3, "paused handoff did not time out")
+                            monitor.send_signal(signal.SIGCONT)
+                        elif mode == "handoff-lost":
+                            kill(monitor)
+                            handoff(error=errno.EOWNERDEAD)
+                        elif mode == "handoff-stopped":
+                            terminate(monitor)
+                            handoff(error=errno.EOWNERDEAD)
+                        elif mode == "handoff-replaced":
+                            session.rename(directory / "original-session")
+                            session.write_bytes((directory / "original-session").read_bytes())
+                            session.chmod(0o600)
+                            handoff(error=errno.EOWNERDEAD)
+                        elif mode == "handoff-renamed":
+                            renamed = interfaces[0] + "r"
+                            run("ip", "link", "set", "dev", interfaces[0], "name", renamed)
+                            try:
+                                monitor.wait(timeout=10)
+                                check(monitor.returncode != 0, "interface rename did not invalidate monitor")
+                                handoff(error=errno.EOWNERDEAD)
+                            finally:
+                                run("ip", "link", "set", "dev", renamed, "name", interfaces[0])
+                        elif mode in ("handoff-contention", "handoff-interrupted"):
+                            log = directory / "handoff-tool.log"
+                            log_paths.append(log)
+                            with log.open("w") as output:
+                                client = subprocess.Popen([str(build / "tests/integration/test_monitor_handoff_window"),
+                                                           "handoff-check", str(guard), revision, str(session)],
+                                                          env=environment, stdout=output, stderr=subprocess.STDOUT)
+                            wait_for(client, lambda: "State:\tT" in Path(f"/proc/{client.pid}/status").read_text(),
+                                     "recovery lease held")
+                            handoff(error=errno.EBUSY)
+                            if mode == "handoff-interrupted":
+                                kill(monitor)
+                                client.send_signal(signal.SIGCONT)
+                                client.wait(timeout=10)
+                                check(client.returncode != 0 and "handoff refused" in log.read_text(), log.read_text())
+                                handoff(error=errno.EOWNERDEAD)
+                            else:
+                                kill(client)
+                        if mode not in ("handoff-lost", "handoff-stopped", "handoff-replaced", "handoff-renamed",
+                                        "handoff-interrupted"):
+                            # 工具退出的通知可能尚未处理，先等待监护释放借用的恢复锁
+                            for retry in range(20):
+                                result = subprocess.run([str(build / "dppd-recovery"), "handoff-check", str(guard),
+                                                         revision, str(session)], env=environment, text=True,
+                                                        capture_output=True, timeout=10)
+                                if result.returncode == 0:
+                                    break
+                                check(f"({-errno.EBUSY})" in result.stderr, result.stdout + result.stderr)
+                                time.sleep(0.05)
+                            else:
+                                raise AssertionError("handoff lease did not release")
+                            check("business=exited lease=held scope=cooperative" in result.stdout and
+                                  "writer-exclusion=no executable=no" in result.stdout, result.stdout)
+                            run(build / "dppd-recovery", "handoff-check", guard, str(int(revision) + 1), session,
+                                error=errno.ESTALE)
+                            check("lease=held" in handoff(), "released lease could not be reacquired")
+                        check(guard.read_bytes() == residual and state.read_bytes() == saved and len(filters()) == 1,
+                              "handoff modified evidence, snapshot or residual rule")
+                    elif mode == "business-crash":
                         kill(daemon)
                         check(monitor.poll() is None and len(filters()) == 1, "independent observation or residual lost")
                         residual = guard.read_bytes()
@@ -213,7 +293,7 @@ def run_case(build, mode, native):
             logs = "\n".join(path.read_text() for path in log_paths)
             raise AssertionError(f"case={mode}\n{logs}") from error
         finally:
-            for process in (client, daemon, monitor):
+            for process in (client, daemon, monitor, alternate):
                 if process is not None and process.poll() is None:
                     kill(process)
             for name, index in tuple(owned.items()):

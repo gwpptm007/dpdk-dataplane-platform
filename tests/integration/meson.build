@@ -54,6 +54,10 @@ executable('test_monitor_install_window', '../../app/dppd/main.c', 'monitor_inst
   dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=dppd_recovery_guard_begin', '-Wl,--wrap=dppd_recovery_guard_begin_owned'], install: false)
 
+# 独立工具在取得租约后暂停，用真实锁与监护验证争抢和交接中断
+executable('test_monitor_handoff_window', '../../app/dppd_recovery/main.c', 'monitor_handoff_window.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=dppd_monitor_recovery_open'], install: false)
+
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', required: false)
 if ring_pmd.found()
   executable(

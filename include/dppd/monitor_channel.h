@@ -11,11 +11,18 @@ struct dppd_monitor_server {
     int fd;
     int clients[DPPD_MONITOR_CLIENT_LIMIT];
     uint64_t expires[DPPD_MONITOR_CLIENT_LIMIT];
+    /** 业务只登记一次，pidfd 保存内核进程身份，恢复连接持有同一把文件锁 */
+    int business_pidfd, recovery_fd, recovery_guard, recovery_pidfd;
+    uint32_t business_pid, recovery_pid;
+    uint64_t recovery_revision;
 };
 
 /** 主线程持有会话文件，任何一次握手失败都会锁存，不能靠后续成功自动恢复 */
 struct dppd_monitor_client {
     int fd, error;
+    int lease_fd;
+    bool registered, recovering;
+    uint64_t recovery_revision;
     char path[DPPD_STATE_PATH_CAPACITY];
     struct dppd_monitor_record record;
 };
@@ -32,5 +39,8 @@ int dppd_monitor_client_check(struct dppd_monitor_client *client);
 int dppd_monitor_client_identity(struct dppd_monitor_client *client, uint16_t port,
     const struct dppd_recovery_identity *identity);
 void dppd_monitor_client_close(struct dppd_monitor_client *client);
+/** 调用方先取得精确版本的恢复锁，只有登记业务已退出才建立只读交接租约 */
+int dppd_monitor_recovery_open(struct dppd_monitor_client *client, const char *path, struct dppd_recovery_guard *guard,
+    uint64_t revision);
 
 #endif

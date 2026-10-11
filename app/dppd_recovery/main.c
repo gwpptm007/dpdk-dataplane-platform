@@ -7,6 +7,7 @@
 #include "dppd/recovery_inspect.h"
 #include "dppd/recovery_plan.h"
 #include "dppd/recovery_watch.h"
+#include "dppd/monitor_channel.h"
 
 /** 离线工具不初始化 EAL，inspect 和 plan 只读内核，确认命令要求已完成外部清理 */
 static int usage(const char *program)
@@ -14,6 +15,7 @@ static int usage(const char *program)
     fprintf(stderr, "usage: %s show PATH\n", program);
     fprintf(stderr, "       %s inspect PATH REVISION\n", program);
     fprintf(stderr, "       %s plan PATH REVISION\n", program);
+    fprintf(stderr, "       %s handoff-check PATH REVISION SESSION_PATH\n", program);
     fprintf(stderr, "       %s acknowledge-clean PATH REVISION --external-cleanup-complete\n", program);
     return EXIT_FAILURE;
 }
@@ -270,11 +272,12 @@ int main(int argc, char **argv)
     bool acknowledge = argc == 5 && strcmp(argv[1], "acknowledge-clean") == 0;
     bool inspect = argc == 4 && strcmp(argv[1], "inspect") == 0;
     bool plan = argc == 4 && strcmp(argv[1], "plan") == 0;
+    bool handoff = argc == 5 && strcmp(argv[1], "handoff-check") == 0;
     int rc;
 
-    if (!(argc == 3 && strcmp(argv[1], "show") == 0) && !acknowledge && !inspect && !plan)
+    if (!(argc == 3 && strcmp(argv[1], "show") == 0) && !acknowledge && !inspect && !plan && !handoff)
         return usage(argv[0]);
-    if ((inspect || plan) && revision_number(argv[3], &revision) != 0)
+    if ((inspect || plan || handoff) && revision_number(argv[3], &revision) != 0)
         return usage(argv[0]);
     if (acknowledge &&
         (strcmp(argv[4], "--external-cleanup-complete") != 0 || revision_number(argv[3], &revision) != 0))
@@ -284,7 +287,19 @@ int main(int argc, char **argv)
         fprintf(stderr, "recovery record unavailable: %s (%d)\n", strerror(-rc), rc);
         return EXIT_FAILURE;
     }
-    if (plan) {
+    if (handoff) {
+        struct dppd_monitor_client client = {.fd = -1};
+        rc = dppd_monitor_recovery_open(&client, argv[4], &guard, revision);
+        if (rc == 0)
+            rc = dppd_monitor_client_check(&client);
+        if (rc != 0)
+            fprintf(stderr, "recovery handoff refused: %s (%d)\n", strerror(-rc), rc);
+        else
+            printf("handoff revision=%" PRIu64 " business=exited lease=held scope=cooperative "
+                   "mode=read-only writer-exclusion=no executable=no\n",
+                revision);
+        dppd_monitor_client_close(&client);
+    } else if (plan) {
         rc = plan_record(&guard.record, revision);
         if (rc != 0)
             fprintf(stderr, "recovery plan incomplete: %s (%d)\n", strerror(-rc), rc);
