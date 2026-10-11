@@ -223,6 +223,9 @@ sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 [写入者登记与恢复交接](recovery_writer_handoff.md)。同一次部署的两端须使用当前 IPC v2。
 若要把存活监护与只读计划关联，可在同一网络命名空间运行
 `dppd-recovery plan-monitored PATH REVISION SESSION_PATH`，该命令保持交接租约直到计划完成。
+使用 systemd 部署时，可按[恢复服务命名空间与权限边界](recovery_namespace_deployment.md)
+让业务、监护和恢复查询共享只含项目 TAP 的网络命名空间，并仅向业务服务授予
+`CAP_NET_ADMIN`。DPDK 端口后端可能还需要额外资源权限，需按实际部署单独配置。
 
 ## 本机规则管理
 

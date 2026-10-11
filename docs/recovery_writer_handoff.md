@@ -120,6 +120,12 @@ sudo python3 tests/integration/monitor_handoff.py --build-dir build-native --nat
 计划有效性证明。所有成功和拒绝路径均核对原残留规则、恢复文件与业务快照未变，
 测试只创建和删除自己的持久 TAP。既有握手及创建窗口同时回归。
 
-恢复租约已要求同一网络命名空间，`plan-monitored` 也将全端口只读查询放在租约内。
-下一步限制命名空间内有能力写 TC 的进程，并把历史连续性证据与后续精确删除放入一个
-持续持有租约的操作。当前两条计划命令仍都输出 `executable=no`。
+systemd 部署可采用[命名空间与 capability 配置](recovery_namespace_deployment.md)：业务、
+监护和恢复工具共享只含项目 TAP 的网络命名空间，`CAP_NET_ADMIN` 只授予业务 unit，
+监护与恢复工具清空 capability 集。已在隔离测试命名空间验证无该 capability 的进程
+可读取链路并订阅 netlink，但修改 TAP 状态会收到 `Operation not permitted`，原状态保持不变。
+这限定了按配置运行的服务，不限制宿主机管理员或其他仍持有 `CAP_NET_ADMIN` 的进程。
+
+这提供部署权限边界的操作范例，但代码尚未自动发现或证明命名空间内没有其他写入者，
+也没有把启动前历史连续性证据与后续精确删除放入一个持续持有租约的操作。当前计划仍
+输出 `writer-exclusion=no executable=no`。
