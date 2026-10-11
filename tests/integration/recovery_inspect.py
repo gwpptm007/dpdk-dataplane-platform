@@ -6,6 +6,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import pwd
 import signal
 import struct
 import subprocess
@@ -117,6 +118,29 @@ def run_case(build):
             check(planned.count("reason=missing-token") == 2 and "candidates=0 rejected=2 excluded=0" in planned and
                   f"unassociated-filters={sum(map(len, expected))}" in planned, planned)
             check([kernel_filters(name) for name in interfaces] == expected, "inspection changed kernel filters")
+
+            # 恢复查询只读取内核规则，降低到普通用户后也必须能完成核对
+            nobody = pwd.getpwnam("nobody")
+            os.chown(directory, nobody.pw_uid, nobody.pw_gid)
+            os.chown(guard, nobody.pw_uid, nobody.pw_gid)
+            guard.chmod(0o600)
+            unprivileged = ["setpriv", "--reuid", str(nobody.pw_uid), "--regid", str(nobody.pw_gid),
+                            "--clear-groups", "--bounding-set=-net_admin", "--inh-caps=-net_admin",
+                            "--ambient-caps=-net_admin", "--no-new-privs"]
+            restricted_inspection = run(*unprivileged, build / "dppd-recovery", "inspect", guard, revision)
+            restricted_plan = run(*unprivileged, build / "dppd-recovery", "plan", guard, revision)
+            check(restricted_inspection.count("status=coordinates-match complete=yes") == 2,
+                  restricted_inspection)
+            check("inventory-complete=yes" in restricted_plan and "candidates=0 rejected=2 excluded=0" in
+                  restricted_plan, restricted_plan)
+            before_denied_write = [kernel_filters(name) for name in interfaces]
+            denied_write = subprocess.run([*unprivileged, "tc", "qdisc", "add", "dev", interfaces[0], "ingress"],
+                                          env=environment, capture_output=True, text=True, timeout=15)
+            check(denied_write.returncode != 0 and "Operation not permitted" in denied_write.stderr,
+                  denied_write.stdout + denied_write.stderr)
+            check([kernel_filters(name) for name in interfaces] == before_denied_write,
+                  "unprivileged TC write changed the observed rule inventory")
+
             run(build / "dppd-recovery", "inspect", guard, revision - 1, error=errno.ESTALE)
             stale_plan = run(build / "dppd-recovery", "plan", guard, revision - 1, error=errno.ESTALE)
             check(not stale_plan, "stale revision produced a plan")
@@ -201,8 +225,9 @@ def run_case(build):
             for name in tuple(owned):
                 remove(name)
     print("PASS TAP recovery inspection: persistent crash residuals, kernel TC inventory equality, "
-          "unknown ownership including foreign rule, read-only files/filters, live lock, stale revision, "
-          "network namespace mismatch, v1/v2 formats, durable attempt candidates, same-coordinate foreign rule, same-name replacement, "
+          "unknown ownership including foreign rule, no-CAP_NET_ADMIN inspection and plan, denied TC write, "
+          "read-only files/filters, live lock, stale revision, network namespace mismatch, v1/v2 formats, "
+          "durable attempt candidates, same-coordinate foreign rule, same-name replacement, "
           "interface absence, explicit cleanup", flush=True)
 
 

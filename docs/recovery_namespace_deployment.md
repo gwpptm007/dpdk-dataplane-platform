@@ -109,8 +109,17 @@ sudo systemd-run --wait --pipe --collect \
 
 这条命令应在 `ip link show` 成功后，于 `ip link set` 收到 `Operation not permitted`。
 之后可重新运行 `ip -n dppd-recovery link show dppdtap0` 确认接口状态未改变。
-按同一方式运行项目的 `dppd-monitor` 与 `dppd-recovery plan-monitored`，可验证只读
-操作不需要 `CAP_NET_ADMIN`。
+项目回归脚本也会将真实 `dppd-recovery inspect` 与 `plan` 以无
+`CAP_NET_ADMIN` 的普通用户运行，并尝试一次被内核拒绝的 TC 写入：
+
+```bash
+sudo python3 tests/integration/recovery_inspect.py --build-dir build
+sudo python3 tests/integration/recovery_inspect.py --build-dir build-native
+```
+
+脚本只创建并清理自己拥有的 TAP。它验证只读查询不需要 `CAP_NET_ADMIN`，且拒绝写入前后
+读取到的 TC 规则列表完全一致；隔离 systemd 命名空间本身仍应按本页的 `systemd-run` 示例
+核查。
 
 验证完成且相关服务已停止后，管理员可删除专用命名空间。删除前先确认其中只含这次部署
 自建的接口；删除命名空间会删除其 TAP：
