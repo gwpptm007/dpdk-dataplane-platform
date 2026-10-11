@@ -1,0 +1,441 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "DPDK 验证与能力边界 · 证据不越界",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-verification-boundaries-20261011-111936/verification-boundaries.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:gwpptm007/dpdk-dataplane-platform.git",
+      "revision": "2ecea51de83e299c8c8c6f08d727da5e1373c7e0",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "unit",
+      "type": "backend",
+      "label": "单元测试与严格构建",
+      "sublabel": "31 个注册测试目标",
+      "pos": [
+        40,
+        70
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "tests/unit/meson.build",
+          "line": 1,
+          "end_line": 195,
+          "label": "单测注册"
+        },
+        {
+          "path": "docs/recovery_plan.md",
+          "line": 92,
+          "end_line": 111,
+          "label": "记录的最新验收"
+        }
+      ]
+    },
+    {
+      "id": "contracts",
+      "type": "database",
+      "label": "控制语义与错误路径",
+      "sublabel": "版本 / 事务 / 快照 / 拒绝",
+      "pos": [
+        460,
+        70
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "tests/unit/test_recovery_plan.c",
+          "line": 1,
+          "end_line": 192,
+          "label": "计划拒绝条件"
+        },
+        {
+          "path": "tests/unit/test_batch_update.c",
+          "line": 1,
+          "end_line": 65,
+          "label": "批量更新测试"
+        }
+      ]
+    },
+    {
+      "id": "scale",
+      "type": "security",
+      "label": "未证明规模性能",
+      "sublabel": "无吞吐、尾延迟或容量基准",
+      "pos": [
+        880,
+        70
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "docs/implementation_status.md",
+          "line": 199,
+          "end_line": 212,
+          "label": "工程限制"
+        },
+        {
+          "path": "docs/roadmap_v3.md",
+          "line": 115,
+          "end_line": 131,
+          "label": "规模化与生产化路线"
+        }
+      ]
+    },
+    {
+      "id": "ring",
+      "type": "backend",
+      "label": "net_ring / 故障进程",
+      "sublabel": "正式 worker + 专用测试夹具",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "tests/integration/README.md",
+          "line": 177,
+          "end_line": 211,
+          "label": "ring 收发与夹具边界"
+        },
+        {
+          "path": "tests/integration/meson.build",
+          "line": 1,
+          "end_line": 53,
+          "label": "测试专用目标"
+        }
+      ]
+    },
+    {
+      "id": "sw-scope",
+      "type": "database",
+      "label": "软件转发与并发发布",
+      "sublabel": "整表切换 / COUNT / mbuf",
+      "pos": [
+        460,
+        280
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "tests/integration/README.md",
+          "line": 191,
+          "end_line": 206,
+          "label": "分类、统计与回收"
+        }
+      ]
+    },
+    {
+      "id": "rss-limit",
+      "type": "security",
+      "label": "不证明硬件 RSS",
+      "sublabel": "测试双队列不等于生产配置",
+      "pos": [
+        880,
+        280
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "tests/integration/README.md",
+          "line": 208,
+          "end_line": 211,
+          "label": "ring 无 RSS"
+        },
+        {
+          "path": "tests/integration/README.md",
+          "line": 296,
+          "end_line": 344,
+          "label": "真实 PMD 与 Linux 对照"
+        }
+      ]
+    },
+    {
+      "id": "tap",
+      "type": "backend",
+      "label": "真实 TAP + 独立补丁",
+      "sublabel": "本地 DROP / QUEUE 与 cookie",
+      "pos": [
+        40,
+        490
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "docs/tap_owner_cookie.md",
+          "line": 1,
+          "end_line": 45,
+          "label": "原生标识的适用条件"
+        },
+        {
+          "path": "docs/recovery_plan.md",
+          "line": 92,
+          "end_line": 111,
+          "label": "真实 TAP 验收记录"
+        }
+      ]
+    },
+    {
+      "id": "tap-scope",
+      "type": "database",
+      "label": "flow 与只读恢复核验",
+      "sublabel": "标识 / 内容 / 范围 / plan",
+      "pos": [
+        460,
+        490
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/control/recovery_plan.c",
+          "line": 35,
+          "end_line": 115,
+          "label": "跨端口查重与核验"
+        },
+        {
+          "path": "docs/tap_rule_verification.md",
+          "line": 1,
+          "end_line": 45,
+          "label": "创建前预期与回读"
+        }
+      ]
+    },
+    {
+      "id": "cleanup-limit",
+      "type": "security",
+      "label": "尚无自动残留删除",
+      "sublabel": "candidate ≠ 可执行授权",
+      "pos": [
+        880,
+        490
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app/dppd_recovery/main.c",
+          "line": 199,
+          "end_line": 204,
+          "label": "明确未实现删除"
+        },
+        {
+          "path": "docs/recovery_plan.md",
+          "line": 78,
+          "end_line": 90,
+          "label": "删除前提缺口"
+        }
+      ]
+    },
+    {
+      "id": "vmx",
+      "type": "backend",
+      "label": "vmxnet3 ↔ TAP",
+      "sublabel": "外部收发 · 单队列",
+      "pos": [
+        40,
+        700
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "tests/integration/README.md",
+          "line": 537,
+          "end_line": 578,
+          "label": "正式 daemon 测试拓扑"
+        }
+      ]
+    },
+    {
+      "id": "packet-scope",
+      "type": "database",
+      "label": "双向逐包内容验收",
+      "sublabel": "120000 包；测试 mbuf 归还",
+      "pos": [
+        460,
+        700
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "tests/integration/README.md",
+          "line": 571,
+          "end_line": 591,
+          "label": "内容、统计与缓冲池结果"
+        }
+      ]
+    },
+    {
+      "id": "physical-limit",
+      "type": "security",
+      "label": "非物理卸载或吞吐证明",
+      "sublabel": "亦非热拔插 / 双物理端口",
+      "pos": [
+        880,
+        700
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "tests/integration/README.md",
+          "line": 569,
+          "end_line": 591,
+          "label": "限速与结论范围"
+        },
+        {
+          "path": "docs/implementation_status.md",
+          "line": 199,
+          "end_line": 204,
+          "label": "物理热拔插未验收"
+        },
+        {
+          "path": "tests/integration/README.md",
+          "line": 132,
+          "end_line": 134,
+          "label": "SmartNIC 实机边界"
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "unit-supports",
+      "from": "unit",
+      "to": "contracts",
+      "label": "证据支持",
+      "variant": "emphasis"
+    },
+    {
+      "id": "unit-limit",
+      "from": "contracts",
+      "to": "scale",
+      "label": "不外推",
+      "variant": "security"
+    },
+    {
+      "id": "ring-supports",
+      "from": "ring",
+      "to": "sw-scope",
+      "label": "证据支持",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ring-limit",
+      "from": "sw-scope",
+      "to": "rss-limit",
+      "label": "不外推",
+      "variant": "security"
+    },
+    {
+      "id": "tap-supports",
+      "from": "tap",
+      "to": "tap-scope",
+      "label": "证据支持",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tap-limit",
+      "from": "tap-scope",
+      "to": "cleanup-limit",
+      "label": "不外推",
+      "variant": "security"
+    },
+    {
+      "id": "vmx-supports",
+      "from": "vmx",
+      "to": "packet-scope",
+      "label": "证据支持",
+      "variant": "emphasis"
+    },
+    {
+      "id": "vmx-limit",
+      "from": "packet-scope",
+      "to": "physical-limit",
+      "label": "不外推",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "证据阅读方式 · 2ecea51",
+      "items": [
+        "本图汇总已提交源码、测试定义和仓库验收记录，不是本次重新运行 DPDK 测试的报告。",
+        "从左到右：证据入口 → 可支持的结论 → 不能外推的能力。箭头表示证据支撑或结论限制，不是运行时调用。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "当前可复用的验证资产",
+      "items": [
+        "构建：Meson / C gnu11 / libdpdk ≥ 21.11，31 个单测目标。2026-10-11 文档记录系统与补丁构建各 31/31，以及三项恢复相关 sanitizer 通过。",
+        "集成：管理、快照重放、批量更新、诊断、故障隔离、TAP 内容核验与 plan 拒绝分支；测试专用故障库不链接生产 daemon。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "已知缺口",
+      "items": [
+        "RSS：当前 VMware 路径下 DPDK 和 Linux 对照均集中队列 0；具体环境原因尚未确定，不据此判定平台初始化有错或产品普遍不支持 RSS。",
+        "恢复：观察候选不是所有权 / 删除授权；cookie 可复制、接口实例连续性未证明、检查到删除缺少互斥，跨进程自动删除仍未实现。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "后续验证优先级（分析建议）",
+      "items": [
+        "P1：先明确接口实例跟踪和受控 TC 写入范围，再设计跨进程删除及失败恢复。P2：换用有独立分流证据的多队列环境重做 RSS 验收。",
+        "P3：真实 NIC / SmartNIC 的 representor、transfer、计数与资源耗尽回归。P4：为 classifier 线性扫描、更新复制及持久化成本建立规模基准；现有功能验收不提供吞吐结论。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "不是现成能力",
+      "items": [
+        "IPv6/tunnel、ACL/LPM/NAT/conntrack、flow template/async 尚未实现；SmartNIC/DPU 缺少实机验收。",
+        "health/ready 不含卡死心跳或主动端到端探测；管理 v15 仅为同机同版 ABI，不是稳定远程协议。"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,604 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "DPDK 状态一致性 · 谁写入、谁读取",
+    "locale": "zh-CN",
+    "output": ".archify/dataflow-state-consistency-20261011-111936/state-consistency.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:gwpptm007/dpdk-dataplane-platform.git",
+      "revision": "2ecea51de83e299c8c8c6f08d727da5e1373c7e0",
+      "link_mode": "local-only"
+    }
+  },
+  "stages": [
+    {
+      "label": "状态生产者"
+    },
+    {
+      "label": "状态载体"
+    },
+    {
+      "label": "读取 / I/O 执行者"
+    },
+    {
+      "label": "结果与消费者"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "control-owner",
+      "type": "backend",
+      "label": "control 写路径",
+      "sublabel": "实际对象成功后发布",
+      "stage": 0,
+      "row": 0,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 654,
+          "end_line": 687,
+          "label": "账本发布次序"
+        }
+      ]
+    },
+    {
+      "id": "repository",
+      "type": "database",
+      "label": "规则账本",
+      "sublabel": "ID / generation / port",
+      "stage": 1,
+      "row": 0,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/control/rule_repository.c",
+          "line": 1,
+          "end_line": 70,
+          "label": "内存规则存储"
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 671,
+          "end_line": 687,
+          "label": "发布与保存调用"
+        }
+      ]
+    },
+    {
+      "id": "snapshot-io",
+      "type": "backend",
+      "label": "control / persistence",
+      "sublabel": "可选 --state-path",
+      "stage": 2,
+      "row": 0,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 77,
+          "end_line": 108,
+          "label": "保存与 dirty 预检"
+        },
+        {
+          "path": "lib/control/persistence.c",
+          "line": 397,
+          "end_line": 428,
+          "label": "fsync 与 rename"
+        }
+      ]
+    },
+    {
+      "id": "snapshot-v2",
+      "type": "database",
+      "label": "业务快照 v2",
+      "sublabel": "启动重放的规则输入",
+      "stage": 3,
+      "row": 0,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 327,
+          "end_line": 478,
+          "label": "读取后重建实际对象"
+        }
+      ]
+    },
+    {
+      "id": "sw-writer",
+      "type": "backend",
+      "label": "软件 backend",
+      "sublabel": "构建完整新 classifier",
+      "stage": 0,
+      "row": 1,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 517,
+          "end_line": 595,
+          "label": "整批更新"
+        }
+      ]
+    },
+    {
+      "id": "classifier",
+      "type": "database",
+      "label": "活跃 classifier",
+      "sublabel": "原子发布 / QSBR 退役",
+      "stage": 1,
+      "row": 1,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 204,
+          "end_line": 245,
+          "label": "交换与延迟回收"
+        }
+      ]
+    },
+    {
+      "id": "sw-reader",
+      "type": "backend",
+      "label": "worker / pipeline",
+      "sublabel": "每次分类读取完整快照",
+      "stage": 2,
+      "row": 1,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 794,
+          "end_line": 841,
+          "label": "快照读取与匹配"
+        },
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 159,
+          "end_line": 186,
+          "label": "静默点与注销"
+        }
+      ]
+    },
+    {
+      "id": "packet-outcome",
+      "type": "external",
+      "label": "软件报文结果",
+      "sublabel": "DROP / MARK / COUNT",
+      "stage": 3,
+      "row": 1,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/dataplane/pipeline.c",
+          "line": 1,
+          "end_line": 52,
+          "label": "策略与端口对转发"
+        },
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 24,
+          "end_line": 121,
+          "label": "发送与释放"
+        }
+      ]
+    },
+    {
+      "id": "guard-owner",
+      "type": "security",
+      "label": "daemon 恢复回调",
+      "sublabel": "启用保护；创建前同步",
+      "stage": 0,
+      "row": 2,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 44,
+          "end_line": 157,
+          "label": "意图、回读及删除事件"
+        }
+      ]
+    },
+    {
+      "id": "record-v5",
+      "type": "database",
+      "label": "恢复记录 v5",
+      "sublabel": "意图 / 结果 / 可选原生证据",
+      "stage": 1,
+      "row": 2,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/control/recovery_guard.c",
+          "line": 559,
+          "end_line": 632,
+          "label": "cookie 与预期内容先落盘"
+        },
+        {
+          "path": "lib/control/recovery_guard.c",
+          "line": 649,
+          "end_line": 702,
+          "label": "事件更新"
+        }
+      ]
+    },
+    {
+      "id": "offline-owner",
+      "type": "backend",
+      "label": "离线 plan 编排",
+      "sublabel": "持锁校验 revision 后读取",
+      "stage": 2,
+      "row": 2,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "app/dppd_recovery/main.c",
+          "line": 179,
+          "end_line": 243,
+          "label": "CLI 读内核再构造计划"
+        },
+        {
+          "path": "app/dppd_recovery/main.c",
+          "line": 246,
+          "end_line": 269,
+          "label": "排他锁入口"
+        },
+        {
+          "path": "lib/control/recovery_plan.c",
+          "line": 35,
+          "end_line": 115,
+          "label": "纯内存分析"
+        }
+      ]
+    },
+    {
+      "id": "plan-output",
+      "type": "security",
+      "label": "只读候选报告",
+      "sublabel": "executable=no",
+      "stage": 3,
+      "row": 2,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "app/dppd_recovery/main.c",
+          "line": 199,
+          "end_line": 243,
+          "label": "禁止执行与未确认清理"
+        }
+      ]
+    },
+    {
+      "id": "kernel-view",
+      "type": "external",
+      "label": "当前 TAP 观察",
+      "sublabel": "登记端口 multiq / ingress",
+      "stage": 1,
+      "row": 3,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "docs/recovery_plan.md",
+          "line": 19,
+          "end_line": 38,
+          "label": "观察范围与非原子性"
+        },
+        {
+          "path": "app/dppd_recovery/main.c",
+          "line": 184,
+          "end_line": 202,
+          "label": "查询全部登记端口"
+        }
+      ]
+    },
+    {
+      "id": "main-publisher",
+      "type": "backend",
+      "label": "主线程采集规则诊断",
+      "sublabel": "管理轮询后发布",
+      "stage": 0,
+      "row": 4,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 354,
+          "end_line": 369,
+          "label": "发布调用"
+        }
+      ]
+    },
+    {
+      "id": "telemetry-copy",
+      "type": "database",
+      "label": "完整诊断副本",
+      "sublabel": "规则 / 失败 / 耗时历史",
+      "stage": 1,
+      "row": 4,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/observability/telemetry.c",
+          "line": 627,
+          "end_line": 668,
+          "label": "构建与交换副本"
+        }
+      ]
+    },
+    {
+      "id": "telemetry-reader",
+      "type": "backend",
+      "label": "Telemetry 回调",
+      "sublabel": "短锁只读副本",
+      "stage": 2,
+      "row": 4,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "lib/observability/telemetry.c",
+          "line": 209,
+          "end_line": 230,
+          "label": "只读规则查询"
+        },
+        {
+          "path": "lib/observability/telemetry.c",
+          "line": 574,
+          "end_line": 607,
+          "label": "命令注册"
+        }
+      ]
+    },
+    {
+      "id": "diagnostic-result",
+      "type": "frontend",
+      "label": "JSON 诊断查询",
+      "sublabel": "非持久审计 / 非全局时刻",
+      "stage": 3,
+      "row": 4,
+      "width": 152,
+      "height": 58,
+      "sources": [
+        {
+          "path": "docs/rule_telemetry.md",
+          "line": 1,
+          "end_line": 55,
+          "label": "统计与副本边界"
+        },
+        {
+          "path": "docs/rule_history.md",
+          "line": 1,
+          "end_line": 45,
+          "label": "历史语义"
+        }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "publish-repo",
+      "from": "control-owner",
+      "to": "repository",
+      "label": "生效版本",
+      "variant": "emphasis",
+      "route": "straight",
+      "labelAt": [
+        207.5,
+        199
+      ]
+    },
+    {
+      "id": "read-repo",
+      "from": "repository",
+      "to": "snapshot-io",
+      "label": "完整账本",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        422.5,
+        199
+      ]
+    },
+    {
+      "id": "save-v2",
+      "from": "snapshot-io",
+      "to": "snapshot-v2",
+      "label": "同步落盘",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        637.5,
+        199
+      ]
+    },
+    {
+      "id": "publish-sw",
+      "from": "sw-writer",
+      "to": "classifier",
+      "label": "切换指针",
+      "variant": "emphasis",
+      "route": "straight",
+      "labelAt": [
+        207.5,
+        313
+      ]
+    },
+    {
+      "id": "read-sw",
+      "from": "classifier",
+      "to": "sw-reader",
+      "label": "单个快照",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        422.5,
+        313
+      ]
+    },
+    {
+      "id": "decide-packet",
+      "from": "sw-reader",
+      "to": "packet-outcome",
+      "label": "分类结果",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        637.5,
+        313
+      ]
+    },
+    {
+      "id": "write-guard",
+      "from": "guard-owner",
+      "to": "record-v5",
+      "label": "持久线索",
+      "variant": "security",
+      "route": "straight",
+      "labelAt": [
+        207.5,
+        427
+      ]
+    },
+    {
+      "id": "read-guard",
+      "from": "record-v5",
+      "to": "offline-owner",
+      "label": "锁定记录",
+      "variant": "security",
+      "route": "straight",
+      "labelAt": [
+        422.5,
+        427
+      ]
+    },
+    {
+      "id": "read-kernel",
+      "from": "kernel-view",
+      "to": "offline-owner",
+      "label": "只读观察",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [
+        [
+          530,
+          499
+        ]
+      ],
+      "labelAt": [
+        468,
+        490
+      ]
+    },
+    {
+      "id": "build-plan",
+      "from": "offline-owner",
+      "to": "plan-output",
+      "label": "候选及拒绝",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        637.5,
+        427
+      ]
+    },
+    {
+      "id": "publish-diag",
+      "from": "main-publisher",
+      "to": "telemetry-copy",
+      "label": "完整副本",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        207.5,
+        655
+      ]
+    },
+    {
+      "id": "read-diag",
+      "from": "telemetry-copy",
+      "to": "telemetry-reader",
+      "label": "已发布版本",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        422.5,
+        655
+      ]
+    },
+    {
+      "id": "diag-response",
+      "from": "telemetry-reader",
+      "to": "diagnostic-result",
+      "label": "查询结果",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        637.5,
+        655
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "读图约定 · 2ecea51",
+      "items": [
+        "每一行是一种独立的状态流，不是跨行同时完成的一笔事务；每个节点均带源码定位。",
+        "规则账本、软件 classifier、业务快照 v2、恢复记录 v5、Telemetry 副本不可相互替代。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "应用成功 ≠ 持久化成功",
+      "items": [
+        "单规则写入：实际后端提交 → 删除旧版本（更新时）→ 发布账本 → finalize → 保存。保存失败返回 EUCLEAN，但已生效规则不会因此回滚。",
+        "dirty 时后续修改先补写；补偿失败则进入恢复隔离，禁止普通写入。启动 v2 重放重新安装实际对象，COUNT 不随业务快照持久化。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "并发一致性范围",
+      "items": [
+        "纯软件批量更新一次切换完整 classifier；硬件 / 混合批次只保证账本整批发布，不保证逐包原子切换。",
+        "worker 静默点允许 QSBR 延迟回收旧 classifier；退出先等 worker 注销，再释放 backend。静态 port-pair snapshot 另由 runtime 构建。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "恢复计划是诊断，不是删除授权",
+      "items": [
+        "CLI 持文件锁、核对 revision、读取全部登记 TAP 端口；lib/control/recovery_plan.c 只分析内存输入，不访问内核或改文件。",
+        "任一端口观察不完整则整份计划无候选；还核对跨端口 cookie 唯一性、原端口、预期内容与当前范围。即使匹配也缺少接口连续性、检查删除互斥和标识真实性保证。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "诊断副本不替代实际状态",
+      "items": [
+        "Telemetry 副本包含规则状态、指标、失败事件与提交耗时；回调不遍历实时可变账本。规则查询与 worker 原子报文统计并非同一全局时刻。",
+        "最近 64 条完成态失败和成功提交耗时均属进程内历史；对象删除或回滚不抹去成功提交历史，重启会清空。"
+      ]
+    }
+  ]
+}

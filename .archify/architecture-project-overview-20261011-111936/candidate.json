@@ -1,0 +1,504 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "DPDK 项目全景 · 控制、转发与恢复",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-project-overview-20261011-111936/project-overview.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:gwpptm007/dpdk-dataplane-platform.git",
+      "revision": "2ecea51de83e299c8c8c6f08d727da5e1373c7e0",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "local-api",
+      "type": "frontend",
+      "label": "dppctl / 本机管理接口",
+      "sublabel": "v15 · Unix SOCK_SEQPACKET",
+      "pos": [
+        40,
+        70
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/management/server.c",
+          "line": 472,
+          "end_line": 505,
+          "label": "本机 socket 与权限"
+        },
+        {
+          "path": "include/dppd/management.h",
+          "line": 74,
+          "end_line": 85,
+          "label": "同机同版 ABI"
+        }
+      ]
+    },
+    {
+      "id": "control",
+      "type": "backend",
+      "label": "规则控制服务",
+      "sublabel": "IR · planner · transaction",
+      "pos": [
+        450,
+        70
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 559,
+          "end_line": 687,
+          "label": "计划、执行、发布、保存"
+        },
+        {
+          "path": "lib/control/planner.c",
+          "line": 49,
+          "end_line": 109,
+          "label": "后端与域条件"
+        }
+      ]
+    },
+    {
+      "id": "state-file",
+      "type": "database",
+      "label": "业务快照 v2",
+      "sublabel": "可选 --state-path",
+      "pos": [
+        860,
+        70
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/control/persistence.c",
+          "line": 335,
+          "end_line": 428,
+          "label": "完整账本与原子替换"
+        },
+        {
+          "path": "lib/control/control.c",
+          "line": 327,
+          "end_line": 478,
+          "label": "启动重放"
+        }
+      ]
+    },
+    {
+      "id": "guard",
+      "type": "security",
+      "label": "恢复保护回调",
+      "sublabel": "可选 --recovery-path",
+      "pos": [
+        40,
+        310
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 44,
+          "end_line": 157,
+          "label": "创建前后与删除回调"
+        },
+        {
+          "path": "lib/offload/rte_flow_backend.c",
+          "line": 204,
+          "end_line": 242,
+          "label": "先记录再调用驱动"
+        }
+      ]
+    },
+    {
+      "id": "backends",
+      "type": "backend",
+      "label": "软件 / rte_flow 后端",
+      "sublabel": "等价软件计划或驱动规则",
+      "pos": [
+        450,
+        310
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/control/control.c",
+          "line": 605,
+          "end_line": 650,
+          "label": "PREFER 回退门槛"
+        },
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 220,
+          "end_line": 245,
+          "label": "不可变快照发布"
+        },
+        {
+          "path": "lib/offload/rte_flow_backend.c",
+          "line": 204,
+          "end_line": 265,
+          "label": "实际 handle 所有权"
+        }
+      ]
+    },
+    {
+      "id": "ethdev",
+      "type": "external",
+      "label": "ethdev / PMD",
+      "sublabel": "NIC、虚拟 PMD；TAP 非硬件证明",
+      "pos": [
+        860,
+        310
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/device/device.c",
+          "line": 115,
+          "end_line": 244,
+          "label": "端口与队列配置"
+        },
+        {
+          "path": "lib/offload/rte_flow.c",
+          "line": 1,
+          "end_line": 55,
+          "label": "rte_flow 适配入口"
+        }
+      ]
+    },
+    {
+      "id": "recovery-file",
+      "type": "database",
+      "label": "恢复记录 v5",
+      "sublabel": "意图、结果、cookie 与预期内容",
+      "pos": [
+        40,
+        550
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/control/recovery_guard.c",
+          "line": 559,
+          "end_line": 632,
+          "label": "创建前持久化"
+        },
+        {
+          "path": "lib/control/recovery_guard.c",
+          "line": 649,
+          "end_line": 702,
+          "label": "创建与删除结果"
+        }
+      ]
+    },
+    {
+      "id": "daemon",
+      "type": "backend",
+      "label": "dppd 主线程 / runtime",
+      "sublabel": "EAL · 设备初始化 · 监督与退出",
+      "pos": [
+        450,
+        550
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app/dppd/main.c",
+          "line": 197,
+          "end_line": 290,
+          "label": "启动与重放顺序"
+        },
+        {
+          "path": "app/dppd/main.c",
+          "line": 323,
+          "end_line": 427,
+          "label": "管理轮询与退出"
+        },
+        {
+          "path": "lib/runtime/runtime.c",
+          "line": 30,
+          "end_line": 69,
+          "label": "queue 与 lcore 绑定"
+        }
+      ]
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "worker / packet pipeline",
+      "sublabel": "RX → 解析 / 软件策略 → TX",
+      "pos": [
+        860,
+        550
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 24,
+          "end_line": 121,
+          "label": "mbuf 所有权与收发"
+        },
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 159,
+          "end_line": 186,
+          "label": "QSBR 生命周期"
+        },
+        {
+          "path": "lib/dataplane/pipeline.c",
+          "line": 1,
+          "end_line": 52,
+          "label": "静态端口对与规则"
+        }
+      ]
+    },
+    {
+      "id": "offline-recovery",
+      "type": "security",
+      "label": "dppd-recovery",
+      "sublabel": "show / inspect / plan / 确认",
+      "pos": [
+        40,
+        790
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app/dppd_recovery/main.c",
+          "line": 179,
+          "end_line": 243,
+          "label": "只读计划输出"
+        },
+        {
+          "path": "app/dppd_recovery/main.c",
+          "line": 246,
+          "end_line": 281,
+          "label": "持锁与精确版本确认"
+        }
+      ]
+    },
+    {
+      "id": "migration",
+      "type": "backend",
+      "label": "dppd-snapshot-migrate",
+      "sublabel": "离线 v1 → v2；显式单端口",
+      "pos": [
+        450,
+        790
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app/dppd_snapshot_migrate/main.c",
+          "line": 85,
+          "end_line": 146,
+          "label": "独立输入输出与端口迁移"
+        },
+        {
+          "path": "meson.build",
+          "line": 71,
+          "end_line": 77,
+          "label": "独立程序目标"
+        }
+      ]
+    },
+    {
+      "id": "diagnostics",
+      "type": "database",
+      "label": "可观测性与诊断副本",
+      "sublabel": "stats / health / rules / history",
+      "pos": [
+        860,
+        790
+      ],
+      "size": [
+        250,
+        82
+      ],
+      "sources": [
+        {
+          "path": "lib/observability/telemetry.c",
+          "line": 574,
+          "end_line": 607,
+          "label": "Telemetry 注册"
+        },
+        {
+          "path": "lib/observability/telemetry.c",
+          "line": 627,
+          "end_line": 668,
+          "label": "主线程发布规则副本"
+        },
+        {
+          "path": "docs/health_readiness.md",
+          "line": 1,
+          "end_line": 38,
+          "label": "就绪语义与边界"
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "local-command",
+      "from": "local-api",
+      "to": "control",
+      "label": "本机请求",
+      "variant": "emphasis"
+    },
+    {
+      "id": "save-state",
+      "from": "control",
+      "to": "state-file",
+      "label": "生效后保存",
+      "variant": "default"
+    },
+    {
+      "id": "select-backend",
+      "from": "control",
+      "to": "backends",
+      "label": "按计划执行",
+      "variant": "emphasis"
+    },
+    {
+      "id": "guard-before-create",
+      "from": "backends",
+      "to": "guard",
+      "label": "启用时先记录",
+      "variant": "security"
+    },
+    {
+      "id": "guard-durable",
+      "from": "guard",
+      "to": "recovery-file",
+      "label": "同步写入",
+      "variant": "security"
+    },
+    {
+      "id": "flow-create",
+      "from": "backends",
+      "to": "ethdev",
+      "label": "rte_flow",
+      "variant": "default"
+    },
+    {
+      "id": "software-publish",
+      "from": "backends",
+      "to": "workers",
+      "label": "软件快照",
+      "variant": "default"
+    },
+    {
+      "id": "launch-workers",
+      "from": "daemon",
+      "to": "workers",
+      "label": "启动 / 等待",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cpu-rx",
+      "from": "ethdev",
+      "to": "workers",
+      "label": "CPU RX",
+      "variant": "emphasis"
+    },
+    {
+      "id": "packet-tx",
+      "from": "workers",
+      "to": "ethdev",
+      "label": "TX",
+      "variant": "default"
+    },
+    {
+      "id": "offline-read",
+      "from": "offline-recovery",
+      "to": "recovery-file",
+      "label": "锁定精确版本",
+      "variant": "security"
+    },
+    {
+      "id": "packet-stats",
+      "from": "workers",
+      "to": "diagnostics",
+      "label": "原子统计",
+      "variant": "default"
+    },
+    {
+      "id": "rule-copy",
+      "from": "daemon",
+      "to": "diagnostics",
+      "label": "发布规则副本",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "整项目基线 · 2ecea51",
+      "items": [
+        "四个可执行程序由 meson.build 定义；dppd_core 汇集 runtime、device、control、dataplane、offload、management 与 observability。",
+        "迁移工具独立读写文件，不调用运行中的 daemon；要求输入输出不同，单端口 v1 显式映射。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "两条执行路径",
+      "items": [
+        "软件：worker 解析 mbuf，读取不可变 classifier，按静态 port-pair 转发；QUEUE / transfer 不属于等价软件降级集合。",
+        "rte_flow：控制面调用 PMD 创建规则；TAP 在内核执行规则，不等同于物理硬件卸载。PREFER 仅在无对象副作用的 validate 失败且软件等价时回退。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "恢复与退出边界",
+      "items": [
+        "恢复保护先于 runtime 初始化与业务快照重放；未确认旧记录时阻止启动。可选原生 TAP cookie 还要求独立 DPDK 21.11.9 补丁。",
+        "在线补偿失败进入隔离并停止 worker；本进程残留清理成功仍需退出重启。离线 plan 始终 executable=no，确认外部清理不是执行删除。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "诊断与能力限制",
+      "items": [
+        "规则 Telemetry 读取主线程发布的完整副本，报文统计独立原子采样；COUNT 按实际后端单独查询。历史不是持久化审计。",
+        "当前拓扑启动后固定，无进程内热重配；IPv6/tunnel、ACL/LPM/NAT/conntrack、flow template/async 尚未实现。"
+      ]
+    }
+  ]
+}

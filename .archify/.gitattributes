@@ -1,0 +1,4 @@
+# Archify receipts bind exact UTF-8 bytes; keep them stable across Windows checkouts.
+*.html text eol=lf
+*.json text eol=lf
+*.png binary

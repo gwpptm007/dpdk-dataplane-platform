@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>DPDK 项目分析 · Archify</title>
+<style>
+:root{--bg:#f4f6fa;--panel:#fff;--text:#172338;--muted:#526177;--line:#dce3ee;--accent:#076a83}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.7 system-ui,"Microsoft YaHei",sans-serif}
+main{max-width:1160px;margin:0 auto;padding:56px 24px}h1{font-size:clamp(28px,4vw,42px);line-height:1.25;margin:8px 0 20px}
+h2{font-size:22px;margin:0 0 12px}p{margin:12px 0}.kicker{font-size:13px;letter-spacing:.08em;color:var(--accent);margin:0 0 12px}
+.muted,footer{color:var(--muted)}a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:4px}
+a:focus-visible{outline:3px solid var(--accent);outline-offset:5px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin:32px 0}
+article,.note{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:24px}article{display:flex;flex-direction:column}article>p{flex:1}
+.links{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:14px;border-top:1px solid var(--line);padding-top:16px;margin-top:12px}
+code{font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere}.note h2{font-size:19px}
+details{margin:32px 0;border-top:1px solid var(--line);padding-top:22px}summary{cursor:pointer;font-weight:600}
+li{margin:18px 0}li p{color:var(--muted);margin:4px 0 0}footer{font-size:14px;border-top:1px solid var(--line);padding-top:20px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}main{padding:32px 18px}}
+@media(prefers-color-scheme:dark){:root{--bg:#0b1220;--panel:#121d30;--text:#ecf2fc;--muted:#aab9cf;--line:#2a3b52;--accent:#70d5eb}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<p class="kicker">DPDK DATAPLANE PLATFORM / ARCHIFY / 2026-10-11</p>
+<h1>从整个项目看清运行、状态与证据</h1>
+<p class="muted">源码基线 <code>2ecea51</code>：已纳入 TAP 内容与作用范围核验，以及只读恢复清理计划。分析不以 IDE 打开的文件为范围。</p>
+</header>
+<section class="grid" aria-label="本次整项目分析">
+<article><p class="kicker">01 · architecture</p><h2><a href="architecture-project-overview-20261011-111936/project-overview.html">项目全景 <span aria-hidden="true">↗</span></a></h2><p>四个程序、控制面、软件与 rte_flow 路径、设备、可观测性及离线恢复。</p><div class="links"><a href="architecture-project-overview-20261011-111936/candidate.json">图形定义</a><a href="architecture-project-overview-20261011-111936/project-overview.finalize-summary.json">验证回执</a><a href="architecture-project-overview-20261011-111936/project-overview.browser-check.json">浏览器证据</a></div></article>
+<article><p class="kicker">02 · dataflow</p><h2><a href="dataflow-state-consistency-20261011-111936/state-consistency.html">状态一致性 <span aria-hidden="true">↗</span></a></h2><p>规则账本、classifier、业务快照 v2、恢复记录 v5、Telemetry 副本的读写与一致性边界。</p><div class="links"><a href="dataflow-state-consistency-20261011-111936/candidate.json">图形定义</a><a href="dataflow-state-consistency-20261011-111936/state-consistency.finalize-summary.json">验证回执</a><a href="dataflow-state-consistency-20261011-111936/state-consistency.browser-check.json">浏览器证据</a></div></article>
+<article><p class="kicker">03 · architecture</p><h2><a href="architecture-verification-boundaries-20261011-111936/verification-boundaries.html">验证与能力边界 <span aria-hidden="true">↗</span></a></h2><p>单测、net_ring、真实 TAP 和 vmxnet3 验收能证明什么，以及不能外推的能力。</p><div class="links"><a href="architecture-verification-boundaries-20261011-111936/candidate.json">图形定义</a><a href="architecture-verification-boundaries-20261011-111936/verification-boundaries.finalize-summary.json">验证回执</a><a href="architecture-verification-boundaries-20261011-111936/verification-boundaries.browser-check.json">浏览器证据</a></div></article>
+</section>
+<section class="note" aria-labelledby="boundary-title">
+<h2 id="boundary-title">这次更新的结论与边界</h2>
+<p>项目已形成规则控制、软件转发、rte_flow、持久化、故障隔离和本机诊断的闭环。恢复 <code>plan</code> 可列出观察候选及拒绝原因，但始终 <code>executable=no</code>，不执行删除，也不解除启动保护。</p>
+<p>后续优先验证接口实例连续性与受控 TC 写入范围，再设计跨进程删除；另需在可实际分流的环境补齐 RSS、真实 NIC / SmartNIC 与规模性能验收。</p>
+<p class="muted">固定源码版本，不是工作树实时镜像。开发中的 <code>recovery_watch</code> 等未提交修改不纳入本次已实现能力，也不随图形产物提交。</p>
+</section>
+<details>
+<summary>历史图与版本差异（保留原始文件）</summary>
+<ul>
+<li><a href="architecture-dpdk-runtime-20261009-220751/dpdk-runtime.html">旧运行时架构</a> <code>46e8d09</code><p>旧运行时架构；不覆盖后续恢复 v5 内容核验与只读 plan。</p></li>
+<li><a href="sequence-rule-fallback-20261009-225434/rule-fallback.html">规则回退时序</a> <code>14ba76b</code><p>旧回退调用链；validate 失败且等价才回退的边界仍保留，源码行号与恢复钩子需以新基线核对。</p></li>
+<li><a href="lifecycle-recovery-20261009-225434/recovery.html">旧恢复生命周期</a> <code>14ba76b</code><p>旧恢复生命周期；后续已加入内容/范围核验与只读清理计划，不应继续把它们视为尚未实现。自动跨进程删除仍未实现。</p></li>
+</ul>
+</details>
+<footer>
+<p>三张图均通过 Archify showcase 9/9 检查，0 错误、0 警告；真实 Chrome 浏览器验证通过。已查看每图 2048×1320 明色与 1440×900 暗色静态截图，未见节点、连线或文字遮挡。</p>
+<p>本次未重新运行 Linux / DPDK 构建或代码测试；验证图中的测试结论是仓库验收记录。完整源码版本、产物哈希、验证回执和截图审阅范围见 <a href="project-analysis-20261011.json">分析交付清单</a>。</p>
+</footer>
+</main>
+</body>
+</html>

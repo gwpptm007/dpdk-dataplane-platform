@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "13b7cea9-10be-4449-95c6-252ed56265a6",
+  "status": "current",
+  "command": "deliver",
+  "type": "dataflow",
+  "input": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\dataflow-state-consistency-20261011-111936\\candidate.json",
+  "output": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\dataflow-state-consistency-20261011-111936\\state-consistency.html",
+  "specification": {
+    "sha256": "d5ecc40db8b0b2fff5e21f62280b7cabc5abf0f6435c022cb42e8862a40b9cc8",
+    "bytes": 14689
+  },
+  "artifact": {
+    "sha256": "53c756e35ebb1967b657c1ea4e7912d24bf519b68b6ad8f334e18352ff760fc4",
+    "bytes": 776173
+  }
+}

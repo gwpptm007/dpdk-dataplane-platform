@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-10-11T11:19:36+08:00",
+  "source_revision": "2ecea51de83e299c8c8c6f08d727da5e1373c7e0",
+  "repository": "git@github.com:gwpptm007/dpdk-dataplane-platform.git",
+  "scope": "whole-project",
+  "code_tests_run_this_task": false,
+  "notes": [
+    "分析基于固定提交，不包含后续工作树中的 recovery_watch 等改动。",
+    "验证图引用的 DPDK 测试结果来自该提交内的验收文档，本次只运行图形产物验证。",
+    "保留历史图及其原始回执，不将旧基线描述冒充最新能力。"
+  ],
+  "diagrams": [
+    {
+      "type": "architecture",
+      "html": "architecture-project-overview-20261011-111936/project-overview.html",
+      "candidate": "architecture-project-overview-20261011-111936/candidate.json",
+      "specification_sha256": "006a8fcdb4e6982deb4e7df0c3a9f8d6ab4368c8d95a91899cc4b40fa0ad1a5d",
+      "artifact_sha256": "aa921b94e8b76e9402e7e48888f19f63ad8083060ab876b3aa7b2b4a70a95a13",
+      "finalize_summary": "architecture-project-overview-20261011-111936/project-overview.finalize-summary.json",
+      "browser_receipt": "architecture-project-overview-20261011-111936/project-overview.browser-check.json",
+      "validation": {
+        "checks_passed": 9,
+        "errors": 0,
+        "warnings": 0,
+        "gates": {
+          "validate": "pass",
+          "deliver": "pass",
+          "check": "pass",
+          "browser-check": "pass"
+        }
+      },
+      "visual_review": {
+        "status": "passed",
+        "scope": "静态 READ/Still 首屏截图：2048×1320 light、1440×900 dark；节点、箭头、文字无遮挡。未据此声明交互或导出人工验收。",
+        "perceptual_correction_rounds": 0,
+        "capture_receipt": "architecture-project-overview-20261011-111936/visual-check/project-overview.visual-check.json"
+      }
+    },
+    {
+      "type": "dataflow",
+      "html": "dataflow-state-consistency-20261011-111936/state-consistency.html",
+      "candidate": "dataflow-state-consistency-20261011-111936/candidate.json",
+      "specification_sha256": "d5ecc40db8b0b2fff5e21f62280b7cabc5abf0f6435c022cb42e8862a40b9cc8",
+      "artifact_sha256": "53c756e35ebb1967b657c1ea4e7912d24bf519b68b6ad8f334e18352ff760fc4",
+      "finalize_summary": "dataflow-state-consistency-20261011-111936/state-consistency.finalize-summary.json",
+      "browser_receipt": "dataflow-state-consistency-20261011-111936/state-consistency.browser-check.json",
+      "validation": {
+        "checks_passed": 9,
+        "errors": 0,
+        "warnings": 0,
+        "gates": {
+          "validate": "pass",
+          "deliver": "pass",
+          "check": "pass",
+          "browser-check": "pass"
+        }
+      },
+      "visual_review": {
+        "status": "passed",
+        "scope": "静态 READ/Still 首屏截图：2048×1320 light、1440×900 dark；节点、箭头、文字无遮挡。未据此声明交互或导出人工验收。",
+        "perceptual_correction_rounds": 0,
+        "capture_receipt": "dataflow-state-consistency-20261011-111936/visual-check/state-consistency.visual-check.json"
+      }
+    },
+    {
+      "type": "architecture",
+      "html": "architecture-verification-boundaries-20261011-111936/verification-boundaries.html",
+      "candidate": "architecture-verification-boundaries-20261011-111936/candidate.json",
+      "specification_sha256": "4630e5f57f20de14db1b8a77c70075815a66ea604afb51348c486caa1a214708",
+      "artifact_sha256": "95c834cdb12a726d9ddfe942c24ac1d1275ff577071fddce1afb588fd5b51ef0",
+      "finalize_summary": "architecture-verification-boundaries-20261011-111936/verification-boundaries.finalize-summary.json",
+      "browser_receipt": "architecture-verification-boundaries-20261011-111936/verification-boundaries.browser-check.json",
+      "validation": {
+        "checks_passed": 9,
+        "errors": 0,
+        "warnings": 0,
+        "gates": {
+          "validate": "pass",
+          "deliver": "pass",
+          "check": "pass",
+          "browser-check": "pass"
+        }
+      },
+      "visual_review": {
+        "status": "passed",
+        "scope": "静态 READ/Still 首屏截图：2048×1320 light、1440×900 dark；节点、箭头、文字无遮挡。未据此声明交互或导出人工验收。",
+        "perceptual_correction_rounds": 0,
+        "capture_receipt": "architecture-verification-boundaries-20261011-111936/visual-check/verification-boundaries.visual-check.json"
+      }
+    }
+  ],
+  "historical": [
+    {
+      "html": "architecture-dpdk-runtime-20261009-220751/dpdk-runtime.html",
+      "source_revision": "46e8d09c970e2f059ba60b86a64a56897e6cdc24",
+      "note": "旧运行时架构；不覆盖后续恢复 v5 内容核验与只读 plan。"
+    },
+    {
+      "html": "sequence-rule-fallback-20261009-225434/rule-fallback.html",
+      "source_revision": "14ba76b358c5795f16b7b0b17f293a7698f89c49",
+      "note": "旧回退调用链；validate 失败且等价才回退的边界仍保留，源码行号与恢复钩子需以新基线核对。"
+    },
+    {
+      "html": "lifecycle-recovery-20261009-225434/recovery.html",
+      "source_revision": "14ba76b358c5795f16b7b0b17f293a7698f89c49",
+      "note": "旧恢复生命周期；后续已加入内容/范围核验与只读清理计划，不应继续把它们视为尚未实现。自动跨进程删除仍未实现。"
+    }
+  ]
+}

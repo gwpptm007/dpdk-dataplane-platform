@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "4ef04719-4caf-4485-b36d-33db5d79101f",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\architecture-project-overview-20261011-111936\\candidate.json",
+  "output": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\architecture-project-overview-20261011-111936\\project-overview.html",
+  "specification": {
+    "sha256": "006a8fcdb4e6982deb4e7df0c3a9f8d6ab4368c8d95a91899cc4b40fa0ad1a5d",
+    "bytes": 12009
+  },
+  "artifact": {
+    "sha256": "aa921b94e8b76e9402e7e48888f19f63ad8083060ab876b3aa7b2b4a70a95a13",
+    "bytes": 773899
+  }
+}

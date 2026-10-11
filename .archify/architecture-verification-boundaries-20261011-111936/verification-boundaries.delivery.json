@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "e65fbe99-2096-4b6d-bd8d-a76e177b370e",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\architecture-verification-boundaries-20261011-111936\\candidate.json",
+  "output": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\.archify\\architecture-verification-boundaries-20261011-111936\\verification-boundaries.html",
+  "specification": {
+    "sha256": "4630e5f57f20de14db1b8a77c70075815a66ea604afb51348c486caa1a214708",
+    "bytes": 10856
+  },
+  "artifact": {
+    "sha256": "95c834cdb12a726d9ddfe942c24ac1d1275ff577071fddce1afb588fd5b51ef0",
+    "bytes": 767716
+  }
+}
