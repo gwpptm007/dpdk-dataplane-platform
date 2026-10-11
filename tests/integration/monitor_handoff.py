@@ -15,7 +15,8 @@ def main():
     parser.add_argument("--native", action="store_true")
     arguments = parser.parse_args()
     check(os.geteuid() == 0, "handoff tests require root for test-owned TAPs")
-    for mode in ("live", "wrong-session", "paused", "lost", "stopped", "replaced", "renamed", "contention", "interrupted"):
+    for mode in ("live", "wrong-session", "paused", "lost", "stopped", "replaced", "renamed", "contention",
+                 "interrupted", "plan-invalidated"):
         run_case(arguments.build_dir.resolve(), "handoff-" + mode, arguments.native)
 
 

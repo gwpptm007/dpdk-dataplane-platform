@@ -14,10 +14,16 @@
 sudo ./build/dppd-recovery show /var/lib/dppd/hardware.recovery
 # 将 23 替换为上面实际显示的 revision
 sudo ./build/dppd-recovery plan /var/lib/dppd/hardware.recovery 23
+sudo ./build/dppd-recovery plan-monitored /var/lib/dppd/hardware.recovery \
+  23 /var/lib/dppd/monitor-session-001
 ```
 
 离线工具全程持有恢复文件排他锁。版本不符时，在读取内核之前拒绝；daemon 正在持锁
 时返回忙。计划不修改恢复文件、业务快照或内核规则，也不解除启动保护。
+`plan-monitored` 同时要求监护会话存活、原业务进程已退出且恢复工具当前处于
+监护登记的网络命名空间。它在查询前和查询后核对新鲜回复，在整个查询期间保留同一
+恢复锁与单一会话租约。只有完整读取且事件窗口无变化时才追加 `plan-evidence` 行，
+把本次只读计划与存活会话关联。普通 `plan` 仍可独立查询，但没有这条关联。
 候选需要此前启用了 [TAP 原生标识](tap_owner_cookie.md) 和
 [创建前预期内容记录](tap_rule_verification.md)，不能事后从内核补造这些证据。
 
@@ -25,7 +31,8 @@ sudo ./build/dppd-recovery plan /var/lib/dppd/hardware.recovery 23
 
 | 行前缀 | 内容 |
 | --- | --- |
-| `plan` | 输出版本 1、文件 revision、格式、端口数、尝试数和观察是否完整 |
+| `plan` | 输出版本 1、文件 revision、格式、端口数、尝试数、是否持有会话租约和观察是否完整 |
+| `plan-evidence` | 仅监护模式的完整计划出现，表示前后新鲜检查成功，不代表历史完整或允许删除 |
 | `scope=` | 仅登记端口的本地 multiq/ingress，非原子快照、未确认清理、不可执行 |
 | `observation-window` | 查询期间的变化和接收异常，历史连续性与写入隔离仍未覆盖 |
 | `prerequisites` | 接口实例连续性、检查到删除之间的并发保护、标识真实性和删除实现的缺口 |
@@ -80,11 +87,11 @@ sudo ./build/dppd-recovery plan /var/lib/dppd/hardware.recovery 23
 
 ## 真正删除前还缺什么
 
-当前 plan 始终列出以下缺口：
+当前两种计划均始终列出以下缺口：
 
 1. **接口实例连续性**：相同 boot、命名空间、名称和索引，仍不足以证明接口从创建
    至今没有销毁重建；文件 revision 也只约束恢复记录
-2. **检查到删除之间的并发保护**：恢复文件锁不能阻止其他 TC 写入者，重复检查也不能
+2. **检查到删除之间的并发保护**：恢复文件锁与合作式租约不能阻止外部 TC 写入者，重复检查也不能
    把后续删除变成条件原子操作，保存计划后更不能直接照着坐标执行
 3. **标识真实性边界**：cookie 可被有权限的程序复制，必须明确受控环境和写入者范围，
    不能把随机 cookie 当作防伪凭证
@@ -93,8 +100,9 @@ sudo ./build/dppd-recovery plan /var/lib/dppd/hardware.recovery 23
 查询期间的事件丢失、中途修改和同名同索引重建已验证为拒绝候选。后续已增加
 [独立接口监护与会话证据](recovery_monitor.md)，业务退出后仍可观察接口变化；该证据
 尚未接入本命令。[业务握手、会话绑定与活性检查](recovery_monitor_handshake.md) 已完成，
-独占业务登记与 [只读交接检查](recovery_writer_handoff.md) 已完成。下一步建立命名空间
-及写入权限边界，再将证据接入本命令和后续删除流程；单独的交接检查不会给本命令授权。
+独占业务登记、网络命名空间核验与 [监护下计划](recovery_writer_handoff.md) 已完成。
+下一步建立命名空间内的写入权限边界并继续证明历史连续性；会话租约仍不排除有权限的
+外部写入者，计划中 `executable=no` 保持不变。
 remote、其他 PMD 和未登记端口不在本计划的过滤器枚举范围。
 目前完成外部清理后仍使用 [现有精确版本确认流程](recovery_guard.md#查看线索并恢复)。
 

@@ -209,8 +209,26 @@ def run_case(build, mode, native):
                                 handoff(error=errno.EOWNERDEAD)
                             else:
                                 kill(client)
+                        elif mode == "handoff-plan-invalidated":
+                            log = directory / "handoff-plan.log"
+                            log_paths.append(log)
+                            injected = dict(environment, DPPD_TEST_HANDOFF_WINDOW="after-query")
+                            with log.open("w") as output:
+                                client = subprocess.Popen([str(build / "tests/integration/test_monitor_handoff_window"),
+                                                           "plan-monitored", str(guard), revision, str(session)],
+                                                          env=injected, stdout=output, stderr=subprocess.STDOUT)
+                            wait_for(client, lambda: "State:\tT" in Path(f"/proc/{client.pid}/status").read_text(),
+                                     "completed inventory query")
+                            handoff(error=errno.EBUSY)
+                            kill(monitor)
+                            client.send_signal(signal.SIGCONT)
+                            client.wait(timeout=10)
+                            output = log.read_text()
+                            check(client.returncode != 0 and "monitored recovery plan refused" in output and
+                                  "plan-evidence status=active" not in output, output)
+                            handoff(error=errno.EOWNERDEAD)
                         if mode not in ("handoff-lost", "handoff-stopped", "handoff-replaced", "handoff-renamed",
-                                        "handoff-interrupted"):
+                                        "handoff-interrupted", "handoff-plan-invalidated"):
                             # 工具退出的通知可能尚未处理，先等待监护释放借用的恢复锁
                             for retry in range(20):
                                 result = subprocess.run([str(build / "dppd-recovery"), "handoff-check", str(guard),
@@ -224,6 +242,25 @@ def run_case(build, mode, native):
                                 raise AssertionError("handoff lease did not release")
                             check("business=exited lease=held scope=cooperative" in result.stdout and
                                   "writer-exclusion=no executable=no" in result.stdout, result.stdout)
+                            planned = None
+                            for query in range(20):
+                                result = subprocess.run([str(build / "dppd-recovery"), "plan-monitored", str(guard),
+                                                         revision, str(session)], env=environment, text=True,
+                                                        capture_output=True, timeout=10)
+                                planned = result.stdout
+                                check(guard.read_bytes() == residual and state.read_bytes() == saved and len(filters()) == 1,
+                                      "monitored plan changed persisted evidence or residual rule")
+                                if result.returncode == 0:
+                                    break
+                                check(f"({-errno.ESTALE})" in result.stderr and "candidates=0" in planned and
+                                      "history-covered=no" in planned, planned + result.stderr)
+                                time.sleep(0.1)
+                            else:
+                                raise AssertionError("monitored plan did not reach a stable observation window")
+                            check("monitored=yes" in planned and "plan-evidence status=active" in planned and
+                                  "session=" + session.read_bytes()[32:48].hex() + " session-checked=yes" in planned and
+                                  "lease=held history-covered=no writer-exclusion=no" in planned and
+                                  "check-delete-exclusion=unavailable executable=no" in planned, planned)
                             run(build / "dppd-recovery", "handoff-check", guard, str(int(revision) + 1), session,
                                 error=errno.ESTALE)
                             check("lease=held" in handoff(), "released lease could not be reacquired")

@@ -57,11 +57,16 @@ int main(void)
     struct dppd_monitor_record record = {.count = 1, .recovery_device = info.st_dev, .recovery_inode = info.st_ino};
     strcpy(record.recovery_path, guard.path);
     record.ports[0].port_id = 3;
+    struct stat namespace;
+    assert(stat("/proc/self/ns/net", &namespace) == 0);
     record.ports[0].identity = (struct dppd_recovery_identity){.ifindex = 17,
         .ifname = "owned",
         .boot_id = "6c307404-452c-475d-83b2-e5aaf3ae0102",
-        .netns_device = 4,
-        .netns_inode = 5};
+        .netns_device = namespace.st_dev,
+        .netns_inode = namespace.st_ino};
+    record.ports[0].identity.netns_inode++;
+    assert(same_network_namespace(&record) == -EXDEV);
+    record.ports[0].identity.netns_inode--;
     struct dppd_recovery_record ports = {.count = 1};
     ports.ports[0].port_id = 3;
     ports.ports[0].identity = record.ports[0].identity;

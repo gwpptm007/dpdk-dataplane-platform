@@ -15,6 +15,7 @@ static int usage(const char *program)
     fprintf(stderr, "usage: %s show PATH\n", program);
     fprintf(stderr, "       %s inspect PATH REVISION\n", program);
     fprintf(stderr, "       %s plan PATH REVISION\n", program);
+    fprintf(stderr, "       %s plan-monitored PATH REVISION SESSION_PATH\n", program);
     fprintf(stderr, "       %s handoff-check PATH REVISION SESSION_PATH\n", program);
     fprintf(stderr, "       %s acknowledge-clean PATH REVISION --external-cleanup-complete\n", program);
     return EXIT_FAILURE;
@@ -179,7 +180,7 @@ static void print_cookie(const uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
  * 先读取所有登记端口，再生成同一份计划，避免逐端口输出时漏掉跨端口复制的标识
  * 大块内核列表放在堆上，退出时统一释放，整个过程不产生删除请求或清理确认
  */
-static int plan_record(const struct dppd_recovery_record *record, uint64_t revision)
+static int plan_record(const struct dppd_recovery_record *record, uint64_t revision, bool monitored)
 {
     struct dppd_recovery_plan plan;
     struct dppd_recovery_watch watch = {.fd = -1};
@@ -207,8 +208,10 @@ static int plan_record(const struct dppd_recovery_record *record, uint64_t revis
         free(inspections);
         return rc;
     }
-    printf("plan version=1 revision=%" PRIu64 " format=%u ports=%u attempts=%u mode=read-only inventory-complete=%s\n",
-        revision, record->format, record->count, record->attempt_count, plan.inventory_complete ? "yes" : "no");
+    printf("plan version=1 revision=%" PRIu64 " format=%u ports=%u attempts=%u mode=read-only inventory-complete=%s "
+           "monitored=%s\n",
+        revision, record->format, record->count, record->attempt_count, plan.inventory_complete ? "yes" : "no",
+        monitored ? "yes" : "no");
     printf("scope=tap-local-multiq-and-ingress remote-scope=excluded ownership=unproven "
            "atomic-snapshot=no cleanup-confirmed=no executable=no\n");
     const char *window = "no-change-observed";
@@ -272,12 +275,14 @@ int main(int argc, char **argv)
     bool acknowledge = argc == 5 && strcmp(argv[1], "acknowledge-clean") == 0;
     bool inspect = argc == 4 && strcmp(argv[1], "inspect") == 0;
     bool plan = argc == 4 && strcmp(argv[1], "plan") == 0;
+    bool monitored_plan = argc == 5 && strcmp(argv[1], "plan-monitored") == 0;
     bool handoff = argc == 5 && strcmp(argv[1], "handoff-check") == 0;
     int rc;
 
-    if (!(argc == 3 && strcmp(argv[1], "show") == 0) && !acknowledge && !inspect && !plan && !handoff)
+    if (!(argc == 3 && strcmp(argv[1], "show") == 0) && !acknowledge && !inspect && !plan && !handoff &&
+        !monitored_plan)
         return usage(argv[0]);
-    if ((inspect || plan || handoff) && revision_number(argv[3], &revision) != 0)
+    if ((inspect || plan || handoff || monitored_plan) && revision_number(argv[3], &revision) != 0)
         return usage(argv[0]);
     if (acknowledge &&
         (strcmp(argv[4], "--external-cleanup-complete") != 0 || revision_number(argv[3], &revision) != 0))
@@ -299,8 +304,28 @@ int main(int argc, char **argv)
                    "mode=read-only writer-exclusion=no executable=no\n",
                 revision);
         dppd_monitor_client_close(&client);
+    } else if (monitored_plan) {
+        struct dppd_monitor_client client = {.fd = -1};
+        rc = dppd_monitor_recovery_open(&client, argv[4], &guard, revision);
+        if (rc == 0)
+            rc = dppd_monitor_client_check(&client);
+        if (rc == 0) {
+            rc = plan_record(&guard.record, revision, true);
+            int monitor_error = dppd_monitor_client_check(&client);
+            if (monitor_error != 0)
+                rc = monitor_error;
+            else if (rc == 0) {
+                printf("plan-evidence status=active revision=%" PRIu64 " session=", revision);
+                print_cookie(client.record.session);
+                printf(" session-checked=yes lease=held history-covered=no writer-exclusion=no "
+                       "check-delete-exclusion=unavailable executable=no\n");
+            }
+        }
+        if (rc != 0)
+            fprintf(stderr, "monitored recovery plan refused: %s (%d)\n", strerror(-rc), rc);
+        dppd_monitor_client_close(&client);
     } else if (plan) {
-        rc = plan_record(&guard.record, revision);
+        rc = plan_record(&guard.record, revision, false);
         if (rc != 0)
             fprintf(stderr, "recovery plan incomplete: %s (%d)\n", strerror(-rc), rc);
     } else if (inspect) {

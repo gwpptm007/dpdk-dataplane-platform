@@ -221,6 +221,8 @@ sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 `dppd-recovery handoff-check PATH REVISION SESSION_PATH`，按精确版本取得临时只读租约。
 命令不更改文件或内核规则，退出后租约释放；完整限制和故障诊断见
 [写入者登记与恢复交接](recovery_writer_handoff.md)。同一次部署的两端须使用当前 IPC v2。
+若要把存活监护与只读计划关联，可在同一网络命名空间运行
+`dppd-recovery plan-monitored PATH REVISION SESSION_PATH`，该命令保持交接租约直到计划完成。
 
 ## 本机规则管理
 

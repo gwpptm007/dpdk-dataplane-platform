@@ -269,6 +269,21 @@ static int open_process(pid_t pid)
 
 static bool same_identity(const struct dppd_recovery_identity *left, const struct dppd_recovery_identity *right);
 
+/** 恢复端必须处于监护启动时登记的网络命名空间，抽象会话地址也按命名空间隔离 */
+static int same_network_namespace(const struct dppd_monitor_record *record)
+{
+    struct stat current;
+    if (stat("/proc/self/ns/net", &current) != 0)
+        return -errno;
+    for (uint32_t index = 0; index < record->count; ++index) {
+        const struct dppd_recovery_identity *identity = &record->ports[index].identity;
+        if (identity->ifindex == 0 || (uint64_t)current.st_dev != identity->netns_device ||
+            (uint64_t)current.st_ino != identity->netns_inode)
+            return -EXDEV;
+    }
+    return 0;
+}
+
 static int authorize(struct dppd_monitor_server *server, const struct dppd_monitor_record *record,
     enum request_type type, int fd, int guard_fd, uint64_t revision)
 {
@@ -607,6 +622,8 @@ int dppd_monitor_recovery_open(struct dppd_monitor_client *client, const char *p
     bool locked;
     int rc = dppd_monitor_read(client->path, &client->record, &locked);
     const struct dppd_monitor_record *record = &client->record;
+    if (rc == 0)
+        rc = same_network_namespace(record);
     if (rc == 0 && (!locked || record->state != DPPD_MONITOR_ACTIVE))
         rc = -EOWNERDEAD;
     if (rc == 0 &&

@@ -64,8 +64,9 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 业务可加 `--recovery-monitor SESSION_PATH`，启动及安装前后核对身份与新鲜回复，
 会话持久绑定至恢复记录 v6，失效后停止安装并退出，见 [监护握手](docs/recovery_monitor_handshake.md)。
 已增加独占业务登记和 `handoff-check PATH REVISION SESSION_PATH` 只读交接检查，
-业务确认退出后才允许单个恢复租约，详见 [写入者与恢复交接](docs/recovery_writer_handoff.md)。
-外部写入权限隔离、完整历史证明及自动删除仍待实现。
+业务确认退出后才允许单个恢复租约；`plan-monitored PATH REVISION SESSION_PATH` 可在租约
+内生成关联计划，详见 [写入者与恢复交接](docs/recovery_writer_handoff.md)。外部写入权限隔离、
+完整历史证明及自动删除仍待实现。
 
 ```bash
 bash scripts/build.sh

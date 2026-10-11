@@ -7,9 +7,9 @@ sudo python3 tests/integration/monitor_handoff.py --build-dir build
 sudo python3 tests/integration/monitor_handoff.py --build-dir build-native --native
 ```
 
-2026-10-11，两种构建各九个场景通过：业务仍存活、错误会话、监护暂停、被杀、正常
+2026-10-11，两种构建各十个场景通过：业务仍存活、错误会话、监护暂停、被杀、正常
 停止、会话文件替换、接口改名、恢复工具争抢及交接中断。成功和拒绝路径均核对恢复
-文件、业务快照与真实残留规则未变。争抢工具在独立测试入口取得真实租约后暂停，
+文件、业务快照与真实残留规则未变。查询结束后监护失效不会输出计划证明，争抢工具在独立测试入口取得真实租约后暂停，
 正式程序没有跳过检查的开关。两套构建各 35/35 单测、六项 sanitizer 通过，详见
 [写入者与恢复交接](../../docs/recovery_writer_handoff.md)。
 
