@@ -117,7 +117,7 @@ static int exchange(struct nlmsghdr *request, bool dump, message_reader reader, 
         size_t remaining = (size_t)received;
         const struct nlmsghdr *header = (const struct nlmsghdr *)buffer.bytes;
         while (remaining != 0) {
-            if (remaining < sizeof(*header) || header->nlmsg_len < sizeof(*header) ||
+            if (remaining < sizeof(*header) || header->nlmsg_len < sizeof(*header) || header->nlmsg_len > remaining ||
                 NLMSG_ALIGN(header->nlmsg_len) > remaining || header->nlmsg_seq != 1) {
                 rc = -EBADMSG;
                 goto done;

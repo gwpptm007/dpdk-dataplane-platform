@@ -158,6 +158,10 @@ test('TAP recovery inspection', recovery_inspect_test)
 recovery_plan_test = executable('test_recovery_plan', 'test_recovery_plan.c', dependencies: dppd_core_dep)
 test('read-only TAP recovery plan', recovery_plan_test)
 
+# 事件丢失、报文损坏、持续事件流及删除重建后的变化标志都不能恢复为可信
+recovery_watch_test = executable('test_recovery_watch', 'test_recovery_watch.c', include_directories: dppd_inc)
+test('recovery observation window', recovery_watch_test)
+
 # 持久化意图、结果和删除事件，覆盖驱动前后写盘故障及清理时的真实 handle 回收
 recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attempt.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])

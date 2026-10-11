@@ -3,6 +3,8 @@
 2026-10-11 新增 `dppd-recovery plan PATH REVISION`，把恢复记录与当前内核观察整理成
 逐条候选、拒绝原因和删除前提。恢复文件仍为 v5，业务快照仍为 v2，管理协议仍为 v15。
 本命令只生成诊断结果，所有输出均保持 `executable=no`，没有执行删除的选项。
+后续已增加 [查询窗口事件监视](recovery_observation_window.md)，读取期间发生变化或
+事件接收不完整时整份计划不产生候选，仍不证明历史接口连续性或排除后续写入。
 
 ## 使用方法
 
@@ -25,6 +27,7 @@ sudo ./build/dppd-recovery plan /var/lib/dppd/hardware.recovery 23
 | --- | --- |
 | `plan` | 输出版本 1、文件 revision、格式、端口数、尝试数和观察是否完整 |
 | `scope=` | 仅登记端口的本地 multiq/ingress，非原子快照、未确认清理、不可执行 |
+| `observation-window` | 查询期间的变化和接收异常，历史连续性与写入隔离仍未覆盖 |
 | `prerequisites` | 接口实例连续性、检查到删除之间的并发保护、标识真实性和删除实现的缺口 |
 | `plan-port` | 持久保存的接口索引、名称、启动标识、命名空间，以及本次查询状态 |
 | `plan-attempt` | 尝试编号、业务规则和版本、安装端口、阶段、决定、主原因及核验结果 |
@@ -54,7 +57,7 @@ sudo ./build/dppd-recovery plan /var/lib/dppd/hardware.recovery 23
 | `removed-token-present` | 已删除记录的标识再次出现，保留矛盾，不接管该对象 |
 | `missing-token` | 普通模式或旧记录没有原生标识，坐标一致不能替代它 |
 | `missing-expected-content` | 旧 v4 等记录没有创建前预期内容，不从当前对象反推 |
-| `inventory-incomplete` | 任一登记端口查询不完整，整份计划不产生候选 |
+| `inventory-incomplete` | 任一登记端口查询不完整或事件监视失败，整份计划不产生候选 |
 | `token-absent` | 所有已登记范围读取完成，未找到标识，仍不自动确认清理 |
 | `token-ambiguous` | 同一标识出现在多个对象，包括跨端口复制 |
 | `wrong-port` | 标识唯一，但仅出现在其他登记端口 |
@@ -87,8 +90,9 @@ sudo ./build/dppd-recovery plan /var/lib/dppd/hardware.recovery 23
    不能把随机 cookie 当作防伪凭证
 4. **删除与失败恢复实现**：尚无跨进程精确删除入口、删除事件落盘和失败后续接流程
 
-下一步先验证接口实例跟踪和受控写入范围的方案，明确事件丢失、接口重建、外部改写
-时如何拒绝操作，再实现删除流程。remote、其他 PMD 和未登记端口不在本计划观察范围。
+查询期间的事件丢失、中途修改和同名同索引重建已验证为拒绝候选。下一步实现独立监护
+会话，保存跨业务进程的连续性与失效证据，并验证写入交接，再实现删除流程。
+remote、其他 PMD 和未登记端口不在本计划的过滤器枚举范围。
 目前完成外部清理后仍使用 [现有精确版本确认流程](recovery_guard.md#查看线索并恢复)。
 
 ## 验证记录

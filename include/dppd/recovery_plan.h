@@ -40,10 +40,12 @@ struct dppd_recovery_plan {
 /**
  * 只分析已经读取的数据，不访问内核或改写恢复文件
  * inspections 和 errors 与 record 的端口顺序一致，任一端口读取不完整都不产生候选
+ * observation_error 保存外部事件监视结果，发现中途变化或无法监视时整份计划失效
  * 调用方负责持锁核对 revision，候选仍缺少接口实例连续性和检查到删除之间的并发保护
  */
 int dppd_recovery_plan_build(const struct dppd_recovery_record *record,
-    const struct dppd_recovery_inspection *inspections, const int *errors, struct dppd_recovery_plan *plan);
+    const struct dppd_recovery_inspection *inspections, const int *errors, int observation_error,
+    struct dppd_recovery_plan *plan);
 const char *dppd_recovery_plan_reason_name(enum dppd_recovery_plan_reason reason);
 
 #endif

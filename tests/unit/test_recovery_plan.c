@@ -51,7 +51,7 @@ static void expect_reason(enum dppd_recovery_plan_reason reason)
 {
     saved_record = record;
     memcpy(saved_inspections, inspections, sizeof(inspections));
-    assert(dppd_recovery_plan_build(&record, inspections, errors, &plan) == 0);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, 0, &plan) == 0);
     assert(plan.entries[0].reason == reason);
     assert(memcmp(&record, &saved_record, sizeof(record)) == 0);
     assert(memcmp(inspections, saved_inspections, sizeof(inspections)) == 0);
@@ -128,6 +128,11 @@ static void test_verification(void)
 
 static void test_partial_inventory(void)
 {
+    reset_fixture();
+    assert(dppd_recovery_plan_build(&record, inspections, errors, -ESTALE, &plan) == 0);
+    assert(!plan.inventory_complete && plan.candidates == 0 && plan.entries[0].reason == DPPD_PLAN_INCOMPLETE);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, -ENOBUFS, &plan) == 0);
+    assert(!plan.inventory_complete && plan.candidates == 0);
     const enum dppd_recovery_inspection_state unavailable[] = {DPPD_INSPECT_UNAVAILABLE, DPPD_INSPECT_UNSUPPORTED,
         DPPD_INSPECT_NO_IDENTITY, DPPD_INSPECT_CONTEXT_MISMATCH, DPPD_INSPECT_IDENTITY_MISMATCH};
     for (unsigned int index = 0; index < sizeof(unavailable) / sizeof(unavailable[0]); ++index) {
@@ -152,34 +157,34 @@ static void test_partial_inventory(void)
     /* 旧端口线索没有逐次记录时仍保留缺口，不能把零候选解释成已经清理 */
     record.attempt_count = 0;
     record.format = 2;
-    assert(dppd_recovery_plan_build(&record, inspections, errors, &plan) == 0);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, 0, &plan) == 0);
     assert(plan.ports_without_attempts == 2 && plan.unassociated_filters == 3 && plan.candidates == 0);
     record.count = 0;
-    assert(dppd_recovery_plan_build(&record, NULL, NULL, &plan) == 0);
+    assert(dppd_recovery_plan_build(&record, NULL, NULL, 0, &plan) == 0);
     assert(plan.inventory_complete && plan.candidates == 0 && plan.ports_without_attempts == 0);
 }
 
 static void test_invalid_input(void)
 {
     reset_fixture();
-    assert(dppd_recovery_plan_build(NULL, inspections, errors, &plan) == -EINVAL);
-    assert(dppd_recovery_plan_build(&record, NULL, errors, &plan) == -EINVAL);
-    assert(dppd_recovery_plan_build(&record, inspections, NULL, &plan) == -EINVAL);
-    assert(dppd_recovery_plan_build(&record, inspections, errors, NULL) == -EINVAL);
+    assert(dppd_recovery_plan_build(NULL, inspections, errors, 0, &plan) == -EINVAL);
+    assert(dppd_recovery_plan_build(&record, NULL, errors, 0, &plan) == -EINVAL);
+    assert(dppd_recovery_plan_build(&record, inspections, NULL, 0, &plan) == -EINVAL);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, 0, NULL) == -EINVAL);
     record.count = DPPD_MAX_PORTS + 1;
-    assert(dppd_recovery_plan_build(&record, inspections, errors, &plan) == -EINVAL);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, 0, &plan) == -EINVAL);
     record.count = 2;
     record.attempt_count = DPPD_RECOVERY_ATTEMPT_LIMIT + 1;
-    assert(dppd_recovery_plan_build(&record, inspections, errors, &plan) == -EINVAL);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, 0, &plan) == -EINVAL);
     reset_fixture();
     inspections[0].count = DPPD_RECOVERY_FILTER_LIMIT + 1;
-    assert(dppd_recovery_plan_build(&record, inspections, errors, &plan) == -EINVAL);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, 0, &plan) == -EINVAL);
     inspections[0].count = 1;
     inspections[0].state = DPPD_INSPECT_ABSENT;
-    assert(dppd_recovery_plan_build(&record, inspections, errors, &plan) == -EINVAL);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, 0, &plan) == -EINVAL);
     reset_fixture();
     record.attempts[0].port_id = 100;
-    assert(dppd_recovery_plan_build(&record, inspections, errors, &plan) == -EINVAL);
+    assert(dppd_recovery_plan_build(&record, inspections, errors, 0, &plan) == -EINVAL);
 }
 
 int main(void)

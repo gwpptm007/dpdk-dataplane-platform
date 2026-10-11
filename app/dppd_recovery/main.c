@@ -6,6 +6,7 @@
 #include "dppd/recovery_guard.h"
 #include "dppd/recovery_inspect.h"
 #include "dppd/recovery_plan.h"
+#include "dppd/recovery_watch.h"
 
 /** 离线工具不初始化 EAL，inspect 和 plan 只读内核，确认命令要求已完成外部清理 */
 static int usage(const char *program)
@@ -179,6 +180,7 @@ static void print_cookie(const uint8_t cookie[DPPD_TAP_COOKIE_SIZE])
 static int plan_record(const struct dppd_recovery_record *record, uint64_t revision)
 {
     struct dppd_recovery_plan plan;
+    struct dppd_recovery_watch watch = {.fd = -1};
     int errors[DPPD_MAX_PORTS] = {0};
     int result = 0;
     if (record->revision != revision)
@@ -186,12 +188,19 @@ static int plan_record(const struct dppd_recovery_record *record, uint64_t revis
     struct dppd_recovery_inspection *inspections = calloc(record->count ? record->count : 1, sizeof(*inspections));
     if (inspections == NULL)
         return -ENOMEM;
+    /* 必须先订阅再查询，否则查询早期发生过的删除和重建可能已经被遗漏 */
+    int watch_error = record->count ? dppd_recovery_watch_open(&watch, record) : 0;
     for (uint32_t port = 0; port < record->count; ++port) {
         errors[port] = dppd_recovery_inspect(&record->ports[port], &inspections[port]);
         if (result == 0)
             result = errors[port];
     }
-    int rc = dppd_recovery_plan_build(record, inspections, errors, &plan);
+    if (watch_error == 0 && record->count != 0)
+        watch_error = dppd_recovery_watch_check(&watch);
+    dppd_recovery_watch_close(&watch);
+    if (result == 0)
+        result = watch_error;
+    int rc = dppd_recovery_plan_build(record, inspections, errors, watch_error, &plan);
     if (rc != 0) {
         free(inspections);
         return rc;
@@ -200,6 +209,16 @@ static int plan_record(const struct dppd_recovery_record *record, uint64_t revis
         revision, record->format, record->count, record->attempt_count, plan.inventory_complete ? "yes" : "no");
     printf("scope=tap-local-multiq-and-ingress remote-scope=excluded ownership=unproven "
            "atomic-snapshot=no cleanup-confirmed=no executable=no\n");
+    const char *window = "no-change-observed";
+    if (record->count == 0)
+        window = "not-needed";
+    else if (watch.error != 0)
+        window = "unavailable";
+    else if (watch_error != 0)
+        window = "changed";
+    printf(
+        "observation-window status=%s error=%d link-changed=%s tc-changed=%s history-covered=no writer-exclusion=no\n",
+        window, watch_error, watch.link_changed ? "yes" : "no", watch.tc_changed ? "yes" : "no");
     printf("prerequisites interface-instance-continuity=unproven check-delete-exclusion=unavailable "
            "token-authenticity=unproven deletion-support=unimplemented\n");
     for (uint32_t port = 0; port < record->count; ++port) {

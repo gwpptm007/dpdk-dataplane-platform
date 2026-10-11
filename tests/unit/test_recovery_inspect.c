@@ -47,6 +47,9 @@ static ssize_t test_receive(int fd, struct msghdr *message, int flags)
     case 9:
         header->nlmsg_type = NLMSG_OVERRUN;
         break;
+    case 10:
+        header->nlmsg_len = UINT32_MAX;
+        return sizeof(*header);
     default:
         break;
     }
@@ -132,7 +135,7 @@ static void qdisc_messages(void)
 static void transport_failures(void)
 {
     static const int errors[] = {0, -EBADMSG, -EBADMSG, -EBADMSG, -EAGAIN, -ENOBUFS, -EBADMSG, -EBADMSG, -EAGAIN,
-        -EBADMSG};
+        -EBADMSG, -EBADMSG};
     struct tc_query query = {.index = 1};
     for (receive_fault = 1; receive_fault < sizeof(errors) / sizeof(errors[0]); ++receive_fault)
         assert(query_tc(&query) == errors[receive_fault]);

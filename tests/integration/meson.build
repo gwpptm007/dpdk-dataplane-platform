@@ -41,6 +41,10 @@ shared_library('dppd_recovery_attempt_faults', 'recovery_attempt_faults.c',
   include_directories: dppd_inc,
   dependencies: [dpdk, meson.get_compiler('c').find_library('dl')], install: false)
 
+# 仅测试版 CLI 暂停在两次查询之间，正式离线工具没有故障开关
+executable('test_recovery_plan_window', 'recovery_plan_window.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=dppd_recovery_inspect', '-Wl,--wrap=recvmsg'], install: false)
+
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', required: false)
 if ring_pmd.found()
   executable(

@@ -58,6 +58,8 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 和自动清理仍待实现，见 [TAP 内容核验](docs/tap_rule_verification.md)。新增
 `dppd-recovery plan PATH REVISION` 可列出观察候选、拒绝原因和删除前提，跨登记端口
 检查重复标识，保持只读且不可执行，详见 [精确清理计划](docs/recovery_plan.md)。
+计划查询期间还会监听链路和 TC 变化，中途重建、修改或接收丢包时撤销候选，见
+[查询窗口监视](docs/recovery_observation_window.md)。历史连续性和删除时的写入隔离仍待实现。
 
 ```bash
 bash scripts/build.sh

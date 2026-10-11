@@ -14,6 +14,7 @@ import zlib
 from batch_update import check, fields
 from health_readiness import clean_environment, daemon_command
 from recovery_isolation import wait_for
+from recovery_window import verify_plan_windows, verify_same_index_recreation
 
 
 def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_content=False, ordinary_remote=False):
@@ -164,6 +165,7 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                 planned = plan()
                 check("candidates=4 rejected=0 excluded=1 ports-without-attempts=0 unassociated-filters=0" in planned,
                       planned)
+                verify_plan_windows(build, guard, revision, interfaces, owned, run, filters)
                 objects = [fields(line) for line in planned.splitlines() if line.startswith("plan-object ")]
                 check(len(objects) == 4, planned)
                 for item in objects:
@@ -309,6 +311,7 @@ def run_case(build, unsupported=False, remote=False, omit_owner=False, alter_con
                 plan(980, "token-absent")
                 check("state=external-reconciliation-required" in run(build / "dppd-recovery", "show", guard),
                       "inspection cleared recovery guard")
+                verify_same_index_recreation(build, guard, revision, interfaces[0], owned, run)
                 remove_interfaces()
                 run(build / "dppd-recovery", "acknowledge-clean", guard, revision, "--external-cleanup-complete")
         except Exception as error:

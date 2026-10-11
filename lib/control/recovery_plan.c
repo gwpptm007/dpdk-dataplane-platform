@@ -65,14 +65,15 @@ static enum dppd_recovery_plan_reason classify(const struct dppd_recovery_record
 }
 
 int dppd_recovery_plan_build(const struct dppd_recovery_record *record,
-    const struct dppd_recovery_inspection *inspections, const int *errors, struct dppd_recovery_plan *plan)
+    const struct dppd_recovery_inspection *inspections, const int *errors, int observation_error,
+    struct dppd_recovery_plan *plan)
 {
     if (record == NULL || plan == NULL || record->count > DPPD_MAX_PORTS ||
         record->attempt_count > DPPD_RECOVERY_ATTEMPT_LIMIT ||
         (record->count != 0 && (inspections == NULL || errors == NULL)))
         return -EINVAL;
     memset(plan, 0, sizeof(*plan));
-    plan->inventory_complete = true;
+    plan->inventory_complete = observation_error == 0;
     for (uint32_t port = 0; port < record->count; ++port) {
         const struct dppd_recovery_inspection *inspection = &inspections[port];
         if (inspection->count > DPPD_RECOVERY_FILTER_LIMIT ||
