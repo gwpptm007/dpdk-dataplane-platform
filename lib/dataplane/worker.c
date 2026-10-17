@@ -74,11 +74,14 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
     int rc = 0;
     if (parsed != DPPD_PARSE_MALFORMED) {
         if (packet->l4_type == DPPD_L4_TCP || packet->l4_type == DPPD_L4_UDP)
-            rc = dppd_ipv4_transport_validate(*mbuf, packet);
+            rc = packet->l3_type == DPPD_L3_IPV6 ? dppd_ipv6_transport_validate(*mbuf, packet)
+                                                 : dppd_ipv4_transport_validate(*mbuf, packet);
         if (rc == 0)
             rc = dppd_conntrack_begin(runtime->conntrack, ingress->port_id, packet, dppd_monotonic_ms(), &attempt);
         policy.connection_state = rc == 0 ? attempt.state : DPPD_CT_INVALID;
         if (rc == 0) {
+            memcpy(policy.ipv6_src, attempt.policy.source6, 16);
+            memcpy(policy.ipv6_dst, attempt.policy.destination6, 16);
             policy.ipv4_src_be = attempt.policy.source_be;
             policy.ipv4_dst_be = attempt.policy.destination_be;
             policy.l4_src_port_be = attempt.policy.source_port_be;
@@ -108,8 +111,10 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
             dppd_conntrack_finish(&attempt, 0, false);
             return;
         }
-        rc = dppd_ipv4_rewrite_flow(mbuf, packet, &decision->ipv4, egress->mac.addr_bytes,
-            attempt.nat ? &attempt.rewrite : NULL);
+        rc = packet->l3_type == DPPD_L3_IPV6 ? dppd_ipv6_rewrite_flow(mbuf, packet, &decision->ipv4,
+                                                   egress->mac.addr_bytes, attempt.nat ? &attempt.rewrite : NULL)
+                                             : dppd_ipv4_rewrite_flow(mbuf, packet, &decision->ipv4,
+                                                   egress->mac.addr_bytes, attempt.nat ? &attempt.rewrite : NULL);
     }
     int commit = dppd_conntrack_finish(&attempt, decision->egress_port, rc == 0);
     if (rc == 0)
@@ -146,8 +151,8 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             delta.rx_malformed++;
         else if (parsed == DPPD_PARSE_UNSUPPORTED)
             delta.rx_unsupported++;
-        /** IPv6 继续使用未跟踪的双栈路由，不能送入只认识 IPv4 五元组的会话与 NAT 表 */
-        if (runtime->conntrack != NULL && packet.l3_type != DPPD_L3_IPV6)
+        /** 两种地址族都经过状态 ACL 和会话提交，失败候选不能占用 NAT 端口或刷新超时 */
+        if (runtime->conntrack != NULL)
             stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision);
         else
             dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router,
@@ -179,11 +184,17 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
                 delta.nat_pool_drops++;
             else if (decision.drop_reason == DPPD_DROP_NAT_MISS)
                 delta.nat_miss_drops++;
-            else if (decision.drop_reason == DPPD_DROP_TTL)
-                delta.ipv4_ttl_drops++;
-            else if (decision.drop_reason == DPPD_DROP_REWRITE)
-                delta.ipv4_rewrite_drops++;
-            else if (decision.drop_reason == DPPD_DROP_EGRESS)
+            else if (decision.drop_reason == DPPD_DROP_TTL) {
+                if (packet.l3_type == DPPD_L3_IPV6)
+                    delta.ipv6_hop_drops++;
+                else
+                    delta.ipv4_ttl_drops++;
+            } else if (decision.drop_reason == DPPD_DROP_REWRITE) {
+                if (packet.l3_type == DPPD_L3_IPV6)
+                    delta.ipv6_rewrite_drops++;
+                else
+                    delta.ipv4_rewrite_drops++;
+            } else if (decision.drop_reason == DPPD_DROP_EGRESS)
                 delta.egress_drops++;
             rte_pktmbuf_free(rx[i]);
             continue;
@@ -196,7 +207,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             rte_pktmbuf_free(rx[i]);
             continue;
         }
-        if (decision.routed && (runtime->conntrack == NULL || packet.l3_type == DPPD_L3_IPV6)) {
+        if (decision.routed && runtime->conntrack == NULL) {
             bool ipv6 = packet.l3_type == DPPD_L3_IPV6;
             int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)
                           : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);

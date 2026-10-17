@@ -160,13 +160,6 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
         }
     }
 
-    /** 当前会话表只处理 IPv4，IPv6 不能声明实际上不会产生的 NEW 或 ESTABLISHED 状态 */
-    if (seen_ipv6)
-        for (i = 0; i < rule->nb_matches; ++i)
-            if (rule->matches[i].type == DPPD_MATCH_CONNECTION_STATE &&
-                (rule->matches[i].spec.connection_states & ~1U) != 0)
-                return rule_error(error, error_len, "IPv6 supports only untracked state");
-
     for (i = 0; i < rule->nb_actions; ++i) {
         const enum dppd_action_type type = rule->actions[i].type;
         if (type < DPPD_ACTION_DROP || type > DPPD_ACTION_ALLOW)

@@ -652,7 +652,7 @@ static void ipv6_queues(struct fixture *fixture)
         .dst_first_be = htons(5000),
         .dst_last_be = htons(6000)};
     allow.matches[3].type = DPPD_MATCH_CONNECTION_STATE;
-    allow.matches[3].spec.connection_states = DPPD_CT_UNTRACKED;
+    allow.matches[3].spec.connection_states = DPPD_CT_NEW;
     allow.actions[0] = (struct dppd_action){.type = DPPD_ACTION_MARK, .conf.mark_id = 0x600d};
     allow.actions[1].type = DPPD_ACTION_COUNT;
     allow.actions[2].type = DPPD_ACTION_ALLOW;
@@ -681,6 +681,8 @@ static void ipv6_queues(struct fixture *fixture)
         assert(inet_pton(AF_INET6, "2001:db8:1::1", ip + 8) == 1);
         assert(inet_pton(AF_INET6, "2001:db8:2::7", ip + 24) == 1);
         memcpy(udp, (uint8_t[]){4, 0xd2, 0x16, 0x2e, 0, (uint8_t)(FRAME_SIZE - l2 - 40), 0, 0}, 8);
+        /** 两个出口各用一个五元组，已建立的会话不能随路由切换偷偷换出口 */
+        udp[1] = (uint8_t)(0xd2 + egress);
         memcpy(pseudo, ip + 8, 32);
         pseudo[35] = ip[5];
         pseudo[39] = 17;
@@ -720,8 +722,155 @@ static void ipv6_queues(struct fixture *fixture)
     assert(hits == 200 && bytes == 200 * FRAME_SIZE);
     struct dppd_conntrack_status status;
     dppd_conntrack_status(fixture->runtime.conntrack, dppd_monotonic_ms(), &status);
-    assert(status.active == 2);
+    assert(status.active == 4);
     printf("PASS IPv6 worker queues=%u updates=200 MARK+COUNT=yes shared-chain=unchanged IPv4-NAT=isolated\n",
+        fixture->queues);
+}
+
+/** 用完整伪首部独立组包，保留 VLAN 和两个填充扩展头，不能只核对转换后的地址 */
+static void nat66_frame(uint8_t bytes[FRAME_SIZE], const char *source, const char *destination, uint16_t source_port,
+    uint16_t destination_port)
+{
+    memset(bytes, 0, FRAME_SIZE);
+    bytes[0] = bytes[6] = 2;
+    memcpy(bytes + 12, (uint8_t[]){0x81, 0, 0, 37, 0x86, 0xdd}, 6);
+    uint8_t *ip6 = bytes + 18, *udp = ip6 + 56;
+    ip6[0] = 0x6a;
+    ip6[3] = 0x55;
+    ip6[5] = FRAME_SIZE - 18 - 40;
+    ip6[6] = 0;
+    ip6[7] = 64;
+    assert(inet_pton(AF_INET6, source, ip6 + 8) == 1);
+    assert(inet_pton(AF_INET6, destination, ip6 + 24) == 1);
+    ip6[40] = 60;
+    ip6[48] = 17;
+    uint16_t port = htons(source_port);
+    memcpy(udp, &port, 2);
+    port = htons(destination_port);
+    memcpy(udp + 2, &port, 2);
+    udp[5] = FRAME_SIZE - 18 - 56;
+    for (unsigned int i = 8; i < udp[5]; ++i)
+        udp[i] = (uint8_t)(i * 7);
+    uint8_t pseudo[FRAME_SIZE + 40] = {0};
+    memcpy(pseudo, ip6 + 8, 32);
+    pseudo[35] = udp[5];
+    pseudo[39] = 17;
+    memcpy(pseudo + 40, udp, udp[5]);
+    uint16_t value = checksum(pseudo, (uint16_t)(40 + udp[5]));
+    if (value == 0)
+        value = UINT16_MAX;
+    udp[6] = (uint8_t)(value >> 8);
+    udp[7] = (uint8_t)value;
+}
+
+/** 正式 worker 的两个队列共用 NAT66 映射，SNAT 与 DNAT 双向均不得污染共享分段原包 */
+static void nat66_queues(struct fixture *fixture)
+{
+    dppd_runtime_request_stop(&fixture->runtime);
+    assert(dppd_runtime_wait(&fixture->runtime) == 0);
+    dppd_conntrack_destroy(fixture->runtime.conntrack);
+    fixture->runtime.conntrack = NULL;
+    struct dppd_snat_config nat =
+        {.enabled = true, .ipv6 = true, .inside_port = 0, .outside_port = 1, .first_port = 40000, .last_port = 40001};
+    assert(inet_pton(AF_INET6, "2001:db8:100::9", nat.address6) == 1);
+    struct dppd_dnat_rule dnat = {.ipv6 = true,
+        .inside_port = 0,
+        .outside_port = 1,
+        .protocol = 17,
+        .public_first = 40000,
+        .public_last = 40000,
+        .private_first = 8000};
+    memcpy(dnat.public_address6, nat.address6, 16);
+    assert(inet_pton(AF_INET6, "2001:db8:1::8", dnat.private_address6) == 1);
+    assert(dppd_conntrack_create_dual(&fixture->runtime.conntrack, 16, 60, NULL, &nat, &dnat, 1) == 0);
+    fixture->control.conntrack = fixture->runtime.conntrack;
+    struct dppd_ipv4_configuration routes;
+    assert(dppd_ipv4_router_get(fixture->router, &routes) == 0);
+    routes.routes6[0].port_id = 1;
+    routes.routes6[1] = routes.routes6[0];
+    assert(inet_pton(AF_INET6, "2001:db8:1::", routes.routes6[1].prefix) == 1);
+    routes.routes6[1].port_id = 0;
+    routes.route6_count = 2;
+    routes.neighbors6[2] = routes.neighbors6[0];
+    routes.neighbors6[2].port_id = 0;
+    routes.neighbors6[2].mac[5] = 10;
+    routes.neighbor6_count = 3;
+    assert(dppd_ipv4_router_replace(fixture->router, routes.generation, &routes, NULL, NULL) == 0);
+    uint64_t generations[2];
+    for (uint16_t port = 0; port < 2; ++port) {
+        struct dppd_rule rule = {.id = (uint64_t)(991 + port),
+            .priority = 10,
+            .fallback = DPPD_FALLBACK_SOFTWARE_ONLY,
+            .nb_matches = 3,
+            .nb_actions = 3};
+        rule.matches[0].type = DPPD_MATCH_ETH;
+        rule.matches[1].type = DPPD_MATCH_IPV6;
+        rule.matches[2].type = DPPD_MATCH_CONNECTION_STATE;
+        rule.matches[2].spec.connection_states = DPPD_CT_NEW | DPPD_CT_ESTABLISHED;
+        rule.actions[0] = (struct dppd_action){.type = DPPD_ACTION_MARK, .conf.mark_id = 0x6600};
+        rule.actions[1].type = DPPD_ACTION_COUNT;
+        rule.actions[2].type = DPPD_ACTION_ALLOW;
+        struct dppd_control_apply_result result;
+        assert(dppd_control_apply(&fixture->control, port, &rule, 0, &result) == 0);
+        generations[port] = result.generation;
+    }
+    assert(dppd_runtime_start(&fixture->runtime) == 0);
+    for (unsigned int destination_nat = 0; destination_nat < 2; ++destination_nat)
+        for (unsigned int reply = 0; reply < 2; ++reply)
+            for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+                uint16_t ingress = (uint16_t)(destination_nat ? !reply : reply), egress = (uint16_t)!ingress;
+                const char *inside = destination_nat ? "2001:db8:1::8" : "2001:db8:1::1";
+                const char *remote = "2001:db8:2::7", *public = "2001:db8:100::9";
+                uint8_t wire[FRAME_SIZE], expected[FRAME_SIZE], buffer[FRAME_SIZE];
+                if (!destination_nat) {
+                    nat66_frame(wire, reply ? remote : inside, reply ? public : remote, reply ? 443 : 1234,
+                        reply ? 40001 : 443);
+                    nat66_frame(expected, reply ? remote : public, reply ? inside : remote, reply ? 443 : 40001,
+                        reply ? 1234 : 443);
+                } else {
+                    nat66_frame(wire, reply ? inside : remote, reply ? remote : public, reply ? 8000 : 1234,
+                        reply ? 1234 : 40000);
+                    nat66_frame(expected, reply ? public : remote, reply ? remote : inside, reply ? 40000 : 1234,
+                        reply ? 1234 : 8000);
+                }
+                memcpy(expected, routes.neighbors6[egress == 0 ? 2 : 0].mac, 6);
+                memcpy(expected + 6, fixture->runtime.devices.ports[egress].mac.addr_bytes, 6);
+                expected[25]--;
+                struct rte_mbuf *original = rte_pktmbuf_alloc(fixture->pool), *tail = rte_pktmbuf_alloc(fixture->pool);
+                assert(original != NULL && tail != NULL);
+                memcpy(rte_pktmbuf_append(original, 33), wire, 33);
+                memcpy(rte_pktmbuf_append(tail, FRAME_SIZE - 33), wire + 33, FRAME_SIZE - 33);
+                assert(rte_pktmbuf_chain(original, tail) == 0);
+                rte_mbuf_refcnt_update(original, 1);
+                rte_mbuf_refcnt_update(tail, 1);
+                assert(rte_ring_enqueue(fixture->rx[ingress][queue], original) == 0);
+                fixture->sent++;
+                void *object;
+                uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
+                while (rte_ring_dequeue(fixture->tx[egress][queue], &object) != 0) {
+                    assert(rte_get_timer_cycles() < deadline);
+                    rte_pause();
+                }
+                assert(memcmp(rte_pktmbuf_read(object, 0, FRAME_SIZE, buffer), expected, FRAME_SIZE) == 0);
+                assert(((struct rte_mbuf *)object)->hash.fdir.hi == 0x6600);
+                assert(memcmp(rte_pktmbuf_read(original, 0, FRAME_SIZE, buffer), wire, FRAME_SIZE) == 0);
+                assert((original->ol_flags & RTE_MBUF_F_RX_FDIR_ID) == 0);
+                rte_pktmbuf_free(object);
+                rte_pktmbuf_free(original);
+                fixture->forwarded++;
+            }
+    for (uint16_t port = 0; port < 2; ++port) {
+        uint64_t hits, bytes;
+        assert(dppd_software_backend_query_count(&fixture->control.software, 991 + port, generations[port], &hits,
+                   &bytes) == 0);
+        assert(hits == 2U * fixture->queues && bytes == hits * FRAME_SIZE);
+    }
+    struct dppd_connection_page page;
+    assert(dppd_conntrack_list(fixture->runtime.conntrack, dppd_monotonic_ms(), 0, 0, &page) == 0 && page.count == 2);
+    for (unsigned int i = 0; i < 2; ++i)
+        assert(page.entries[i].original.ipv6 && page.entries[i].seen_reply &&
+            page.entries[i].packets[0] == fixture->queues && page.entries[i].packets[1] == fixture->queues);
+    printf("PASS NAT66 worker queues=%u SNAT+DNAT shared-session=2 MARK+COUNT=yes shared-chain=unchanged\n",
         fixture->queues);
 }
 
@@ -787,6 +936,7 @@ static void run_case(uint16_t queues)
     failure_paths(fixture);
     stateful_queues(fixture);
     ipv6_queues(fixture);
+    nat66_queues(fixture);
     dppd_runtime_request_stop(&fixture->runtime);
     assert(dppd_runtime_wait(&fixture->runtime) == 0);
     struct dppd_stats_values statistics;

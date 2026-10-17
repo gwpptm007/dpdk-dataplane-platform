@@ -2,25 +2,32 @@
 
 状态只表示代码是否真实存在，不以目录或占位接口计入完成度。
 
+2026-10-17 完成 M2 [IPv6 连接跟踪与 NAT66](nat66.md)：双向 TCP/UDP 状态、握手、
+状态 ACL、超时、容量与管理先接通，再接通 SNAT66、静态 DNAT66、整地址/端口转发、
+回包还原和协议/地址族端口池隔离。管理协议 v21，启动策略与规则/路由恢复、会话
+重启清空语义已验证；两套构建各 46/46 单测、sanitizer 构建全部 46 项、单双队列正式 worker
+和真实三 TAP 的纯跟踪、NAT66/IPv4 共存、错误路径、重启与老化验收通过。
+动态 ND/RA、ICMPv6 错误/RELATED、重组、hairpin、NPTv6、隧道和硬件/性能目标仍未完成。
+
 2026-10-17 完成 M2 [IPv6 解析、ACL 与转发](ipv6.md)：IPv6 固定头和有界填充扩展头、
 完整地址/掩码及 TCP/UDP 范围 ACL、/0–/128 最长前缀、静态邻居和 MAC/Hop Limit 改写
 接通。双栈共用路由版本与一次发布，CLI v20、规则 v2/v3 与路由 v1/v2 兼容恢复，旧
 IPv4 ACL/SNAT/DNAT 保持可用。两套构建各 45/45 单测、十一项相关 sanitizer、单双
-队列正式 worker 和真实三 TAP 验收通过。IPv6 不进入 IPv4 会话/NAT；动态 ND/RA、
-IPv6 跟踪/NAT66、分片重组、ICMPv6 错误生成、隧道和硬件/性能目标仍未完成。
+队列正式 worker 和真实三 TAP 验收通过。后续已接通 IPv6 会话与 NAT66；动态 ND/RA、
+分片重组、ICMPv6 错误生成、隧道和硬件/性能目标仍未完成。
 
 2026-10-17 完成 M2 [IPv4 静态 DNAT 与端口转发](dnat.md)：TCP/UDP 整地址映射、
 单端口和等长端口段、后端回包公网还原、逻辑地址 ACL/路由、跨队列共用会话、静态
 端口与 SNAT 池隔离、配置冲突和管理分页查询接通。两套构建各 43/43 单测、七项相关
 sanitizer、单双队列正式 worker 和真实三 TAP 独立/共存/老化验收通过。管理协议 v19，
-静态策略由部署保留启动参数，重启清空会话。IPv6 解析/ACL/转发已在上述阶段补齐；IPv6 NAT、hairpin、ICMP/RELATED、运行时
+静态策略由部署保留启动参数，重启清空会话。IPv6 解析、ACL、转发与 NAT 已在上述阶段补齐；hairpin、ICMP/RELATED、运行时
 NAT 策略更新、双向主动建连的一对一静态 NAT、HA 和硬件有状态处理仍未完成。
 
 2026-10-17 完成 M2 [IPv4 连接跟踪与出站 SNAT](conntrack_nat.md)：先接通 TCP/UDP 双向
 状态、握手校验、超时/容量/资源回收、状态 ACL 和管理，再接通正向转换、回包还原、
 完整校验和、跨队列共用映射及易失会话重启语义。两套构建各 42/42 单测、六项相关
 sanitizer、单双队列正式 worker 和真实三 TAP 验收通过。管理协议 v18，NAT 由启动参数
-固定配置，规则/路由按快照恢复而会话清空。静态 DNAT 已在上述阶段补齐，IPv6 静态转发也已接通；IPv6 跟踪/NAT、RELATED/ICMP 转换、
+固定配置，规则/路由按快照恢复而会话清空。静态 DNAT 与 IPv6 静态转发、跟踪/NAT 已在上述阶段补齐；RELATED/ICMP 转换、
 会话复制、硬件有状态处理和性能目标尚未完成，整个 M2 仍在推进。
 
 2026-10-17 完成 M2 [IPv4 软件 ACL 闭环](acl.md)：独立编译匹配阶段已接入正式 worker，
@@ -188,11 +195,11 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | 虚拟 PMD flow 验证 | TAP 与 net_ring 已验证 | 双 TAP 已验证硬件 DROP/QUEUE；软件 TCP+MARK+COUNT+DROP 有真实报文与计数证据；net_ring 已验证 prefer 回退，见 [待办文档](todo_virtual_flow_backend.md) |
 | 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
 | control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
-| management API | 本机 v20 已验证 | IPv6 ACL、双栈路由与邻居；静态 DNAT 分页、会话映射与状态/分页/精确清空、NAT 状态、状态 ACL；原 ACL/路由/规则诊断及健康；旧版本客户端被拒绝 |
+| management API | 本机 v21 已验证 | IPv6 会话与 NAT66、IPv6 ACL、双栈路由与邻居；静态 DNAT 分页、会话映射与状态/分页/精确清空、NAT 状态、状态 ACL；原 ACL/路由/规则诊断及健康；旧版本客户端被拒绝 |
 | 规则安装观测 | 已实现状态、失败分类、失败事件、耗时历史与规则 telemetry | 精确版本核对后端、端口与 COUNT 配置；三组耗时、整批不重复计数、分位数上界与未知/溢出标志；最近 64 条完整失败的版本分页、覆盖提示和编号耗尽冻结；不提供持久化审计日志 |
 | health/readiness | 已实现本机最小闭环 | 实际线程、端口与链路、移除、恢复隔离和持久化 dirty；未就绪原因与 CLI 退出码；未提供远程探针、心跳或主动网络探测 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |
-| ACL/LPM/NAT/conntrack | IPv4/IPv6 ACL、LPM/rewrite/neighbor；IPv4 TCP/UDP 跟踪、SNAT 和静态 DNAT/端口转发已接通 | 原子规则更新、持久重放、易失会话和映射回收、双向收发及静态端口保留已验证；IPv6 跟踪/NAT66、hairpin、RELATED/ICMP、HA 与硬件有状态处理未实现 |
+| ACL/LPM/NAT/conntrack | IPv4/IPv6 ACL、LPM/rewrite/neighbor；双栈 TCP/UDP 跟踪、SNAT 和静态 DNAT/端口转发已接通 | 原子规则更新、持久重放、易失会话和映射回收、双向收发及静态端口保留已验证；hairpin、NPTv6、RELATED/ICMP、HA 与硬件有状态处理未实现 |
 | DPU/SmartNIC 实机 | 未验证 | 需在具体 PMD、固件、representor devargs 上建立能力矩阵 |
 
 2026-10-01 新增端口/队列统计、丢弃原因与 management v8，16/16 单测通过；实际收发核对入口 RX、出口 TX 及端口/队列汇总，并覆盖畸形、无路由、出口异常与 TX 队列满。详见验证记录中的统计验证。 双队列实际收发验证已补齐：两个正式 worker 分别处理 24/48 包的每轮负载，满容量批量更新、逐队列统计、报文序号、恢复和资源回收通过普通及 AddressSanitizer/UBSan 构建。net_ring 无 RSS，双队列仅由测试夹具显式配置，生产 daemon 的 RSS 要求保持不变。
@@ -283,7 +290,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 - 没有查询 `rte_flow` 资源容量或预留规则空间；
 - COUNT id 由 rule id 的低 32 位生成，控制面必须保证其作用域内不冲突。
 - 硬件规则更新采用“先创建新 generation，再删除旧 generation”；若 PMD 拒绝重叠规则，更新失败并保留旧规则，当前不承诺跨 PMD 的无损原子替换。
-- management v20 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
+- management v21 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
 - 批量更新保留 `rule_capacity + 1` 的 backend 容量。纯软件路径整批替换快照、复用旧槽位，满表可更新；每次分类使用完整旧表或新表，新版本 COUNT 归零，未更新规则保留计数。硬件及混合路径仍需要临时容量，只保证账本整批发布；PREFER 可能整表替换但最终成为混合计划时，会在安装前复查软件空间。
 - 普通 daemon 不自动删除启动前已存在的 socket；`dppd-scope` 只在自己确认旧业务退出后清除私有目录内属于服务账户的管理 socket。
 - snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready`、`capability-show`、`rule-metrics/rule-latency/rule-history` 与规则 telemetry 的进程内隔离模式。可选 `--recovery-path` 已提供异常退出后的重放阻断与外部清理确认；受控本地 TAP 的自动清理与快照重启已接通，其他 PMD 自动清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md) 与 [恢复保护](recovery_guard.md)。

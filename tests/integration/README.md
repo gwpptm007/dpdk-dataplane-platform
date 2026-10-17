@@ -1,5 +1,19 @@
 # 集成验收
 
+## IPv6 连接跟踪与 NAT66
+
+```sh
+sudo python3 tests/integration/nat66_traffic.py --build-dir build
+sudo python3 tests/integration/nat66_traffic.py --build-dir build-native
+python3 tests/integration/ipv4_traffic.py --build-dir build
+```
+
+两套构建各 46 项单测，AddressSanitizer/UBSan 构建也通过全部 46 项。真实三 TAP 分别核对
+IPv6 纯跟踪、SNAT66/静态 DNAT66/整地址与端口段、状态 ACL 和原子批量更新、完整线缆
+字节与独立校验和、IPv4 SNAT 同端口数字共存、失败回滚、会话清空、SIGKILL 后策略恢复
+和老化回收。正式单双队列 worker 增加共享分段包上的 NAT66 双向映射、MARK、COUNT、
+原包不变与零 mbuf 泄漏。只在自建空网络命名空间创建并清理自己的 TAP，见 [NAT66](../../docs/nat66.md)。
+
 ## IPv6 解析、ACL 与转发
 
 ```sh
@@ -12,7 +26,7 @@ python3 tests/integration/ipv4_traffic.py --build-dir build
 TCP/UDP/ICMPv6、双 VLAN、填充扩展头、/0、/64、/65、/128 路由与静态邻居、范围及批量
 ACL、完整输出字节/校验和、丢弃原因、混合快照重启、存储故障与 IPv4 SNAT 共存。
 正式单双队列 worker 另检查 200 次 IPv6 在线路由切换、MARK/COUNT、共享分段包原样
-保留、IPv4 NAT 会话不变及 mbuf 零泄漏。只使用自建虚拟接口，见 [IPv6](../../docs/ipv6.md)。
+保留、IPv4 NAT 会话隔离及 mbuf 零泄漏。只使用自建虚拟接口，见 [IPv6](../../docs/ipv6.md)。
 
 ## 静态 DNAT 与端口转发
 

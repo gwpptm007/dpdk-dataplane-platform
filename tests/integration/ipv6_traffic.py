@@ -29,6 +29,10 @@ class Flow6:
     extensions: tuple = ()
     udp_zero: bool = False
     icmp_type: int = 128
+    flags: int = 0x18
+    sequence: int = 101
+    acknowledgment: int = 501
+    payload: bytes | None = None
 
     def reverse(self):
         return replace(self, source=self.destination, destination=self.source,
@@ -63,7 +67,7 @@ class IPv6Fixture(StatefulFixture):
         self.acl6(1102, "tcp", "allow", destination_ports="443")
         self.acl6(1103, "ip:58", "allow")
         self.cli("acl6-set", 1104, 1, 0, 10, "ipv6", "2001:db8:2::/64", "2001:db8:1::/64",
-                 "any", "any", "allow", "count", "state:untracked")
+                 "any", "any", "allow", "count", "state:established" if self.nat else "state:untracked")
         self.acl6(1200, "ipv6", "drop", priority=100, source="any", destination="any")
         self.cli("acl6-set", 1201, 1, 0, 100, "ipv6", "any", "any", "any", "any", "drop", "count")
         check((self.directory / "rules").read_bytes()[8] == 3, "IPv6 ACL did not use complete v3 records")
@@ -80,12 +84,16 @@ class IPv6Fixture(StatefulFixture):
         if isinstance(flow, Flow):
             return super().frame(flow, tag, ingress, output)
         payload = b"DPPD-IPV6-CLOSURE" + struct.pack("!I", tag) + b"odd-payload"
+        if flow.payload is not None:
+            payload = flow.payload
+        elif flow.protocol == 6 and flow.flags & 2:
+            payload = b""
         if flow.protocol == 17:
             upper = bytearray(struct.pack("!HHHH", flow.source_port, flow.destination_port, len(payload) + 8, 0) + payload)
             checksum_offset = 6
         elif flow.protocol == 6:
             upper = bytearray(struct.pack("!HHIIBBHHH", flow.source_port, flow.destination_port,
-                                          tag, tag + 1, 0x50, 0x18, 8192, 0, 0) + payload)
+                                          flow.sequence, flow.acknowledgment, 0x50, flow.flags, 8192, 0, 0) + payload)
             checksum_offset = 16
         elif flow.protocol == 58:
             upper = bytearray(struct.pack("!BBHHH", flow.icmp_type, 0, 0, 81, tag & 65535) + payload)
@@ -111,9 +119,9 @@ class IPv6Fixture(StatefulFixture):
             ethernet += struct.pack("!HH", 0x88a8 if flow.vlans == 2 and index == 0 else 0x8100, 37 + index)
         return ethernet + bytes.fromhex("86dd") + header + body, payload
 
-    def exchange(self, flow, ingress=0, output=None, reason=None, corrupt=False, bad_length=False, **options):
+    def exchange(self, flow, ingress=0, output=None, reason=None, corrupt=False, bad_length=False, translated=None, **options):
         if isinstance(flow, Flow):
-            return super().exchange(flow, ingress, output, reason=reason, corrupt=corrupt, **options)
+            return super().exchange(flow, ingress, output, reason=reason, corrupt=corrupt, translated=translated, **options)
         self.sequence += 1
         before = self.stats() if reason else None
         wire, marker = self.frame(flow, self.sequence, ingress)
@@ -140,7 +148,9 @@ class IPv6Fixture(StatefulFixture):
                         status, _, _, _, _, tci, tpid = struct.unpack("=IIIHHHH", auxiliary[:20])
                         if status & 16:
                             data = data[:12] + struct.pack("!HH", tpid if status & 64 else 0x8100, tci) + data[12:]
-                if marker in data:
+                l2 = 14 + 4 * flow.vlans
+                identity = marker in data if marker else len(data) >= l2 + 40 and data[l2:l2 + 4] == bytes.fromhex("600abcde")
+                if identity:
                     found.append((self.links.index(link), data))
             if found:
                 break
@@ -149,8 +159,16 @@ class IPv6Fixture(StatefulFixture):
             if reason:
                 check(self.stats()[reason] >= before[reason] + 1, f"missing IPv6 drop reason {reason}")
             return
-        expected, _ = self.frame(replace(flow, hop=flow.hop - 1), self.sequence, ingress, output)
+        wire_flow = flow if translated is None else translated
+        if getattr(self, "auto_snat6", False) and ingress == 0 and translated is None:
+            check(len(found) == 1, f"missing NAT66 output: {found}")
+            offset = 14 + 4 * flow.vlans + 40 + 8 * len(flow.extensions)
+            port = struct.unpack_from("!H", found[0][1], offset)[0]
+            check(40001 <= port <= 40002 or flow.protocol == 6 and port == 40000, "NAT66 mapping outside available pool")
+            wire_flow = replace(flow, source="2001:db8:100::9", source_port=port)
+        expected, _ = self.frame(replace(wire_flow, hop=flow.hop - 1), self.sequence, ingress, output)
         check(found == [(output, expected)], f"IPv6 bytes/port/checksum mismatch: {found}, expected={expected.hex()}")
+        return wire_flow
 
 
 def validate(build, directory, nat):
@@ -163,7 +181,8 @@ def validate(build, directory, nat):
         for vlans in (0, 1, 2):
             for extensions in ((), ("hop",), ("hop", "dest")):
                 for protocol in (6, 17, 58):
-                    fixture.exchange(replace(ordinary, vlans=vlans, extensions=extensions, protocol=protocol), output=1)
+                    fixture.exchange(replace(ordinary, vlans=vlans, extensions=extensions, protocol=protocol,
+                                             flags=2 if nat and protocol == 6 else 0x18, acknowledgment=0), output=1)
         fixture.exchange(ordinary.reverse(), ingress=1, output=0)
         fixture.exchange(replace(ordinary, destination="2001:db8:3::7"), output=2)
         fixture.exchange(replace(ordinary, destination="2001:db8:2:0:8000::7"), output=2)
@@ -196,14 +215,14 @@ def validate(build, directory, nat):
         for identity in (1101, 1102, 1103, 1104, 1200, 1201):
             fixture.delete_rule(identity)
         fixture.exchange(replace(ordinary, hop=1), reason="ipv6_hop_drops")
-        fixture.exchange(ordinary, corrupt=True, reason="ipv6_checksum_drops")
-        fixture.exchange(replace(ordinary, udp_zero=True), reason="ipv6_checksum_drops")
+        fixture.exchange(ordinary, corrupt=True, reason="ct_checksum_drops" if nat else "ipv6_checksum_drops")
+        fixture.exchange(replace(ordinary, udp_zero=True), reason="ct_checksum_drops" if nat else "ipv6_checksum_drops")
         fixture.exchange(ordinary, bad_length=True, reason="rx_malformed")
         for extension in ("route", "fragment", "option"):
-            fixture.exchange(replace(ordinary, extensions=(extension,)), reason="ipv6_unsupported_drops")
-        fixture.exchange(replace(ordinary, protocol=58, icmp_type=135), reason="ipv6_unsupported_drops")
-        fixture.exchange(replace(ordinary, destination="ff02::1"), reason="ipv6_unsupported_drops")
-        fixture.exchange(replace(ordinary, source="fe80::1"), reason="ipv6_unsupported_drops")
+            fixture.exchange(replace(ordinary, extensions=(extension,)), reason="ct_unsupported_drops" if nat else "ipv6_unsupported_drops")
+        fixture.exchange(replace(ordinary, protocol=58, icmp_type=135), reason="ct_unsupported_drops" if nat else "ipv6_unsupported_drops")
+        fixture.exchange(replace(ordinary, destination="ff02::1"), reason="ct_unsupported_drops" if nat else "ipv6_unsupported_drops")
+        fixture.exchange(replace(ordinary, source="fe80::1"), reason="ct_unsupported_drops" if nat else "ipv6_unsupported_drops")
         fixture.change("route6-delete", "::/0")
         fixture.exchange(replace(ordinary, destination="2001:db8:3::7"), reason="no_route_drops")
         fixture.change("neighbor6-delete", 2, "fe80::1")
@@ -214,11 +233,14 @@ def validate(build, directory, nat):
         fixture.cli("route6-set", "2001:db8:2::/64", 9, "fe80::1", generation, success=False)
         check(fixture.generation() == generation and fixture.snapshot.read_bytes() == saved, "rejected IPv6 route changed state")
         if nat:
-            check(fixture.status()["active"] == 0, "IPv6 unexpectedly entered IPv4 conntrack")
+            active6 = fixture.status()["active"]
+            check(active6 > 0, "IPv6 did not enter dual-stack conntrack")
+            sessions = fixture.cli("conntrack-list")
+            check("family=ipv6 kind=none" in sessions and "nat=yes" not in sessions, "IPv4 SNAT changed IPv6 sessions")
             original = Flow()
             wire = fixture.exchange(original, output=1)
             fixture.exchange(wire.reverse(), ingress=1, output=0, translated=original.reverse())
-            check(fixture.status()["active"] == 1, "IPv4 SNAT stopped working with IPv6 routes")
+            check(fixture.status()["active"] == active6 + 1, "IPv4 SNAT stopped working with IPv6 routes")
         fixture.acl6(1101, "udp", "allow", source_ports="1000-2000", destination_ports="443-445")
         fixture.acl6(1200, "ipv6", "drop", priority=100, source="any", destination="any")
         details = {identity: fixture.cli("get", identity) for identity in (1000, 1101, 1200)}

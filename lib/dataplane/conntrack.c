@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "dppd/conntrack.h"
+#include "dppd/ipv6.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -20,8 +21,8 @@ struct dppd_conntrack {
     bool initialized, pending_new;
     struct connection *entries, pending;
     uint32_t *buckets, *free_slots, bucket_count, free_count, cursor, pending_slot, pending_bytes;
-    uint16_t port_cursor[2];
-    uint8_t ports[2][65536];
+    uint16_t port_cursor[2][2];
+    uint8_t ports[2][2][65536];
     uint64_t clock_ms, next_id, full_gc_after_ms;
     struct dppd_conntrack_status status;
     struct dppd_dnat_rule dnat[DPPD_MAX_DNAT_RULES];
@@ -37,33 +38,65 @@ uint64_t dppd_monotonic_ms(void)
 
 static struct dppd_flow_tuple tuple(const struct dppd_packet *packet)
 {
-    return (struct dppd_flow_tuple){.source_be = packet->ipv4_src_be,
+    struct dppd_flow_tuple value = {.source_be = packet->ipv4_src_be,
         .destination_be = packet->ipv4_dst_be,
         .source_port_be = packet->l4_src_port_be,
         .destination_port_be = packet->l4_dst_port_be,
-        .protocol = packet->ip_protocol};
+        .protocol = packet->ip_protocol,
+        .ipv6 = packet->l3_type == DPPD_L3_IPV6};
+    if (value.ipv6) {
+        memcpy(value.source6, packet->ipv6_src, 16);
+        memcpy(value.destination6, packet->ipv6_dst, 16);
+    }
+    return value;
 }
 
 static struct dppd_flow_tuple reverse(struct dppd_flow_tuple value)
 {
-    return (struct dppd_flow_tuple){.source_be = value.destination_be,
-        .destination_be = value.source_be,
-        .source_port_be = value.destination_port_be,
-        .destination_port_be = value.source_port_be,
-        .protocol = value.protocol};
+    struct dppd_flow_tuple result = value;
+    result.source_be = value.destination_be;
+    result.destination_be = value.source_be;
+    result.source_port_be = value.destination_port_be;
+    result.destination_port_be = value.source_port_be;
+    memcpy(result.source6, value.destination6, 16);
+    memcpy(result.destination6, value.source6, 16);
+    return result;
 }
 
 static bool equal(const struct dppd_flow_tuple *a, const struct dppd_flow_tuple *b)
 {
-    return a->source_be == b->source_be && a->destination_be == b->destination_be &&
-        a->source_port_be == b->source_port_be && a->destination_port_be == b->destination_port_be &&
-        a->protocol == b->protocol;
+    return a->ipv6 == b->ipv6 && a->protocol == b->protocol && a->source_port_be == b->source_port_be &&
+        a->destination_port_be == b->destination_port_be &&
+        (a->ipv6 ? memcmp(a->source6, b->source6, 16) == 0 && memcmp(a->destination6, b->destination6, 16) == 0
+                 : a->source_be == b->source_be && a->destination_be == b->destination_be);
+}
+
+/** 同一个进程的两种地址族共用状态机，但转换策略和端口占用不能串到另一种地址族 */
+static const struct dppd_snat_config *source_nat(const struct dppd_conntrack *table, bool ipv6)
+{
+    return ipv6 ? &table->status.snat6 : &table->status.snat;
+}
+
+static bool same_address(bool ipv6, uint32_t left, const uint8_t left6[16], uint32_t right, const uint8_t right6[16])
+{
+    return ipv6 ? memcmp(left6, right6, 16) == 0 : left == right;
+}
+
+static bool has_payload(const struct dppd_packet *packet)
+{
+    uint32_t total = packet->l3_type == DPPD_L3_IPV6 ? 40U + packet->ipv6_payload_len : packet->ipv4_total_len;
+    return total != (uint32_t)packet->l3_len + packet->l4_len;
 }
 
 static uint32_t bucket(const struct dppd_conntrack *table, const struct dppd_flow_tuple *value, uint16_t ingress)
 {
-    uint32_t hash = 2166136261U;
-    const uint32_t words[] = {value->source_be, value->destination_be,
+    uint32_t hash = (2166136261U ^ value->ipv6) * 16777619U;
+    if (value->ipv6)
+        for (unsigned int i = 0; i < 16; ++i) {
+            hash = (hash ^ value->source6[i]) * 16777619U;
+            hash = (hash ^ value->destination6[i]) * 16777619U;
+        }
+    const uint32_t words[] = {value->ipv6 ? 0 : value->source_be, value->ipv6 ? 0 : value->destination_be,
         (uint32_t)value->source_port_be << 16 | value->destination_port_be, ingress, value->protocol};
     for (size_t i = 0; i < sizeof(words) / sizeof(*words); ++i)
         for (unsigned int byte = 0; byte < 4; ++byte)
@@ -99,7 +132,8 @@ static void remove_connection(struct dppd_conntrack *table, uint32_t slot, bool 
             *link = entry->next[direction];
     }
     if (entry->view.nat && entry->view.dnat_rule_id == 0)
-        table->ports[entry->view.original.protocol == 6][ntohs(entry->view.translated.source_port_be)] = 0;
+        table->ports[entry->view.original.ipv6][entry->view.original.protocol == 6]
+                    [ntohs(entry->view.translated.source_port_be)] = 0;
     memset(entry, 0, sizeof(*entry));
     table->free_slots[table->free_count++] = slot;
     table->status.active--;
@@ -122,12 +156,17 @@ static void collect(struct dppd_conntrack *table, uint64_t now, uint32_t budget)
     }
 }
 
-int dppd_conntrack_create(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
-    const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t dnat_count)
+int dppd_conntrack_create_dual(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
+    const struct dppd_snat_config *snat, const struct dppd_snat_config *snat6, const struct dppd_dnat_rule *dnat,
+    uint32_t dnat_count)
 {
     if (result == NULL || *result != NULL || capacity == 0 || capacity > 65536 || timeout_s == 0 || timeout_s > 86400)
         return -EINVAL;
+    if ((snat != NULL && snat->enabled && snat->ipv6) || (snat6 != NULL && snat6->enabled && !snat6->ipv6))
+        return -EINVAL;
     int validation = dppd_nat_validate(snat, dnat, dnat_count);
+    if (validation == 0)
+        validation = dppd_nat_validate(snat6, dnat, dnat_count);
     if (validation != 0)
         return validation;
     struct dppd_conntrack *table = calloc(1, sizeof(*table));
@@ -152,23 +191,32 @@ int dppd_conntrack_create(struct dppd_conntrack **result, uint32_t capacity, uin
         (struct dppd_conntrack_status){.enabled = true, .capacity = capacity, .timeout_s = timeout_s, .revision = 1};
     if (snat != NULL)
         table->status.snat = *snat;
+    if (snat6 != NULL)
+        table->status.snat6 = *snat6;
     table->status.dnat_count = dnat_count;
     if (dnat_count != 0)
         memcpy(table->dnat, dnat, dnat_count * sizeof(*dnat));
     /** 静态公网端口在进程存活期间一直保留，清会话也不能把它们借给动态 SNAT */
     for (uint32_t i = 0; i < dnat_count; ++i) {
         const struct dppd_dnat_rule *rule = &dnat[i];
-        if (snat == NULL || !snat->enabled || snat->outside_port != rule->outside_port ||
-            snat->address_be != rule->public_address_be)
+        const struct dppd_snat_config *nat = source_nat(table, rule->ipv6);
+        if (!nat->enabled || nat->outside_port != rule->outside_port ||
+            !same_address(rule->ipv6, nat->address_be, nat->address6, rule->public_address_be, rule->public_address6))
             continue;
         for (uint32_t port = rule->public_first; port <= rule->public_last; ++port)
-            table->ports[rule->protocol == 6][port] = 2;
+            table->ports[rule->ipv6][rule->protocol == 6][port] = 2;
     }
     table->free_count = capacity;
     for (uint32_t i = 0; i < capacity; ++i)
         table->free_slots[i] = capacity - i - 1;
     *result = table;
     return 0;
+}
+
+int dppd_conntrack_create(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
+    const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t dnat_count)
+{
+    return dppd_conntrack_create_dual(result, capacity, timeout_s, snat, NULL, dnat, dnat_count);
 }
 
 void dppd_conntrack_destroy(struct dppd_conntrack *table)
@@ -189,7 +237,7 @@ static int tcp_transition(struct connection *entry, const struct dppd_packet *pa
     uint8_t flags = packet->tcp_flags;
     uint32_t sequence = ntohl(packet->tcp_sequence_be), ack = ntohl(packet->tcp_acknowledgment_be);
     /** 不支持 Fast Open，SYN 与 SYN/ACK 的首次发送和重传都不能携带负载 */
-    if ((flags & 2U) != 0 && packet->ipv4_total_len != packet->l3_len + packet->l4_len)
+    if ((flags & 2U) != 0 && has_payload(packet))
         return -EPROTO;
     if ((flags & 3U) == 3U || (flags & 5U) == 5U || ((flags & 2U) != 0 && (flags & 4U) != 0))
         return -EPROTO;
@@ -224,7 +272,7 @@ static int tcp_transition(struct connection *entry, const struct dppd_packet *pa
     case DPPD_TCP_FIN:
         if ((flags & 2U) != 0 || (flags & 16U) == 0)
             return -EPROTO;
-        if ((entry->fin_seen & (1U << reply)) != 0 && packet->ipv4_total_len != packet->l3_len + packet->l4_len)
+        if ((entry->fin_seen & (1U << reply)) != 0 && has_payload(packet))
             return -EPROTO;
         if ((flags & 1U) != 0) {
             entry->fin_seen |= (uint8_t)(1U << reply);
@@ -232,22 +280,22 @@ static int tcp_transition(struct connection *entry, const struct dppd_packet *pa
         }
         return 0;
     case DPPD_TCP_CLOSED:
-        return (flags & 0x17U) == 16 && packet->ipv4_total_len == packet->l3_len + packet->l4_len ? 0 : -EPROTO;
+        return (flags & 0x17U) == 16 && !has_payload(packet) ? 0 : -EPROTO;
     default:
         return -EPROTO;
     }
 }
 
-static int allocate_port(struct dppd_conntrack *table, uint8_t protocol, uint16_t *port_be)
+static int allocate_port(struct dppd_conntrack *table, bool ipv6, uint8_t protocol, uint16_t *port_be)
 {
-    const struct dppd_snat_config *nat = &table->status.snat;
+    const struct dppd_snat_config *nat = source_nat(table, ipv6);
     uint32_t count = (uint32_t)nat->last_port - nat->first_port + 1;
     unsigned int group = protocol == 6;
     for (uint32_t i = 0; i < count; ++i) {
-        uint16_t port = (uint16_t)(nat->first_port + table->port_cursor[group]);
-        table->port_cursor[group] = (uint16_t)(((uint32_t)table->port_cursor[group] + 1) % count);
-        if (table->ports[group][port] == 0) {
-            table->ports[group][port] = 1;
+        uint16_t port = (uint16_t)(nat->first_port + table->port_cursor[ipv6][group]);
+        table->port_cursor[ipv6][group] = (uint16_t)(((uint32_t)table->port_cursor[ipv6][group] + 1) % count);
+        if (table->ports[ipv6][group][port] == 0) {
+            table->ports[ipv6][group][port] = 1;
             *port_be = htons(port);
             return 0;
         }
@@ -261,20 +309,25 @@ static int new_destination(struct dppd_conntrack *table, const struct dppd_flow_
     uint32_t *rule_id)
 {
     uint16_t source = ntohs(key->source_port_be), destination = ntohs(key->destination_port_be);
-    bool wrong_ingress = false, backend_reply = false;
+    bool wrong_ingress = false, backend_reply = false, family_dnat = false;
     for (uint32_t i = 0; i < table->status.dnat_count; ++i) {
         const struct dppd_dnat_rule *rule = &table->dnat[i];
+        if (key->ipv6 != rule->ipv6)
+            continue;
+        family_dnat = true;
         if (key->protocol != rule->protocol)
             continue;
-        if (key->destination_be == rule->public_address_be && destination >= rule->public_first &&
-            destination <= rule->public_last) {
+        if (same_address(key->ipv6, key->destination_be, key->destination6, rule->public_address_be,
+                rule->public_address6) &&
+            destination >= rule->public_first && destination <= rule->public_last) {
             if (ingress == rule->outside_port)
                 *rule_id = i + 1;
             else
                 wrong_ingress = true;
         }
         uint32_t last = (uint32_t)rule->private_first + rule->public_last - rule->public_first;
-        if (ingress == rule->inside_port && key->source_be == rule->private_address_be &&
+        if (ingress == rule->inside_port &&
+            same_address(key->ipv6, key->source_be, key->source6, rule->private_address_be, rule->private_address6) &&
             source >= rule->private_first && source <= last)
             backend_reply = true;
     }
@@ -284,9 +337,10 @@ static int new_destination(struct dppd_conntrack *table, const struct dppd_flow_
         return -EXDEV;
     if (backend_reply)
         return -ENOENT;
-    if (table->status.snat.enabled)
-        return ingress == table->status.snat.inside_port ? 0 : -ENOENT;
-    return table->status.dnat_count != 0 ? -ENOENT : 0;
+    const struct dppd_snat_config *nat = source_nat(table, key->ipv6);
+    if (nat->enabled)
+        return ingress == nat->inside_port ? 0 : -ENOENT;
+    return family_dnat ? -ENOENT : 0;
 }
 
 int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const struct dppd_packet *packet,
@@ -299,17 +353,25 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
     attempt->policy = attempt->rewrite = tuple(packet);
     if (table == NULL)
         return 0;
-    if (packet->l3_type != DPPD_L3_IPV4 || (packet->l4_type != DPPD_L4_TCP && packet->l4_type != DPPD_L4_UDP))
-        return table->status.snat.enabled || table->status.dnat_count != 0 || packet->l4_type == DPPD_L4_FRAGMENT
-            ? -ENOTSUP
-            : 0;
+    bool ipv6 = packet->l3_type == DPPD_L3_IPV6;
+    bool nat_enabled = source_nat(table, ipv6)->enabled;
+    for (uint32_t i = 0; i < table->status.dnat_count; ++i)
+        nat_enabled |= table->dnat[i].ipv6 == ipv6;
+    /** 不支持的扩展头不是普通未跟踪流量，不能借 UNTRACKED 策略隐藏协议拒绝原因 */
+    if (ipv6 && packet->ipv6_unsupported)
+        return -ENOTSUP;
+    if ((packet->l3_type != DPPD_L3_IPV4 && !ipv6) ||
+        (packet->l4_type != DPPD_L4_TCP && packet->l4_type != DPPD_L4_UDP))
+        return nat_enabled || packet->l4_type == DPPD_L4_FRAGMENT ? -ENOTSUP : 0;
     pthread_mutex_lock(&table->lock);
     table->pending_bytes = packet->packet_len;
     collect(table, now_ms, 8);
     uint32_t source = ntohl(packet->ipv4_src_be), destination = ntohl(packet->ipv4_dst_be);
-    if (source < 0x01000000U || destination < 0x01000000U || (source >> 24) == 127 || (destination >> 24) == 127 ||
-        source >= 0xe0000000U || destination >= 0xe0000000U || ingress == UINT16_MAX ||
-        packet->ip_protocol != (packet->l4_type == DPPD_L4_TCP ? 6 : 17)) {
+    bool invalid_address = ipv6
+        ? (!dppd_ipv6_unicast(packet->ipv6_src, false) || !dppd_ipv6_unicast(packet->ipv6_dst, false))
+        : (source < 0x01000000U || destination < 0x01000000U || (source >> 24) == 127 || (destination >> 24) == 127 ||
+              source >= 0xe0000000U || destination >= 0xe0000000U);
+    if (invalid_address || ingress == UINT16_MAX || packet->ip_protocol != (packet->l4_type == DPPD_L4_TCP ? 6 : 17)) {
         attempt->state = DPPD_CT_INVALID;
         table->status.invalid++;
         pthread_mutex_unlock(&table->lock);
@@ -320,7 +382,7 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
         remove_connection(table, (link - 1) / 2, true);
         link = 0;
     }
-    const struct dppd_snat_config *nat = &table->status.snat;
+    const struct dppd_snat_config *nat = source_nat(table, ipv6);
     int rc = 0;
     table->pending_new = link == 0;
     if (link != 0) {
@@ -336,8 +398,7 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
             rc = -EPROTO;
         if (rc == 0)
             rc = new_destination(table, &attempt->policy, ingress, &dnat_id);
-        if (rc == 0 && packet->l4_type == DPPD_L4_TCP &&
-            ((packet->tcp_flags & 0x3fU) != 2 || packet->ipv4_total_len != packet->l3_len + packet->l4_len))
+        if (rc == 0 && packet->l4_type == DPPD_L4_TCP && ((packet->tcp_flags & 0x3fU) != 2 || has_payload(packet)))
             rc = -EPROTO;
         if (rc == 0 && table->free_count == 0) {
             /** 满表探测限速，不能让每个新五元组都强迫工作线程扫描整张大表 */
@@ -365,11 +426,13 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
             const struct dppd_dnat_rule *rule = &table->dnat[dnat_id - 1];
             table->pending.view.egress = rule->inside_port;
             table->pending.view.translated.destination_be = rule->private_address_be;
+            memcpy(table->pending.view.translated.destination6, rule->private_address6, 16);
             table->pending.view.translated.destination_port_be =
                 htons((uint16_t)(rule->private_first + ntohs(packet->l4_dst_port_be) - rule->public_first));
         } else if (rc == 0 && nat->enabled) {
             table->pending.view.translated.source_be = nat->address_be;
-            rc = allocate_port(table, packet->ip_protocol, &table->pending.view.translated.source_port_be);
+            memcpy(table->pending.view.translated.source6, nat->address6, 16);
+            rc = allocate_port(table, ipv6, packet->ip_protocol, &table->pending.view.translated.source_port_be);
         }
         if (rc == 0)
             table->pending_slot = table->free_slots[table->free_count - 1];
@@ -400,11 +463,12 @@ int dppd_conntrack_finish(struct dppd_connection_attempt *attempt, uint16_t egre
     struct dppd_conntrack *table = attempt->owner;
     struct dppd_connection_view *view = &table->pending.view;
     int rc = 0;
+    const struct dppd_snat_config *nat = source_nat(table, view->original.ipv6);
     if (accept &&
         (((!table->pending_new || view->dnat_rule_id != 0) &&
              egress != (attempt->reply ? view->ingress : view->egress)) ||
             (view->nat && view->dnat_rule_id == 0 &&
-                egress != (attempt->reply ? table->status.snat.inside_port : table->status.snat.outside_port))))
+                egress != (attempt->reply ? nat->inside_port : nat->outside_port))))
         rc = -EXDEV;
     if (accept && rc == 0 && table->pending_new) {
         view->egress = egress;
@@ -443,7 +507,7 @@ int dppd_conntrack_finish(struct dppd_connection_attempt *attempt, uint16_t egre
         }
         table->entries[table->pending_slot] = table->pending;
     } else if (table->pending_new && view->nat && view->dnat_rule_id == 0)
-        table->ports[view->original.protocol == 6][ntohs(view->translated.source_port_be)] = 0;
+        table->ports[view->original.ipv6][view->original.protocol == 6][ntohs(view->translated.source_port_be)] = 0;
     attempt->owner = NULL;
     pthread_mutex_unlock(&table->lock);
     return rc;

@@ -97,7 +97,7 @@ static void test_ipv6_arguments(void)
     assert(request.payload.apply.rule.matches[1].spec.ipv6.src_mask[8] == 0x80);
     assert(request.payload.apply.rule.matches[1].spec.ipv6.src[15] == 0);
     arguments[12] = "state:established";
-    assert(build_request(13, arguments, &request) == -EINVAL);
+    assert(build_request(13, arguments, &request) == 0);
     arguments[12] = "state:untracked";
     arguments[6] = "192.0.2.0/24";
     assert(build_request(13, arguments, &request) == -EINVAL);

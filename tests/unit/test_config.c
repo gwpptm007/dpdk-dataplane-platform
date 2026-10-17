@@ -144,5 +144,29 @@ int main(void)
     assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
     tracking[8] = "0,0,203.0.113.1,40000-40001";
     assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
+    /** NAT66 必须使用完整普通单播地址，端口池、依赖关系和后端冲突都不能绕过 */
+    tracking[7] = "--snat6";
+    tracking[8] = "0,1,2001:db8:100::9,40000-40001";
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_OK);
+    assert(config.snat6.enabled && config.snat6.ipv6 && !config.snat.enabled);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    config.snat6.ipv6 = false;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    const char *invalid6[] = {"::", "::1", "fe80::1", "ff02::1", "::ffff:192.0.2.1", "192.0.2.1"};
+    for (unsigned int i = 0; i < sizeof(invalid6) / sizeof(*invalid6); ++i) {
+        char option[128];
+        snprintf(option, sizeof(option), "0,1,%s,40000-40001", invalid6[i]);
+        tracking[8] = option;
+        assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
+    }
+    tracking[7] = "--dnat6";
+    tracking[8] = "1,0,udp,2001:db8:100::9,8443-8445,fd00:1::8,443-445";
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_OK);
+    assert(config.dnat_count == 1 && config.dnat[0].ipv6 && config.dnat[0].private_first == 443);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    tracking[8] = "1,0,tcp,2001:db8:100::9,any,fd00:1::8,same";
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_OK);
+    tracking[8] = "1,0,tcp,2001:db8:100::9,8443-8445,fd00:1::8,443-444";
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
     return 0;
 }

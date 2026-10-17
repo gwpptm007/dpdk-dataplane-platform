@@ -7,6 +7,7 @@ TCP/UDP 出站 SNAT 和对应回包的反向转换。正式 daemon、状态 ACL�
 
 后续已完成 [静态 DNAT 与端口转发](dnat.md)，包含整地址映射、单端口/端口段、
 对应回包及与 SNAT 的端口保留。本页保留连接跟踪和出站 SNAT 的原始验收记录。
+IPv6 双向会话与转换已在 [IPv6 连接跟踪与 NAT66](nat66.md) 接通，`--conntrack` 现同时处理两种地址族。
 
 ## 启动与配置
 
@@ -19,7 +20,7 @@ TCP/UDP 出站 SNAT 和对应回包的反向转换。正式 daemon、状态 ACL�
 --snat 0,1,203.0.113.9,40000-60000
 ```
 
-`--conntrack` 指定 1–65536 个会话的全局容量，默认禁用，要求显式 IPv4 路由。
+`--conntrack` 指定 1–65536 个会话的全局容量，默认禁用，要求显式 IP 路由。
 `--ct-timeout` 是已建立会话的空闲秒数，默认 300，范围 1–86400。
 `--snat` 要求已启用跟踪，内外口必须是配置集合中的两个不同端口，公网地址必须为
 有效单播地址，端口池为包含端点的 1–65535 范围。NAT 不修改 Linux 接口地址、ARP 或
@@ -123,7 +124,7 @@ RST 后最多 2 秒，均不超过配置的基础超时。每个有效且被接�
 不跨重启比较。清空必须指定当前修订号，错误版本不修改会话；清空归还映射，但不能
 撤回已经进入发送批次的报文。
 
-本阶段管理协议为 v18，后续静态 DNAT 扩展为 v19，daemon 与 CLI 须配套。
+本阶段管理协议为 v18，后续静态 DNAT 扩展为 v19，当前 [IPv6 跟踪与 NAT66](nat66.md) 为 v21，daemon 与 CLI 须配套。
 `stats`/telemetry 增加 `ct_invalid_drops`、`ct_full_drops`、
 `ct_unsupported_drops`、`ct_zone_drops`、`ct_checksum_drops`、`nat_pool_drops` 和
 `nat_miss_drops`。校验和失败在跟踪模式中统一归 `ct_checksum_drops`，TTL 沿用三层
@@ -159,7 +160,7 @@ python3 tests/integration/software_traffic.py --build-dir build
 单端口池复用、SIGKILL 后会话清空与策略重放，以及禁用跟踪时拒绝恢复状态规则。
 测试只创建和删除自己的虚拟接口，不改实体网卡。既有 ACL、二层及 IPv4 路由回归保留。
 
-静态 DNAT/端口转发已在[后续阶段](dnat.md)接通。IPv6 跟踪/NAT66、RELATED/ICMP 错误转换、
+静态 DNAT/端口转发已在[后续阶段](dnat.md)接通。IPv6 跟踪/NAT66 已在[后续阶段](nat66.md)接通。RELATED/ICMP 错误转换、
 分片重组、hairpin、ALG、完整 TCP 窗口验证、会话复制和硬件有状态卸载仍未实现。
 它们不计入 TCP/UDP 跟踪及出站 SNAT 闭环，后续按独立目标推进。
-IPv6 解析、ACL 与静态转发已在 [IPv6 阶段](ipv6.md)接通，与 IPv4 NAT 共存但不进入其会话表。
+IPv6 解析、ACL 与静态转发已在 [IPv6 阶段](ipv6.md)接通，当前与 IPv4 共用双栈会话容量，但不使用 IPv4 NAT 策略和端口池。

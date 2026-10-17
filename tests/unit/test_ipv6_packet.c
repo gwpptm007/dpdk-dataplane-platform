@@ -101,6 +101,97 @@ static void bind_chain(struct rte_mbuf segments[2], uint8_t bytes[SIZE], uint16_
 static const struct dppd_ipv4_forward forward = {.destination_mac = {2, 0, 0, 0, 1, 1}};
 static const uint8_t source[6] = {2, 0, 0, 0, 2, 2};
 
+/** 预期校验和从完整新伪首部独立重算，不能复制生产代码的增量公式来验证自己 */
+static void translated_frame(uint8_t bytes[SIZE], unsigned int l2, unsigned int l3,
+    const struct dppd_flow_tuple *translation)
+{
+    uint8_t *ip = bytes + l2, *l4 = ip + l3, pseudo[SIZE] = {0};
+    memcpy(ip + 8, translation->source6, 16);
+    memcpy(ip + 24, translation->destination6, 16);
+    memcpy(l4, &translation->source_port_be, 2);
+    memcpy(l4 + 2, &translation->destination_port_be, 2);
+    unsigned int length = 40 + ((unsigned int)ip[4] << 8 | ip[5]) - l3;
+    unsigned int offset = translation->protocol == 6 ? 16 : 6;
+    l4[offset] = l4[offset + 1] = 0;
+    memcpy(pseudo, ip + 8, 32);
+    put(pseudo + 34, (uint16_t)length);
+    pseudo[39] = translation->protocol;
+    memcpy(pseudo + 40, l4, length);
+    uint16_t value = checksum(pseudo, 40 + length);
+    put(l4 + offset, value == 0 && translation->protocol == 17 ? UINT16_MAX : value);
+    memcpy(bytes, forward.destination_mac, 6);
+    memcpy(bytes + 6, source, 6);
+    ip[7]--;
+}
+
+/** 转换地址和两端端口，逐个检查跨头部分段、双 VLAN、扩展头与奇数负载 */
+static void nat_shapes(void)
+{
+    for (unsigned int vlan = 0; vlan <= 2; ++vlan)
+        for (unsigned int extension = 0; extension <= 2; ++extension)
+            for (unsigned int tcp = 0; tcp < 2; ++tcp)
+                for (unsigned int odd = 0; odd < 2; ++odd)
+                    for (uint16_t split = 1; split <= SIZE; ++split) {
+                        uint8_t bytes[SIZE], expected[SIZE];
+                        unsigned int l2 = frame(bytes, vlan, extension, tcp ? 6 : 17, odd);
+                        struct dppd_flow_tuple translation = {.ipv6 = true,
+                            .protocol = tcp ? 6 : 17,
+                            .source_port_be = htons(40001),
+                            .destination_port_be = htons(8443)};
+                        assert(inet_pton(AF_INET6, "2001:db8:100:1234::5678", translation.source6) == 1);
+                        assert(inet_pton(AF_INET6, "fd00:2:4321::abcd", translation.destination6) == 1);
+                        memcpy(expected, bytes, SIZE);
+                        translated_frame(expected, l2, 40 + 8 * extension, &translation);
+                        struct rte_mbuf segments[2];
+                        bind_chain(segments, bytes, split);
+                        struct rte_mbuf *mbuf = segments;
+                        struct dppd_packet packet;
+                        assert(dppd_packet_parse_mbuf(mbuf, &packet) == DPPD_PARSE_OK);
+                        if (split == 17) {
+                            rte_mbuf_refcnt_set(mbuf, 2);
+                            uint8_t original[SIZE];
+                            memcpy(original, bytes, SIZE);
+                            assert(dppd_ipv6_rewrite_flow(&mbuf, &packet, &forward, source, &translation) == -ENOMEM);
+                            assert(mbuf == segments && memcmp(bytes, original, SIZE) == 0);
+                            rte_mbuf_refcnt_set(mbuf, 1);
+                        }
+                        assert(dppd_ipv6_rewrite_flow(&mbuf, &packet, &forward, source, &translation) == 0);
+                        assert(memcmp(bytes, expected, SIZE) == 0);
+                        assert(dppd_packet_parse_mbuf(mbuf, &packet) == DPPD_PARSE_OK);
+                        assert(dppd_ipv6_transport_validate(mbuf, &packet) == 0);
+                    }
+}
+
+/** 专门构造转换后计算结果为零的 UDP，线缆上必须编码为全一，不能变成禁用校验 */
+static void nat_zero_checksum(void)
+{
+    uint8_t bytes[SIZE], expected[SIZE];
+    unsigned int l2 = frame(bytes, 2, 2, 17, 1), l3 = 56;
+    struct dppd_flow_tuple translation = {.ipv6 = true, .protocol = 17, .destination_port_be = htons(8443)};
+    assert(inet_pton(AF_INET6, "2001:db8:100::9", translation.source6) == 1);
+    assert(inet_pton(AF_INET6, "fd00:1::8", translation.destination6) == 1);
+    bool found = false;
+    for (uint32_t port = 1; port <= UINT16_MAX; ++port) {
+        translation.source_port_be = htons((uint16_t)port);
+        memcpy(expected, bytes, SIZE);
+        translated_frame(expected, l2, l3, &translation);
+        if (expected[l2 + l3 + 6] == 255 && expected[l2 + l3 + 7] == 255) {
+            found = true;
+            break;
+        }
+    }
+    assert(found);
+    struct rte_mbuf segments[2];
+    bind_chain(segments, bytes, 83);
+    struct rte_mbuf *mbuf = segments;
+    struct dppd_packet packet;
+    assert(dppd_packet_parse_mbuf(mbuf, &packet) == DPPD_PARSE_OK);
+    assert(dppd_ipv6_rewrite_flow(&mbuf, &packet, &forward, source, &translation) == 0);
+    assert(memcmp(bytes, expected, SIZE) == 0);
+    assert(dppd_packet_parse_mbuf(mbuf, &packet) == DPPD_PARSE_OK);
+    assert(dppd_ipv6_transport_validate(mbuf, &packet) == 0);
+}
+
 /** 遍历所有分段点、双 VLAN、两种填充扩展头和三种校验和，输出只允许 MAC 与 Hop Limit 变化 */
 static void shapes(void)
 {
@@ -196,6 +287,8 @@ static void rejection(void)
 int main(void)
 {
     shapes();
+    nat_shapes();
+    nat_zero_checksum();
     rejection();
     /** 零负载配 No Next Header 是合法报文，以太网尾部填充不能被误认成巨型负载 */
     uint8_t bytes[SIZE], expected[SIZE];

@@ -3,9 +3,11 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 #include "dppd/conntrack.h"
 
 static unsigned int fail_allocation;
+static bool ipv6_case;
 void *__real_calloc(size_t count, size_t size);
 void *__wrap_calloc(size_t count, size_t size)
 {
@@ -16,7 +18,7 @@ void *__wrap_calloc(size_t count, size_t size)
 
 static struct dppd_packet packet(bool reply, bool tcp)
 {
-    return (struct dppd_packet){.packet_len = 64,
+    struct dppd_packet value = {.packet_len = 64,
         .l2_len = 14,
         .l3_len = 20,
         .l4_len = tcp ? 20 : 8,
@@ -30,6 +32,14 @@ static struct dppd_packet packet(bool reply, bool tcp)
         .l4_dst_port_be = htons(reply ? 1234 : 443),
         .tcp_flags = 2,
         .tcp_sequence_be = htonl(100)};
+    if (ipv6_case) {
+        value.l3_type = DPPD_L3_IPV6;
+        value.l3_len = 56;
+        value.ipv6_payload_len = (uint16_t)(16 + value.l4_len);
+        assert(inet_pton(AF_INET6, reply ? "2001:db8:2::1" : "fd00:1::1", value.ipv6_src) == 1);
+        assert(inet_pton(AF_INET6, reply ? "fd00:1::1" : "2001:db8:2::1", value.ipv6_dst) == 1);
+    }
+    return value;
 }
 
 static void accept_packet(struct dppd_conntrack *table, bool reply, const struct dppd_packet *value, uint64_t now,
@@ -84,12 +94,16 @@ static void test_tcp(void)
     assert(attempt.owner == NULL && attempt.state == DPPD_CT_INVALID);
     forward.tcp_flags = 2;
     forward.ipv4_total_len++;
+    forward.ipv6_payload_len++;
     assert(dppd_conntrack_begin(table, 0, &forward, 5, &attempt) == -EPROTO);
     forward.ipv4_total_len--;
+    forward.ipv6_payload_len--;
     accept_packet(table, false, &forward, 10, DPPD_CT_NEW);
     forward.ipv4_total_len++;
+    forward.ipv6_payload_len++;
     assert(dppd_conntrack_begin(table, 0, &forward, 15, &attempt) == -EPROTO);
     forward.ipv4_total_len--;
+    forward.ipv6_payload_len--;
     accept_packet(table, false, &forward, 20, DPPD_CT_NEW);
     reply.tcp_flags = 18;
     reply.tcp_sequence_be = htonl(500);
@@ -97,15 +111,19 @@ static void test_tcp(void)
     assert(dppd_conntrack_begin(table, 1, &reply, 30, &attempt) == -EPROTO);
     reply.tcp_acknowledgment_be = htonl(101);
     reply.ipv4_total_len++;
+    reply.ipv6_payload_len++;
     assert(dppd_conntrack_begin(table, 1, &reply, 35, &attempt) == -EPROTO);
     reply.ipv4_total_len--;
+    reply.ipv6_payload_len--;
     accept_packet(table, true, &reply, 40, DPPD_CT_ESTABLISHED);
     struct dppd_connection_page page;
     /** 已见 SYN/ACK 仍未完成握手，不能提前得到已建立连接的长超时 */
     assert(dppd_conntrack_list(table, 40, 0, 0, &page) == 0 && page.entries[0].expires_ms == 30040);
     reply.ipv4_total_len++;
+    reply.ipv6_payload_len++;
     assert(dppd_conntrack_begin(table, 1, &reply, 45, &attempt) == -EPROTO);
     reply.ipv4_total_len--;
+    reply.ipv6_payload_len--;
     accept_packet(table, true, &reply, 50, DPPD_CT_ESTABLISHED);
     forward.tcp_flags = 16;
     forward.tcp_sequence_be = htonl(101);
@@ -118,8 +136,10 @@ static void test_tcp(void)
     assert(dppd_conntrack_list(table, 70, 0, 0, &page) == 0 && page.entries[0].tcp_state == DPPD_TCP_FIN);
     assert(page.entries[0].expires_ms == 30070);
     forward.ipv4_total_len++;
+    forward.ipv6_payload_len++;
     assert(dppd_conntrack_begin(table, 0, &forward, 75, &attempt) == -EPROTO);
     forward.ipv4_total_len--;
+    forward.ipv6_payload_len--;
     reply.tcp_flags = 20;
     accept_packet(table, true, &reply, 80, DPPD_CT_ESTABLISHED);
     assert(dppd_conntrack_list(table, 80, 0, 0, &page) == 0 && page.entries[0].tcp_state == DPPD_TCP_CLOSED);
@@ -251,10 +271,15 @@ int main(void)
         assert(dppd_conntrack_create(&table, 8, 60, NULL, NULL, 0) == -ENOMEM && table == NULL);
         fail_allocation = 0;
     }
-    test_udp();
-    test_tcp();
-    test_capacity();
-    test_concurrent();
+    /** 相同的状态机验收分别使用 IPv4 和含扩展头长度的 IPv6，不能只验证地址字段替换 */
+    for (unsigned int family = 0; family < 2; ++family) {
+        ipv6_case = family != 0;
+        test_udp();
+        test_tcp();
+        test_capacity();
+        test_concurrent();
+    }
+    ipv6_case = false;
     test_snat();
     return 0;
 }

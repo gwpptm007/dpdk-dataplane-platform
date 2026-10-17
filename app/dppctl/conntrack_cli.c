@@ -57,9 +57,17 @@ int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request
 
 static void print_tuple(const char *label, const struct dppd_flow_tuple *tuple)
 {
-    char source[INET_ADDRSTRLEN], destination[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &tuple->source_be, source, sizeof(source));
-    inet_ntop(AF_INET, &tuple->destination_be, destination, sizeof(destination));
+    char source[INET6_ADDRSTRLEN], destination[INET6_ADDRSTRLEN];
+    inet_ntop(tuple->ipv6 ? AF_INET6 : AF_INET,
+        tuple->ipv6 ? (const void *)tuple->source6 : (const void *)&tuple->source_be, source, sizeof(source));
+    inet_ntop(tuple->ipv6 ? AF_INET6 : AF_INET,
+        tuple->ipv6 ? (const void *)tuple->destination6 : (const void *)&tuple->destination_be, destination,
+        sizeof(destination));
+    if (tuple->ipv6) {
+        printf(" %s=[%s]:%u->[%s]:%u", label, source, ntohs(tuple->source_port_be), destination,
+            ntohs(tuple->destination_port_be));
+        return;
+    }
     printf(" %s=%s:%u->%s:%u", label, source, ntohs(tuple->source_port_be), destination,
         ntohs(tuple->destination_port_be));
 }
@@ -74,13 +82,18 @@ bool dppctl_conntrack_print(const struct dppd_management_response *response)
             page->more ? "yes" : "no");
         for (uint32_t i = 0; i < page->count; ++i) {
             const struct dppd_dnat_rule *rule = &page->entries[i].rule;
-            char public[INET_ADDRSTRLEN], private[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &rule->public_address_be, public, sizeof(public));
-            inet_ntop(AF_INET, &rule->private_address_be, private, sizeof(private));
-            printf("dnat id=%u protocol=%s outside=%u inside=%u public=%s:%u-%u private=%s:%u-%u\n",
-                page->entries[i].id, rule->protocol == 6 ? "tcp" : "udp", rule->outside_port, rule->inside_port, public,
-                rule->public_first, rule->public_last, private, rule->private_first,
-                rule->private_first + rule->public_last - rule->public_first);
+            char public[INET6_ADDRSTRLEN], private[INET6_ADDRSTRLEN];
+            inet_ntop(rule->ipv6 ? AF_INET6 : AF_INET,
+                rule->ipv6 ? (const void *)rule->public_address6 : (const void *)&rule->public_address_be, public,
+                sizeof(public));
+            inet_ntop(rule->ipv6 ? AF_INET6 : AF_INET,
+                rule->ipv6 ? (const void *)rule->private_address6 : (const void *)&rule->private_address_be, private,
+                sizeof(private));
+            printf("dnat id=%u protocol=%s outside=%u inside=%u public=%s%s%s:%u-%u private=%s%s%s:%u-%u family=%s\n",
+                page->entries[i].id, rule->protocol == 6 ? "tcp" : "udp", rule->outside_port, rule->inside_port,
+                rule->ipv6 ? "[" : "", public, rule->ipv6 ? "]" : "", rule->public_first, rule->public_last,
+                rule->ipv6 ? "[" : "", private, rule->ipv6 ? "]" : "", rule->private_first,
+                rule->private_first + rule->public_last - rule->public_first, rule->ipv6 ? "ipv6" : "ipv4");
         }
     } else if (response->operation == DPPD_MANAGEMENT_CONNTRACK_LIST) {
         const struct dppd_connection_page *page = &response->payload.connections;
@@ -95,7 +108,7 @@ bool dppctl_conntrack_print(const struct dppd_management_response *response)
                 entry->egress, entry->nat ? "yes" : "no");
             print_tuple("original", &entry->original);
             print_tuple("translated", &entry->translated);
-            printf(" kind=%s dnat-rule=%u",
+            printf(" family=%s kind=%s dnat-rule=%u", entry->original.ipv6 ? "ipv6" : "ipv4",
                 entry->dnat_rule_id != 0 ? "dnat"
                     : entry->nat         ? "snat"
                                          : "none",
@@ -117,9 +130,14 @@ bool dppctl_conntrack_print(const struct dppd_management_response *response)
         inet_ntop(AF_INET, &status->snat.address_be, address, sizeof(address));
         printf("nat enabled=%s snat=%s inside=%u outside=%u address=%s ports=%u-%u dnat-rules=%u"
                " policy=startup sessions-persistent=no\n",
-            status->snat.enabled || status->dnat_count != 0 ? "yes" : "no", status->snat.enabled ? "yes" : "no",
-            status->snat.inside_port, status->snat.outside_port, address, status->snat.first_port,
-            status->snat.last_port, status->dnat_count);
+            status->snat.enabled || status->snat6.enabled || status->dnat_count != 0 ? "yes" : "no",
+            status->snat.enabled ? "yes" : "no", status->snat.inside_port, status->snat.outside_port, address,
+            status->snat.first_port, status->snat.last_port, status->dnat_count);
+        char address6[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, status->snat6.address6, address6, sizeof(address6));
+        printf("nat6 snat=%s inside=%u outside=%u address=%s ports=%u-%u policy=startup sessions-persistent=no\n",
+            status->snat6.enabled ? "yes" : "no", status->snat6.inside_port, status->snat6.outside_port, address6,
+            status->snat6.first_port, status->snat6.last_port);
     }
     return true;
 }

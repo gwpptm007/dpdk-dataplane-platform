@@ -15,6 +15,10 @@ test('connection tracking lifecycle and concurrency', conntrack_test)
 dnat_test = executable('test_dnat', 'test_dnat.c', dependencies: dppd_core_dep)
 test('static DNAT forwarding and reservations', dnat_test)
 
+# 双栈共用会话容量但独立分配端口，核对 NAT66 双向地址、端口与静态保留
+nat66_test = executable('test_nat66', 'test_nat66.c', dependencies: dppd_core_dep)
+test('NAT66 mappings and address family isolation', nat66_test)
+
 config_test = executable(
   'test_config',
   'test_config.c',

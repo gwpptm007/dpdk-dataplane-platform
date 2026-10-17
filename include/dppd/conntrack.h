@@ -13,6 +13,9 @@ struct dppd_flow_tuple {
     uint32_t source_be, destination_be;
     uint16_t source_port_be, destination_port_be;
     uint8_t protocol;
+    /** 地址族参与索引，不能让地址尾部相同的 IPv4 与 IPv6 命中同一会话 */
+    bool ipv6;
+    uint8_t source6[16], destination6[16];
 };
 
 enum dppd_tcp_state {
@@ -38,6 +41,7 @@ struct dppd_conntrack_status {
     uint32_t capacity, active, peak, timeout_s;
     uint64_t revision, created, expired, flushed, invalid, table_full, pool_full;
     struct dppd_snat_config snat;
+    struct dppd_snat_config snat6;
     uint32_t dnat_count;
 };
 
@@ -69,6 +73,10 @@ struct dppd_connection_attempt {
 uint64_t dppd_monotonic_ms(void);
 int dppd_conntrack_create(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
     const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t dnat_count);
+/** 双栈共用容量与会话修订号，转换策略和端口分配按地址族独立 */
+int dppd_conntrack_create_dual(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
+    const struct dppd_snat_config *snat, const struct dppd_snat_config *snat6, const struct dppd_dnat_rule *dnat,
+    uint32_t dnat_count);
 /** 只在全部 worker 停止、管理入口关闭后销毁，不保存运行时会话 */
 void dppd_conntrack_destroy(struct dppd_conntrack *table);
 int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const struct dppd_packet *packet,

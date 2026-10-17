@@ -522,11 +522,6 @@ static int build_acl_request(int argc, char **argv, struct dppd_management_reque
         if (strcmp(argv[i], "count") != 0 && strncmp(argv[i], "mark:", 5) != 0 && strncmp(argv[i], "state:", 6) != 0)
             return -EINVAL;
     int rc = build_filter_actions(argc, argv, 10, rule);
-    if (rc == 0 && ipv6)
-        for (uint16_t i = 0; i < rule->nb_matches; ++i)
-            if (rule->matches[i].type == DPPD_MATCH_CONNECTION_STATE &&
-                (rule->matches[i].spec.connection_states & ~1U) != 0)
-                return -EINVAL;
     return rc;
 }
 
