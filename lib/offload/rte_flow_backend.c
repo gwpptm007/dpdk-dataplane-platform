@@ -48,6 +48,80 @@ static int shared_error(struct dppd_flow_error *error, int rc, const char *messa
     return rc;
 }
 
+/** 设备事件没有证明句柄仍有效或已经删除，拒绝驱动调用时也不能伪造清理成功 */
+static int quarantine_error(struct dppd_flow_error *error)
+{
+    if (error != NULL) {
+        error->code = -EUCLEAN;
+        snprintf(error->message, sizeof(error->message),
+            "device event: backend is quarantined; handle validity is unknown");
+    }
+    return -EUCLEAN;
+}
+
+void dppd_rte_flow_backend_quarantine(struct dppd_rte_flow_backend *backend)
+{
+    if (backend == NULL || backend->quarantined)
+        return;
+    backend->quarantined = true;
+    dppd_flow_probe_cache_invalidate_all(backend->probes);
+}
+
+bool dppd_rte_flow_backend_is_quarantined(const struct dppd_rte_flow_backend *backend)
+{
+    return backend != NULL && backend->quarantined;
+}
+
+int dppd_rte_flow_backend_driver_ready(const struct dppd_rte_flow_backend *backend)
+{
+    if (backend == NULL)
+        return -EINVAL;
+    if (backend->quarantined)
+        return -EUCLEAN;
+    int rc = backend->driver_ready == NULL ? 0 : backend->driver_ready(backend->driver_context);
+    return rc != 0 ? rc : backend->quarantined ? -EUCLEAN : 0;
+}
+
+static int driver_preflight(const struct dppd_rte_flow_backend *backend, struct dppd_flow_error *error)
+{
+    int rc = dppd_rte_flow_backend_driver_ready(backend);
+    if (rc == -EUCLEAN)
+        return quarantine_error(error);
+    if (rc != 0 && error != NULL) {
+        error->code = rc;
+        snprintf(error->message, sizeof(error->message), "device readiness check failed (%d); PMD was not called", rc);
+    }
+    return rc;
+}
+
+/** 空槽位只由 calloc 或完整 memset 生成，检查所有字节才能发现计数归零后遗留的引用 */
+static bool empty_storage(const void *memory, size_t size)
+{
+    const unsigned char *bytes = memory;
+    for (size_t i = 0; i < size; ++i)
+        if (bytes[i] != 0)
+            return false;
+    return true;
+}
+
+int dppd_rte_flow_backend_resume_empty(struct dppd_rte_flow_backend *backend)
+{
+    if (backend == NULL || backend->objects == NULL || backend->shared_counts == NULL || backend->capacity == 0)
+        return -EINVAL;
+    if (!backend->quarantined)
+        return -EALREADY;
+    if (backend->count != 0 || backend->shared_count_count != 0 ||
+        !empty_storage(backend->objects, backend->capacity * sizeof(*backend->objects)) ||
+        !empty_storage(backend->shared_counts, DPPD_SHARED_COUNT_MAX * sizeof(*backend->shared_counts)))
+        return -EUCLEAN;
+    /** 这里只核对主线程提供的事件证据，不把隔离标志自身当作设备事件 */
+    int rc = backend->driver_ready == NULL ? 0 : backend->driver_ready(backend->driver_context);
+    if (rc != 0)
+        return rc;
+    backend->quarantined = false;
+    return 0;
+}
+
 static bool shared_spec_equal(const struct dppd_shared_count_spec *left, const struct dppd_shared_count_spec *right)
 {
     return left->id == right->id && left->generation == right->generation &&
@@ -94,6 +168,9 @@ static int lookup_shared(const struct dppd_rte_flow_backend *backend, uint64_t i
 static int destroy_shared(struct dppd_rte_flow_backend *backend, struct dppd_shared_count_object *object,
     struct dppd_flow_error *error)
 {
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     if (object->references != 0)
         return shared_error(error, -EBUSY, "object is still referenced by prepared or installed rules");
     if (object->handle.opaque == NULL)
@@ -273,6 +350,9 @@ static void release_object(struct dppd_rte_flow_backend *backend, struct dppd_rt
 static int remove_object(struct dppd_rte_flow_backend *backend, struct dppd_rte_flow_object *object,
     struct dppd_flow_error *error)
 {
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     dppd_flow_probe_cache_invalidate_all(backend->probes);
     int rc = backend->api.remove(&object->handle, error);
     if (backend->after_remove != NULL && object->recovery_attempt != 0)
@@ -291,6 +371,9 @@ int dppd_rte_flow_backend_validate_rule(struct dppd_rte_flow_backend *backend, u
 
     if (backend == NULL || backend->objects == NULL || backend->api.validate == NULL || rule == NULL)
         return -EINVAL;
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     (void)dppd_flow_probe_cache_clear(backend->probes, port_id);
     if (rule->nb_actions > DPPD_RULE_MAX_ACTIONS)
         return -EINVAL;
@@ -328,6 +411,9 @@ static int transaction_prepare(void *context, const struct dppd_transaction_item
     struct dppd_rte_flow_object *object;
     uint16_t action;
 
+    int ready = driver_preflight(backend, NULL);
+    if (ready != 0)
+        return ready;
     if (token == NULL)
         return -EINVAL;
     if (item->rule.generation == 0)
@@ -377,6 +463,9 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
     struct dppd_install_timer timer;
     int rc;
 
+    int ready = driver_preflight(backend, NULL);
+    if (ready != 0)
+        return ready;
     if (object == NULL || !object->occupied || object->installed)
         return -EINVAL;
     /** 恢复记录落盘失败时不进入驱动，事务仍可撤销尚未安装的预留槽位 */
@@ -386,6 +475,9 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
         if (rc != 0)
             return rc;
     }
+    ready = driver_preflight(backend, NULL);
+    if (ready != 0)
+        return ready;
     /** 即使创建报错，也可能改变部分资源，不能继续沿用此前的探测答复 */
     dppd_flow_probe_cache_invalidate_all(backend->probes);
     /** 只测量驱动创建调用，校验、事务准备和之后的规则账本保存不算在内 */
@@ -430,6 +522,9 @@ static int transaction_rollback(void *context, const struct dppd_transaction_ite
     struct dppd_flow_error error;
     int rc = 0;
 
+    int ready = driver_preflight(backend, NULL);
+    if (ready != 0)
+        return ready;
     (void)item;
     (void)commit_was_attempted;
     if (object == NULL || !object->occupied)
@@ -506,12 +601,18 @@ int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
 
     if (backend == NULL)
         return -EINVAL;
+    int ready = driver_preflight(backend, NULL);
+    if (ready != 0)
+        return ready;
     for (i = 0; i < backend->capacity; ++i) {
         struct dppd_rte_flow_object *object = &backend->objects[i];
         int rc;
 
         if (!object->occupied)
             continue;
+        ready = driver_preflight(backend, NULL);
+        if (ready != 0)
+            return ready;
         rc = object->installed || object->handle.flow != NULL ? remove_object(backend, object, &error) : 0;
         if (rc == 0)
             release_object(backend, object);
@@ -549,6 +650,9 @@ int dppd_rte_flow_backend_simulate_reset(struct dppd_rte_flow_backend *backend, 
     if (backend == NULL || backend->objects == NULL || backend->shared_counts == NULL || backend->probes == NULL ||
         backend->capacity == 0)
         return simulated_reset_error(error, -EINVAL, "invalid backend");
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     if (backend->before_create != NULL)
         return simulated_reset_error(error, -ENOTSUP, "native recovery journal cannot track simulated reset");
     if (backend->api.simulate_reset == NULL)
@@ -628,7 +732,6 @@ int dppd_rte_flow_backend_install_info(const struct dppd_rte_flow_backend *backe
 
     if (backend == NULL || backend->objects == NULL || rule_id == 0 || generation == 0 || info == NULL)
         return -EINVAL;
-    memset(info, 0, sizeof(*info));
     object = find_object_const(backend, rule_id, generation);
     if (object == NULL || !object->installed)
         return -ENOENT;
@@ -649,6 +752,9 @@ int dppd_rte_flow_backend_remove(struct dppd_rte_flow_backend *backend, uint64_t
 
     if (backend == NULL || backend->objects == NULL || rule_id == 0)
         return -EINVAL;
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     object = find_latest_object(backend, rule_id);
     if (object == NULL || !object->installed)
         return -ENOENT;
@@ -670,6 +776,9 @@ int dppd_rte_flow_backend_remove_version(struct dppd_rte_flow_backend *backend, 
 
     if (backend == NULL || backend->objects == NULL || rule_id == 0 || generation == 0)
         return -EINVAL;
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     object = find_object(backend, rule_id, generation);
     if (object == NULL || !object->installed)
         return -ENOENT;
@@ -692,6 +801,9 @@ int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend, uint3
 
     if (backend == NULL || backend->objects == NULL || residual_objects == NULL)
         return -EINVAL;
+    int ready = driver_preflight(backend, NULL);
+    if (ready != 0)
+        return ready;
 
     /**
      * 只预留槽位但尚未留下 handle 的对象可以直接归还本地资源
@@ -703,6 +815,9 @@ int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend, uint3
 
         if (!object->occupied)
             continue;
+        ready = driver_preflight(backend, NULL);
+        if (ready != 0)
+            return ready;
         if (object->installed || object->handle.flow != NULL)
             rc = remove_object(backend, object, &error);
         if (rc == 0)
@@ -728,6 +843,9 @@ int dppd_rte_flow_backend_query_count(const struct dppd_rte_flow_backend *backen
 
     if (backend == NULL || backend->objects == NULL || rule_id == 0 || generation == 0 || hits == NULL || bytes == NULL)
         return -EINVAL;
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     handle = dppd_rte_flow_backend_find_version(backend, rule_id, generation);
     if (handle == NULL)
         return -ENOENT;
@@ -760,6 +878,9 @@ int dppd_rte_flow_backend_query_age(const struct dppd_rte_flow_backend *backend,
     if (backend == NULL || backend->objects == NULL || rule_id == 0 || generation == 0 || generation == UINT64_MAX ||
         result == NULL)
         return age_query_error(error, -EINVAL, "invalid backend, identity or output");
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     const struct dppd_rte_flow_object *object = find_object_const(backend, rule_id, generation);
     if (object == NULL || !object->installed)
         return age_query_error(error, -ENOENT, "installed version not found");
@@ -792,6 +913,9 @@ int dppd_rte_flow_backend_shared_count_create(struct dppd_rte_flow_backend *back
         spec->generation == 0 || spec->generation == UINT64_MAX || spec->install_port_id == UINT16_MAX ||
         spec->domain < DPPD_RULE_DOMAIN_INGRESS || spec->domain > DPPD_RULE_DOMAIN_TRANSFER)
         return shared_error(error, -EINVAL, "invalid backend or object identity");
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     if (!shared_recovery_ready(backend))
         return shared_error(error, -ENOTSUP, "indirect recovery callbacks are incomplete");
     if (find_shared(backend, spec->id) != NULL)
@@ -817,6 +941,9 @@ int dppd_rte_flow_backend_shared_count_create(struct dppd_rte_flow_backend *back
         if (attempt == 0)
             return shared_error(error, -EUCLEAN, "indirect create intent has no attempt identity");
     }
+    ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     struct dppd_shared_count_handle next = {.spec = *spec};
     dppd_flow_probe_cache_invalidate_all(backend->probes);
     int rc = backend->api.shared_count_create(spec, &next, error);
@@ -890,6 +1017,9 @@ int dppd_rte_flow_backend_shared_count_query(const struct dppd_rte_flow_backend 
         memset(error, 0, sizeof(*error));
     if (hits == NULL || bytes == NULL)
         return shared_error(error, -EINVAL, "missing query output");
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     struct dppd_shared_count_object *object;
     int rc = lookup_shared(backend, id, expected, &object);
     if (rc != 0)
@@ -912,6 +1042,9 @@ int dppd_rte_flow_backend_shared_count_destroy(struct dppd_rte_flow_backend *bac
 {
     if (error != NULL)
         memset(error, 0, sizeof(*error));
+    int ready = driver_preflight(backend, error);
+    if (ready != 0)
+        return ready;
     if (expected == UINT64_MAX)
         return shared_error(error, -EINVAL, "destroy requires an exact generation");
     struct dppd_shared_count_object *object;

@@ -47,6 +47,8 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] persistence-flush\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-retry\n", program);
+    fprintf(stderr, "  %s [--socket PATH] device-status\n", program);
+    fprintf(stderr, "  %s [--socket PATH] device-reset EXPECTED_SEQUENCE\n", program);
     fprintf(stderr, "  %s [--socket PATH] port-show PORT\n", program);
     fprintf(stderr, "  %s [--socket PATH] capability-show PORT\n", program);
     fprintf(stderr, "  %s [--socket PATH] probe-cache-clear PORT\n", program);
@@ -803,6 +805,14 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
     if (argc == 1 && strcmp(argv[0], "reconcile-status") == 0) {
         initialize_request(request, DPPD_MANAGEMENT_RECOVERY_STATUS);
         return 0;
+    }
+    if (argc == 1 && strcmp(argv[0], "device-status") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_DEVICE_STATUS);
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[0], "device-reset") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_DEVICE_RESET);
+        return parse_u64(argv[1], 0, UINT64_MAX - 1U, &request->payload.device_reset.expected_sequence);
     }
     if (argc == 1 && strcmp(argv[0], "reconcile-retry") == 0) {
         initialize_request(request, DPPD_MANAGEMENT_RECOVERY_RETRY);
@@ -1618,6 +1628,30 @@ static int print_response(const struct dppd_management_response *response)
             recovery_state_name(response->payload.recovery.state), response->payload.recovery.residual_objects,
             response->payload.recovery.last_error);
         break;
+    case DPPD_MANAGEMENT_DEVICE_STATUS:
+    case DPPD_MANAGEMENT_DEVICE_RESET: {
+        const struct dppd_device_recovery_status *status = &response->payload.device;
+        if (status->nb_ports > DPPD_MAX_PORTS)
+            return -EPROTO;
+        printf("device state=%s sequence=%" PRIu64 " approved-sequence=%" PRIu64
+               " planned=%s quarantined=%s workers-stopped=%s attempts=%" PRIu64 " resets=%" PRIu64
+               " recoveries=%" PRIu64 " last-error=%d cleanup-error=%d phase=%u\n",
+            dppd_device_recovery_state_name(status->state), status->sequence, status->approved_sequence,
+            status->planned ? "yes" : "no", status->quarantined ? "yes" : "no", status->workers_stopped ? "yes" : "no",
+            status->attempts, status->resets, status->recoveries, status->last_error, status->cleanup_error,
+            status->device_phase);
+        printf("device-objects desired-rules=%u desired-shared=%u actual-rules=%u actual-shared=%u "
+               "reset-events=0x%x removal-events=0x%x destroy-events=0x%x\n",
+            status->desired_rules, status->desired_shared, status->actual_rules, status->actual_shared,
+            status->reset_event_ports, status->removal_event_ports, status->destroy_event_ports);
+        printf("device-stages stopped=0x%x reset=0x%x configured=0x%x started=0x%x\n", status->stopped_ports,
+            status->reset_ports, status->configured_ports, status->started_ports);
+        printf("device-ports count=%u ids=", status->nb_ports);
+        for (uint16_t i = 0; i < status->nb_ports; ++i)
+            printf("%s%u", i == 0 ? "" : ",", status->ports[i]);
+        putchar('\n');
+        break;
+    }
     default:
         break;
     }

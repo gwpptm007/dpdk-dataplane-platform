@@ -358,7 +358,7 @@ static void build_rule_summary(const struct dppd_rule *rule, struct dppd_managem
 }
 
 int dppd_management_handle(struct dppd_control_service *control, const struct dppd_device_set *devices,
-    const struct dppd_runtime *runtime, const struct dppd_management_request *request,
+    struct dppd_runtime *runtime, const struct dppd_management_request *request,
     struct dppd_management_response *response)
 {
     int rc;
@@ -378,6 +378,9 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
      * 回滚失败时 repository 从未发布，但 backend 可能还有实际 flow
      * 只允许恢复状态、重试、只读健康、能力画像和失败/耗时历史，防止空账本被误认为可以正常运行
      */
+    /** 同一轮 poll 可以处理多条请求，每条分发前再检查事件，不能沿用轮首的设备状态 */
+    if (runtime != NULL)
+        (void)dppd_runtime_device_poll(runtime);
     if (control->recovery_state != DPPD_CONTROL_RECOVERY_READY &&
         request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS && request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY &&
         request->operation != DPPD_MANAGEMENT_HEALTH_GET && request->operation != DPPD_MANAGEMENT_CAPABILITY_GET &&
@@ -388,12 +391,21 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         request->operation != DPPD_MANAGEMENT_DNAT_LIST && request->operation != DPPD_MANAGEMENT_ND6_STATUS &&
         request->operation != DPPD_MANAGEMENT_ND6_LIST && request->operation != DPPD_MANAGEMENT_TRANSFER_PLAN &&
         request->operation != DPPD_MANAGEMENT_AGE_STATUS && request->operation != DPPD_MANAGEMENT_SHARED_COUNT_GET &&
-        request->operation != DPPD_MANAGEMENT_SHARED_COUNT_LIST) {
+        request->operation != DPPD_MANAGEMENT_SHARED_COUNT_LIST &&
+        request->operation != DPPD_MANAGEMENT_DEVICE_STATUS && request->operation != DPPD_MANAGEMENT_DEVICE_RESET) {
         response->status = -EUCLEAN;
         return 0;
     }
 
     switch (request->operation) {
+    case DPPD_MANAGEMENT_DEVICE_STATUS:
+        dppd_runtime_device_status(runtime, &response->payload.device);
+        rc = runtime != NULL && response->payload.device.bound ? 0 : -ENOTSUP;
+        break;
+    case DPPD_MANAGEMENT_DEVICE_RESET:
+        rc = dppd_runtime_device_reset(runtime, request->payload.device_reset.expected_sequence);
+        dppd_runtime_device_status(runtime, &response->payload.device);
+        break;
     case DPPD_MANAGEMENT_SHARED_COUNT_CREATE:
         rc = dppd_control_shared_count_create(control, &request->payload.shared_count_create,
             &response->payload.shared_count);
@@ -721,7 +733,7 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
 }
 
 int dppd_management_start(struct dppd_management_server *server, struct dppd_control_service *control,
-    const struct dppd_device_set *devices, const struct dppd_runtime *runtime, const char *socket_path)
+    const struct dppd_device_set *devices, struct dppd_runtime *runtime, const char *socket_path)
 {
     struct sockaddr_un address;
     size_t path_length;

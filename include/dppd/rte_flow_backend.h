@@ -58,6 +58,11 @@ struct dppd_rte_flow_backend {
     uint32_t capacity;
     /** 已占用槽位数，包含准备阶段的预留项和已安装对象 */
     uint32_t count;
+    /** 真实设备事件后旧句柄有效性未知，只保留诊断，不能再交给任何驱动接口 */
+    bool quarantined;
+    /** 每次驱动调用前只读核对真实设备事件，失败时由 context 持有的可变后端锁存隔离 */
+    int (*driver_ready)(void *context);
+    void *driver_context;
     /** 操作入口的副本，普通运行使用真实驱动调用 */
     struct dppd_flow_api api;
     /** 本进程的端口校验统计和短期诊断缓存，不拥有任何网卡规则 */
@@ -90,6 +95,16 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend, uint32_t c
     const struct dppd_flow_api *api);
 /** 删除已安装或失败后仍有 handle 的对象，删除失败时保留剩余清理线索 */
 int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend);
+/**
+ * 仅由串行控制线程标记，不在设备回调中访问本仓库，也不执行任何驱动清理
+ * 保留全部旧句柄、预留槽位与共享引用，没有无条件恢复或遗忘入口
+ */
+void dppd_rte_flow_backend_quarantine(struct dppd_rte_flow_backend *backend);
+bool dppd_rte_flow_backend_is_quarantined(const struct dppd_rte_flow_backend *backend);
+/** 已隔离时返回 EUCLEAN，否则保留可选设备检查的原始错误，不访问 PMD */
+int dppd_rte_flow_backend_driver_ready(const struct dppd_rte_flow_backend *backend);
+/** 只允许确实没有任何槽位、句柄或引用的隔离仓库恢复，不能遗忘未知旧对象 */
+int dppd_rte_flow_backend_resume_empty(struct dppd_rte_flow_backend *backend);
 /**
  * 只由串行控制线程在没有进行中的事务时调用，默认真实驱动返回 ENOTSUP
  * 模拟回调成功后才遗忘失效句柄，不调用 remove/destroy，失败保留全部对象和引用

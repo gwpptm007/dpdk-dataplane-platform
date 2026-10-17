@@ -13,8 +13,10 @@ dppd_inc = include_directories('include')
 dppd_sources = files(
   'lib/runtime/config.c',
   'lib/runtime/runtime.c',
+  'lib/runtime/device_recovery.c',
   'lib/device/device.c',
   'lib/device/topology.c',
+  'lib/device/safety.c',
   'lib/control/snapshot.c',
   'lib/control/rule.c',
   'lib/control/rule_repository.c',

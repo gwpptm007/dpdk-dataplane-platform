@@ -217,6 +217,17 @@ v5 单快照和协议 v26；三套各 60/60 单测、四步核心回归及 24 �
 共享恢复日志轮次三套各 63/63 单测、五步 M3 验收和 31 组模拟通过，241 项源码摘要一致。
 该轮补齐真实 daemon 的日志和重启保护，不计为真实设备恢复或 ASIC 清理验收。
 
+已接通 [正式设备事件与主动复位](m3_device_recovery.md)：在重放前登记 RESET/RMV/DESTROY，
+事件发生后停止 worker 并隔离未知旧句柄；正式 v27 `device-status/device-reset` 支持完整组的
+管理口保护、精确身份与临时拓扑核对、stop/reset/队列重建/start，以及共享对象先行恢复。
+该流程调用真实 DPDK 接口，不借用独立模拟复位回调。未知旧对象仍须外部清理与干净重放，
+部分 PMD 失败不保证原地重试，软件与三层联合恢复不在首期支持范围。上述代码与测试夹具
+不能替代下面的实际设备、外部流量、CPU 旁路和恢复报告，整个 M3 保持未完成。
+本轮四套各 69/69 单测、六步 M3、四组正式设备事件及 31 组模拟通过，252 项源码一致；
+135 系统与本地 TAP 适配各十二步完整 M2 回归，ASan/UBSan 与 134 GCC 13 各四步核心通过。
+非 mlx5 除缺少实机证据外，当前还缺生产接口身份采集和可信角色适配；pair 控制层允许
+未知角色不代表其他命名模板或现成硬件 runner 已支持，不能把该软件缺口只登记为等待硬件。
+
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。
 
 验收：至少在 NVIDIA mlx5/BlueField 和一个非 mlx5 PMD 上形成可复现实机报告；证明 offloaded packets 不经过 CPU worker；端点移除和 device reset 后可 reconciliation。

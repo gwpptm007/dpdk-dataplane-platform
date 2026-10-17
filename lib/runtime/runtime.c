@@ -115,8 +115,8 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
     if (runtime == NULL || runtime->workers_started)
         return -EINVAL;
     /** 普通停止后可以重新启动线程，但设备移除后必须重建整个运行实例 */
-    if (dppd_devices_removal_requested(&runtime->devices))
-        return -ENODEV;
+    if (dppd_devices_io_quiesced(&runtime->devices))
+        return dppd_devices_removal_requested(&runtime->devices) ? -ENODEV : -EUCLEAN;
 
     atomic_store_explicit(&runtime->stop_requested, false, memory_order_release);
     /* worker 失败时先置 stop，再 wait 已经启动的 lcore，确保其 QSBR reader 都能注销 */
@@ -148,7 +148,7 @@ int dppd_runtime_check_workers(const struct dppd_runtime *runtime)
     if (runtime == NULL)
         return -EINVAL;
     if (!runtime->workers_started || atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
-        dppd_devices_removal_requested(&runtime->devices))
+        dppd_devices_io_quiesced(&runtime->devices))
         return 0;
     for (uint16_t i = 0; i < runtime->nb_workers; ++i) {
         const unsigned int state = atomic_load_explicit(&runtime->workers[i].state, memory_order_acquire);
@@ -159,7 +159,7 @@ int dppd_runtime_check_workers(const struct dppd_runtime *runtime)
              * 读到结束状态后再次检查原因，避免把按通知结束的线程误报为独立故障
              */
             if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
-                dppd_devices_removal_requested(&runtime->devices))
+                dppd_devices_io_quiesced(&runtime->devices))
                 return 0;
             return -EIO;
         }

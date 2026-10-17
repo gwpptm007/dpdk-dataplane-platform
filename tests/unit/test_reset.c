@@ -780,6 +780,42 @@ static void pending_finalization(void)
     assert(fake.removes == 0 && fake.shared_removes == 0);
 }
 
+/** 正式控制计划不调用模拟复位，先清理已知对象，重建后仍等运行层确认才发布 READY */
+static void device_plan_lifecycle(void)
+{
+    struct dppd_topology ports = topology();
+    struct dppd_control_service control;
+    initialize(&control, &ports);
+    control.rte_flow.api.simulate_reset = NULL;
+    uint64_t shared = add_shared(&control, 100);
+    uint64_t first = install(&control, 10, shared, true), second = install(&control, 20, shared, false);
+    uint64_t generation = control.rules.generation, revision = control.shared_count_revision;
+    assert(dppd_control_device_reset_prepare(&control) == 0 && fake.resets == 0 && fake.removes == 0);
+    assert(dppd_control_device_reset_pending(&control));
+    assert(dppd_control_device_reset_prepare(&control) == -EALREADY);
+    assert(dppd_control_reset_recover(&control) == -ENOTSUP);
+    assert(dppd_control_device_reset_commit(&control) == -EUCLEAN);
+    fake.remove_error = -EBUSY;
+    assert(dppd_control_device_reset_cleanup(&control) == -EUCLEAN);
+    assert(fake.shared_removes == 0 && control.rules.generation == generation);
+    fake.remove_error = 0;
+    assert(dppd_control_device_reset_cleanup(&control) == 0);
+    assert(dppd_rte_flow_backend_count(&control.rte_flow) == 0 &&
+        dppd_rte_flow_backend_shared_count_count(&control.rte_flow) == 0);
+    assert(control.rules.generation == generation && control.shared_count_revision == revision);
+    dppd_rte_flow_backend_quarantine(&control.rte_flow);
+    assert(dppd_control_device_reset_rebuild(&control) == -EUCLEAN);
+    assert(dppd_rte_flow_backend_resume_empty(&control.rte_flow) == 0);
+    assert(dppd_control_device_reset_rebuild(&control) == 0);
+    assert(control.recovery_state == DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED);
+    assert(dppd_control_device_reset_pending(&control) && installed(&control, 10, first)->active &&
+        installed(&control, 20, second)->active && fake.resets == 0);
+    assert(dppd_control_device_reset_commit(&control) == 0);
+    assert(!dppd_control_device_reset_pending(&control) && control.recovery_state == DPPD_CONTROL_RECOVERY_READY);
+    assert(control.rules.generation == generation && control.shared_count_revision == revision);
+    assert(dppd_control_fini(&control) == 0);
+}
+
 int main(void)
 {
     rejected_reset_preserves_actual();
@@ -790,5 +826,6 @@ int main(void)
     failed_recovery_retries();
     transfer_endpoint_preflight();
     pending_finalization();
+    device_plan_lifecycle();
     return 0;
 }

@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -18,14 +19,24 @@ static struct rte_eth_dev_info information[DPPD_MAX_PORTS];
 static uint32_t flags[DPPD_MAX_PORTS];
 static int failed_port = -1, reader_error, reader_mode;
 static unsigned int info_calls, reader_calls;
+static unsigned int reader_fail_at;
 static int kernel_mode, open_kind, kernel_fds;
 static unsigned int kernel_receives;
 static size_t read_offset;
+static const char *current_device_name = "0000:03:00.0";
 #if RTE_VERSION < RTE_VERSION_NUM(22, 11, 0, 0)
 static struct rte_device fake_device = {.name = "0000:03:00.0"};
 #else
 static char fake_device;
 #endif
+
+static void set_device_name(const char *name)
+{
+    current_device_name = name;
+#if RTE_VERSION < RTE_VERSION_NUM(22, 11, 0, 0)
+    fake_device.name = name;
+#endif
+}
 
 int __wrap_rte_eth_dev_info_get(uint16_t port_id, struct rte_eth_dev_info *info);
 int __wrap_rte_eth_dev_info_get(uint16_t port_id, struct rte_eth_dev_info *info)
@@ -43,7 +54,7 @@ const char *__wrap_rte_dev_name(const struct rte_device *device);
 const char *__wrap_rte_dev_name(const struct rte_device *device)
 {
     assert(device == (const struct rte_device *)&fake_device);
-    return "0000:03:00.0";
+    return current_device_name;
 }
 #endif
 
@@ -52,8 +63,10 @@ static int fake_reader(uint32_t if_index, const char *device_name, struct dppd_t
 {
     assert(opaque == &reader_mode);
     assert(if_index == 13);
-    assert(strcmp(device_name, "0000:03:00.0") == 0);
+    assert(strcmp(device_name, current_device_name) == 0);
     ++reader_calls;
+    if (reader_fail_at != 0 && reader_calls == reader_fail_at)
+        return -EIO;
     identity->if_index = if_index;
     memcpy(identity->device_name, device_name, strlen(device_name) + 1U);
     memcpy(identity->interface_name, "pf0vf2", sizeof("pf0vf2"));
@@ -91,6 +104,7 @@ static int fake_reader(uint32_t if_index, const char *device_name, struct dppd_t
 
 static void reset(void)
 {
+    set_device_name("0000:03:00.0");
     memset(information, 0, sizeof(information));
     memset(flags, 0, sizeof(flags));
     for (unsigned int i = 0; i < DPPD_MAX_PORTS; ++i) {
@@ -101,6 +115,7 @@ static void reset(void)
     failed_port = -1;
     reader_error = reader_mode = 0;
     info_calls = reader_calls = 0;
+    reader_fail_at = 0;
 }
 
 static void check_unknown(const struct dppd_endpoint *endpoint, int error)
@@ -503,11 +518,250 @@ static void test_default_reader(void)
     }
 }
 
+/** 每次重新建立带完整身份的双端口夹具，不把已知字符串解析当作真实设备证明 */
+static void make_verified_fixture(struct dppd_config *config, struct dppd_topology *topology)
+{
+    reset();
+    *config = (struct dppd_config){.nb_ports = 2, .ports = {3, 7}};
+    for (unsigned int i = 0; i < config->nb_ports; ++i) {
+        uint16_t port = config->ports[i];
+        information[port].device = (struct rte_device *)&fake_device;
+        information[port].driver_name = "mlx5_pci";
+        information[port].if_index = 13;
+        information[port].switch_info.domain_id = 4;
+        information[port].switch_info.port_id = 100 + port;
+        information[port].switch_info.name = "test-switch";
+        flags[port] = RTE_ETH_DEV_REPRESENTOR;
+    }
+    assert(dppd_topology_discover_with_reader(config, topology, fake_reader, &reader_mode) == 0);
+}
+
+static void test_identity_comparison(void)
+{
+    struct dppd_config config;
+    struct dppd_topology expected, candidate;
+    make_verified_fixture(&config, &expected);
+    candidate = expected;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == 0);
+    candidate.endpoints[0] = expected.endpoints[1];
+    candidate.endpoints[1] = expected.endpoints[0];
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == 0);
+
+#define CHECK_CHANGED(member, value)                                                                             \
+    do {                                                                                                         \
+        candidate = expected;                                                                                    \
+        candidate.endpoints[0].member = (value);                                                                 \
+        assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EXDEV); \
+    } while (0)
+    CHECK_CHANGED(kind, DPPD_ENDPOINT_ETHDEV);
+    CHECK_CHANGED(has_switch_domain, false);
+    CHECK_CHANGED(switch_domain_id, 5);
+    CHECK_CHANGED(switch_port_id, 104);
+    CHECK_CHANGED(if_index, 14);
+    CHECK_CHANGED(role, DPPD_ENDPOINT_ROLE_SF);
+    CHECK_CHANGED(role_source, DPPD_ENDPOINT_ROLE_SOURCE_UNKNOWN);
+    CHECK_CHANGED(role_error, -EIO);
+    CHECK_CHANGED(has_controller, false);
+    CHECK_CHANGED(controller_id, 1);
+    CHECK_CHANGED(has_pf, false);
+    CHECK_CHANGED(pf_id, 1);
+    CHECK_CHANGED(has_function, false);
+    CHECK_CHANGED(function_id, 3);
+    CHECK_CHANGED(has_physical_port, true);
+    expected.endpoints[0].has_physical_port = true;
+    CHECK_CHANGED(physical_port_id, 1);
+    expected.endpoints[0].has_physical_port = false;
+#undef CHECK_CHANGED
+
+    struct text_member {
+        size_t offset, size;
+    };
+    static const struct text_member texts[] = {
+        {offsetof(struct dppd_endpoint, switch_name), sizeof(candidate.endpoints[0].switch_name)},
+        {offsetof(struct dppd_endpoint, driver_name), sizeof(candidate.endpoints[0].driver_name)},
+        {offsetof(struct dppd_endpoint, interface_name), sizeof(candidate.endpoints[0].interface_name)},
+        {offsetof(struct dppd_endpoint, device_name), sizeof(candidate.endpoints[0].device_name)},
+        {offsetof(struct dppd_endpoint, phys_port_name), sizeof(candidate.endpoints[0].phys_port_name)}};
+    for (unsigned int i = 0; i < sizeof(texts) / sizeof(texts[0]); ++i) {
+        candidate = expected;
+        char *value = (char *)&candidate.endpoints[0] + texts[i].offset;
+        value[0] = 'x';
+        assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EXDEV);
+        memset(value, 'x', texts[i].size);
+        assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EINVAL);
+        assert(dppd_topology_validate_identity(&candidate, &expected, config.ports, config.nb_ports) == -EINVAL);
+    }
+    candidate = expected;
+    strcpy(candidate.endpoints[0].device_name, "0000:03:00.1");
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EXDEV);
+    candidate = expected;
+    candidate.endpoints[0].device_name[0] = '\0';
+    assert(dppd_topology_validate_identity(&candidate, &candidate, config.ports, config.nb_ports) == -ENODATA);
+    candidate = expected;
+    candidate.endpoints[0].driver_name[0] = '\0';
+    assert(dppd_topology_validate_identity(&candidate, &candidate, config.ports, config.nb_ports) == -ENODATA);
+    strcpy(candidate.endpoints[0].driver_name, "unknown");
+    assert(dppd_topology_validate_identity(&candidate, &candidate, config.ports, config.nb_ports) == -ENODATA);
+
+    candidate = expected;
+    candidate.endpoints[0].kind = (enum dppd_endpoint_kind)99;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EINVAL);
+    candidate = expected;
+    candidate.endpoints[0].role = (enum dppd_endpoint_role)99;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EINVAL);
+    candidate = expected;
+    candidate.endpoints[0].role_source = (enum dppd_endpoint_role_source)99;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EINVAL);
+    candidate = expected;
+    candidate.endpoints[0].switch_domain_id = UINT16_MAX;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EINVAL);
+
+    /** 未生效的编号与填充字节不携带身份证据，相同未知状态不能被补成已知角色 */
+    expected.endpoints[0].has_controller = expected.endpoints[0].has_pf = expected.endpoints[0].has_function = false;
+    expected.endpoints[0].has_switch_domain = false;
+    expected.endpoints[0].role = DPPD_ENDPOINT_ROLE_UNKNOWN;
+    expected.endpoints[0].role_source = DPPD_ENDPOINT_ROLE_SOURCE_UNKNOWN;
+    expected.endpoints[0].role_error = -ENOTSUP;
+    candidate = expected;
+    candidate.endpoints[0].controller_id = candidate.endpoints[0].pf_id = candidate.endpoints[0].function_id = 42;
+    candidate.endpoints[0].physical_port_id = 42;
+    candidate.endpoints[0].switch_domain_id = candidate.endpoints[0].switch_port_id = 42;
+    candidate.endpoints[0].driver_name[sizeof(candidate.endpoints[0].driver_name) - 1U] = 'y';
+    for (size_t i = sizeof(expected.endpoints[0].ethdev_port_id); i < offsetof(struct dppd_endpoint, kind); ++i)
+        ((unsigned char *)&candidate.endpoints[0])[i] = 0xa5;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == 0);
+    candidate.endpoints[0].has_pf = true;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EXDEV);
+
+    /** 普通虚拟设备可以没有 Linux 接口和角色，但仍必须保留相同的设备名与驱动 */
+    expected.endpoints[0].if_index = 0;
+    expected.endpoints[0].interface_name[0] = '\0';
+    expected.endpoints[0].phys_port_name[0] = '\0';
+    strcpy(expected.endpoints[0].device_name, "test-vdev0");
+    strcpy(expected.endpoints[0].driver_name, "net_null");
+    candidate = expected;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == 0);
+
+    make_verified_fixture(&config, &expected);
+    candidate = expected;
+    candidate.endpoints[1] = candidate.endpoints[0];
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EUCLEAN);
+    assert(dppd_topology_validate_identity(&candidate, &expected, config.ports, config.nb_ports) == -EUCLEAN);
+    candidate = expected;
+    candidate.nb_endpoints = 1;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -ENOENT);
+    candidate = expected;
+    candidate.endpoints[2] = expected.endpoints[0];
+    candidate.endpoints[2].ethdev_port_id = 9;
+    candidate.nb_endpoints = 3;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EXDEV);
+    candidate.nb_endpoints = DPPD_MAX_PORTS + 1U;
+    assert(dppd_topology_validate_identity(&expected, &candidate, config.ports, config.nb_ports) == -EINVAL);
+    uint16_t duplicated[] = {3, 3}, invalid[] = {3, UINT16_MAX};
+    assert(dppd_topology_validate_identity(&expected, &expected, duplicated, 2) == -EEXIST);
+    assert(dppd_topology_validate_identity(&expected, &expected, invalid, 2) == -EINVAL);
+    assert(dppd_topology_validate_identity(NULL, &expected, config.ports, 2) == -EINVAL);
+    assert(dppd_topology_validate_identity(&expected, NULL, config.ports, 2) == -EINVAL);
+    assert(dppd_topology_validate_identity(&expected, &expected, NULL, 2) == -EINVAL);
+    assert(dppd_topology_validate_identity(&expected, &expected, config.ports, 0) == -EINVAL);
+    assert(dppd_topology_validate_identity(&expected, &expected, config.ports, DPPD_MAX_PORTS + 1U) == -EINVAL);
+}
+
+/** 重发现只在完整成功后写出，第二端口失败也不能覆盖旧拓扑或调用方的哨兵字节 */
+static void test_verified_rediscovery(void)
+{
+    struct dppd_config config;
+    struct dppd_topology expected, output, sentinel;
+    make_verified_fixture(&config, &expected);
+    memset(&sentinel, 0xa5, sizeof(sentinel));
+    memcpy(&output, &sentinel, sizeof(output));
+    failed_port = 7;
+    info_calls = reader_calls = 0;
+    assert(
+        dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) == -EIO);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0 && info_calls == 2 && reader_calls == 1);
+    struct dppd_topology original;
+    memcpy(&original, &expected, sizeof(original));
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &expected, fake_reader, &reader_mode) ==
+        -EIO);
+    assert(memcmp(&expected, &original, sizeof(expected)) == 0);
+    failed_port = -1;
+    reader_calls = 0;
+    reader_fail_at = 2;
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) ==
+        -EXDEV);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0 && reader_calls == 2);
+    reader_fail_at = 0;
+    information[7].switch_info.domain_id = 5;
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) ==
+        -EXDEV);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0);
+    information[7].switch_info.domain_id = 4;
+    set_device_name("0000:03:00.1");
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) ==
+        -EXDEV);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0);
+    set_device_name("0000:03:00.0");
+    char oversized[65];
+    memset(oversized, 'x', sizeof(oversized));
+    oversized[64] = '\0';
+    set_device_name(oversized);
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) ==
+        -ENAMETOOLONG);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0);
+    set_device_name("0000:03:00.0");
+    information[7].driver_name = oversized;
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) ==
+        -ENAMETOOLONG);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0);
+    information[7].driver_name = "mlx5_pci";
+    information[7].switch_info.name = oversized;
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) ==
+        -ENAMETOOLONG);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0);
+    information[7].switch_info.name = "test-switch";
+    config.ports[0] = 7;
+    config.ports[1] = 3;
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) == 0);
+    assert(output.endpoints[0].ethdev_port_id == 7 && output.endpoints[1].ethdev_port_id == 3);
+    assert(dppd_topology_validate_identity(&expected, &output, config.ports, config.nb_ports) == 0);
+    assert(
+        dppd_topology_rediscover_verified_with_reader(&config, &expected, &expected, fake_reader, &reader_mode) == 0);
+    assert(expected.endpoints[0].ethdev_port_id == 7);
+
+    /** 基线已经缺少身份或端口集合错误时，连第一次 PMD 读取也不应开始 */
+    memcpy(&output, &sentinel, sizeof(output));
+    expected.endpoints[0].device_name[0] = '\0';
+    info_calls = 0;
+    assert(dppd_topology_rediscover_verified_with_reader(&config, &expected, &output, fake_reader, &reader_mode) ==
+        -ENODATA);
+    assert(info_calls == 0 && memcmp(&output, &sentinel, sizeof(output)) == 0);
+    assert(
+        dppd_topology_rediscover_verified_with_reader(NULL, &expected, &output, fake_reader, &reader_mode) == -EINVAL);
+    assert(dppd_topology_rediscover_verified_with_reader(&config, NULL, &output, fake_reader, &reader_mode) == -EINVAL);
+    assert(
+        dppd_topology_rediscover_verified_with_reader(&config, &expected, NULL, fake_reader, &reader_mode) == -EINVAL);
+
+    /** 默认内核读取变体同样只读，接口观察失败不会发布未知身份来替换原来的已知身份 */
+    make_verified_fixture(&config, &expected);
+    config.nb_ports = expected.nb_endpoints = 1;
+    kernel_mode = 0;
+    kernel_fds = 0;
+    kernel_receives = 0;
+    assert(dppd_topology_rediscover_verified(&config, &expected, &output) == 0 && kernel_fds == 0);
+    kernel_mode = 17;
+    memcpy(&output, &sentinel, sizeof(output));
+    assert(dppd_topology_rediscover_verified(&config, &expected, &output) == -EXDEV);
+    assert(kernel_fds == 0 && memcmp(&output, &sentinel, sizeof(output)) == 0);
+}
+
 int main(void)
 {
     test_role_parser();
     test_identity_evidence();
     test_discovery_atomicity();
     test_default_reader();
+    test_identity_comparison();
+    test_verified_rediscovery();
     return 0;
 }

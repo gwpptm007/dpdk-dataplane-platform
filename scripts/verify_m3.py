@@ -42,6 +42,8 @@ def main():
                                       "--build-dir", str(build)], 180),
                 ("shared_recovery", [sys.executable, "tests/integration/m3_shared_recovery.py",
                                      "--build-dir", str(build)], 180),
+                ("device_events", [sys.executable, "tests/integration/m3_device_events.py",
+                                   "--build-dir", str(build)], 180),
                 ("transfer_simulation", [sys.executable, "scripts/simulate_m3.py", "demo",
                                          "--build-dir", str(build)], 180)]
     try:

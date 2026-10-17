@@ -412,6 +412,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "[dppd] control service initialization failed\n");
         goto cleanup_runtime;
     }
+    /** 快照重放前就启用事件门禁，不能等到 worker 启动后才开始保护驱动句柄 */
+    int device_binding = dppd_runtime_device_bind(&runtime, &control);
+    if (device_binding != 0) {
+        fprintf(stderr, "[dppd] device event tracking refused: %d\n", device_binding);
+        goto cleanup_control;
+    }
     /*
      * worker 只借用 control 持有的 backend；退出时 main 的清理顺序会先停止并 wait 所有
      * worker（使其注销 QSBR reader），再调用 control_fini 释放 snapshot/QSBR。这里不能
@@ -470,19 +476,25 @@ int main(int argc, char **argv)
         fprintf(stderr, "[dppd] telemetry command registration failed\n");
         goto cleanup_management;
     }
+    if (dppd_runtime_device_poll(&runtime) != 0)
+        goto cleanup_telemetry;
+    recovery_isolation |= control.recovery_state != DPPD_CONTROL_RECOVERY_READY;
     if (recovery_isolation) {
         /**
          * 隔离保留只读诊断，不启动 ethdev worker，也不输出正常转发统计
          * 清理重试结束后更新诊断副本，成功进入 RESTART_REQUIRED 后仍必须退出重启
          */
         while (!stop_signal) {
+            loop_error = dppd_runtime_device_poll(&runtime);
+            if (loop_error != 0)
+                break;
             loop_error = dppd_monitor_client_check(&monitor_client);
             if (loop_error != 0) {
                 fprintf(stderr, "[dppd] recovery monitor unavailable during isolation: %d\n", loop_error);
                 break;
             }
             /** 隔离仅停止软件转发，设备仍需监控，移除时应退出并清理而不是继续等待 */
-            loop_error = dppd_devices_poll_links(&runtime.devices);
+            loop_error = dppd_devices_io_quiesced(&runtime.devices) ? 0 : dppd_devices_poll_links(&runtime.devices);
             if (loop_error != 0) {
                 fprintf(stderr, "[dppd] device monitoring failed during recovery isolation\n");
                 break;
@@ -521,6 +533,15 @@ int main(int argc, char **argv)
     while (!stop_signal) {
         const uint64_t now = rte_get_timer_cycles();
 
+        /** 事件优先于链路、AGE 和管理处理，先等待 worker 退出，再保留受限诊断入口 */
+        loop_error = dppd_runtime_device_poll(&runtime);
+        if (loop_error != 0)
+            break;
+        if (control.recovery_state != DPPD_CONTROL_RECOVERY_READY)
+            recovery_isolation = true;
+        else if (runtime.workers_started && runtime.device_recovery.status.state == DPPD_DEVICE_RECOVERY_RUNNING)
+            recovery_isolation = false;
+
         loop_error = dppd_scope_check(&managed_scope);
         if (loop_error != 0) {
             fprintf(stderr, "[dppd] managed scope lost; stopping workers: %d\n", loop_error);
@@ -538,7 +559,7 @@ int main(int argc, char **argv)
          */
         if (!recovery_isolation && config.duration_s != 0 && now - started_at >= timer_hz * config.duration_s)
             break;
-        loop_error = dppd_devices_poll_links(&runtime.devices);
+        loop_error = dppd_devices_io_quiesced(&runtime.devices) ? 0 : dppd_devices_poll_links(&runtime.devices);
         if (loop_error != 0) {
             fprintf(stderr, "[dppd] device monitoring failed; stopping workers\n");
             break;
@@ -567,6 +588,9 @@ int main(int argc, char **argv)
             fprintf(stderr, "[dppd] management request processing failed: %d\n", loop_error);
             break;
         }
+        loop_error = dppd_runtime_device_poll(&runtime);
+        if (loop_error != 0)
+            break;
         /** AGE 查询失败只保留错误并重试，不把缺少驱动数据当作已经过期 */
         (void)dppd_control_age_poll(&control, dppd_monotonic_ms() * UINT64_C(1000000), DPPD_AGE_POLL_BUDGET);
         /** 整轮请求处理完再发布，不让独立查询线程看到整批更新的中间账本 */
@@ -616,6 +640,8 @@ cleanup_management:
     /* 先关闭入口，再回收已安装 flow，避免退出阶段接收新事务 */
     dppd_management_stop(&management);
 cleanup_control:
+    /** 退出窗口也可能收到复位事件，未知句柄不能落入普通 fini 的逐项删除 */
+    (void)dppd_runtime_device_poll(&runtime);
     if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)
         rc = EXIT_FAILURE;
     /** backend 真正释放才证明已删除所有本进程 handle，失败时保留磁盘标记等待下次核对 */
@@ -625,7 +651,7 @@ cleanup_control:
     }
 cleanup_runtime:
     /** 清理失败或退出期间才收到移除通知，都必须保留失败退出码 */
-    if (dppd_runtime_destroy(&runtime) != 0 || dppd_devices_removal_requested(&runtime.devices))
+    if (dppd_runtime_destroy(&runtime) != 0 || dppd_devices_io_quiesced(&runtime.devices))
         rc = EXIT_FAILURE;
 cleanup_eal:
     dppd_monitor_client_close(&monitor_client);

@@ -30,7 +30,7 @@ static void reset_runtime(struct dppd_runtime *runtime)
 }
 
 /** 经过正式协议分发器查询，确认业务上未就绪不会被错误包装成传输或协议失败 */
-static struct dppd_management_health query(struct dppd_control_service *control, const struct dppd_runtime *runtime)
+static struct dppd_management_health query(struct dppd_control_service *control, struct dppd_runtime *runtime)
 {
     const struct dppd_management_request request = {
         .version = DPPD_MANAGEMENT_VERSION,

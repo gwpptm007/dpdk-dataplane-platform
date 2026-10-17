@@ -25,7 +25,7 @@ enum dppd_control_recovery_state {
 
 struct dppd_control_service {
     /*
-     * topology 在运行期由 runtime 持有且不可变；control 只借用该指针来规划规则
+     * topology 由 runtime 持有，只有停止全部 worker 并核对设备身份后才能整体更新
      * 因此 runtime 的销毁必须晚于 control_fini
      */
     const struct dppd_topology *topology;
@@ -56,7 +56,7 @@ struct dppd_control_service {
     int age_cycle_error;
     /** 共享对象使用独立修订号，删除后也保留，防止同 ID 重建后误认成旧对象 */
     uint64_t shared_count_revision;
-    /** 模拟复位期间保留完整期望配置，实际句柄作废也不能丢掉恢复依据 */
+    /** 复位期间保留完整期望配置，正式设备计划与独立模拟计划不能互相替代 */
     struct dppd_reset_plan *reset_plan;
     struct dppd_reset_status reset;
 };

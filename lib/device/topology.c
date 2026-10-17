@@ -400,6 +400,18 @@ static void discover_role(struct dppd_endpoint *endpoint, const struct rte_eth_d
         identity.phys_port_name);
 }
 
+/** PMD 名称也要完整复制，截断后碰巧相同的前缀不能作为重新发现时的身份证据 */
+static int copy_pmd_name(char *destination, size_t capacity, const char *value, const char *unknown)
+{
+    if (value == NULL)
+        value = unknown;
+    size_t length = strnlen(value, capacity);
+    if (length == capacity)
+        return -ENAMETOOLONG;
+    memcpy(destination, value, length + 1U);
+    return 0;
+}
+
 int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dppd_topology *topology,
     dppd_topology_identity_reader reader, void *opaque)
 {
@@ -429,10 +441,14 @@ int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dpp
         endpoint->has_switch_domain = info.switch_info.domain_id != RTE_ETH_DEV_SWITCH_DOMAIN_ID_INVALID;
         endpoint->switch_domain_id = info.switch_info.domain_id;
         endpoint->switch_port_id = info.switch_info.port_id;
-        snprintf(endpoint->switch_name, sizeof(endpoint->switch_name), "%s",
-            info.switch_info.name != NULL ? info.switch_info.name : "-");
-        snprintf(endpoint->driver_name, sizeof(endpoint->driver_name), "%s",
-            info.driver_name != NULL ? info.driver_name : "unknown");
+        rc = copy_pmd_name(endpoint->switch_name, sizeof(endpoint->switch_name), info.switch_info.name, "-");
+        if (rc == 0)
+            rc = copy_pmd_name(endpoint->driver_name, sizeof(endpoint->driver_name), info.driver_name, "unknown");
+        if (rc != 0)
+            return rc;
+        const char *device_name = get_device_name(&info);
+        if (device_name != NULL && strnlen(device_name, sizeof(endpoint->device_name)) == sizeof(endpoint->device_name))
+            return -ENAMETOOLONG;
         discover_role(endpoint, &info, reader, opaque);
         discovered.nb_endpoints++;
     }
@@ -444,6 +460,123 @@ int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dpp
 int dppd_topology_discover(const struct dppd_config *cfg, struct dppd_topology *topology)
 {
     return dppd_topology_discover_with_reader(cfg, topology, read_identity, NULL);
+}
+
+static bool role_is_valid(enum dppd_endpoint_role role)
+{
+    switch (role) {
+    case DPPD_ENDPOINT_ROLE_UNKNOWN:
+    case DPPD_ENDPOINT_ROLE_UPLINK:
+    case DPPD_ENDPOINT_ROLE_PF:
+    case DPPD_ENDPOINT_ROLE_VF:
+    case DPPD_ENDPOINT_ROLE_SF:
+        return true;
+    }
+    return false;
+}
+
+/** 不读取未终止字符串，也不让两份同样缺失的设备身份互相作证 */
+static int identity_shape(const struct dppd_endpoint *endpoint)
+{
+    if ((endpoint->kind != DPPD_ENDPOINT_ETHDEV && endpoint->kind != DPPD_ENDPOINT_REPRESENTOR) ||
+        !role_is_valid(endpoint->role) ||
+        (endpoint->role_source != DPPD_ENDPOINT_ROLE_SOURCE_UNKNOWN &&
+            endpoint->role_source != DPPD_ENDPOINT_ROLE_SOURCE_MLX5_PHYS_PORT_NAME) ||
+        (endpoint->has_switch_domain && endpoint->switch_domain_id == UINT16_MAX))
+        return -EINVAL;
+    if (memchr(endpoint->switch_name, '\0', sizeof(endpoint->switch_name)) == NULL ||
+        memchr(endpoint->driver_name, '\0', sizeof(endpoint->driver_name)) == NULL ||
+        memchr(endpoint->interface_name, '\0', sizeof(endpoint->interface_name)) == NULL ||
+        memchr(endpoint->device_name, '\0', sizeof(endpoint->device_name)) == NULL ||
+        memchr(endpoint->phys_port_name, '\0', sizeof(endpoint->phys_port_name)) == NULL)
+        return -EINVAL;
+    if (endpoint->driver_name[0] == '\0' || strcmp(endpoint->driver_name, "unknown") == 0 ||
+        endpoint->device_name[0] == '\0')
+        return -ENODATA;
+    return 0;
+}
+
+static int identity_port_set(const struct dppd_topology *topology, const uint16_t *ports, uint16_t count)
+{
+    if (topology == NULL || topology->nb_endpoints > DPPD_MAX_PORTS)
+        return -EINVAL;
+    for (uint16_t i = 0; i < topology->nb_endpoints; ++i) {
+        for (uint16_t j = 0; j < i; ++j)
+            if (topology->endpoints[i].ethdev_port_id == topology->endpoints[j].ethdev_port_id)
+                return -EUCLEAN;
+        int rc = identity_shape(&topology->endpoints[i]);
+        if (rc != 0)
+            return rc;
+    }
+    for (uint16_t i = 0; i < count; ++i)
+        if (dppd_topology_find(topology, ports[i]) == NULL)
+            return -ENOENT;
+    return topology->nb_endpoints == count ? 0 : -EXDEV;
+}
+
+/** 有效标志本身也属于身份，标志为未知时不使用残留编号猜测同一端点 */
+static bool same_identity(const struct dppd_endpoint *left, const struct dppd_endpoint *right)
+{
+    return left->ethdev_port_id == right->ethdev_port_id && left->kind == right->kind &&
+        left->has_switch_domain == right->has_switch_domain &&
+        (!left->has_switch_domain ||
+            (left->switch_domain_id == right->switch_domain_id && left->switch_port_id == right->switch_port_id)) &&
+        left->role == right->role && left->role_source == right->role_source && left->role_error == right->role_error &&
+        left->if_index == right->if_index && left->has_controller == right->has_controller &&
+        (!left->has_controller || left->controller_id == right->controller_id) && left->has_pf == right->has_pf &&
+        (!left->has_pf || left->pf_id == right->pf_id) && left->has_function == right->has_function &&
+        (!left->has_function || left->function_id == right->function_id) &&
+        left->has_physical_port == right->has_physical_port &&
+        (!left->has_physical_port || left->physical_port_id == right->physical_port_id) &&
+        strcmp(left->switch_name, right->switch_name) == 0 && strcmp(left->driver_name, right->driver_name) == 0 &&
+        strcmp(left->interface_name, right->interface_name) == 0 &&
+        strcmp(left->device_name, right->device_name) == 0 && strcmp(left->phys_port_name, right->phys_port_name) == 0;
+}
+
+int dppd_topology_validate_identity(const struct dppd_topology *expected, const struct dppd_topology *candidate,
+    const uint16_t *ports, uint16_t count)
+{
+    if (ports == NULL || count == 0 || count > DPPD_MAX_PORTS)
+        return -EINVAL;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (ports[i] == UINT16_MAX)
+            return -EINVAL;
+        for (uint16_t j = 0; j < i; ++j)
+            if (ports[i] == ports[j])
+                return -EEXIST;
+    }
+    int rc = identity_port_set(expected, ports, count);
+    if (rc == 0)
+        rc = identity_port_set(candidate, ports, count);
+    if (rc != 0)
+        return rc;
+    for (uint16_t i = 0; i < count; ++i)
+        if (!same_identity(dppd_topology_find(expected, ports[i]), dppd_topology_find(candidate, ports[i])))
+            return -EXDEV;
+    return 0;
+}
+
+int dppd_topology_rediscover_verified_with_reader(const struct dppd_config *cfg, const struct dppd_topology *expected,
+    struct dppd_topology *output, dppd_topology_identity_reader reader, void *opaque)
+{
+    if (cfg == NULL || expected == NULL || output == NULL)
+        return -EINVAL;
+    int rc = dppd_topology_validate_identity(expected, expected, cfg->ports, cfg->nb_ports);
+    if (rc != 0)
+        return rc;
+    struct dppd_topology candidate;
+    rc = dppd_topology_discover_with_reader(cfg, &candidate, reader, opaque);
+    if (rc == 0)
+        rc = dppd_topology_validate_identity(expected, &candidate, cfg->ports, cfg->nb_ports);
+    if (rc == 0)
+        *output = candidate;
+    return rc;
+}
+
+int dppd_topology_rediscover_verified(const struct dppd_config *cfg, const struct dppd_topology *expected,
+    struct dppd_topology *output)
+{
+    return dppd_topology_rediscover_verified_with_reader(cfg, expected, output, read_identity, NULL);
 }
 
 const struct dppd_endpoint *dppd_topology_find(const struct dppd_topology *topology, uint16_t ethdev_port_id)

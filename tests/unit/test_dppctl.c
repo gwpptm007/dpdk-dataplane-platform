@@ -696,5 +696,21 @@ int main(void)
     assert(build_request(2, nd, &request) == 0 && request.operation == DPPD_MANAGEMENT_ND6_FLUSH);
     nd[1] = "0";
     assert(build_request(2, nd, &request) == -EINVAL);
+    /** 设备复位使用精确事件代次，零是有效初始代次，any 和溢出都不能授权操作 */
+    char *device[] = {"device-status", "0"};
+    assert(build_request(1, device, &request) == 0 && request.operation == DPPD_MANAGEMENT_DEVICE_STATUS);
+    assert(build_request(2, device, &request) == -EINVAL);
+    device[0] = "device-reset";
+    assert(build_request(1, device, &request) == -EINVAL);
+    assert(build_request(2, device, &request) == 0 && request.operation == DPPD_MANAGEMENT_DEVICE_RESET &&
+        request.payload.device_reset.expected_sequence == 0);
+    device[1] = "17";
+    assert(build_request(2, device, &request) == 0 && request.payload.device_reset.expected_sequence == 17);
+    device[1] = "any";
+    assert(build_request(2, device, &request) == -EINVAL);
+    device[1] = "18446744073709551615";
+    assert(build_request(2, device, &request) == -EINVAL);
+    device[1] = "-1";
+    assert(build_request(2, device, &request) == -EINVAL);
     return 0;
 }

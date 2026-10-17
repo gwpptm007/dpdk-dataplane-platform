@@ -4,6 +4,7 @@
 import argparse
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -28,8 +29,13 @@ def run_case(build, mode, port=1):
         clean_env = {key: value for key, value in os.environ.items()
                      if key != "LD_PRELOAD" and not key.startswith("DPPD_TEST_")}
         clean_env["LC_ALL"] = "C"
+        preload = [str(build / "tests/integration/libdppd_removal_faults.so")]
+        linked = subprocess.check_output(["ldd", str(build / "dppd")], text=True, env=clean_env)
+        sanitizer = re.search(r"\blibasan\.so\S*\s+=>\s+(/\S+)", linked)
+        if sanitizer is not None:
+            preload.insert(0, sanitizer.group(1))
         fault_env = dict(clean_env,
-                         LD_PRELOAD=str(build / "tests/integration/libdppd_removal_faults.so"),
+                         LD_PRELOAD=":".join(preload),
                          DPPD_TEST_REMOVAL_FILE=str(trigger), DPPD_TEST_REMOVAL_MODE=mode,
                          DPPD_TEST_REMOVAL_PORT=str(port))
 
@@ -66,6 +72,14 @@ def run_case(build, mode, port=1):
                     health = fields(ctl("ready"))
                     check(health["links-unsupported"] == "1" and health["links-up"] == "1", str(health))
                 trigger.touch()
+                if mode.startswith("callback"):
+                    # 正式回调保留管理诊断，确认隔离后主动结束进程，并验证真实在途注销
+                    wait_for(daemon, lambda: fields(ctl("device-status"))["state"] == "isolated",
+                             "device event isolation")
+                    isolated = fields(ctl("device-status"))
+                    check(isolated["quarantined"] == "yes" and isolated["workers-stopped"] == "yes",
+                          str(isolated))
+                    stop(daemon)
                 daemon.wait(timeout=10)
                 check(not sock.exists() and state.read_bytes() == saved_state,
                       "removal changed snapshot/socket")
@@ -84,7 +98,8 @@ def run_case(build, mode, port=1):
                     check(f"[removal-fixture] unregister port={port} busy" in log,
                           "in-flight callback was not observed: " + log)
                 if saved_state is not None:
-                    check("device monitoring failed; stopping workers" in log, log)
+                    check(("device event isolated:" if mode.startswith("callback") else
+                           "device monitoring failed; stopping workers") in log, log)
             check("link query failed" not in log, "removal was detected only through link error")
         except Exception:
             print((directory / "failed.log").read_text(), flush=True)

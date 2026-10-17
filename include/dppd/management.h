@@ -9,6 +9,7 @@
 #include "dppd/conntrack.h"
 #include "dppd/nd6.h"
 #include "dppd/transfer.h"
+#include "dppd/device_recovery.h"
 
 /*
  * 管理协议版本在请求和响应中显式传递。当前实现不做版本协商：版本不一致时
@@ -23,7 +24,8 @@
 /** v24 增加有来源的端点角色与 transfer 图规划/整批安装，旧客户端必须配套更新 */
 /** v25 增加 AGE 策略和老化状态，客户端与 daemon 必须配套更新 */
 /** v26 增加共享 COUNT 的逻辑身份、精确引用和生命周期管理 */
-#define DPPD_MANAGEMENT_VERSION 26U
+/** v27 增加正式设备事件状态与精确代次的完整端口组主动复位 */
+#define DPPD_MANAGEMENT_VERSION 27U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -107,6 +109,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_SHARED_COUNT_QUERY,
     DPPD_MANAGEMENT_SHARED_COUNT_DELETE,
     DPPD_MANAGEMENT_SHARED_COUNT_LIST,
+    DPPD_MANAGEMENT_DEVICE_STATUS,
+    DPPD_MANAGEMENT_DEVICE_RESET,
 };
 
 /*
@@ -122,6 +126,9 @@ struct dppd_management_request {
     uint64_t request_id; /* 客户端生成；响应原样回显，用于请求/响应配对 */
     union {
         struct dppd_transfer_spec transfer;
+        struct {
+            uint64_t expected_sequence;
+        } device_reset;
         struct dppd_shared_count_spec shared_count_create;
         struct {
             uint64_t id, expected;
@@ -443,6 +450,7 @@ struct dppd_management_response {
         struct dppd_management_rule_page rule_page;
         struct dppd_control_persistence_status persistence;
         struct dppd_control_recovery_status recovery;
+        struct dppd_device_recovery_status device;
         struct dppd_stats_values stats;
         struct dppd_management_health health;
         struct dppd_control_rule_status rule_status;
@@ -476,7 +484,7 @@ struct dppd_management_server {
     struct dppd_control_service *control;
     /* device_set 同样由 runtime 持有，必须比 management server 生命周期更长 */
     const struct dppd_device_set *devices;
-    const struct dppd_runtime *runtime;
+    struct dppd_runtime *runtime;
     /* 保存 bind 成功的路径，stop 时只删除本实例创建的 socket */
     char socket_path[DPPD_MANAGEMENT_SOCKET_PATH_MAX + 1U];
     bool started;
@@ -487,10 +495,10 @@ struct dppd_management_server {
  * 函数自身参数错误通过返回值报告；已收到请求后的协议/业务错误写入 response->status
  */
 int dppd_management_handle(struct dppd_control_service *control, const struct dppd_device_set *devices,
-    const struct dppd_runtime *runtime, const struct dppd_management_request *request,
+    struct dppd_runtime *runtime, const struct dppd_management_request *request,
     struct dppd_management_response *response);
 int dppd_management_start(struct dppd_management_server *server, struct dppd_control_service *control,
-    const struct dppd_device_set *devices, const struct dppd_runtime *runtime, const char *socket_path);
+    const struct dppd_device_set *devices, struct dppd_runtime *runtime, const char *socket_path);
 int dppd_management_poll(struct dppd_management_server *server);
 /* stop 可重复调用；成功启动过时会关闭 fd 并删除对应文件系统路径 */
 void dppd_management_stop(struct dppd_management_server *server);

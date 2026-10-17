@@ -69,6 +69,22 @@ typedef int (*dppd_topology_identity_reader)(uint32_t if_index, const char *devi
 int dppd_topology_discover(const struct dppd_config *cfg, struct dppd_topology *topology);
 int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dppd_topology *topology,
     dppd_topology_identity_reader reader, void *opaque);
+/**
+ * 两份拓扑都必须恰好包含选定端口集合，逐字段核对身份，忽略数组顺序和结构体填充
+ * 未知角色与可选编号只原样比较，不能据此补出 PF/VF/SF 身份
+ * 设备名和驱动缺失时返回 ENODATA，重复拓扑返回 EUCLEAN，身份变化返回 EXDEV
+ * 该接口核对调用方提供的观察值，不能代替真实发现或证明硬件复位已经完成
+ */
+int dppd_topology_validate_identity(const struct dppd_topology *expected, const struct dppd_topology *candidate,
+    const uint16_t *ports, uint16_t count);
+/**
+ * 先发现到临时对象，只有全部端口身份核对通过才写出结果，失败保持 output 的全部字节
+ * output 可与 expected 相同，但调用方仍应先停止 worker 并核对设备事件序号再发布
+ */
+int dppd_topology_rediscover_verified(const struct dppd_config *cfg, const struct dppd_topology *expected,
+    struct dppd_topology *output);
+int dppd_topology_rediscover_verified_with_reader(const struct dppd_config *cfg, const struct dppd_topology *expected,
+    struct dppd_topology *output, dppd_topology_identity_reader reader, void *opaque);
 /** 纯解析接口只检查可信观察值的语法，调用方仍须证明该名称属于当前端口 */
 int dppd_topology_resolve_role(struct dppd_endpoint *endpoint, const char *driver_name, bool is_representor,
     const char *phys_port_name);

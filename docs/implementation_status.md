@@ -5,6 +5,13 @@
 以下日期条目保留各次交付当时的验收状态，当前能力以最新条目、模块表和
 [M2 整体验收](m2_acceptance.md) 为准，不能将历史待办当作当前仍缺失的功能。
 
+2026-10-18 已接通 [M3 正式设备事件与主动复位](m3_device_recovery.md)：v27 设备状态与
+完整组 reset，RESET/RMV/DESTROY 收发门禁和旧句柄隔离，管理 PCI parent 保护、临时
+拓扑精确核对、真实队列重建、共享先行恢复及 worker 就绪后提交。四套构建各 69/69 单测、
+六步 M3、四组正式事件和 31 组模拟通过，252 项源码摘要一致；135 系统/本地适配各十二步
+完整 M2 回归，135 ASan/UBSan 与 134 GCC 13 各四步核心回归通过。未知旧句柄与部分 PMD
+失败仍须外部处置，软件/三层联合恢复、非 mlx5 身份适配和实机正向证据尚缺，整个 M3 未完成。
+
 2026-10-18 已接通 [M3 共享 COUNT 异常退出保护](m3_shared_recovery.md)：v7 日志区分
 规则与间接对象，保存方向和精确引用，先同步意图再进入驱动；不确定创建或记录失败
 保留句柄和线索，启动重放前必须完成外部核对。v1–v6 兼容且保留已有监护要求，普通
@@ -246,18 +253,18 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 |---|---|---|
 | 构建 | 已验证 | Ubuntu 22.04、Meson 0.61.2、DPDK 21.11.9 下完成 `-Werror` 全量编译和链接 |
 | 配置 | 已实现最小 CLI | 端口对、队列、burst、mbuf、统计、duration、promisc、pdump、管理 socket、规则容量 |
-| ethdev | 已实现 baseline、链路恢复与移除保护 | capability 交集、RSS、per-socket pool、queue setup、start/stop；链路轮询、down 丢弃、up 恢复；移除通知/状态停止 worker，等待回调后退出重启；重新枚举、热重配与物理热拔插验收未完成 |
+| ethdev | baseline、事件隔离与完整组主动复位已接通 | capability 交集、RSS、per-socket pool、queue setup、start/stop；RESET/RMV/DESTROY 收发门禁、回调排空、旧句柄隔离与身份保护；真实 reset/队列重建/start 已接通，热枚举和实机验收仍缺 |
 | 软件 worker | 已实现 | 每 queue 一个 lcore，所有端口 burst RX/TX，mbuf ownership 完整；实际运行状态发布与异常结束监控 |
 | parser | IPv4/IPv6 与常用隧道已接通 | 双 VLAN、ARP、IPv4、IPv6、有界扩展头、fragment、UDP/TCP/ICMPv6；VXLAN/Geneve/GRE 只读单层解析，完整扩展选项与隧道终端未实现 |
 | exact match 与批量 COUNT | 独立双栈五元组哈希、与 ACL 同快照排序、每批归并 | 独立 IR 对照、冲突链、优先级、版本隔离、并发计数、ND 重试和正式 worker 已验证 |
 | 软件策略 | 二层基线和 IPv4/IPv6 静态三层闭环 | malformed drop；默认端口对转发；显式三层模式执行 LPM/neighbor/rewrite，不能回退端口对 |
 | stats/telemetry | 已实现报文统计与规则诊断 | 工作线程、端口、队列统计及丢弃原因；规则汇总/分页、安装副本、失败指标、失败事件和耗时历史完整发布；规则 COUNT 独立查询 |
-| topology | 发现与有证据的 mlx5 角色解析已接通 | 当前命名空间 netlink、sysfs、PCI 身份交叉核对；支持 uplink/PF/VF/SF 严格名称，缺失或矛盾保留 unknown；实机尚未验收 |
+| topology | 发现、mlx5 角色解析与重发现核对已接通 | 当前命名空间 netlink、sysfs、PCI 身份交叉核对；支持 uplink/PF/VF/SF 严格名称，缺失或矛盾保留 unknown；复位前后先核对完整端口集合和精确身份，失败不发布新拓扑；实机尚未验收 |
 | transfer 场景 | 七种模板的图与管理入口已接通 | 同交换域、角色/父子证据、优先级冲突及版本检查；同批创建与补偿，永不软件降级；虚拟控制验证不等于硬件卸载 |
 | 独立功能模拟 | 可直接运行且明确标记模拟 | 真实管理 CLI、平坦 transfer 报文与私有/共享 COUNT、AGE、虚拟推进、故障、隔离、快照重放和复位恢复；仅测试构建提供，不接触真实网卡 |
 | AGE | 正式查询、轮询回收及功能模拟已接通 | 超时 1–16777215 秒；独立于 COUNT、精确版本删除、v4 快照、失败保留与节流重试；重启重新计时，真实 PMD 未验收 |
-| 共享 COUNT | indirect 生产接口和模拟已接通 | 独立身份与修订、同安装口/域绑定、prepare/残留引用保护、AGE 释放、v5 单快照先对象后规则；累计重启归零，native 恢复日志不支持，实机未验收 |
-| 复位恢复 | 独立模拟已接通 | 可选原子模拟回调、精确端点核对、内存计划保留、共享先行重建、补偿与显式 recover 重试；快照不改、COUNT/AGE 重置；默认真实回调为空，真实设备及软件/三层联合恢复未实现 |
+| 共享 COUNT | indirect 生产接口、v7 恢复日志和模拟已接通 | 独立身份与修订、同安装口/域绑定、prepare/残留引用保护、AGE 释放、v5 单快照先对象后规则；普通硬件日志支持对象与精确引用，TAP 原生/监护组合仍拒绝 indirect；累计重启归零，实机未验收 |
+| 复位恢复 | 正式设备协调器与独立模拟均已接通 | 正式完整组管理身份保护、真实 stop/reset/队列/start、临时拓扑核对、共享先行重建、补偿和 worker 就绪后提交；快照不改、COUNT/AGE 重置；未知旧句柄外部处置、部分 PMD 失败保留现场，软件/三层联合恢复与实机证据仍缺 |
 | capability profile / probe cache | 已实现本机诊断闭环 | 设备/固件/DPDK 身份、描述符和既有 queue/RSS/offload；完整规则校验结果缓存五秒、64 槽、强制刷新与失效；成功观察集合不承诺任意组合；正式安装始终新校验 |
 | rule IR | 已实现第一版 | 有序 match/action、domain/fallback、持久化 install port 和语义校验 |
 | rule repository | 已实现内存版和可选写路径 | 稳定 ID、单调 generation、幂等 CRUD、乐观并发、按 ID 稳定分页；control 可在 mutation 后保存完整 snapshot |
@@ -268,7 +275,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | 虚拟 PMD flow 验证 | TAP 与 net_ring 已验证 | 双 TAP 已验证硬件 DROP/QUEUE；软件 TCP+MARK+COUNT+DROP 有真实报文与计数证据；net_ring 已验证 prefer 回退，见 [待办文档](todo_virtual_flow_backend.md) |
 | 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
 | control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
-| management API | 本机 v26 | 增加共享 COUNT 对象五个命令与精确绑定；保留 AGE、角色身份与图规划/安装、隧道、动态 ND/DAD/NUD、IPv6 会话与 NAT66、IPv6 ACL、双栈路由与邻居及原规则诊断和健康；旧版本客户端被拒绝 |
+| management API | 本机 v27 | 增加 device-status、精确事件代次 device-reset 与完整组端口/阶段诊断；保留共享 COUNT、AGE、角色身份与图规划/安装、隧道、动态 ND/DAD/NUD、IPv6 会话与 NAT66、IPv6 ACL、双栈路由与邻居及原规则诊断和健康；旧版本客户端被拒绝 |
 | 规则安装观测 | 已实现状态、失败分类、失败事件、耗时历史与规则 telemetry | 精确版本核对后端、端口与 COUNT 配置；三组耗时、整批不重复计数、分位数上界与未知/溢出标志；最近 64 条完整失败的版本分页、覆盖提示和编号耗尽冻结；不提供持久化审计日志 |
 | health/readiness | 已实现本机最小闭环 | 实际线程、端口与链路、移除、恢复隔离和持久化 dirty；未就绪原因与 CLI 退出码；未提供远程探针、心跳或主动网络探测 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |

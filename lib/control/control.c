@@ -128,7 +128,10 @@ static int recovery_write_preflight(const struct dppd_control_service *service)
      * 启动恢复或在线补偿失败后，实际对象与账本可能已经不一致
      * 此时禁止继续更新、删除或覆盖快照，只允许专用恢复流程清理本进程仍持有的对象
      */
-    return service->recovery_state == DPPD_CONTROL_RECOVERY_READY ? 0 : -EUCLEAN;
+    return service->recovery_state == DPPD_CONTROL_RECOVERY_READY &&
+            dppd_rte_flow_backend_driver_ready(&service->rte_flow) == 0
+        ? 0
+        : -EUCLEAN;
 }
 
 /** 创建只分配逻辑身份和真实共享对象，计数从零开始，不隐式创建任何引用规则 */
@@ -404,8 +407,15 @@ int dppd_control_probe_rule(struct dppd_control_service *service, uint16_t insta
     rc = dppd_plan_rule(&context, &candidate, &plan);
     if (rc != 0)
         return rc;
+    rc = dppd_rte_flow_backend_driver_ready(&service->rte_flow);
+    if (rc != 0)
+        return rc;
     rc = dppd_flow_probe_cache_query(service->rte_flow.probes, install_port_id, &candidate, refresh,
         service->rte_flow.api.validate, result);
+    if (dppd_rte_flow_backend_driver_ready(&service->rte_flow) != 0) {
+        memset(result, 0, sizeof(*result));
+        return -EUCLEAN;
+    }
     if (rc == 0)
         result->software_equivalent = dppd_software_backend_rule_supported(&candidate);
     return rc;

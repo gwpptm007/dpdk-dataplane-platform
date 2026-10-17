@@ -10,6 +10,7 @@
 #include "dppd/stats.h"
 #include "dppd/conntrack.h"
 #include "dppd/nd6.h"
+#include "dppd/device_recovery.h"
 
 struct dppd_runtime;
 struct dppd_software_backend;
@@ -62,6 +63,7 @@ struct dppd_runtime {
     atomic_bool stop_requested;
     bool pdump_initialized;
     bool workers_started;
+    struct dppd_device_recovery device_recovery;
 };
 
 int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cfg);

@@ -17,13 +17,20 @@ static void free_packets(struct rte_mbuf **packets, uint16_t count)
         rte_pktmbuf_free(packets[i]);
 }
 
+/** 每次准备调用驱动前都重新检查，事件不能等到整轮端口扫描结束后才阻止下一次收发 */
+static bool worker_io_quiesced(const struct dppd_worker *worker)
+{
+    return atomic_load_explicit(&worker->runtime->stop_requested, memory_order_acquire) ||
+        dppd_devices_io_quiesced(&worker->runtime->devices);
+}
+
 /** 一个出口独立提交一批报文，发送归出口，发送前失效仍计入入口的出口不可用丢弃 */
 static void flush_egress(struct dppd_worker *worker, const struct dppd_port *egress, struct rte_mbuf **packets,
     const uint32_t *lengths, uint16_t count, struct dppd_stats_values *ingress, struct dppd_stats_values *output)
 {
     if (count == 0)
         return;
-    if (dppd_devices_removal_requested(&worker->runtime->devices) || !dppd_port_tx_available(egress)) {
+    if (worker_io_quiesced(worker) || !dppd_port_tx_available(egress)) {
         ingress->policy_drops += count;
         ingress->egress_drops += count;
         free_packets(packets, count);
@@ -45,7 +52,7 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
 {
     struct dppd_worker *worker = context;
     const struct dppd_port *port = dppd_devices_find(&worker->runtime->devices, port_id);
-    if (port == NULL || !dppd_port_tx_available(port) || dppd_devices_removal_requested(&worker->runtime->devices))
+    if (port == NULL || !dppd_port_tx_available(port) || worker_io_quiesced(worker))
         return -ENODEV;
     struct rte_mbuf *mbuf = rte_pktmbuf_alloc(worker->runtime->devices.pools[port->socket_id]);
     if (mbuf == NULL)
@@ -56,6 +63,11 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
         return -ENOMEM;
     }
     memcpy(bytes, wire, length);
+    /** 分配与复制期间也可能收到事件，尚未交给驱动的报文仍由本线程归还 */
+    if (worker_io_quiesced(worker) || !dppd_port_tx_available(port)) {
+        rte_pktmbuf_free(mbuf);
+        return -ENODEV;
+    }
     if (rte_eth_tx_burst(port_id, worker->queue_id, &mbuf, 1) != 1) {
         rte_pktmbuf_free(mbuf);
         return -EAGAIN;
@@ -187,8 +199,11 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
     uint16_t counts[DPPD_MAX_PORTS] = {0};
     struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};
     struct dppd_software_count_batch rule_counts = {0};
-    if (dppd_devices_removal_requested(&runtime->devices))
+    if (worker_io_quiesced(worker)) {
+        /** RX 返回的报文已归线程所有，事件不能让这批 mbuf 因提前返回而泄漏 */
+        free_packets(rx, received);
         return;
+    }
     if (received == 0)
         return;
     delta.rx_packets = retry ? 0 : received;
@@ -354,6 +369,8 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
 
 static void process_ingress(struct dppd_worker *worker, const struct dppd_port *ingress)
 {
+    if (worker_io_quiesced(worker) || atomic_load_explicit(&ingress->removed, memory_order_acquire))
+        return;
     struct rte_mbuf *packets[DPPD_MAX_BURST];
     uint16_t count = rte_eth_rx_burst(ingress->port_id, worker->queue_id, packets, worker->runtime->config.burst_size);
     process_batch(worker, ingress, packets, count, false, 0);
@@ -408,9 +425,8 @@ int dppd_worker_main(void *arg)
     /** 完成全部读者注册后才宣布线程可以收发，健康查询据此统计实际运行的队列 */
     atomic_store_explicit(&worker->state, DPPD_WORKER_RUNNING, memory_order_release);
 
-    /** 移除回调直接通知所有工作线程退出，不依赖主线程先设置普通停止标记 */
-    while (!atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) &&
-        !dppd_devices_removal_requested(&runtime->devices)) {
+    /** 设备事件直接通知所有工作线程退出，不依赖主线程先设置普通停止标记 */
+    while (!worker_io_quiesced(worker)) {
         uint16_t i;
 
         if (runtime->nd6 != NULL) {

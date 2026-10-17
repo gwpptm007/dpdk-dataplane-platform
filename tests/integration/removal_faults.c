@@ -67,6 +67,21 @@ static bool mode_is(const char *mode)
     return value != NULL && strcmp(value, mode) == 0;
 }
 
+/** 缺省仍分发 RMV，只有显式环境变量才选择本轮新增的 RESET 或 DESTROY */
+static enum rte_eth_event_type selected_event(void)
+{
+    const char *value = getenv("DPPD_TEST_DEVICE_EVENT");
+
+    if (value == NULL || strcmp(value, "remove") == 0)
+        return RTE_ETH_EVENT_INTR_RMV;
+    if (strcmp(value, "reset") == 0)
+        return RTE_ETH_EVENT_INTR_RESET;
+    if (strcmp(value, "destroy") == 0)
+        return RTE_ETH_EVENT_DESTROY;
+    fprintf(stderr, "[removal-fixture] invalid selected device event\n");
+    _exit(93);
+}
+
 /** 默认选择第二个端口，也可指定第一个端口以覆盖端口扫描与初始化顺序 */
 static uint16_t target_port(void)
 {
@@ -93,7 +108,7 @@ static void pause_ms(long milliseconds)
 }
 
 /**
- * 先执行生产回调发布移除状态，再让代理保持半秒钟仍在 DPDK 回调分发器中
+ * 先执行生产回调发布选定事件，再让代理保持半秒钟仍在 DPDK 回调分发器中
  * 这段时间真实注销接口会返回 EAGAIN，可证明清理确实等待在途回调结束
  * 启动期间同步分发的场景不延时，专门覆盖注册尚未返回时已经收到事件的情况
  */
@@ -121,7 +136,7 @@ static void dispatch_event(uint16_t port_id)
         fprintf(stderr, "[removal-fixture] cannot find port=%u\n", port_id);
         _exit(91);
     }
-    process_real(device, RTE_ETH_EVENT_INTR_RMV, NULL);
+    process_real(device, selected_event(), NULL);
     fprintf(stderr, "[removal-fixture] dispatch port=%u finished\n", port_id);
 }
 
@@ -140,8 +155,8 @@ static void *wait_for_event(void *unused)
 }
 
 /**
- * 仅代理移除事件，其余事件交给真实接口
- * 可模拟注册失败、注册过程中立即移除，以及运行中由独立线程分发移除事件
+ * 仅代理显式选择的事件，其余事件交给真实接口
+ * 默认保留原移除测试，新增 RESET 与 DESTROY 只供独立进程验收隔离路径
  */
 int rte_eth_dev_callback_register(uint16_t port_id, enum rte_eth_event_type event, rte_eth_dev_cb_fn function,
     void *context)
@@ -149,7 +164,7 @@ int rte_eth_dev_callback_register(uint16_t port_id, enum rte_eth_event_type even
     int rc;
 
     pthread_once(&symbols_once, resolve_symbols);
-    if (event != RTE_ETH_EVENT_INTR_RMV || port_id >= RTE_MAX_ETHPORTS)
+    if (event != selected_event() || port_id >= RTE_MAX_ETHPORTS)
         return register_real(port_id, event, function, context);
     if (mode_is("register-error") && port_id == target_port())
         return -ENOMEM;
@@ -182,7 +197,7 @@ int rte_eth_dev_callback_unregister(uint16_t port_id, enum rte_eth_event_type ev
     int rc;
 
     pthread_once(&symbols_once, resolve_symbols);
-    if (event != RTE_ETH_EVENT_INTR_RMV || port_id >= RTE_MAX_ETHPORTS || entries[port_id].function != function ||
+    if (event != selected_event() || port_id >= RTE_MAX_ETHPORTS || entries[port_id].function != function ||
         entries[port_id].context != context)
         return unregister_real(port_id, event, function, context);
     rc = unregister_real(port_id, event, proxy_callback, &entries[port_id]);

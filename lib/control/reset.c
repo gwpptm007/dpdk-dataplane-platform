@@ -12,6 +12,7 @@ struct dppd_reset_plan {
     struct dppd_topology topology;
     uint64_t repository_generation, shared_revision;
     uint32_t count, shared_count;
+    bool device_reset, rebuilt;
 };
 
 static void increment(uint64_t *value)
@@ -148,19 +149,9 @@ static int rebuild_preflight(const struct dppd_control_service *service, const s
     return 0;
 }
 
-int dppd_control_simulate_reset(struct dppd_control_service *service)
+/** 捕获过程只读本地完整配置，任何错误都不发布半份恢复计划 */
+static int capture_plan(struct dppd_control_service *service, struct dppd_reset_plan **output)
 {
-    if (service == NULL || service->topology == NULL || service->rules.records == NULL)
-        return -EINVAL;
-    if (service->reset_plan != NULL)
-        return -EALREADY;
-    if (service->recovery_state != DPPD_CONTROL_RECOVERY_READY || service->persistence_dirty)
-        return failed(service, -EUCLEAN, 0);
-    /** 模拟不会停止真实 worker 或协调三层阶段，这些组合必须在失效任何对象前拒绝 */
-    if (service->rte_flow.api.simulate_reset == NULL || service->rte_flow.before_create != NULL ||
-        service->routing != NULL || service->conntrack != NULL || service->nd6 != NULL ||
-        dppd_software_backend_count(&service->software) != 0)
-        return failed(service, -ENOTSUP, 0);
     if (service->topology->nb_endpoints > DPPD_MAX_PORTS)
         return failed(service, -EINVAL, 0);
     if (dppd_rte_flow_backend_count(&service->rte_flow) != dppd_rule_repository_count(&service->rules))
@@ -187,9 +178,34 @@ int dppd_control_simulate_reset(struct dppd_control_service *service)
         rc = check_topology(plan, service->topology);
     if (rc == 0)
         rc = rebuild_preflight(service, plan);
+    if (rc != 0) {
+        free(plan->items);
+        free(plan);
+        return failed(service, rc, 0);
+    }
+    *output = plan;
+    return 0;
+}
+
+int dppd_control_simulate_reset(struct dppd_control_service *service)
+{
+    if (service == NULL || service->topology == NULL || service->rules.records == NULL)
+        return -EINVAL;
+    if (service->reset_plan != NULL)
+        return -EALREADY;
+    if (service->recovery_state != DPPD_CONTROL_RECOVERY_READY || service->persistence_dirty)
+        return failed(service, -EUCLEAN, 0);
+    /** 模拟不会停止真实 worker 或协调三层阶段，这些组合必须在失效任何对象前拒绝 */
+    if (service->rte_flow.api.simulate_reset == NULL || service->rte_flow.before_create != NULL ||
+        service->routing != NULL || service->conntrack != NULL || service->nd6 != NULL ||
+        dppd_software_backend_count(&service->software) != 0)
+        return failed(service, -ENOTSUP, 0);
+    struct dppd_reset_plan *plan;
+    int rc = capture_plan(service, &plan);
+    if (rc != 0)
+        return rc;
     struct dppd_flow_error error;
-    if (rc == 0)
-        rc = dppd_rte_flow_backend_simulate_reset(&service->rte_flow, &error);
+    rc = dppd_rte_flow_backend_simulate_reset(&service->rte_flow, &error);
     if (rc != 0) {
         free(plan->items);
         free(plan);
@@ -204,7 +220,61 @@ int dppd_control_simulate_reset(struct dppd_control_service *service)
     return 0;
 }
 
-/** 只清理本次已重建的有效句柄，失效旧句柄已由模拟复位回调从仓库移除 */
+int dppd_control_device_reset_prepare(struct dppd_control_service *service)
+{
+    if (service == NULL || service->topology == NULL || service->rules.records == NULL)
+        return -EINVAL;
+    if (service->reset_plan != NULL)
+        return -EALREADY;
+    if (service->recovery_state != DPPD_CONTROL_RECOVERY_READY || service->persistence_dirty ||
+        dppd_rte_flow_backend_is_quarantined(&service->rte_flow))
+        return -EUCLEAN;
+    /** 首期正式硬件重建不同时迁移三层或软件状态，拒绝发生在停止设备与清理对象之前 */
+    if (service->routing != NULL || service->conntrack != NULL || service->nd6 != NULL ||
+        dppd_software_backend_count(&service->software) != 0)
+        return -ENOTSUP;
+    struct dppd_reset_plan *plan;
+    int rc = capture_plan(service, &plan);
+    if (rc != 0)
+        return rc;
+    plan->device_reset = true;
+    service->reset_plan = plan;
+    service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+    service->recovery_last_error = 0;
+    return 0;
+}
+
+bool dppd_control_device_reset_pending(const struct dppd_control_service *service)
+{
+    return service != NULL && service->reset_plan != NULL && service->reset_plan->device_reset;
+}
+
+void dppd_control_device_isolate(struct dppd_control_service *service, int error)
+{
+    if (service == NULL)
+        return;
+    dppd_rte_flow_backend_quarantine(&service->rte_flow);
+    service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+    service->recovery_last_error = error != 0 ? error : -EUCLEAN;
+}
+
+int dppd_control_device_reset_cleanup(struct dppd_control_service *service)
+{
+    if (!dppd_control_device_reset_pending(service))
+        return -EALREADY;
+    struct dppd_reset_plan *plan = service->reset_plan;
+    if (service->persistence_dirty || service->shared_count_revision != plan->shared_revision ||
+        dppd_rule_repository_generation(&service->rules) != plan->repository_generation ||
+        dppd_rule_repository_count(&service->rules) != plan->count)
+        return failed(service, -EUCLEAN, 0);
+    uint32_t residual;
+    int rc = dppd_rte_flow_backend_reconcile(&service->rte_flow, &residual);
+    if (rc == 0 && residual == 0)
+        plan->rebuilt = false;
+    return rc == 0 && residual == 0 ? 0 : failed(service, rc != 0 ? rc : -EUCLEAN, rc != 0 ? rc : -EUCLEAN);
+}
+
+/** 只清理本次重建的有效句柄，正式复位已先删除旧对象，模拟复位则由专用回调使旧对象失效 */
 static int cleanup_failed_rebuild(struct dppd_control_service *service, int original)
 {
     uint32_t residual;
@@ -212,20 +282,23 @@ static int cleanup_failed_rebuild(struct dppd_control_service *service, int orig
     return failed(service, original, rc != 0 ? rc : residual != 0 ? -EUCLEAN : 0);
 }
 
-int dppd_control_reset_recover(struct dppd_control_service *service)
+static int recover_plan(struct dppd_control_service *service, bool device_reset)
 {
     if (service == NULL)
         return -EINVAL;
     struct dppd_reset_plan *plan = service->reset_plan;
     if (plan == NULL)
         return -EALREADY;
+    if (plan->device_reset != device_reset)
+        return -ENOTSUP;
     increment(&service->reset.attempts);
     if (service->persistence_dirty || service->shared_count_revision != plan->shared_revision ||
         dppd_rule_repository_generation(&service->rules) != plan->repository_generation ||
         dppd_rule_repository_count(&service->rules) != plan->count)
         return failed(service, -EUCLEAN, 0);
     if (service->routing != NULL || service->conntrack != NULL || service->nd6 != NULL ||
-        dppd_software_backend_count(&service->software) != 0 || service->rte_flow.before_create != NULL)
+        dppd_software_backend_count(&service->software) != 0 ||
+        (!device_reset && service->rte_flow.before_create != NULL))
         return failed(service, -ENOTSUP, 0);
     int rc = check_topology(plan, service->topology);
     if (rc != 0)
@@ -273,7 +346,44 @@ int dppd_control_reset_recover(struct dppd_control_service *service)
         if (rc != 0)
             return cleanup_failed_rebuild(service, rc);
     }
+    /** 正式设备还要核对事件并等待 worker 就绪，重建完成不能提前发布 READY */
+    if (device_reset) {
+        plan->rebuilt = true;
+        return 0;
+    }
     /** 账本与磁盘没有改写，只有整套实际对象重建成功才恢复 READY */
+    dppd_control_reset_plan_destroy(service);
+    service->recovery_state = DPPD_CONTROL_RECOVERY_READY;
+    service->recovery_last_error = 0;
+    service->reset.last_error = service->reset.cleanup_error = 0;
+    increment(&service->reset.recoveries);
+    service->age.cursor = service->age.next_poll_ns = 0;
+    service->age.last_error = service->age_cycle_error = 0;
+    return 0;
+}
+
+int dppd_control_reset_recover(struct dppd_control_service *service)
+{
+    return recover_plan(service, false);
+}
+
+int dppd_control_device_reset_rebuild(struct dppd_control_service *service)
+{
+    return recover_plan(service, true);
+}
+
+int dppd_control_device_reset_commit(struct dppd_control_service *service)
+{
+    if (!dppd_control_device_reset_pending(service))
+        return -EALREADY;
+    const struct dppd_reset_plan *plan = service->reset_plan;
+    if (!plan->rebuilt || service->persistence_dirty || service->shared_count_revision != plan->shared_revision ||
+        dppd_rule_repository_generation(&service->rules) != plan->repository_generation ||
+        dppd_rule_repository_count(&service->rules) != plan->count ||
+        dppd_rte_flow_backend_count(&service->rte_flow) != plan->count ||
+        dppd_rte_flow_backend_shared_count_count(&service->rte_flow) != plan->shared_count ||
+        dppd_rte_flow_backend_driver_ready(&service->rte_flow) != 0)
+        return failed(service, -EUCLEAN, 0);
     dppd_control_reset_plan_destroy(service);
     service->recovery_state = DPPD_CONTROL_RECOVERY_READY;
     service->recovery_last_error = 0;

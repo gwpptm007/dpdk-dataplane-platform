@@ -33,6 +33,47 @@ test('shared COUNT prepared and installed references', shared_backend_test)
 reset_test = executable('test_reset', 'test_reset.c', dependencies: dppd_core_dep)
 test('simulated reset isolation and exact desired rebuild', reset_test)
 
+# 回调只发布原子事件，复位、移除和销毁都不能绕过收发门禁
+device_events_test = executable('test_device_events', 'test_device_events.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_eth_dev_callback_register', '-Wl,--wrap=rte_eth_dev_callback_unregister',
+              '-Wl,--wrap=rte_eth_dev_stop', '-Wl,--wrap=rte_eth_dev_close', '-Wl,--wrap=rte_eth_dev_info_get',
+              '-Wl,--wrap=rte_eth_dev_get_name_by_port', '-Wl,--wrap=rte_eth_dev_is_valid_port', '-Wl,--wrap=rte_dev_name'])
+test('real device event latch and resume barriers', device_events_test)
+
+worker_device_gate_test = executable('test_worker_device_gate', 'test_worker_device_gate.c', dependencies: dppd_core_dep)
+test('worker RX TX event gates and mbuf return', worker_device_gate_test)
+
+device_backend_gate_test = executable('test_device_backend_gate', 'test_device_backend_gate.c', dependencies: dppd_core_dep)
+test('unknown device handles block every backend driver entry', device_backend_gate_test)
+
+# 全部设备操作为显式夹具，只验证正式顺序与失败后资源保留，不登记为实机复位
+device_reset_test = executable('test_device_reset', 'test_device_reset.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_eth_dev_callback_register', '-Wl,--wrap=rte_eth_dev_callback_unregister',
+              '-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_eth_dev_get_name_by_port',
+              '-Wl,--wrap=rte_eth_dev_fw_version_get', '-Wl,--wrap=rte_eth_dev_is_valid_port',
+              '-Wl,--wrap=rte_eth_dev_is_removed', '-Wl,--wrap=rte_eth_dev_socket_id', '-Wl,--wrap=rte_eth_dev_stop',
+              '-Wl,--wrap=rte_eth_dev_reset', '-Wl,--wrap=rte_eth_dev_configure',
+              '-Wl,--wrap=rte_eth_dev_adjust_nb_rx_tx_desc', '-Wl,--wrap=rte_eth_dev_start',
+              '-Wl,--wrap=rte_eth_dev_close', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=rte_eth_macaddr_get',
+              '-Wl,--wrap=rte_eth_rx_queue_setup', '-Wl,--wrap=rte_eth_tx_queue_setup',
+              '-Wl,--wrap=rte_eth_promiscuous_enable', '-Wl,--wrap=rte_eth_allmulticast_enable',
+              '-Wl,--wrap=rte_pktmbuf_pool_create', '-Wl,--wrap=rte_mempool_avail_count', '-Wl,--wrap=rte_mempool_free',
+              '-Wl,--wrap=rte_eth_link_get_nowait', '-Wl,--wrap=dppd_topology_discover',
+              '-Wl,--wrap=dppd_topology_rediscover_verified'])
+test('device stop reset reconfigure identity and failure contract', device_reset_test)
+
+device_safety_test = executable('test_device_safety', 'test_device_safety.c', dependencies: dppd_core_dep)
+test('management PCI protection before planned reset', device_safety_test)
+
+# 正式协调器使用真实控制计划，设备边界为夹具，覆盖补偿重试与事件窗口
+device_recovery_test = executable('test_device_recovery', 'test_device_recovery.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=dppd_runtime_wait', '-Wl,--wrap=dppd_runtime_start',
+              '-Wl,--wrap=dppd_devices_enable_event_tracking', '-Wl,--wrap=dppd_devices_pause_io',
+              '-Wl,--wrap=dppd_devices_reset_reconfigure', '-Wl,--wrap=dppd_devices_reset_identity_ready',
+              '-Wl,--wrap=dppd_devices_check_reset_safety', '-Wl,--wrap=dppd_topology_rediscover_verified',
+              '-Wl,--wrap=dppd_devices_resume_after_event', '-Wl,--wrap=dppd_devices_poll_links'])
+test('formal device reset coordination and unknown event isolation', device_recovery_test)
+
 transfer_test = executable('test_transfer', 'test_transfer.c', dependencies: dppd_core_dep)
 test('simulated transfer templates and control lifecycle', transfer_test)
 
