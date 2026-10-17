@@ -77,6 +77,13 @@ static void test_acl_arguments(void)
     query[0] = "nat-status";
     assert(build_request(1, query, &request) == 0 && request.operation == DPPD_MANAGEMENT_NAT_STATUS);
     assert(build_request(2, query, &request) == -EINVAL);
+    query[0] = "dnat-list";
+    assert(build_request(1, query, &request) == 0 && request.operation == DPPD_MANAGEMENT_DNAT_LIST);
+    query[1] = "4";
+    assert(build_request(2, query, &request) == 0 && request.payload.conntrack.after_id == 4);
+    assert(build_request(3, query, &request) == -EINVAL);
+    query[1] = "-1";
+    assert(build_request(2, query, &request) == -EINVAL);
 }
 
 /** 路由命令先完整解析再连接服务，错误文件不能被当成空配置发送 */

@@ -28,7 +28,7 @@ SmartNIC/DPU 上全路径策略一致性及硬件 ACL 适配属于后续阶段�
 
 `acl-set` 固定使用软件后端，创建使用旧版本 0，更新必须指定查询到的精确旧版本，
 不接受 `any`。ID、版本和计数与已有 rule repository 共用，没有第二套 ACL 账本。
-ACL 首版为 v17，当前 [连接跟踪](conntrack_nat.md) 扩展为 v18，daemon 与 CLI 必须配套。
+ACL 首版为 v17，当前[静态 DNAT](dnat.md) 已扩展为 v19，daemon 与 CLI 必须配套。
 `state:new,established` 等状态条件已接通，启用跟踪后所有规则强制经软件执行。
 
 ```sh

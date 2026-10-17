@@ -5,6 +5,9 @@ TCP/UDP 出站 SNAT 和对应回包的反向转换。正式 daemon、状态 ACL�
 查询、清空、资源回收和重启行为均已接通。此交付是静态启动策略下的 IPv4 软件基线，
 不表示完整 NAT 家族或整个 M2 已完成。
 
+后续已完成 [静态 DNAT 与端口转发](dnat.md)，包含整地址映射、单端口/端口段、
+对应回包及与 SNAT 的端口保留。本页保留连接跟踪和出站 SNAT 的原始验收记录。
+
 ## 启动与配置
 
 在现有 EAL 参数后的应用参数中启用：
@@ -23,7 +26,7 @@ TCP/UDP 出站 SNAT 和对应回包的反向转换。正式 daemon、状态 ACL�
 物理网卡；部署需自行提供正确的两向路由、静态邻居及外部可达性。
 
 NAT 策略在本进程启动时固定，来自启动参数，需由部署配置保留；运行中不支持改池、
-动态规则和静态端口转发。规则与路由仍分别通过原有快照保存。运行时会话、映射和
+动态规则；静态端口转发通过另行声明的 `--dnat` 配置。规则与路由仍分别通过原有快照保存。运行时会话、映射和
 流量计数不持久化，重启后清空，不把旧 TCP 流静默恢复成已建立状态。
 
 跟踪模式强制所有规则经过软件处理，禁止硬件直转和不具软件等价语义的动作。
@@ -120,7 +123,8 @@ RST 后最多 2 秒，均不超过配置的基础超时。每个有效且被接�
 不跨重启比较。清空必须指定当前修订号，错误版本不修改会话；清空归还映射，但不能
 撤回已经进入发送批次的报文。
 
-管理协议为 v18。`stats`/telemetry 增加 `ct_invalid_drops`、`ct_full_drops`、
+本阶段管理协议为 v18，后续静态 DNAT 扩展为 v19，daemon 与 CLI 须配套。
+`stats`/telemetry 增加 `ct_invalid_drops`、`ct_full_drops`、
 `ct_unsupported_drops`、`ct_zone_drops`、`ct_checksum_drops`、`nat_pool_drops` 和
 `nat_miss_drops`。校验和失败在跟踪模式中统一归 `ct_checksum_drops`，TTL 沿用三层
 计数。ACL 先拒绝时计入 `rule_drops`，会话状态命令另外记录资源失败累计值。
@@ -155,6 +159,6 @@ python3 tests/integration/software_traffic.py --build-dir build
 单端口池复用、SIGKILL 后会话清空与策略重放，以及禁用跟踪时拒绝恢复状态规则。
 测试只创建和删除自己的虚拟接口，不改实体网卡。既有 ACL、二层及 IPv4 路由回归保留。
 
-IPv6、RELATED/ICMP 错误转换、分片重组、静态 DNAT/端口转发、hairpin、ALG、完整 TCP
-窗口验证、会话复制和硬件有状态卸载未实现。它们不计入本次 TCP/UDP 跟踪及出站 SNAT
-闭环，后续按独立目标推进。
+静态 DNAT/端口转发已在[后续阶段](dnat.md)接通。IPv6、RELATED/ICMP 错误转换、
+分片重组、hairpin、ALG、完整 TCP 窗口验证、会话复制和硬件有状态卸载仍未实现。
+它们不计入 TCP/UDP 跟踪及出站 SNAT 闭环，后续按独立目标推进。

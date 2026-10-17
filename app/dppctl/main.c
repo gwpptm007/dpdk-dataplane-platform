@@ -27,6 +27,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] conntrack-status|nat-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] conntrack-list [AFTER_ID [REVISION]]\n", program);
     fprintf(stderr, "  %s [--socket PATH] conntrack-flush REVISION\n", program);
+    fprintf(stderr, "  %s [--socket PATH] dnat-list [AFTER_ID]\n", program);
     fprintf(stderr, "  ACL modifiers also accept state:new,established,invalid,untracked\n");
     dppctl_routing_usage(program);
     fprintf(stderr, "  %s [--socket PATH] ping\n", program);

@@ -93,6 +93,127 @@ static int parse_snat(const char *text, struct dppd_snat_config *nat)
     return 0;
 }
 
+static bool unicast(uint32_t address_be)
+{
+    uint32_t address = ntohl(address_be);
+    return address >= 0x01000000U && (address >> 24) != 127 && address < 0xe0000000U;
+}
+
+static bool overlaps(uint32_t first, uint32_t last, uint32_t other_first, uint32_t other_last)
+{
+    return first <= other_last && other_first <= last;
+}
+
+/** 同一公网入口不能有重叠规则，同一后端也不能有两种回包无法区分的公网身份 */
+int dppd_nat_validate(const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t count)
+{
+    if (count > DPPD_MAX_DNAT_RULES || (count != 0 && dnat == NULL))
+        return -EINVAL;
+    if (snat != NULL && snat->enabled &&
+        (!unicast(snat->address_be) || snat->inside_port == snat->outside_port || snat->inside_port == UINT16_MAX ||
+            snat->outside_port == UINT16_MAX || snat->first_port == 0 || snat->first_port > snat->last_port))
+        return -EINVAL;
+    uint32_t reserved[2] = {0};
+    for (uint32_t i = 0; i < count; ++i) {
+        const struct dppd_dnat_rule *rule = &dnat[i];
+        uint32_t last = (uint32_t)rule->private_first + rule->public_last - rule->public_first;
+        if (!unicast(rule->public_address_be) || !unicast(rule->private_address_be) ||
+            rule->public_address_be == rule->private_address_be || (rule->protocol != 6 && rule->protocol != 17) ||
+            rule->outside_port == rule->inside_port || rule->outside_port == UINT16_MAX ||
+            rule->inside_port == UINT16_MAX || rule->public_first > rule->public_last || last > UINT16_MAX ||
+            (rule->public_first == 0 && (rule->public_last != UINT16_MAX || rule->private_first != 0)) ||
+            (rule->public_first != 0 && rule->private_first == 0))
+            return -EINVAL;
+        for (uint32_t j = 0; j < i; ++j) {
+            const struct dppd_dnat_rule *other = &dnat[j];
+            if (rule->protocol != other->protocol)
+                continue;
+            if ((rule->outside_port == other->outside_port && rule->public_address_be == other->public_address_be &&
+                    overlaps(rule->public_first, rule->public_last, other->public_first, other->public_last)) ||
+                (rule->inside_port == other->inside_port && rule->private_address_be == other->private_address_be &&
+                    overlaps(rule->private_first, last, other->private_first,
+                        (uint32_t)other->private_first + other->public_last - other->public_first)))
+                return -EEXIST;
+        }
+        if (snat != NULL && snat->enabled && rule->outside_port == snat->outside_port &&
+            rule->public_address_be == snat->address_be &&
+            overlaps(rule->public_first, rule->public_last, snat->first_port, snat->last_port)) {
+            uint32_t first = rule->public_first > snat->first_port ? rule->public_first : snat->first_port;
+            uint32_t end = rule->public_last < snat->last_port ? rule->public_last : snat->last_port;
+            reserved[rule->protocol == 6] += end - first + 1;
+        }
+    }
+    /** SNAT 仍承诺 TCP 和 UDP 都可分配，静态保留不能吃掉任一协议的整个动态池 */
+    if (snat != NULL && snat->enabled &&
+        (reserved[0] == (uint32_t)snat->last_port - snat->first_port + 1 ||
+            reserved[1] == (uint32_t)snat->last_port - snat->first_port + 1))
+        return -ENOSPC;
+    return 0;
+}
+
+/** 单端口与等长端口段用同一种表示，any 只允许配 same，避免截断或取模映射 */
+static int parse_port_range(char *text, uint16_t *first, uint16_t *last)
+{
+    char *dash = strchr(text, '-');
+    if (dash != NULL)
+        *dash++ = '\0';
+    uint32_t start, end;
+    if (*text < '0' || *text > '9' || parse_u32(text, 1, UINT16_MAX, &start) != 0 ||
+        (dash != NULL && (*dash < '0' || *dash > '9' || parse_u32(dash, 1, UINT16_MAX, &end) != 0)))
+        return -1;
+    if (dash == NULL)
+        end = start;
+    *first = (uint16_t)start;
+    *last = (uint16_t)end;
+    return start <= end ? 0 : -1;
+}
+
+static int parse_dnat(const char *text, struct dppd_dnat_rule *rule)
+{
+    char copy[192];
+    if (text == NULL || strlen(text) >= sizeof(copy))
+        return -1;
+    strcpy(copy, text);
+    char *fields[7], *cursor = copy;
+    for (unsigned int i = 0; i < 7; ++i) {
+        fields[i] = cursor;
+        char *comma = strchr(cursor, ',');
+        if ((i < 6 && comma == NULL) || (i == 6 && comma != NULL))
+            return -1;
+        if (comma != NULL) {
+            *comma = '\0';
+            cursor = comma + 1;
+        }
+        if (*fields[i] == '\0')
+            return -1;
+    }
+    uint32_t outside, inside;
+    memset(rule, 0, sizeof(*rule));
+    if (*fields[0] < '0' || *fields[0] > '9' || *fields[1] < '0' || *fields[1] > '9' ||
+        parse_u32(fields[0], 0, UINT16_MAX - 1U, &outside) != 0 ||
+        parse_u32(fields[1], 0, UINT16_MAX - 1U, &inside) != 0 ||
+        inet_pton(AF_INET, fields[3], &rule->public_address_be) != 1 ||
+        inet_pton(AF_INET, fields[5], &rule->private_address_be) != 1)
+        return -1;
+    rule->outside_port = (uint16_t)outside;
+    rule->inside_port = (uint16_t)inside;
+    rule->protocol = strcmp(fields[2], "tcp") == 0 ? 6 : strcmp(fields[2], "udp") == 0 ? 17 : 0;
+    bool all = strcmp(fields[4], "any") == 0;
+    if (all)
+        rule->public_last = UINT16_MAX;
+    else if (parse_port_range(fields[4], &rule->public_first, &rule->public_last) != 0)
+        return -1;
+    if (strcmp(fields[6], "same") == 0)
+        rule->private_first = rule->public_first;
+    else {
+        uint16_t last;
+        if (all || parse_port_range(fields[6], &rule->private_first, &last) != 0 ||
+            last - rule->private_first != rule->public_last - rule->public_first)
+            return -1;
+    }
+    return dppd_nat_validate(NULL, rule, 1);
+}
+
 void dppd_config_defaults(struct dppd_config *cfg)
 {
     /* 先清零确保新增字段有确定默认值，再覆盖可运行的最小双端口配置 */
@@ -134,6 +255,7 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"conntrack", required_argument, NULL, 1009},
         {"ct-timeout", required_argument, NULL, 1010},
         {"snat", required_argument, NULL, 1011},
+        {"dnat", required_argument, NULL, 1012},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -237,6 +359,11 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
             if (parse_snat(optarg, &cfg->snat) != 0)
                 return DPPD_CONFIG_ERROR;
             break;
+        case 1012:
+            if (cfg->dnat_count == DPPD_MAX_DNAT_RULES || parse_dnat(optarg, &cfg->dnat[cfg->dnat_count]) != 0)
+                return DPPD_CONFIG_ERROR;
+            cfg->dnat_count++;
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -267,24 +394,35 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
     if (cfg == NULL || error == NULL || error_len == 0)
         return -1;
     if ((cfg->conntrack_capacity != 0 && cfg->routing_path[0] == '\0') ||
-        (cfg->snat.enabled && cfg->conntrack_capacity == 0) || cfg->conntrack_capacity > 65536 ||
-        cfg->conntrack_timeout_s == 0 || cfg->conntrack_timeout_s > 86400) {
+        ((cfg->snat.enabled || cfg->dnat_count != 0) && cfg->conntrack_capacity == 0) ||
+        cfg->conntrack_capacity > 65536 || cfg->conntrack_timeout_s == 0 || cfg->conntrack_timeout_s > 86400) {
         snprintf(error, error_len,
-            "conntrack requires IPv4 routing, a bounded capacity and valid timeout; SNAT requires conntrack");
+            "conntrack requires IPv4 routing, a bounded capacity and valid timeout; NAT requires conntrack");
         return -1;
     }
+    if (dppd_nat_validate(&cfg->snat, cfg->dnat, cfg->dnat_count) != 0) {
+        snprintf(error, error_len, "invalid or conflicting NAT rules, or static reservations exhaust the SNAT pool");
+        return -1;
+    }
+    for (uint32_t index = 0; index < cfg->dnat_count; ++index) {
+        bool inside = false, outside = false;
+        for (uint16_t port = 0; port < cfg->nb_ports && port < DPPD_MAX_PORTS; ++port) {
+            inside |= cfg->ports[port] == cfg->dnat[index].inside_port;
+            outside |= cfg->ports[port] == cfg->dnat[index].outside_port;
+        }
+        if (!inside || !outside) {
+            snprintf(error, error_len, "DNAT requires configured inside/outside ports");
+            return -1;
+        }
+    }
     if (cfg->snat.enabled) {
-        uint32_t address = ntohl(cfg->snat.address_be);
         bool inside = false, outside = false;
         for (uint16_t index = 0; index < cfg->nb_ports && index < DPPD_MAX_PORTS; ++index) {
             inside |= cfg->ports[index] == cfg->snat.inside_port;
             outside |= cfg->ports[index] == cfg->snat.outside_port;
         }
-        if (!inside || !outside || address < 0x01000000U || (address >> 24) == 127 || address >= 0xe0000000U ||
-            cfg->snat.inside_port == cfg->snat.outside_port || cfg->snat.first_port == 0 ||
-            cfg->snat.first_port > cfg->snat.last_port) {
-            snprintf(error, error_len,
-                "SNAT requires distinct configured inside/outside ports and a nonempty port pool");
+        if (!inside || !outside) {
+            snprintf(error, error_len, "SNAT requires configured inside/outside ports");
             return -1;
         }
     }
@@ -362,6 +500,8 @@ void dppd_config_print_usage(const char *program)
     printf("  --conntrack N       track IPv4 TCP/UDP sessions, capacity 1..65536, requires IPv4 routing\n");
     printf("  --ct-timeout N      established idle timeout in seconds (default 300)\n");
     printf("  --snat I,O,IP,A-B   translate inside I to outside O using public IPv4 and TCP/UDP port pool\n");
+    printf("  --dnat O,I,PROTO,PUBLIC,PORTS,PRIVATE,PORTS  repeatable static TCP/UDP destination translation\n");
+    printf("                      PORTS accepts N or A-B; public any requires private same\n");
     printf("  --recovery-path P   guard hardware replay after an unclean exit (requires state-path)\n");
     printf("  --tap-owner-cookie require native TAP owner cookie (patched driver and recovery-path)\n");
     printf("  --recovery-monitor P require a live monitor session before hardware installation\n");
@@ -384,6 +524,6 @@ void dppd_config_dump(const struct dppd_config *cfg)
     if (cfg->routing_path[0] != '\0')
         printf("[dppd] forwarding=ipv4-routing routing-path=%s\n", cfg->routing_path);
     if (cfg->conntrack_capacity != 0)
-        printf("[dppd] conntrack capacity=%u timeout=%us snat=%s\n", cfg->conntrack_capacity, cfg->conntrack_timeout_s,
-            cfg->snat.enabled ? "on" : "off");
+        printf("[dppd] conntrack capacity=%u timeout=%us snat=%s dnat-rules=%u\n", cfg->conntrack_capacity,
+            cfg->conntrack_timeout_s, cfg->snat.enabled ? "on" : "off", cfg->dnat_count);
 }

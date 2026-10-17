@@ -451,6 +451,60 @@ static void configure_queues(struct fixture *fixture)
     assert(false);
 }
 
+/** 静态服务两向都走正式 worker，共享原包保持不变，跨队列只创建一个会话 */
+static void dnat_queues(struct fixture *fixture, const struct dppd_dnat_rule *dnat)
+{
+    uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
+    for (unsigned int reply = 0; reply < 2; ++reply)
+        for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+            uint8_t wire[FRAME_SIZE], expected[FRAME_SIZE], buffer[FRAME_SIZE];
+            fill_frame(wire, 0, 993);
+            uint32_t remote = ip("203.0.113.7");
+            uint16_t remote_port = htons(5678), public_port = htons(dnat->public_first);
+            uint16_t private_port = htons(dnat->private_first);
+            memcpy(wire + 26, reply ? &dnat->private_address_be : &remote, 4);
+            memcpy(wire + 30, reply ? &remote : &dnat->public_address_be, 4);
+            memcpy(wire + 34, reply ? &private_port : &remote_port, 2);
+            memcpy(wire + 36, reply ? &remote_port : &public_port, 2);
+            wire[24] = wire[25] = 0;
+            uint16_t crc = checksum(wire + 14, 20);
+            wire[24] = (uint8_t)(crc >> 8);
+            wire[25] = (uint8_t)crc;
+            memcpy(expected, wire, FRAME_SIZE);
+            uint16_t ingress = reply ? 0 : 1, egress = reply ? 1 : 0;
+            memcpy(expected, reply ? (uint8_t[]){2, 0, 0, 0, 0, 1} : (uint8_t[]){2, 0, 0, 0, 0, 10}, 6);
+            memcpy(expected + 6, fixture->runtime.devices.ports[egress].mac.addr_bytes, 6);
+            memcpy(expected + (reply ? 26 : 30), reply ? &dnat->public_address_be : &dnat->private_address_be, 4);
+            memcpy(expected + (reply ? 34 : 36), reply ? &public_port : &private_port, 2);
+            expected[22]--;
+            expected[24] = expected[25] = 0;
+            crc = checksum(expected + 14, 20);
+            expected[24] = (uint8_t)(crc >> 8);
+            expected[25] = (uint8_t)crc;
+            struct rte_mbuf *mbuf = rte_pktmbuf_alloc(fixture->pool);
+            assert(mbuf != NULL);
+            memcpy(rte_pktmbuf_append(mbuf, FRAME_SIZE), wire, FRAME_SIZE);
+            rte_mbuf_refcnt_update(mbuf, 1);
+            assert(rte_ring_enqueue(fixture->rx[ingress][queue], mbuf) == 0);
+            fixture->sent++;
+            void *object;
+            while (rte_ring_dequeue(fixture->tx[egress][queue], &object) != 0) {
+                assert(rte_get_timer_cycles() < deadline);
+                rte_pause();
+            }
+            assert(memcmp(rte_pktmbuf_read(object, 0, FRAME_SIZE, buffer), expected, FRAME_SIZE) == 0);
+            assert(memcmp(rte_pktmbuf_read(mbuf, 0, FRAME_SIZE, buffer), wire, FRAME_SIZE) == 0);
+            rte_pktmbuf_free(object);
+            rte_pktmbuf_free(mbuf);
+            fixture->forwarded++;
+        }
+    struct dppd_connection_page page;
+    assert(dppd_conntrack_list(fixture->runtime.conntrack, dppd_monotonic_ms(), 0, 0, &page) == 0 && page.count == 2);
+    assert(page.entries[1].dnat_rule_id == 1 && page.entries[1].seen_reply &&
+        page.entries[1].packets[0] == fixture->queues && page.entries[1].packets[1] == fixture->queues);
+    printf("PASS DNAT worker queues=%u shared-session=1 original-unchanged=yes\n", fixture->queues);
+}
+
 /** 同一流从不同 RX 队列进出也必须共用映射，回包恢复内网地址，共享原包保持不变 */
 static void stateful_queues(struct fixture *fixture)
 {
@@ -471,7 +525,15 @@ static void stateful_queues(struct fixture *fixture)
         .address_be = ip("192.0.2.250"),
         .first_port = 40000,
         .last_port = 40007};
-    assert(dppd_conntrack_create(&fixture->runtime.conntrack, 32, 60, &nat) == 0);
+    struct dppd_dnat_rule dnat = {.outside_port = 1,
+        .inside_port = 0,
+        .protocol = 17,
+        .public_address_be = nat.address_be,
+        .private_address_be = ip("198.18.0.1"),
+        .public_first = 40000,
+        .public_last = 40000,
+        .private_first = 8000};
+    assert(dppd_conntrack_create(&fixture->runtime.conntrack, 32, 60, &nat, &dnat, 1) == 0);
     fixture->control.conntrack = fixture->runtime.conntrack;
     assert(dppd_runtime_start(&fixture->runtime) == 0);
     uint16_t mapped = 0;
@@ -555,6 +617,7 @@ static void stateful_queues(struct fixture *fixture)
     assert(page.entries[0].seen_reply && page.entries[0].packets[0] == fixture->queues &&
         page.entries[0].packets[1] == fixture->queues);
     printf("PASS conntrack/NAT worker queues=%u shared-session=1 original-unchanged=yes\n", fixture->queues);
+    dnat_queues(fixture, &dnat);
 }
 
 static void run_case(uint16_t queues)

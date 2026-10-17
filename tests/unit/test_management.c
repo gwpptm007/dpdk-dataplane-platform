@@ -226,7 +226,7 @@ static void test_conntrack_management(void)
     rule->nb_actions = 1;
     rule->actions[0].type = DPPD_ACTION_ALLOW;
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -ENOTSUP);
-    assert(dppd_conntrack_create(&control.conntrack, 8, 60, NULL) == 0);
+    assert(dppd_conntrack_create(&control.conntrack, 8, 60, NULL, NULL, 0) == 0);
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
     struct dppd_packet packet = {.l3_type = DPPD_L3_IPV4,
         .l4_type = DPPD_L4_UDP,
@@ -249,6 +249,30 @@ static void test_conntrack_management(void)
     request.payload.conntrack.expected_revision = revision;
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
     assert(response.payload.conntrack.active == 0);
+    dppd_conntrack_destroy(control.conntrack);
+    control.conntrack = NULL;
+    struct dppd_dnat_rule dnat = {.outside_port = 1,
+        .inside_port = 0,
+        .protocol = 6,
+        .public_address_be = htonl(0xcb007109),
+        .private_address_be = htonl(0x0a000009),
+        .public_first = 443,
+        .public_last = 443,
+        .private_first = 8443};
+    assert(dppd_conntrack_create(&control.conntrack, 8, 60, NULL, &dnat, 1) == 0);
+    initialize_request(&request, DPPD_MANAGEMENT_DNAT_LIST);
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
+    assert(response.payload.dnat.count == 1 && response.payload.dnat.entries[0].rule.private_first == 8443);
+    /** 处于恢复隔离也可核对静态策略，但清空会话仍属于禁止的写入操作 */
+    enum dppd_control_recovery_state saved_state = control.recovery_state;
+    control.recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
+    initialize_request(&request, DPPD_MANAGEMENT_NAT_STATUS);
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
+    assert(response.payload.conntrack.dnat_count == 1);
+    initialize_request(&request, DPPD_MANAGEMENT_CONNTRACK_FLUSH);
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -EUCLEAN);
+    control.recovery_state = saved_state;
     struct dppd_conntrack *table = control.conntrack;
     assert(dppd_control_fini(&control) == 0);
     dppd_conntrack_destroy(table);

@@ -45,7 +45,7 @@ static void accept_packet(struct dppd_conntrack *table, bool reply, const struct
 static void test_udp(void)
 {
     struct dppd_conntrack *table = NULL;
-    assert(dppd_conntrack_create(&table, 3, 2, NULL) == 0);
+    assert(dppd_conntrack_create(&table, 3, 2, NULL, NULL, 0) == 0);
     struct dppd_packet forward = packet(false, false), reply = packet(true, false);
     struct dppd_connection_attempt attempt;
     assert(dppd_conntrack_begin(table, 0, &forward, 10, &attempt) == 0 && attempt.state == DPPD_CT_NEW);
@@ -76,7 +76,7 @@ static void test_udp(void)
 static void test_tcp(void)
 {
     struct dppd_conntrack *table = NULL;
-    assert(dppd_conntrack_create(&table, 8, 60, NULL) == 0);
+    assert(dppd_conntrack_create(&table, 8, 60, NULL, NULL, 0) == 0);
     struct dppd_packet forward = packet(false, true), reply = packet(true, true);
     struct dppd_connection_attempt attempt;
     forward.tcp_flags = 16;
@@ -133,7 +133,7 @@ static void test_tcp(void)
 static void test_capacity(void)
 {
     struct dppd_conntrack *table = NULL;
-    assert(dppd_conntrack_create(&table, 7, 2, NULL) == 0);
+    assert(dppd_conntrack_create(&table, 7, 2, NULL, NULL, 0) == 0);
     struct dppd_packet value = packet(false, false);
     for (uint16_t i = 0; i < 7; ++i) {
         value.l4_src_port_be = htons((uint16_t)(1000 + i));
@@ -179,7 +179,7 @@ static void *traffic(void *context)
 static void test_concurrent(void)
 {
     struct dppd_conntrack *table = NULL;
-    assert(dppd_conntrack_create(&table, 32, 60, NULL) == 0);
+    assert(dppd_conntrack_create(&table, 32, 60, NULL, NULL, 0) == 0);
     struct dppd_packet value = packet(false, false);
     accept_packet(table, false, &value, 1, DPPD_CT_NEW);
     struct reader readers[4];
@@ -206,7 +206,7 @@ static void test_snat(void)
         .last_port = 40001,
         .address_be = htonl(0xcb007101)};
     struct dppd_conntrack *table = NULL;
-    assert(dppd_conntrack_create(&table, 3, 2, &nat) == 0);
+    assert(dppd_conntrack_create(&table, 3, 2, &nat, NULL, 0) == 0);
     struct dppd_packet value = packet(false, false), reply = packet(true, false);
     struct dppd_connection_attempt attempt;
     assert(dppd_conntrack_begin(table, 0, &value, 10, &attempt) == 0 && attempt.nat);
@@ -248,7 +248,7 @@ int main(void)
     for (unsigned int i = 1; i <= 4; ++i) {
         struct dppd_conntrack *table = NULL;
         fail_allocation = i;
-        assert(dppd_conntrack_create(&table, 8, 60, NULL) == -ENOMEM && table == NULL);
+        assert(dppd_conntrack_create(&table, 8, 60, NULL, NULL, 0) == -ENOMEM && table == NULL);
         fail_allocation = 0;
     }
     test_udp();

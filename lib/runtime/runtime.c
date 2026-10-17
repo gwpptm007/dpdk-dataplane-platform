@@ -60,7 +60,8 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         return rc;
 
     if (cfg->conntrack_capacity != 0) {
-        rc = dppd_conntrack_create(&runtime->conntrack, cfg->conntrack_capacity, cfg->conntrack_timeout_s, &cfg->snat);
+        rc = dppd_conntrack_create(&runtime->conntrack, cfg->conntrack_capacity, cfg->conntrack_timeout_s, &cfg->snat,
+            cfg->dnat, cfg->dnat_count);
         if (rc != 0) {
             dppd_devices_stop(&runtime->devices);
             return rc;

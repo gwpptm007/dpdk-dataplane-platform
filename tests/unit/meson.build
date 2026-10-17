@@ -12,6 +12,9 @@ conntrack_test = executable('test_conntrack', 'test_conntrack.c', dependencies: 
   link_args: ['-Wl,--wrap=calloc'])
 test('connection tracking lifecycle and concurrency', conntrack_test)
 
+dnat_test = executable('test_dnat', 'test_dnat.c', dependencies: dppd_core_dep)
+test('static DNAT forwarding and reservations', dnat_test)
+
 config_test = executable(
   'test_config',
   'test_config.c',

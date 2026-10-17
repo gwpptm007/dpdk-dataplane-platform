@@ -29,7 +29,7 @@ MAC 来自同一版邻居表，TTL 递减一次并重新计算头校验和。IP 
 归入口、TX 归实际出口，同口转发同样不会重复释放或重复统计。
 
 默认仍走已有端口对转发，三层路由显式启用。新增三层统计时管理协议提升至 v16，随后
-[ACL](acl.md) 扩展为 v17，目前连接跟踪与 SNAT 已扩展为 v18，daemon 和 dppctl 必须同版本配套。
+[ACL](acl.md) 扩展为 v17，目前[静态 DNAT](dnat.md) 已扩展为 v19，daemon 和 dppctl 必须同版本配套。
 原始单字段统计是独立原子采样，不承诺全部字段来自同一时刻。
 
 TTL、头校验和及下一跳处理参考 [RFC 1812](https://www.rfc-editor.org/rfc/rfc1812.html)。

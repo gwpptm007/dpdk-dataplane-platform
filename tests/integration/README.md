@@ -1,5 +1,19 @@
 # 集成验收
 
+## 静态 DNAT 与端口转发
+
+```sh
+sudo python3 tests/integration/dnat_traffic.py --build-dir build
+sudo python3 tests/integration/dnat_traffic.py --build-dir build-native
+python3 tests/integration/ipv4_traffic.py --build-dir build
+```
+
+2026-10-17，两套构建各 43/43 单测、七项相关 sanitizer 通过。三 TAP 核对整地址、
+单端口/端口段、UDP/TCP 和完整双向校验和、状态 ACL、拒绝不建连/不刷新、入口与
+出口错误、无路由/邻居、满表、静态端口与 SNAT 共存、分页查询、清空、过期和崩溃
+重启。单双队列正式 worker 核对同一服务共用会话、共享原包不变和 mbuf 零泄漏。
+测试只使用自己创建的虚拟接口，语义及范围见 [静态 DNAT](../../docs/dnat.md)。
+
 ## TCP/UDP 连接跟踪与出站 SNAT
 
 ```sh

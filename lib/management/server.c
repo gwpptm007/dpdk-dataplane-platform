@@ -294,7 +294,8 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         request->operation != DPPD_MANAGEMENT_RULE_METRICS && request->operation != DPPD_MANAGEMENT_RULE_LATENCY &&
         request->operation != DPPD_MANAGEMENT_RULE_HISTORY && request->operation != DPPD_MANAGEMENT_ROUTING_STATUS &&
         request->operation != DPPD_MANAGEMENT_ROUTING_GET && request->operation != DPPD_MANAGEMENT_CONNTRACK_STATUS &&
-        request->operation != DPPD_MANAGEMENT_CONNTRACK_LIST && request->operation != DPPD_MANAGEMENT_NAT_STATUS) {
+        request->operation != DPPD_MANAGEMENT_CONNTRACK_LIST && request->operation != DPPD_MANAGEMENT_NAT_STATUS &&
+        request->operation != DPPD_MANAGEMENT_DNAT_LIST) {
         response->status = -EUCLEAN;
         return 0;
     }
@@ -529,6 +530,9 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
     case DPPD_MANAGEMENT_NAT_STATUS:
         dppd_conntrack_status(control->conntrack, dppd_monotonic_ms(), &response->payload.conntrack);
         rc = 0;
+        break;
+    case DPPD_MANAGEMENT_DNAT_LIST:
+        rc = dppd_conntrack_dnat_list(control->conntrack, request->payload.conntrack.after_id, &response->payload.dnat);
         break;
     case DPPD_MANAGEMENT_CONNTRACK_LIST:
         rc = dppd_conntrack_list(control->conntrack, dppd_monotonic_ms(), request->payload.conntrack.after_id,

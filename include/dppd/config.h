@@ -10,12 +10,20 @@
 #define DPPD_CONTROL_SOCKET_PATH_CAPACITY 108U
 #define DPPD_STATE_PATH_CAPACITY 4096U
 #define DPPD_DEFAULT_RULE_CAPACITY 1024U
+#define DPPD_MAX_DNAT_RULES 32U
 
 /** 出站 SNAT 配置在启动时确定，不修改内核接口地址，也不把易失会话写进规则快照 */
 struct dppd_snat_config {
     bool enabled;
     uint16_t inside_port, outside_port, first_port, last_port;
     uint32_t address_be;
+};
+
+/** 静态目的转换按外口、协议、公网地址和端口段匹配，内网端口按相同偏移一一对应 */
+struct dppd_dnat_rule {
+    uint32_t public_address_be, private_address_be;
+    uint16_t outside_port, inside_port, public_first, public_last, private_first;
+    uint8_t protocol;
 };
 
 struct dppd_config {
@@ -32,6 +40,8 @@ struct dppd_config {
     uint32_t rule_capacity;
     uint32_t conntrack_capacity, conntrack_timeout_s;
     struct dppd_snat_config snat;
+    uint32_t dnat_count;
+    struct dppd_dnat_rule dnat[DPPD_MAX_DNAT_RULES];
     /* Unix 管理 socket 的文件系统路径，长度包含末尾 '\0' */
     char control_socket[DPPD_CONTROL_SOCKET_PATH_CAPACITY];
     /* 为空表示禁用持久化；非空时启动必须成功恢复或创建该 snapshot */
@@ -55,6 +65,8 @@ enum dppd_config_result {
 };
 
 void dppd_config_defaults(struct dppd_config *cfg);
+/** 共用同一份 NAT 校验，直接构造配置和命令行启动都不能绕过冲突检查 */
+int dppd_nat_validate(const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t count);
 int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg);
 int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t error_len);
 void dppd_config_print_usage(const char *program);

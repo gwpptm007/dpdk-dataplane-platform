@@ -30,6 +30,7 @@ meson test -C build --print-errorlogs
 连接跟踪与 SNAT 的启动参数、状态 ACL、会话清空和重启限制见
 [连接跟踪与出站 SNAT](conntrack_nat.md)。默认保持禁用，要求显式三层模式；
 启用后所有策略都经软件路径，不能通过硬件动作绕过会话检查。
+静态地址映射及端口转发的 `--dnat` 参数、分页查询与 SNAT 共存见 [静态 DNAT](dnat.md)。
 
 默认使用偶数端口对转发；加入 `--ipv4-routing /private/routes.bin` 切换为 IPv4 静态路由，
 接受 1–16 个端口。首次为空表，需配置路由和静态邻居后才能转发。`routing-show` 查询、
@@ -42,7 +43,7 @@ meson test -C build --print-errorlogs
 ./build/dppctl stats all 1    # 全部端口的队列 1
 ```
 
-管理协议为 v18，daemon 和 CLI 必须一起更新，旧客户端不会被当作当前协议接受。不存在的端口或
+管理协议为 v19，daemon 和 CLI 必须一起更新，旧客户端不会被当作当前协议接受。不存在的端口或
 队列返回 ENOENT。队列编号是运行配置中的 RX/TX queue id，不是物理 CPU/lcore id。
 这些计数记录本项目软件工作线程实际处理的报文，不是网卡硬件计数；硬件卸载后未进入
 CPU 的报文不会计入。运行时初始化后从零开始，不跨进程重启保存，不提供清零操作。
@@ -289,7 +290,7 @@ sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 ./build/dppctl update-drop-batch 0 20 prefer 200 3 201 4
 ```
 
-成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v18，daemon 和 CLI 必须一起更新。
+成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v19，daemon 和 CLI 必须一起更新。
 
 `count RULE_ID EXPECTED_GENERATION` 查询已发布 generation 对应的 COUNT。它不会重置 counter；规则不存在、generation 已过期、规则没有 COUNT，以及当前 backend 不支持查询会分别返回错误。硬件规则的 hits/bytes 由目标 PMD 的 `rte_flow_query()` 决定；软件规则由 classifier 的原子计数器返回。
 
@@ -320,7 +321,7 @@ status 在 management socket 开放时已经是恢复完成的 clean generation�
 或被强制终止时，应使用目标 PMD/设备支持的复位或清理流程，不能直接使用全端口 flush。
 可选的 `--recovery-path` 为这种跨进程情况保存线索并阻止未确认的重放，详见上述离线流程。
 
-管理 socket 权限为 `0600`。v18 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
+管理 socket 权限为 `0600`。v19 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
 
 `health` 成功响应时退出码为 0，`live=yes` 证明管理线程能够响应；`ready` 只有
 `ready=yes` 才返回 0，否则打印全部未就绪原因并返回 1。两者都不修改规则或快照。

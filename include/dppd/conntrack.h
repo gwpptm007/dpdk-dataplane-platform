@@ -28,6 +28,7 @@ struct dppd_connection_view {
     uint64_t id, last_seen_ms, expires_ms, packets[2], bytes[2];
     struct dppd_flow_tuple original, translated;
     uint16_t ingress, egress;
+    uint32_t dnat_rule_id;
     uint8_t tcp_state;
     bool seen_reply, nat;
 };
@@ -37,6 +38,17 @@ struct dppd_conntrack_status {
     uint32_t capacity, active, peak, timeout_s;
     uint64_t revision, created, expired, flushed, invalid, table_full, pool_full;
     struct dppd_snat_config snat;
+    uint32_t dnat_count;
+};
+
+/** 静态规则启动后不变，编号按启动参数顺序分配，不与易失会话的修订号混用 */
+struct dppd_dnat_page {
+    uint32_t count, next_id;
+    bool more;
+    struct {
+        uint32_t id;
+        struct dppd_dnat_rule rule;
+    } entries[DPPD_CT_PAGE_SIZE];
 };
 
 struct dppd_connection_page {
@@ -56,7 +68,7 @@ struct dppd_connection_attempt {
 
 uint64_t dppd_monotonic_ms(void);
 int dppd_conntrack_create(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
-    const struct dppd_snat_config *snat);
+    const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t dnat_count);
 /** 只在全部 worker 停止、管理入口关闭后销毁，不保存运行时会话 */
 void dppd_conntrack_destroy(struct dppd_conntrack *table);
 int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const struct dppd_packet *packet,
@@ -67,5 +79,6 @@ void dppd_conntrack_status(struct dppd_conntrack *table, uint64_t now_ms, struct
 int dppd_conntrack_list(struct dppd_conntrack *table, uint64_t now_ms, uint64_t after_id, uint64_t expected_revision,
     struct dppd_connection_page *page);
 int dppd_conntrack_flush(struct dppd_conntrack *table, uint64_t expected_revision);
+int dppd_conntrack_dnat_list(struct dppd_conntrack *table, uint64_t after_id, struct dppd_dnat_page *page);
 
 #endif

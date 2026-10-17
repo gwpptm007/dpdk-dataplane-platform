@@ -24,6 +24,7 @@ struct dppd_conntrack {
     uint8_t ports[2][65536];
     uint64_t clock_ms, next_id, full_gc_after_ms;
     struct dppd_conntrack_status status;
+    struct dppd_dnat_rule dnat[DPPD_MAX_DNAT_RULES];
 };
 
 uint64_t dppd_monotonic_ms(void)
@@ -97,7 +98,7 @@ static void remove_connection(struct dppd_conntrack *table, uint32_t slot, bool 
         if (*link != 0)
             *link = entry->next[direction];
     }
-    if (entry->view.nat)
+    if (entry->view.nat && entry->view.dnat_rule_id == 0)
         table->ports[entry->view.original.protocol == 6][ntohs(entry->view.translated.source_port_be)] = 0;
     memset(entry, 0, sizeof(*entry));
     table->free_slots[table->free_count++] = slot;
@@ -122,16 +123,13 @@ static void collect(struct dppd_conntrack *table, uint64_t now, uint32_t budget)
 }
 
 int dppd_conntrack_create(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
-    const struct dppd_snat_config *snat)
+    const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t dnat_count)
 {
     if (result == NULL || *result != NULL || capacity == 0 || capacity > 65536 || timeout_s == 0 || timeout_s > 86400)
         return -EINVAL;
-    if (snat != NULL && snat->enabled &&
-        (snat->inside_port == snat->outside_port || snat->inside_port == UINT16_MAX ||
-            snat->outside_port == UINT16_MAX || snat->first_port == 0 || snat->first_port > snat->last_port ||
-            ntohl(snat->address_be) < 0x01000000U || (ntohl(snat->address_be) >> 24) == 127 ||
-            ntohl(snat->address_be) >= 0xe0000000U))
-        return -EINVAL;
+    int validation = dppd_nat_validate(snat, dnat, dnat_count);
+    if (validation != 0)
+        return validation;
     struct dppd_conntrack *table = calloc(1, sizeof(*table));
     if (table == NULL)
         return -ENOMEM;
@@ -154,6 +152,18 @@ int dppd_conntrack_create(struct dppd_conntrack **result, uint32_t capacity, uin
         (struct dppd_conntrack_status){.enabled = true, .capacity = capacity, .timeout_s = timeout_s, .revision = 1};
     if (snat != NULL)
         table->status.snat = *snat;
+    table->status.dnat_count = dnat_count;
+    if (dnat_count != 0)
+        memcpy(table->dnat, dnat, dnat_count * sizeof(*dnat));
+    /** 静态公网端口在进程存活期间一直保留，清会话也不能把它们借给动态 SNAT */
+    for (uint32_t i = 0; i < dnat_count; ++i) {
+        const struct dppd_dnat_rule *rule = &dnat[i];
+        if (snat == NULL || !snat->enabled || snat->outside_port != rule->outside_port ||
+            snat->address_be != rule->public_address_be)
+            continue;
+        for (uint32_t port = rule->public_first; port <= rule->public_last; ++port)
+            table->ports[rule->protocol == 6][port] = 2;
+    }
     table->free_count = capacity;
     for (uint32_t i = 0; i < capacity; ++i)
         table->free_slots[i] = capacity - i - 1;
@@ -246,6 +256,39 @@ static int allocate_port(struct dppd_conntrack *table, uint8_t protocol, uint16_
     return -EADDRNOTAVAIL;
 }
 
+/** 只为显式外口的静态服务新建入站会话，旧后端回包不能被重新解释成动态出站连接 */
+static int new_destination(struct dppd_conntrack *table, const struct dppd_flow_tuple *key, uint16_t ingress,
+    uint32_t *rule_id)
+{
+    uint16_t source = ntohs(key->source_port_be), destination = ntohs(key->destination_port_be);
+    bool wrong_ingress = false, backend_reply = false;
+    for (uint32_t i = 0; i < table->status.dnat_count; ++i) {
+        const struct dppd_dnat_rule *rule = &table->dnat[i];
+        if (key->protocol != rule->protocol)
+            continue;
+        if (key->destination_be == rule->public_address_be && destination >= rule->public_first &&
+            destination <= rule->public_last) {
+            if (ingress == rule->outside_port)
+                *rule_id = i + 1;
+            else
+                wrong_ingress = true;
+        }
+        uint32_t last = (uint32_t)rule->private_first + rule->public_last - rule->public_first;
+        if (ingress == rule->inside_port && key->source_be == rule->private_address_be &&
+            source >= rule->private_first && source <= last)
+            backend_reply = true;
+    }
+    if (*rule_id != 0)
+        return 0;
+    if (wrong_ingress)
+        return -EXDEV;
+    if (backend_reply)
+        return -ENOENT;
+    if (table->status.snat.enabled)
+        return ingress == table->status.snat.inside_port ? 0 : -ENOENT;
+    return table->status.dnat_count != 0 ? -ENOENT : 0;
+}
+
 int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const struct dppd_packet *packet,
     uint64_t now_ms, struct dppd_connection_attempt *attempt)
 {
@@ -257,7 +300,9 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
     if (table == NULL)
         return 0;
     if (packet->l3_type != DPPD_L3_IPV4 || (packet->l4_type != DPPD_L4_TCP && packet->l4_type != DPPD_L4_UDP))
-        return table->status.snat.enabled || packet->l4_type == DPPD_L4_FRAGMENT ? -ENOTSUP : 0;
+        return table->status.snat.enabled || table->status.dnat_count != 0 || packet->l4_type == DPPD_L4_FRAGMENT
+            ? -ENOTSUP
+            : 0;
     pthread_mutex_lock(&table->lock);
     table->pending_bytes = packet->packet_len;
     collect(table, now_ms, 8);
@@ -285,12 +330,13 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
         if (packet->l4_type == DPPD_L4_TCP)
             rc = tcp_transition(&table->pending, packet, attempt->reply);
     } else {
+        uint32_t dnat_id = 0;
         struct dppd_flow_tuple reversed = reverse(attempt->policy);
         if (equal(&attempt->policy, &reversed))
             rc = -EPROTO;
-        if (nat->enabled && ingress != nat->inside_port)
-            rc = -ENOENT;
-        else if (packet->l4_type == DPPD_L4_TCP &&
+        if (rc == 0)
+            rc = new_destination(table, &attempt->policy, ingress, &dnat_id);
+        if (rc == 0 && packet->l4_type == DPPD_L4_TCP &&
             ((packet->tcp_flags & 0x3fU) != 2 || packet->ipv4_total_len != packet->l3_len + packet->l4_len))
             rc = -EPROTO;
         if (rc == 0 && table->free_count == 0) {
@@ -311,10 +357,17 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
             .original = attempt->policy,
             .translated = attempt->policy,
             .ingress = ingress,
-            .nat = nat->enabled,
+            .nat = nat->enabled || dnat_id != 0,
+            .dnat_rule_id = dnat_id,
             .tcp_state = packet->l4_type == DPPD_L4_TCP ? DPPD_TCP_SYN : DPPD_TCP_NONE};
         table->pending.sequence[0] = ntohl(packet->tcp_sequence_be);
-        if (rc == 0 && nat->enabled) {
+        if (rc == 0 && dnat_id != 0) {
+            const struct dppd_dnat_rule *rule = &table->dnat[dnat_id - 1];
+            table->pending.view.egress = rule->inside_port;
+            table->pending.view.translated.destination_be = rule->private_address_be;
+            table->pending.view.translated.destination_port_be =
+                htons((uint16_t)(rule->private_first + ntohs(packet->l4_dst_port_be) - rule->public_first));
+        } else if (rc == 0 && nat->enabled) {
             table->pending.view.translated.source_be = nat->address_be;
             rc = allocate_port(table, packet->ip_protocol, &table->pending.view.translated.source_port_be);
         }
@@ -331,7 +384,10 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
     table->pending.view.seen_reply |= attempt->reply;
     attempt->state = table->pending.view.seen_reply ? DPPD_CT_ESTABLISHED : DPPD_CT_NEW;
     attempt->nat = table->pending.view.nat;
-    attempt->policy = attempt->reply ? reverse(table->pending.view.original) : table->pending.view.original;
+    /** ACL 看 DNAT 后的后端地址，也看 SNAT 前的内网地址，正反向保持同一逻辑身份 */
+    struct dppd_flow_tuple logical =
+        table->pending.view.dnat_rule_id != 0 ? table->pending.view.translated : table->pending.view.original;
+    attempt->policy = attempt->reply ? reverse(logical) : logical;
     attempt->rewrite = attempt->reply ? reverse(table->pending.view.original) : table->pending.view.translated;
     return 0;
 }
@@ -345,8 +401,9 @@ int dppd_conntrack_finish(struct dppd_connection_attempt *attempt, uint16_t egre
     struct dppd_connection_view *view = &table->pending.view;
     int rc = 0;
     if (accept &&
-        ((!table->pending_new && egress != (attempt->reply ? view->ingress : view->egress)) ||
-            (view->nat &&
+        (((!table->pending_new || view->dnat_rule_id != 0) &&
+             egress != (attempt->reply ? view->ingress : view->egress)) ||
+            (view->nat && view->dnat_rule_id == 0 &&
                 egress != (attempt->reply ? table->status.snat.inside_port : table->status.snat.outside_port))))
         rc = -EXDEV;
     if (accept && rc == 0 && table->pending_new) {
@@ -385,7 +442,7 @@ int dppd_conntrack_finish(struct dppd_connection_attempt *attempt, uint16_t egre
             table->status.revision++;
         }
         table->entries[table->pending_slot] = table->pending;
-    } else if (table->pending_new && view->nat)
+    } else if (table->pending_new && view->nat && view->dnat_rule_id == 0)
         table->ports[view->original.protocol == 6][ntohs(view->translated.source_port_be)] = 0;
     attempt->owner = NULL;
     pthread_mutex_unlock(&table->lock);
@@ -459,4 +516,24 @@ int dppd_conntrack_flush(struct dppd_conntrack *table, uint64_t expected_revisio
             }
     pthread_mutex_unlock(&table->lock);
     return rc;
+}
+
+int dppd_conntrack_dnat_list(struct dppd_conntrack *table, uint64_t after_id, struct dppd_dnat_page *page)
+{
+    if (table == NULL || page == NULL)
+        return -ENODEV;
+    memset(page, 0, sizeof(*page));
+    /** 启动后规则不可变，查询不需要占住逐包会话锁，游标超过末尾时返回空页 */
+    for (uint32_t i = 0; i < table->status.dnat_count; ++i) {
+        if (i + 1 <= after_id)
+            continue;
+        if (page->count == DPPD_CT_PAGE_SIZE) {
+            page->more = true;
+            break;
+        }
+        page->entries[page->count].id = i + 1;
+        page->entries[page->count++].rule = table->dnat[i];
+        page->next_id = i + 1;
+    }
+    return 0;
 }

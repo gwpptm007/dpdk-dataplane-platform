@@ -1,9 +1,62 @@
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 #include "dppd/config.h"
 
+/** 配置的两端端口必须等长，重叠与回包歧义直接拒绝，不能依赖参数顺序猜优先级 */
+static void test_dnat_config(void)
+{
+    struct dppd_config config;
+    char error[160];
+    char *arguments[] = {"dppd", "--conntrack", "8", "--ipv4-routing", "/tmp/routes", "--dnat",
+        "1,0,tcp,203.0.113.9,443,10.0.0.9,8443"};
+    assert(dppd_config_parse(7, arguments, &config) == 0 && config.dnat_count == 1);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    assert(config.dnat[0].public_first == 443 && config.dnat[0].private_first == 8443);
+    config.conntrack_capacity = 0;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    arguments[6] = "1,0,udp,203.0.113.9,1000-1002,10.0.0.9,2000-2002";
+    assert(dppd_config_parse(7, arguments, &config) == 0 && config.dnat[0].public_last == 1002);
+    config.dnat[0].inside_port = 2;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    arguments[6] = "1,0,udp,203.0.113.9,any,10.0.0.9,same";
+    assert(dppd_config_parse(7, arguments, &config) == 0 && config.dnat[0].public_first == 0 &&
+        config.dnat[0].public_last == UINT16_MAX && config.dnat[0].private_first == 0);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    config.dnat[1] = config.dnat[0];
+    config.dnat_count = 2;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.dnat[1].public_address_be++;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.dnat[1].private_address_be++;
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    const char *invalid[] = {"1,0,icmp,203.0.113.9,443,10.0.0.9,8443", "1,0,tcp,203.0.113.9,443,10.0.0.9",
+        "1,0,tcp,203.0.113.9,,10.0.0.9,8443", "1,0,tcp,203.0.113.9,443,10.0.0.9,8443,extra",
+        "1,0,tcp,224.0.0.1,443,10.0.0.9,8443", "1,0,tcp,203.0.113.9,any,10.0.0.9,8443",
+        "1,0,tcp,203.0.113.9,443-444,10.0.0.9,8443", "1,0,tcp,203.0.113.9,0,10.0.0.9,8443",
+        "1,0,tcp,203.0.113.9,443,10.0.0.9,0", "1,0,tcp,203.0.113.9,444-443,10.0.0.9,same",
+        "1,0,tcp,203.0.113.9,443,203.0.113.9,same", "1,1,tcp,203.0.113.9,443,10.0.0.9,8443",
+        "-1,0,tcp,203.0.113.9,443,10.0.0.9,8443"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        arguments[6] = (char *)invalid[i];
+        assert(dppd_config_parse(7, arguments, &config) != 0);
+    }
+    /** 最多保存三十二条，不因重复参数而默默覆盖前一条或写出数组边界 */
+    char text[DPPD_MAX_DNAT_RULES + 1][128];
+    char *many[5 + 2 * (DPPD_MAX_DNAT_RULES + 1)] = {"dppd", "--conntrack", "8", "--ipv4-routing", "/tmp/routes"};
+    for (uint32_t i = 0; i <= DPPD_MAX_DNAT_RULES; ++i) {
+        snprintf(text[i], sizeof(text[i]), "1,0,udp,203.0.113.9,%u,10.0.0.9,%u", 1000 + i, 2000 + i);
+        many[5 + 2 * i] = "--dnat";
+        many[6 + 2 * i] = text[i];
+    }
+    assert(dppd_config_parse(5 + 2 * DPPD_MAX_DNAT_RULES, many, &config) == 0);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    assert(dppd_config_parse(7 + 2 * DPPD_MAX_DNAT_RULES, many, &config) != 0);
+}
+
 int main(void)
 {
+    test_dnat_config();
     struct dppd_config config;
     char error[128];
     char *defaults[] = {"dppd"};

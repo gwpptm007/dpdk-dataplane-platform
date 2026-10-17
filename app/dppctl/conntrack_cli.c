@@ -32,9 +32,13 @@ int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request
         operation = DPPD_MANAGEMENT_CONNTRACK_FLUSH;
     else if (strcmp(argv[0], "nat-status") == 0)
         operation = DPPD_MANAGEMENT_NAT_STATUS;
+    else if (strcmp(argv[0], "dnat-list") == 0)
+        operation = DPPD_MANAGEMENT_DNAT_LIST;
     else
         return -ENOSYS;
     initialize(request, operation);
+    if (operation == DPPD_MANAGEMENT_DNAT_LIST)
+        return argc == 1 || (argc == 2 && number(argv[1], &request->payload.conntrack.after_id) == 0) ? 0 : -EINVAL;
     if (operation == DPPD_MANAGEMENT_CONNTRACK_FLUSH)
         return argc == 2 && number(argv[1], &request->payload.conntrack.expected_revision) == 0 &&
                 request->payload.conntrack.expected_revision != 0
@@ -62,9 +66,23 @@ static void print_tuple(const char *label, const struct dppd_flow_tuple *tuple)
 
 bool dppctl_conntrack_print(const struct dppd_management_response *response)
 {
-    if (response->operation < DPPD_MANAGEMENT_CONNTRACK_STATUS || response->operation > DPPD_MANAGEMENT_NAT_STATUS)
+    if (response->operation < DPPD_MANAGEMENT_CONNTRACK_STATUS || response->operation > DPPD_MANAGEMENT_DNAT_LIST)
         return false;
-    if (response->operation == DPPD_MANAGEMENT_CONNTRACK_LIST) {
+    if (response->operation == DPPD_MANAGEMENT_DNAT_LIST) {
+        const struct dppd_dnat_page *page = &response->payload.dnat;
+        printf("dnat count=%u next-id=%u more=%s policy=startup\n", page->count, page->next_id,
+            page->more ? "yes" : "no");
+        for (uint32_t i = 0; i < page->count; ++i) {
+            const struct dppd_dnat_rule *rule = &page->entries[i].rule;
+            char public[INET_ADDRSTRLEN], private[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &rule->public_address_be, public, sizeof(public));
+            inet_ntop(AF_INET, &rule->private_address_be, private, sizeof(private));
+            printf("dnat id=%u protocol=%s outside=%u inside=%u public=%s:%u-%u private=%s:%u-%u\n",
+                page->entries[i].id, rule->protocol == 6 ? "tcp" : "udp", rule->outside_port, rule->inside_port, public,
+                rule->public_first, rule->public_last, private, rule->private_first,
+                rule->private_first + rule->public_last - rule->public_first);
+        }
+    } else if (response->operation == DPPD_MANAGEMENT_CONNTRACK_LIST) {
         const struct dppd_connection_page *page = &response->payload.connections;
         printf("conntrack revision=%" PRIu64 " count=%u next-id=%" PRIu64 " more=%s\n", page->revision, page->count,
             page->next_id, page->more ? "yes" : "no");
@@ -77,6 +95,11 @@ bool dppctl_conntrack_print(const struct dppd_management_response *response)
                 entry->egress, entry->nat ? "yes" : "no");
             print_tuple("original", &entry->original);
             print_tuple("translated", &entry->translated);
+            printf(" kind=%s dnat-rule=%u",
+                entry->dnat_rule_id != 0 ? "dnat"
+                    : entry->nat         ? "snat"
+                                         : "none",
+                entry->dnat_rule_id);
             printf(" packets=%" PRIu64 "/%" PRIu64 " bytes=%" PRIu64 "/%" PRIu64 " last-seen-ms=%" PRIu64
                    " expires-ms=%" PRIu64 "\n",
                 entry->packets[0], entry->packets[1], entry->bytes[0], entry->bytes[1], entry->last_seen_ms,
@@ -92,9 +115,11 @@ bool dppctl_conntrack_print(const struct dppd_management_response *response)
             status->pool_full);
         char address[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &status->snat.address_be, address, sizeof(address));
-        printf("nat enabled=%s inside=%u outside=%u address=%s ports=%u-%u sessions-persistent=no\n",
-            status->snat.enabled ? "yes" : "no", status->snat.inside_port, status->snat.outside_port, address,
-            status->snat.first_port, status->snat.last_port);
+        printf("nat enabled=%s snat=%s inside=%u outside=%u address=%s ports=%u-%u dnat-rules=%u"
+               " policy=startup sessions-persistent=no\n",
+            status->snat.enabled || status->dnat_count != 0 ? "yes" : "no", status->snat.enabled ? "yes" : "no",
+            status->snat.inside_port, status->snat.outside_port, address, status->snat.first_port,
+            status->snat.last_port, status->dnat_count);
     }
     return true;
 }

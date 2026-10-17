@@ -17,8 +17,8 @@
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload
  */
 /** v16 扩展三层转发统计，后续路由配置命令使用同一版 ABI，旧版客户端必须拒绝 */
-/** v18 增加会话查询与清空、NAT 状态、状态 ACL 和有状态丢弃原因 */
-#define DPPD_MANAGEMENT_VERSION 18U
+/** v19 增加静态 DNAT 分页查询、策略数量和会话对应的静态规则编号 */
+#define DPPD_MANAGEMENT_VERSION 19U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -85,6 +85,7 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_CONNTRACK_LIST,
     DPPD_MANAGEMENT_CONNTRACK_FLUSH,
     DPPD_MANAGEMENT_NAT_STATUS,
+    DPPD_MANAGEMENT_DNAT_LIST,
 };
 
 /*
@@ -341,6 +342,7 @@ struct dppd_management_response {
     union {
         struct dppd_conntrack_status conntrack;
         struct dppd_connection_page connections;
+        struct dppd_dnat_page dnat;
         struct dppd_routing_status routing_status;
         struct dppd_ipv4_configuration routing;
         struct {
