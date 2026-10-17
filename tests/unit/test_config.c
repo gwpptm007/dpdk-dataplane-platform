@@ -168,5 +168,18 @@ int main(void)
     assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_OK);
     tracking[8] = "1,0,tcp,2001:db8:100::9,8443-8445,fd00:1::8,443-444";
     assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
+    /** 动态邻居必须有三层入口和唯一作用域，不能把同端口不同 VLAN 混为一张缓存 */
+    char *discovery[] = {"dppd", "--ip-routing", "/private/routes", "--nd6", "0,fe80::10,37,38"};
+    assert(dppd_config_parse(5, discovery, &config) == DPPD_CONFIG_OK);
+    assert(config.nd6_count == 1 && config.nd6[0].vlan_depth == 2);
+    config.routing_path[0] = '\0';
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    discovery[4] = "2,fe80::10";
+    assert(dppd_config_parse(5, discovery, &config) == DPPD_CONFIG_OK);
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    discovery[4] = "0,ff02::1";
+    assert(dppd_config_parse(5, discovery, &config) == DPPD_CONFIG_ERROR);
+    discovery[4] = "0,fe80::10,4095";
+    assert(dppd_config_parse(5, discovery, &config) == DPPD_CONFIG_ERROR);
     return 0;
 }

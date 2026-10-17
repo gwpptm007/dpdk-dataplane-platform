@@ -34,17 +34,23 @@ int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request
         operation = DPPD_MANAGEMENT_NAT_STATUS;
     else if (strcmp(argv[0], "dnat-list") == 0)
         operation = DPPD_MANAGEMENT_DNAT_LIST;
+    else if (strcmp(argv[0], "nd6-status") == 0)
+        operation = DPPD_MANAGEMENT_ND6_STATUS;
+    else if (strcmp(argv[0], "nd6-list") == 0)
+        operation = DPPD_MANAGEMENT_ND6_LIST;
+    else if (strcmp(argv[0], "nd6-flush") == 0)
+        operation = DPPD_MANAGEMENT_ND6_FLUSH;
     else
         return -ENOSYS;
     initialize(request, operation);
     if (operation == DPPD_MANAGEMENT_DNAT_LIST)
         return argc == 1 || (argc == 2 && number(argv[1], &request->payload.conntrack.after_id) == 0) ? 0 : -EINVAL;
-    if (operation == DPPD_MANAGEMENT_CONNTRACK_FLUSH)
+    if (operation == DPPD_MANAGEMENT_CONNTRACK_FLUSH || operation == DPPD_MANAGEMENT_ND6_FLUSH)
         return argc == 2 && number(argv[1], &request->payload.conntrack.expected_revision) == 0 &&
                 request->payload.conntrack.expected_revision != 0
             ? 0
             : -EINVAL;
-    if (operation == DPPD_MANAGEMENT_CONNTRACK_LIST) {
+    if (operation == DPPD_MANAGEMENT_CONNTRACK_LIST || operation == DPPD_MANAGEMENT_ND6_LIST) {
         if (argc > 3 || (argc >= 2 && number(argv[1], &request->payload.conntrack.after_id) != 0) ||
             (argc == 3 &&
                 (number(argv[2], &request->payload.conntrack.expected_revision) != 0 ||
@@ -72,8 +78,53 @@ static void print_tuple(const char *label, const struct dppd_flow_tuple *tuple)
         ntohs(tuple->destination_port_be));
 }
 
+/** 动态缓存单独查询，不混入持久静态邻居；修订号只属于本次进程的易失状态 */
+static bool nd6_print(const struct dppd_management_response *response)
+{
+    if (response->operation < DPPD_MANAGEMENT_ND6_STATUS || response->operation > DPPD_MANAGEMENT_ND6_FLUSH)
+        return false;
+    if (response->operation == DPPD_MANAGEMENT_ND6_STATUS) {
+        const struct dppd_nd6_status *status = &response->payload.nd6;
+        printf("nd6 enabled=%s revision=%" PRIu64 " active=%u pending=%u local-count=%u reachable-ms=%u"
+               " solicitations=%" PRIu64 " advertisements=%" PRIu64 " invalid=%" PRIu64 " tx-errors=%" PRIu64
+               " queue-drops=%" PRIu64 " resolved=%" PRIu64 " failed=%" PRIu64 " persistent=no\n",
+            status->enabled ? "yes" : "no", status->revision, status->active, status->pending, status->local_count,
+            status->reachable_ms, status->solicitations, status->advertisements, status->invalid, status->tx_errors,
+            status->queue_drops, status->resolved, status->failed);
+        for (uint32_t i = 0; i < status->local_count; ++i) {
+            char address[INET6_ADDRSTRLEN];
+            const struct dppd_nd6_local *local = &status->locals[i].configuration;
+            inet_ntop(AF_INET6, local->address, address, sizeof(address));
+            printf("local port=%u address=%s state=%s vlan-depth=%u vlan=%u/%u\n", local->port_id, address,
+                status->locals[i].state == DPPD_ND6_PREFERRED       ? "preferred"
+                    : status->locals[i].state == DPPD_ND6_DUPLICATE ? "duplicate"
+                                                                    : "tentative",
+                local->vlan_depth, local->vlan[0], local->vlan[1]);
+        }
+    } else if (response->operation == DPPD_MANAGEMENT_ND6_LIST) {
+        const struct dppd_nd6_page *page = &response->payload.dynamic_neighbors;
+        static const char *states[] = {"none", "incomplete", "reachable", "stale", "delay", "probe", "failed"};
+        printf("nd6 revision=%" PRIu64 " count=%u next-id=%" PRIu64 " more=%s\n", page->revision, page->count,
+            page->next_id, page->more ? "yes" : "no");
+        for (uint32_t i = 0; i < page->count; ++i) {
+            const struct dppd_nd6_entry *entry = &page->entries[i];
+            char address[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, entry->address, address, sizeof(address));
+            printf("neighbor id=%" PRIu64 " port=%u address=%s mac=%02x:%02x:%02x:%02x:%02x:%02x state=%s probes=%u"
+                   " changed-ms=%" PRIu64 " due-ms=%" PRIu64 " used-ms=%" PRIu64 "\n",
+                entry->id, entry->port_id, address, entry->mac[0], entry->mac[1], entry->mac[2], entry->mac[3],
+                entry->mac[4], entry->mac[5], entry->state <= DPPD_ND6_FAILED ? states[entry->state] : "unknown",
+                entry->probes, entry->changed_ms, entry->due_ms, entry->used_ms);
+        }
+    } else
+        puts("nd6 cache flushed");
+    return true;
+}
+
 bool dppctl_conntrack_print(const struct dppd_management_response *response)
 {
+    if (nd6_print(response))
+        return true;
     if (response->operation < DPPD_MANAGEMENT_CONNTRACK_STATUS || response->operation > DPPD_MANAGEMENT_DNAT_LIST)
         return false;
     if (response->operation == DPPD_MANAGEMENT_DNAT_LIST) {

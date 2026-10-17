@@ -19,6 +19,10 @@ test('static DNAT forwarding and reservations', dnat_test)
 nat66_test = executable('test_nat66', 'test_nat66.c', dependencies: dppd_core_dep)
 test('NAT66 mappings and address family isolation', nat66_test)
 
+# 使用独立线缆校验和和可控时钟，验证 ND、DAD、VLAN、等待首包和可达性探测
+nd6_test = executable('test_nd6', 'test_nd6.c', dependencies: dppd_core_dep)
+test('IPv6 neighbor discovery lifecycle and validation', nd6_test)
+
 config_test = executable(
   'test_config',
   'test_config.c',

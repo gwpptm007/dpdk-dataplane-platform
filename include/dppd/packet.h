@@ -58,6 +58,8 @@ struct dppd_packet {
     uint16_t l4_len;
     /** 最多保存两层 VLAN 的完整 TCI 数值，包含优先级等位，不能直接当作 VLAN ID */
     uint16_t vlan_tci[2];
+    /** ND 同时核对标签类型和 VLAN ID，不能把客户标签域与服务标签域混在一起 */
+    uint16_t vlan_tpid[2];
     uint8_t vlan_depth;
     enum dppd_l3_type l3_type;
     enum dppd_l4_type l4_type;
@@ -78,6 +80,8 @@ struct dppd_packet {
     uint16_t l4_dst_port_be;
     /** IPv4 的 MF 位，表示后面还有分片；末尾分片此位为假，但仍可能属于 FRAGMENT */
     bool ipv4_more_fragments;
+    /** ND 等待包重走最新策略时不重复累计接收与 COUNT，报文字节中没有这个内部标记 */
+    bool neighbor_retry;
 };
 
 /**

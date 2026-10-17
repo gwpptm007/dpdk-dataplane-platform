@@ -44,6 +44,8 @@ enum dppd_drop_reason {
     DPPD_DROP_REWRITE,
     DPPD_DROP_EGRESS,
     DPPD_DROP_IPV6_UNSUPPORTED,
+    DPPD_DROP_ND_PENDING,
+    DPPD_DROP_ND_NOT_READY,
 };
 
 /** 单个报文的处理结果；只有转发决定中的出口端口和标记才会被工作线程用于发送 */

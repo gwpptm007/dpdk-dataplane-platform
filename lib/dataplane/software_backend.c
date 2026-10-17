@@ -783,7 +783,7 @@ void dppd_software_backend_decide(struct dppd_software_backend *backend, uint16_
             else if (source->type == DPPD_ACTION_MARK) {
                 decision->has_mark = true;
                 decision->mark_id = source->conf.mark_id;
-            } else if (source->type == DPPD_ACTION_COUNT) {
+            } else if (source->type == DPPD_ACTION_COUNT && !packet->neighbor_retry) {
                 atomic_fetch_add_explicit(&selected->metrics->hits, 1, memory_order_relaxed);
                 atomic_fetch_add_explicit(&selected->metrics->bytes, packet->packet_len, memory_order_relaxed);
             }

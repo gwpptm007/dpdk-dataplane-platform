@@ -9,6 +9,7 @@
 #include "dppd/pipeline.h"
 #include "dppd/stats.h"
 #include "dppd/conntrack.h"
+#include "dppd/nd6.h"
 
 struct dppd_runtime;
 struct dppd_software_backend;
@@ -53,6 +54,8 @@ struct dppd_runtime {
     struct dppd_ipv4_router *ipv4_router;
     /** runtime 拥有易失会话，先停止全部线程再释放，控制面仅借用此指针 */
     struct dppd_conntrack *conntrack;
+    /** 动态邻居与等待首包由 runtime 持有，静态路由快照仍由控制面独立管理 */
+    struct dppd_nd6 *nd6;
     struct dppd_worker workers[DPPD_MAX_WORKERS];
     uint16_t nb_workers;
     /** 停止请求只通知线程结束循环，不表示线程已经退出；释放共享资源前仍需等待 */

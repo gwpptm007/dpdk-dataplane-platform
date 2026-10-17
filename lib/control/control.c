@@ -268,6 +268,7 @@ int dppd_control_probe_rule(struct dppd_control_service *service, uint16_t insta
     context.topology = service->topology;
     context.ipv4_routing = service->routing != NULL;
     context.connection_tracking = service->conntrack != NULL;
+    context.neighbor_discovery = service->nd6 != NULL;
     context.install_port_id = install_port_id;
     context.hardware_available = true;
     rc = dppd_plan_rule(&context, &candidate, &plan);
@@ -404,6 +405,7 @@ static int control_restore_impl(struct dppd_control_service *service, const char
         planner_context.topology = service->topology;
         planner_context.ipv4_routing = service->routing != NULL;
         planner_context.connection_tracking = service->conntrack != NULL;
+        planner_context.neighbor_discovery = service->nd6 != NULL;
         planner_context.install_port_id = snapshot.rules[i].install_port_id;
         planner_context.hardware_available = true;
         planner_context.software_equivalent = dppd_software_backend_rule_supported(&snapshot.rules[i]);
@@ -623,6 +625,7 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
     planner_context.topology = service->topology;
     planner_context.ipv4_routing = service->routing != NULL;
     planner_context.connection_tracking = service->conntrack != NULL;
+    planner_context.neighbor_discovery = service->nd6 != NULL;
     planner_context.install_port_id = install_port_id;
     planner_context.hardware_available = true;
     planner_context.software_equivalent = dppd_software_backend_rule_supported(&candidate);
@@ -789,6 +792,7 @@ static int control_create_batch_impl(struct dppd_control_service *service,
         planner_context.topology = service->topology;
         planner_context.ipv4_routing = service->routing != NULL;
         planner_context.connection_tracking = service->conntrack != NULL;
+        planner_context.neighbor_discovery = service->nd6 != NULL;
         planner_context.install_port_id = requests[i].install_port_id;
         planner_context.hardware_available = true;
         planner_context.software_equivalent = dppd_software_backend_rule_supported(&items[i].rule);
@@ -1125,6 +1129,7 @@ static int control_update_batch_impl(struct dppd_control_service *service,
         context.topology = service->topology;
         context.ipv4_routing = service->routing != NULL;
         context.connection_tracking = service->conntrack != NULL;
+        context.neighbor_discovery = service->nd6 != NULL;
         context.install_port_id = requests[i].install_port_id;
         context.hardware_available = true;
         context.software_equivalent = dppd_software_backend_rule_supported(&candidates[i]);
@@ -1175,6 +1180,7 @@ static int control_update_batch_impl(struct dppd_control_service *service,
                 context.topology = service->topology;
                 context.ipv4_routing = service->routing != NULL;
                 context.connection_tracking = service->conntrack != NULL;
+                context.neighbor_discovery = service->nd6 != NULL;
                 context.install_port_id = requests[i].install_port_id;
                 context.software_equivalent = true;
                 rc = dppd_plan_rule(&context, &items[i].rule, &items[i].plan);

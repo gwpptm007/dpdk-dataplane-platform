@@ -124,7 +124,7 @@ RST 后最多 2 秒，均不超过配置的基础超时。每个有效且被接�
 不跨重启比较。清空必须指定当前修订号，错误版本不修改会话；清空归还映射，但不能
 撤回已经进入发送批次的报文。
 
-本阶段管理协议为 v18，后续静态 DNAT 扩展为 v19，当前 [IPv6 跟踪与 NAT66](nat66.md) 为 v21，daemon 与 CLI 须配套。
+本阶段管理协议为 v18，后续静态 DNAT 扩展为 v19，当前 [IPv6 动态 ND](nd6.md) 为 v22，daemon 与 CLI 须配套。
 `stats`/telemetry 增加 `ct_invalid_drops`、`ct_full_drops`、
 `ct_unsupported_drops`、`ct_zone_drops`、`ct_checksum_drops`、`nat_pool_drops` 和
 `nat_miss_drops`。校验和失败在跟踪模式中统一归 `ct_checksum_drops`，TTL 沿用三层

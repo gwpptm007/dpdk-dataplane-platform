@@ -102,7 +102,7 @@ DNAT 会话只占连接跟踪容量，不从动态池借端口；取消、老化
 ./build/dppctl conntrack-list
 ```
 
-本阶段管理协议为 v19，当前 [IPv6 跟踪与 NAT66](nat66.md) 扩展为 v21，daemon 和 CLI 必须配套。`nat-status` 返回 SNAT 开关及静态规则
+本阶段管理协议为 v19，当前 [IPv6 动态 ND](nd6.md) 扩展为 v22，daemon 和 CLI 必须配套。`nat-status` 返回 SNAT 开关及静态规则
 数量；`dnat-list` 每页最多四条，返回配置 ID、内外口、协议和两端地址/端口段。游标
 是上一页的 `next-id`，超过末尾返回空页；启动配置不可变，不借用会话 revision。
 `conntrack-list` 显示 `kind=dnat` 和 `dnat-rule`，保留原始及转换五元组、状态和两向

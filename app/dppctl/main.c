@@ -29,6 +29,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] conntrack-list [AFTER_ID [REVISION]]\n", program);
     fprintf(stderr, "  %s [--socket PATH] conntrack-flush REVISION\n", program);
     fprintf(stderr, "  %s [--socket PATH] dnat-list [AFTER_ID]\n", program);
+    fprintf(stderr, "  %s [--socket PATH] nd6-status|nd6-list [AFTER_ID [REVISION]]|nd6-flush REVISION\n", program);
     fprintf(stderr, "  ACL modifiers also accept state:new,established,invalid,untracked\n");
     dppctl_routing_usage(program);
     fprintf(stderr, "  %s [--socket PATH] ping\n", program);
@@ -999,6 +1000,7 @@ static void print_health(const struct dppd_management_health *health)
         {DPPD_HEALTH_PERSISTENCE_DIRTY, "persistence-dirty"},
         {DPPD_HEALTH_WORKER_FAILED, "worker-failed"},
         {DPPD_HEALTH_ROUTING_DIRTY, "routing-dirty"},
+        {DPPD_HEALTH_ND6_NOT_READY, "nd6-not-ready"},
     };
     bool first = true;
 

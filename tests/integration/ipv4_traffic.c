@@ -29,7 +29,7 @@ struct fixture {
     struct rte_mbuf *retained[2][CASES];
     uint16_t queues;
     atomic_uint external_frees;
-    uint64_t sent, forwarded;
+    uint64_t sent, forwarded, nd_packets, nd_bytes;
 };
 
 static uint32_t ip(const char *text)
@@ -874,6 +874,127 @@ static void nat66_queues(struct fixture *fixture)
         fixture->queues);
 }
 
+static int prime_dad(void *context, uint16_t port, const uint8_t *wire, uint16_t length)
+{
+    (void)context;
+    (void)port;
+    (void)wire;
+    (void)length;
+    return 0;
+}
+
+/** 先保存共享首包，再从另一 RX 队列注入 NA，原始 mbuf 和两条队列的统计都不能被重复处理 */
+static void nd6_queues(struct fixture *fixture)
+{
+    dppd_runtime_request_stop(&fixture->runtime);
+    assert(dppd_runtime_wait(&fixture->runtime) == 0);
+    struct dppd_ipv4_configuration routes;
+    assert(dppd_ipv4_router_get(fixture->router, &routes) == 0);
+    routes.neighbor6_count = 0;
+    assert(dppd_ipv4_router_replace(fixture->router, routes.generation, &routes, NULL, NULL) == 0);
+    struct dppd_config configuration = fixture->runtime.config;
+    strcpy(configuration.routing_path, "/private/nd-test");
+    configuration.nd6_count = 2;
+    uint8_t macs[DPPD_MAX_PORTS][6] = {{0}};
+    for (uint16_t i = 0; i < PORTS; ++i)
+        memcpy(macs[i], fixture->runtime.devices.ports[i].mac.addr_bytes, 6);
+    for (uint16_t i = 0; i < 2; ++i) {
+        configuration.nd6[i].port_id = i;
+        configuration.nd6[i].vlan_depth = 1;
+        configuration.nd6[i].vlan[0] = 37;
+        assert(inet_pton(AF_INET6, i == 0 ? "2001:db8:1::fe" : "2001:db8:2::fe", configuration.nd6[i].address) == 1);
+    }
+    uint64_t now = dppd_monotonic_ms();
+    assert(now > 3000 &&
+        dppd_nd6_create(&fixture->runtime.nd6, &configuration, (const uint8_t(*)[6])macs, now - 3000) == 0);
+    fixture->control.nd6 = fixture->runtime.nd6;
+    dppd_nd6_tick(fixture->runtime.nd6, now - 1000, prime_dad, NULL);
+    dppd_nd6_tick(fixture->runtime.nd6, now, prime_dad, NULL);
+    assert(dppd_nd6_port_ready(fixture->runtime.nd6, 0) && dppd_nd6_port_ready(fixture->runtime.nd6, 1));
+    assert(dppd_runtime_start(&fixture->runtime) == 0);
+    struct rte_mbuf *retained[2];
+    uint8_t wire[FRAME_SIZE], expected[FRAME_SIZE], buffer[FRAME_SIZE];
+    nat66_frame(wire, "2001:db8:1::1", "2001:db8:2::7", 1234, 443);
+    for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+        retained[queue] = rte_pktmbuf_alloc(fixture->pool);
+        struct rte_mbuf *tail = rte_pktmbuf_alloc(fixture->pool);
+        assert(retained[queue] != NULL && tail != NULL);
+        memcpy(rte_pktmbuf_append(retained[queue], 33), wire, 33);
+        memcpy(rte_pktmbuf_append(tail, FRAME_SIZE - 33), wire + 33, FRAME_SIZE - 33);
+        assert(rte_pktmbuf_chain(retained[queue], tail) == 0);
+        rte_mbuf_refcnt_update(retained[queue], 1);
+        rte_mbuf_refcnt_update(tail, 1);
+        assert(rte_ring_enqueue(fixture->rx[0][queue], retained[queue]) == 0);
+        fixture->sent++;
+    }
+    void *object;
+    uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
+    while (rte_ring_dequeue(fixture->tx[1][0], &object) != 0) {
+        assert(rte_get_timer_cycles() < deadline);
+        rte_pause();
+    }
+    struct dppd_packet parsed;
+    assert(dppd_packet_parse_mbuf(object, &parsed) == 0 && parsed.ip_protocol == 58);
+    const uint8_t *ns = rte_pktmbuf_read(object, 0, rte_pktmbuf_pkt_len((struct rte_mbuf *)object), buffer);
+    assert(ns != NULL && ns[58] == 135 && ns[25] == 255 && ns[0] == 0x33);
+    fixture->nd_packets++;
+    fixture->nd_bytes += rte_pktmbuf_pkt_len((struct rte_mbuf *)object);
+    rte_pktmbuf_free(object);
+    struct dppd_nd6_status status;
+    do {
+        dppd_nd6_status(fixture->runtime.nd6, &status);
+        assert(rte_get_timer_cycles() < deadline);
+        rte_pause();
+    } while (status.pending != fixture->queues);
+    uint8_t na[90] = {0}, pseudo[72] = {0};
+    memcpy(na, macs[1], 6);
+    memcpy(na + 6, (uint8_t[]){2, 0, 0, 0, 0, 1}, 6);
+    memcpy(na + 12, (uint8_t[]){0x81, 0, 0, 37, 0x86, 0xdd}, 6);
+    uint8_t *ip6 = na + 18, *icmp = ip6 + 40;
+    ip6[0] = 0x60;
+    ip6[5] = 32;
+    ip6[6] = 58;
+    ip6[7] = 255;
+    assert(inet_pton(AF_INET6, "fe80::1", ip6 + 8) == 1);
+    memcpy(ip6 + 24, configuration.nd6[1].address, 16);
+    icmp[0] = 136;
+    icmp[4] = 0x60;
+    memcpy(icmp + 8, ip6 + 8, 16);
+    memcpy(icmp + 24, (uint8_t[]){2, 1, 2, 0, 0, 0, 0, 1}, 8);
+    memcpy(pseudo, ip6 + 8, 32);
+    pseudo[35] = 32;
+    pseudo[39] = 58;
+    memcpy(pseudo + 40, icmp, 32);
+    uint16_t crc = checksum(pseudo, sizeof(pseudo));
+    icmp[2] = (uint8_t)(crc >> 8);
+    icmp[3] = (uint8_t)crc;
+    struct rte_mbuf *advertisement = rte_pktmbuf_alloc(fixture->pool);
+    assert(advertisement != NULL);
+    memcpy(rte_pktmbuf_append(advertisement, sizeof(na)), na, sizeof(na));
+    assert(rte_ring_enqueue(fixture->rx[1][fixture->queues - 1], advertisement) == 0);
+    fixture->sent++;
+    nat66_frame(expected, "2001:db8:100::9", "2001:db8:2::7", 40001, 443);
+    memcpy(expected, (uint8_t[]){2, 0, 0, 0, 0, 1}, 6);
+    memcpy(expected + 6, macs[1], 6);
+    expected[25]--;
+    for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+        while (rte_ring_dequeue(fixture->tx[1][queue], &object) != 0) {
+            assert(rte_get_timer_cycles() < deadline);
+            rte_pause();
+        }
+        assert(memcmp(rte_pktmbuf_read(object, 0, FRAME_SIZE, buffer), expected, FRAME_SIZE) == 0);
+        assert(memcmp(rte_pktmbuf_read(retained[queue], 0, FRAME_SIZE, buffer), wire, FRAME_SIZE) == 0);
+        assert((retained[queue]->ol_flags & RTE_MBUF_F_RX_FDIR_ID) == 0);
+        rte_pktmbuf_free(object);
+        rte_pktmbuf_free(retained[queue]);
+        fixture->forwarded++;
+    }
+    dppd_nd6_status(fixture->runtime.nd6, &status);
+    assert(status.active == 1 && status.pending == 0 && status.resolved == 1);
+    printf("PASS ND worker queues=%u held-first-packet=yes cross-queue-NA=yes NAT66=yes shared-chain=unchanged\n",
+        fixture->queues);
+}
+
 static void run_case(uint16_t queues)
 {
     struct fixture *fixture = calloc(1, sizeof(*fixture));
@@ -937,12 +1058,13 @@ static void run_case(uint16_t queues)
     stateful_queues(fixture);
     ipv6_queues(fixture);
     nat66_queues(fixture);
+    nd6_queues(fixture);
     dppd_runtime_request_stop(&fixture->runtime);
     assert(dppd_runtime_wait(&fixture->runtime) == 0);
     struct dppd_stats_values statistics;
     dppd_runtime_stats_read(&fixture->runtime, &statistics);
-    assert(statistics.rx_packets == fixture->sent && statistics.tx_packets == fixture->forwarded);
-    assert(statistics.tx_bytes == fixture->forwarded * FRAME_SIZE);
+    assert(statistics.rx_packets == fixture->sent && statistics.tx_packets == fixture->forwarded + fixture->nd_packets);
+    assert(statistics.tx_bytes == fixture->forwarded * FRAME_SIZE + fixture->nd_bytes);
     struct dppd_stats_values ports = {0};
     for (uint16_t port = 0; port < PORTS; ++port) {
         struct dppd_stats_values values;

@@ -195,6 +195,14 @@ static int configure_port(struct dppd_port *port, const struct dppd_config *cfg,
         if (rc != 0)
             return rc;
     }
+    /** ND 需要接收本链路的 solicited-node 和 all-nodes 组播，失败不能冒充已启用 */
+    for (uint32_t i = 0; i < cfg->nd6_count; ++i)
+        if (cfg->nd6[i].port_id == port->port_id) {
+            rc = rte_eth_allmulticast_enable(port->port_id);
+            if (rc != 0)
+                return rc;
+            break;
+        }
     rc = rte_eth_macaddr_get(port->port_id, &port->mac);
     if (rc != 0)
         return rc;

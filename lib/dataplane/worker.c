@@ -40,6 +40,57 @@ static void flush_egress(struct dppd_worker *worker, const struct dppd_port *egr
     }
 }
 
+/** 每个工作线程只写自己的 TX 队列，ND 不借主线程并发写同一个硬件队列 */
+static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16_t length)
+{
+    struct dppd_worker *worker = context;
+    const struct dppd_port *port = dppd_devices_find(&worker->runtime->devices, port_id);
+    if (port == NULL || !dppd_port_tx_available(port) || dppd_devices_removal_requested(&worker->runtime->devices))
+        return -ENODEV;
+    struct rte_mbuf *mbuf = rte_pktmbuf_alloc(worker->runtime->devices.pools[port->socket_id]);
+    if (mbuf == NULL)
+        return -ENOMEM;
+    void *bytes = rte_pktmbuf_append(mbuf, length);
+    if (bytes == NULL) {
+        rte_pktmbuf_free(mbuf);
+        return -ENOMEM;
+    }
+    memcpy(bytes, wire, length);
+    if (rte_eth_tx_burst(port_id, worker->queue_id, &mbuf, 1) != 1) {
+        rte_pktmbuf_free(mbuf);
+        return -EAGAIN;
+    }
+    struct dppd_stats_values output = {.tx_packets = 1, .tx_bytes = length, .nd6_tx_packets = 1};
+    dppd_stats_add(&worker->stats, &output);
+    dppd_stats_add(&worker->port_stats[port - worker->runtime->devices.ports], &output);
+    return 0;
+}
+
+/** 先执行原有 ACL 和静态查表，只有缺少静态邻居时才查询动态缓存 */
+static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int parsed, const struct dppd_packet *packet,
+    struct dppd_pipeline_decision *decision)
+{
+    dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,
+        packet, decision);
+    if (runtime->nd6 == NULL || packet->l3_type != DPPD_L3_IPV6)
+        return;
+    if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR) {
+        int rc = dppd_nd6_resolve(runtime->nd6, decision->ipv4.port_id, decision->ipv4.next_hop6, packet,
+            dppd_monotonic_ms(), decision->ipv4.destination_mac);
+        if (rc == 0) {
+            decision->action = DPPD_PACKET_FORWARD;
+            decision->drop_reason = DPPD_DROP_NONE;
+            decision->egress_port = decision->ipv4.port_id;
+            decision->routed = true;
+        } else if (rc == -EAGAIN)
+            decision->drop_reason = DPPD_DROP_ND_PENDING;
+    }
+    if (decision->action == DPPD_PACKET_FORWARD && !dppd_nd6_port_ready(runtime->nd6, decision->egress_port)) {
+        decision->action = DPPD_PACKET_DROP;
+        decision->drop_reason = DPPD_DROP_ND_NOT_READY;
+    }
+}
+
 static enum dppd_drop_reason stateful_error(int error)
 {
     switch (error) {
@@ -97,8 +148,7 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
         dppd_conntrack_finish(&attempt, 0, false);
         return;
     }
-    dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress->port_id,
-        parsed, &policy, decision);
+    routed_decide(runtime, ingress->port_id, parsed, &policy, decision);
     if (decision->action != DPPD_PACKET_FORWARD) {
         dppd_conntrack_finish(&attempt, 0, false);
         return;
@@ -126,41 +176,68 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
 }
 
 /** 同一入口批次按实际出口分组，三层路由可以同时选择多个出口，报文始终只交付一次 */
-static void process_ingress(struct dppd_worker *worker, const struct dppd_port *ingress)
+static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,
+    uint16_t received, bool retry, uint64_t expires)
 {
     struct dppd_runtime *runtime = worker->runtime;
-    struct rte_mbuf *rx[DPPD_MAX_BURST], *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];
+    struct rte_mbuf *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];
     uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];
     uint16_t counts[DPPD_MAX_PORTS] = {0};
     struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};
     if (dppd_devices_removal_requested(&runtime->devices))
         return;
-    uint16_t received = rte_eth_rx_burst(ingress->port_id, worker->queue_id, rx, runtime->config.burst_size);
     if (received == 0)
         return;
-    delta.rx_packets = received;
+    delta.rx_packets = retry ? 0 : received;
     const struct dppd_port *paired =
         runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;
     for (uint16_t i = 0; i < received; ++i) {
         struct dppd_pipeline_decision decision;
         struct dppd_packet packet = {0};
         uint32_t length = rte_pktmbuf_pkt_len(rx[i]);
-        delta.rx_bytes += length;
+        if (!retry)
+            delta.rx_bytes += length;
         int parsed = dppd_packet_parse_mbuf(rx[i], &packet);
+        packet.neighbor_retry = retry;
         if (parsed == DPPD_PARSE_MALFORMED)
             delta.rx_malformed++;
         else if (parsed == DPPD_PARSE_UNSUPPORTED)
             delta.rx_unsupported++;
+        if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&
+            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {
+            delta.nd6_rx_packets++;
+            rte_pktmbuf_free(rx[i]);
+            continue;
+        }
+        if (packet.l3_type == DPPD_L3_IPV6 && !dppd_nd6_port_ready(runtime->nd6, ingress->port_id)) {
+            delta.nd6_not_ready_drops++;
+            delta.policy_drops++;
+            rte_pktmbuf_free(rx[i]);
+            continue;
+        }
         /** 两种地址族都经过状态 ACL 和会话提交，失败候选不能占用 NAT 端口或刷新超时 */
         if (runtime->conntrack != NULL)
             stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision);
         else
-            dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router,
-                ingress->port_id, parsed, &packet, &decision);
+            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision);
+        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {
+            struct dppd_nd6_pending pending = {.mbuf = rx[i],
+                .ingress = ingress->port_id,
+                .queue = worker->queue_id,
+                .expires_ms = expires};
+            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,
+                    dppd_monotonic_ms()) == 0) {
+                delta.nd6_queued++;
+                continue;
+            }
+            delta.nd6_queue_drops++;
+        }
         if (decision.action != DPPD_PACKET_FORWARD) {
             if (decision.drop_reason != DPPD_DROP_MALFORMED)
                 delta.policy_drops++;
-            if (decision.drop_reason == DPPD_DROP_POLICY)
+            if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)
+                delta.nd6_not_ready_drops++;
+            else if (decision.drop_reason == DPPD_DROP_POLICY)
                 delta.rule_drops++;
             else if (decision.drop_reason == DPPD_DROP_NO_ROUTE)
                 delta.no_route_drops++;
@@ -262,6 +339,32 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
     dppd_stats_add(&worker->stats, &delta);
 }
 
+static void process_ingress(struct dppd_worker *worker, const struct dppd_port *ingress)
+{
+    struct rte_mbuf *packets[DPPD_MAX_BURST];
+    uint16_t count = rte_eth_rx_burst(ingress->port_id, worker->queue_id, packets, worker->runtime->config.burst_size);
+    process_batch(worker, ingress, packets, count, false, 0);
+}
+
+/** 等待包重新检查最新 ACL、NAT 与路由，不能把等待前的放行结果带过策略更新 */
+static void process_waiting(struct dppd_worker *worker)
+{
+    struct dppd_nd6_pending pending;
+    for (unsigned int i = 0;
+         i < DPPD_MAX_BURST && dppd_nd6_take(worker->runtime->nd6, worker->queue_id, dppd_monotonic_ms(), &pending);
+         ++i) {
+        const struct dppd_port *ingress = dppd_devices_find(&worker->runtime->devices, pending.ingress);
+        if (pending.expired || ingress == NULL) {
+            rte_pktmbuf_free(pending.mbuf);
+            struct dppd_stats_values dropped = {.policy_drops = 1, .nd6_queue_drops = 1};
+            dppd_stats_add(&worker->stats, &dropped);
+            if (ingress != NULL)
+                dppd_stats_add(&worker->port_stats[ingress - worker->runtime->devices.ports], &dropped);
+        } else
+            process_batch(worker, ingress, &pending.mbuf, 1, true, pending.expires_ms);
+    }
+}
+
 /** 工作线程先登记为规则读者，再循环处理端口；收到停止请求后注销并返回 */
 int dppd_worker_main(void *arg)
 {
@@ -297,6 +400,11 @@ int dppd_worker_main(void *arg)
         !dppd_devices_removal_requested(&runtime->devices)) {
         uint16_t i;
 
+        if (runtime->nd6 != NULL) {
+            if (worker->queue_id == 0)
+                dppd_nd6_tick(runtime->nd6, dppd_monotonic_ms(), send_nd6, worker);
+            process_waiting(worker);
+        }
         for (i = 0; i < runtime->devices.nb_ports; ++i)
             process_ingress(worker, &runtime->devices.ports[i]);
         /** 即使所有端口都没有报文，也要报告安全点，避免空闲线程一直阻止旧表回收 */

@@ -33,7 +33,12 @@
     F(ipv6_hop_drops)         \
     F(ipv6_checksum_drops)    \
     F(ipv6_unsupported_drops) \
-    F(ipv6_rewrite_drops)
+    F(ipv6_rewrite_drops)     \
+    F(nd6_rx_packets)         \
+    F(nd6_tx_packets)         \
+    F(nd6_queued)             \
+    F(nd6_queue_drops)        \
+    F(nd6_not_ready_drops)
 
 struct dppd_stats_values {
 #define DPPD_STATS_VALUE(field) uint64_t field;

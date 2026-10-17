@@ -80,7 +80,7 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
     for (uint16_t i = 0; i < rule->nb_matches; ++i)
         ipv6 |= rule->matches[i].type == DPPD_MATCH_IPV6;
     /** 有状态处理和当前 IPv6 ACL 只走软件，不安装会绕过本阶段语义的硬件对象 */
-    if (context->connection_tracking || ipv6) {
+    if (context->connection_tracking || context->neighbor_discovery || ipv6) {
         if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || !context->software_equivalent ||
             rule->fallback == DPPD_FALLBACK_REQUIRE_HARDWARE)
             return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);

@@ -123,6 +123,11 @@ static void build_health(const struct dppd_control_service *control, const struc
         return;
     }
 
+    struct dppd_nd6_status neighbors;
+    dppd_nd6_status(runtime->nd6, &neighbors);
+    for (uint32_t i = 0; i < neighbors.local_count; ++i)
+        if (neighbors.locals[i].state != DPPD_ND6_PREFERRED)
+            output->blockers |= DPPD_HEALTH_ND6_NOT_READY;
     output->workers_expected = runtime->config.nb_queues;
     output->ports_expected = runtime->config.nb_ports;
     if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire))
@@ -365,7 +370,8 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         request->operation != DPPD_MANAGEMENT_RULE_HISTORY && request->operation != DPPD_MANAGEMENT_ROUTING_STATUS &&
         request->operation != DPPD_MANAGEMENT_ROUTING_GET && request->operation != DPPD_MANAGEMENT_CONNTRACK_STATUS &&
         request->operation != DPPD_MANAGEMENT_CONNTRACK_LIST && request->operation != DPPD_MANAGEMENT_NAT_STATUS &&
-        request->operation != DPPD_MANAGEMENT_DNAT_LIST) {
+        request->operation != DPPD_MANAGEMENT_DNAT_LIST && request->operation != DPPD_MANAGEMENT_ND6_STATUS &&
+        request->operation != DPPD_MANAGEMENT_ND6_LIST) {
         response->status = -EUCLEAN;
         return 0;
     }
@@ -600,6 +606,17 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
     case DPPD_MANAGEMENT_NAT_STATUS:
         dppd_conntrack_status(control->conntrack, dppd_monotonic_ms(), &response->payload.conntrack);
         rc = 0;
+        break;
+    case DPPD_MANAGEMENT_ND6_STATUS:
+        dppd_nd6_status(runtime == NULL ? NULL : runtime->nd6, &response->payload.nd6);
+        rc = 0;
+        break;
+    case DPPD_MANAGEMENT_ND6_LIST:
+        rc = dppd_nd6_list(runtime == NULL ? NULL : runtime->nd6, request->payload.conntrack.after_id,
+            request->payload.conntrack.expected_revision, &response->payload.dynamic_neighbors);
+        break;
+    case DPPD_MANAGEMENT_ND6_FLUSH:
+        rc = dppd_nd6_flush(runtime == NULL ? NULL : runtime->nd6, request->payload.conntrack.expected_revision);
         break;
     case DPPD_MANAGEMENT_DNAT_LIST:
         rc = dppd_conntrack_dnat_list(control->conntrack, request->payload.conntrack.after_id, &response->payload.dnat);

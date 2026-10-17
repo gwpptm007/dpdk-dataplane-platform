@@ -265,13 +265,27 @@ static void test_conntrack_management(void)
     assert(response.payload.dnat.count == 1 && response.payload.dnat.entries[0].rule.private_first == 8443);
     /** 处于恢复隔离也可核对静态策略，但清空会话仍属于禁止的写入操作 */
     enum dppd_control_recovery_state saved_state = control.recovery_state;
+    /** 只读 ND 状态必须明确成功，不能沿用前一个失败查询的返回码 */
+    for (unsigned int attempt = 0; attempt < 16; ++attempt) {
+        initialize_request(&request, DPPD_MANAGEMENT_ND6_LIST);
+        assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -ENODEV);
+        initialize_request(&request, DPPD_MANAGEMENT_ND6_STATUS);
+        assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0);
+        assert(response.status == 0 && !response.payload.nd6.enabled);
+    }
     control.recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+    initialize_request(&request, DPPD_MANAGEMENT_DNAT_LIST);
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
     initialize_request(&request, DPPD_MANAGEMENT_NAT_STATUS);
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
     assert(response.payload.conntrack.dnat_count == 1);
     initialize_request(&request, DPPD_MANAGEMENT_CONNTRACK_FLUSH);
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -EUCLEAN);
+    initialize_request(&request, DPPD_MANAGEMENT_ND6_FLUSH);
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -EUCLEAN);
+    initialize_request(&request, DPPD_MANAGEMENT_ND6_STATUS);
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
+
     control.recovery_state = saved_state;
     struct dppd_conntrack *table = control.conntrack;
     assert(dppd_control_fini(&control) == 0);

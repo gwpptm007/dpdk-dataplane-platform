@@ -59,10 +59,20 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     if (rc != 0)
         return rc;
 
+    uint8_t macs[DPPD_MAX_PORTS][6] = {{0}};
+    for (uint16_t i = 0; i < runtime->devices.nb_ports; ++i)
+        memcpy(macs[i], runtime->devices.ports[i].mac.addr_bytes, 6);
+    rc = dppd_nd6_create(&runtime->nd6, cfg, (const uint8_t(*)[6])macs, dppd_monotonic_ms());
+    if (rc != 0) {
+        dppd_devices_stop(&runtime->devices);
+        return rc;
+    }
     if (cfg->conntrack_capacity != 0) {
         rc = dppd_conntrack_create_dual(&runtime->conntrack, cfg->conntrack_capacity, cfg->conntrack_timeout_s,
             &cfg->snat, &cfg->snat6, cfg->dnat, cfg->dnat_count);
         if (rc != 0) {
+            dppd_nd6_destroy(runtime->nd6);
+            runtime->nd6 = NULL;
             dppd_devices_stop(&runtime->devices);
             return rc;
         }
@@ -72,6 +82,8 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         rc = rte_pdump_init();
         if (rc != 0) {
             fprintf(stderr, "[dppd] cannot initialize pdump service\n");
+            dppd_nd6_destroy(runtime->nd6);
+            runtime->nd6 = NULL;
             dppd_conntrack_destroy(runtime->conntrack);
             runtime->conntrack = NULL;
             dppd_devices_stop(&runtime->devices);
@@ -257,6 +269,8 @@ int dppd_runtime_destroy(struct dppd_runtime *runtime)
         (void)rte_pdump_uninit();
         runtime->pdump_initialized = false;
     }
+    dppd_nd6_destroy(runtime->nd6);
+    runtime->nd6 = NULL;
     dppd_conntrack_destroy(runtime->conntrack);
     runtime->conntrack = NULL;
     /** 将端口关闭或回调注销错误交给进程入口，避免清理失败却报告正常退出 */

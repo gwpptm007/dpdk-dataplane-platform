@@ -230,6 +230,38 @@ static int parse_dnat(const char *text, struct dppd_dnat_rule *rule, bool ipv6)
     return dppd_nat_validate(NULL, rule, 1);
 }
 
+/** 每个端口的 VLAN 域在启动时固定，可在同一域配置多个本机 IPv6 地址 */
+static int parse_nd6(const char *text, struct dppd_nd6_local *local)
+{
+    char copy[128];
+    if (text == NULL || strlen(text) >= sizeof(copy))
+        return -1;
+    strcpy(copy, text);
+    char *fields[4], *cursor = copy;
+    unsigned int count = 0;
+    while (cursor != NULL && count < 4) {
+        fields[count++] = cursor;
+        char *comma = strchr(cursor, ',');
+        if (comma != NULL)
+            *comma++ = '\0';
+        cursor = comma;
+    }
+    uint32_t port;
+    memset(local, 0, sizeof(*local));
+    if (cursor != NULL || count < 2 || parse_u32(fields[0], 0, UINT16_MAX - 1, &port) != 0 ||
+        inet_pton(AF_INET6, fields[1], local->address) != 1 || !dppd_ipv6_unicast(local->address, true))
+        return -1;
+    local->port_id = (uint16_t)port;
+    local->vlan_depth = (uint8_t)(count - 2);
+    for (unsigned int i = 2; i < count; ++i) {
+        uint32_t vlan;
+        if (parse_u32(fields[i], 1, 4094, &vlan) != 0)
+            return -1;
+        local->vlan[i - 2] = (uint16_t)vlan;
+    }
+    return 0;
+}
+
 void dppd_config_defaults(struct dppd_config *cfg)
 {
     /* 先清零确保新增字段有确定默认值，再覆盖可运行的最小双端口配置 */
@@ -244,6 +276,7 @@ void dppd_config_defaults(struct dppd_config *cfg)
     cfg->stats_period_ms = 1000;
     cfg->rule_capacity = DPPD_DEFAULT_RULE_CAPACITY;
     cfg->conntrack_timeout_s = 300;
+    cfg->nd6_reachable_ms = 30000;
     /* sizeof 字符串字面量包含末尾 '\0'，复制后路径一定终止 */
     memcpy(cfg->control_socket, DPPD_MANAGEMENT_DEFAULT_SOCKET, sizeof(DPPD_MANAGEMENT_DEFAULT_SOCKET));
     cfg->promiscuous = false;
@@ -275,6 +308,8 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"dnat", required_argument, NULL, 1012},
         {"snat6", required_argument, NULL, 1013},
         {"dnat6", required_argument, NULL, 1014},
+        {"nd6", required_argument, NULL, 1015},
+        {"nd6-reachable-ms", required_argument, NULL, 1016},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -386,6 +421,15 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
                 return DPPD_CONFIG_ERROR;
             cfg->dnat_count++;
             break;
+        case 1015:
+            if (cfg->nd6_count == DPPD_ND6_LOCAL_LIMIT || parse_nd6(optarg, &cfg->nd6[cfg->nd6_count]) != 0)
+                return DPPD_CONFIG_ERROR;
+            cfg->nd6_count++;
+            break;
+        case 1016:
+            if (parse_u32(optarg, 1000, 3600000, &cfg->nd6_reachable_ms) != 0)
+                return DPPD_CONFIG_ERROR;
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -415,6 +459,32 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
 
     if (cfg == NULL || error == NULL || error_len == 0)
         return -1;
+    if (cfg->nd6_count > DPPD_ND6_LOCAL_LIMIT ||
+        (cfg->nd6_count != 0 &&
+            (cfg->routing_path[0] == '\0' || cfg->nd6_reachable_ms < 1000 || cfg->nd6_reachable_ms > 3600000))) {
+        snprintf(error, error_len, "ND requires IP routing, bounded local addresses and reachable timer");
+        return -1;
+    }
+    for (uint32_t index = 0; index < cfg->nd6_count; ++index) {
+        const struct dppd_nd6_local *local = &cfg->nd6[index];
+        bool present = false;
+        for (uint16_t port = 0; port < cfg->nb_ports && port < DPPD_MAX_PORTS; ++port)
+            present |= cfg->ports[port] == local->port_id;
+        if (!present || !dppd_ipv6_unicast(local->address, true) || local->vlan_depth > 2 ||
+            (local->vlan_depth > 0 && (local->vlan[0] == 0 || local->vlan[0] > 4094)) ||
+            (local->vlan_depth > 1 && (local->vlan[1] == 0 || local->vlan[1] > 4094))) {
+            snprintf(error, error_len, "invalid ND interface, IPv6 address or VLAN domain");
+            return -1;
+        }
+        for (uint32_t other = 0; other < index; ++other)
+            if (local->port_id == cfg->nd6[other].port_id &&
+                (memcmp(local->address, cfg->nd6[other].address, 16) == 0 ||
+                    local->vlan_depth != cfg->nd6[other].vlan_depth ||
+                    memcmp(local->vlan, cfg->nd6[other].vlan, sizeof(local->vlan)) != 0)) {
+                snprintf(error, error_len, "ND local address duplicated or VLAN domain differs on the same port");
+                return -1;
+            }
+    }
     if ((cfg->conntrack_capacity != 0 && cfg->routing_path[0] == '\0') ||
         ((cfg->snat.enabled || cfg->snat6.enabled || cfg->dnat_count != 0) && cfg->conntrack_capacity == 0) ||
         cfg->conntrack_capacity > 65536 || cfg->conntrack_timeout_s == 0 || cfg->conntrack_timeout_s > 86400) {
@@ -529,6 +599,8 @@ void dppd_config_print_usage(const char *program)
     printf("  --ct-timeout N      established idle timeout in seconds (default 300)\n");
     printf("  --snat I,O,IP,A-B   translate inside I to outside O using public IPv4 and TCP/UDP port pool\n");
     printf("  --dnat O,I,PROTO,PUBLIC,PORTS,PRIVATE,PORTS  repeatable static TCP/UDP destination translation\n");
+    printf("  --nd6 PORT,IP6[,VID[,VID]]  repeatable local address, enables ND and duplicate detection\n");
+    printf("  --nd6-reachable-ms N  base reachability timer 1000..3600000, default 30000\n");
     printf("  --snat6 I,O,IP6,A-B  IPv6 source translation with a separate TCP/UDP port pool\n");
     printf("  --dnat6 O,I,PROTO,PUBLIC6,PORTS,PRIVATE6,PORTS  static IPv6 destination translation\n");
     printf("                      PORTS accepts N or A-B; public any requires private same\n");

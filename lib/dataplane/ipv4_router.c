@@ -303,11 +303,12 @@ int dppd_ipv6_router_lookup(struct dppd_ipv4_router *router, const uint8_t desti
     memcpy(key.address, memcmp(route->gateway, zero, 16) == 0 ? destination : route->gateway, 16);
     const struct dppd_ipv6_neighbor *neighbor =
         bsearch(&key, configuration->neighbors6, configuration->neighbor6_count, sizeof(key), compare_neighbor6);
-    if (neighbor == NULL)
-        return -EHOSTUNREACH;
     forward->generation = configuration->generation;
     forward->port_id = route->port_id;
     memcpy(forward->next_hop6, key.address, 16);
+    /** 缺少静态邻居时仍返回已匹配的出口和下一跳，供独立 ND 缓存继续解析 */
+    if (neighbor == NULL)
+        return -EHOSTUNREACH;
     memcpy(forward->destination_mac, neighbor->mac, 6);
     return 0;
 }

@@ -11,6 +11,13 @@
 #define DPPD_STATE_PATH_CAPACITY 4096U
 #define DPPD_DEFAULT_RULE_CAPACITY 1024U
 #define DPPD_MAX_DNAT_RULES 32U
+#define DPPD_ND6_LOCAL_LIMIT 32U
+
+/** 同一端口使用同一组 VLAN，可配置多个本机地址，启用前逐个执行重复地址检测 */
+struct dppd_nd6_local {
+    uint16_t port_id, vlan[2];
+    uint8_t address[16], vlan_depth;
+};
 
 /** 出站 SNAT 配置在启动时确定，不修改内核接口地址，也不把易失会话写进规则快照 */
 struct dppd_snat_config {
@@ -48,6 +55,8 @@ struct dppd_config {
     struct dppd_snat_config snat6;
     uint32_t dnat_count;
     struct dppd_dnat_rule dnat[DPPD_MAX_DNAT_RULES];
+    uint32_t nd6_count, nd6_reachable_ms;
+    struct dppd_nd6_local nd6[DPPD_ND6_LOCAL_LIMIT];
     /* Unix 管理 socket 的文件系统路径，长度包含末尾 '\0' */
     char control_socket[DPPD_CONTROL_SOCKET_PATH_CAPACITY];
     /* 为空表示禁用持久化；非空时启动必须成功恢复或创建该 snapshot */

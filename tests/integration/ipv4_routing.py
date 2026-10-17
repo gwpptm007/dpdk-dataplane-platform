@@ -60,7 +60,7 @@ class Fixture:
         check((result.returncode == 0) == success, f"CLI {arguments}: {output}")
         return output
 
-    def start(self, faults=False, refused=False):
+    def start(self, faults=False, refused=False, allow_not_ready=False):
         check(self.process is None, "previous daemon still exists")
         cpus = sorted(os.sched_getaffinity(0))
         check(len(cpus) >= 2, "two CPUs required")
@@ -85,7 +85,7 @@ class Fixture:
                 # socket 建立早于工作线程启动，使用正式就绪查询等待完整初始化
                 ready = subprocess.run([str(self.build / "dppctl"), "--socket", str(self.socket), "ready"],
                                        capture_output=True, text=True, timeout=3)
-                if ready.returncode == 0:
+                if ready.returncode == 0 or allow_not_ready:
                     # 旧抓包 socket 会保留前一次关口的 ENETDOWN，新进程就绪后建立新的观察端点
                     for link in self.links:
                         link.close()

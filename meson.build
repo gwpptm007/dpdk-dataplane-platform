@@ -37,6 +37,7 @@ dppd_sources = files(
   'lib/management/server.c',
   'lib/dataplane/packet.c',
   'lib/dataplane/ipv6.c',
+  'lib/dataplane/nd6.c',
   'lib/dataplane/ipv6_rewrite.c',
   'lib/dataplane/packet_mbuf.c',
   'lib/dataplane/pipeline.c',

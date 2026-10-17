@@ -36,6 +36,8 @@ struct dppd_control_service {
     struct dppd_routing_service *routing;
     /** 会话由 runtime 持有，规则规划只据此限制硬件旁路，控制面不负责销毁 */
     struct dppd_conntrack *conntrack;
+    /** 只借用动态邻居实例，用于禁止绕过本机 ND 的硬件处理 */
+    struct dppd_nd6 *nd6;
     uint64_t next_transaction_id;
     /* persistence path 由 service 动态持有；NULL 表示未启用自动 snapshot */
     char *persistence_path;

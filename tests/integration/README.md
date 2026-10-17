@@ -1,5 +1,20 @@
 # 集成验收
 
+## IPv6 动态邻居发现
+
+```sh
+sudo python3 tests/integration/nd6_traffic.py --build-dir build
+sudo python3 tests/integration/nd6_traffic.py --build-dir build-native
+python3 tests/integration/ipv4_traffic.py --build-dir build
+```
+
+两套构建各 47/47 单测，AddressSanitizer/UBSan 构建也通过全部 47 项。三 TAP 独立
+扮演 IPv6 邻居，核对未打标签、单 VLAN、双 VLAN 下的首包等待、NS/NA、完整输出
+字节和校验和、COUNT、NAT66、等待期间 ACL 更新、静态优先、MAC Override、NUD
+单播探测与失败、有界队列、DAD 冲突和异常重启重新学习。正式单双队列 worker
+另外核对跨队列 NA 唤醒共享分段包、原包不变和零 mbuf 泄漏。只使用自建私有网络
+命名空间，见 [ND 使用与边界](../../docs/nd6.md)。
+
 ## IPv6 连接跟踪与 NAT66
 
 ```sh

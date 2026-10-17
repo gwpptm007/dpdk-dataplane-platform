@@ -359,6 +359,7 @@ int main(int argc, char **argv)
      */
     dppd_runtime_set_software_backend(&runtime, &control.software);
     control.conntrack = runtime.conntrack;
+    control.nd6 = runtime.nd6;
     int routing_error = setup_ipv4_routing(&runtime, &control);
     if (routing_error != 0) {
         fprintf(stderr, "[dppd] IPv4 routing restore refused: %d\n", routing_error);

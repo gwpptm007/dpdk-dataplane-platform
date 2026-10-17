@@ -38,7 +38,7 @@ IPv4-mapped 地址，内外口必须是已配置的不同端口。
 
 策略在启动时固定，由部署保留启动参数，不写入规则或路由快照。运行时不提供策略
 热更新。部署还需提供正确的双向路由、静态邻居和外部可达性，本程序不修改 Linux
-地址、路由或实体接口，也不替代 ND、RA 和 SLAAC。
+地址、路由或实体接口。动态邻居已在 [ND 阶段](nd6.md)接通，RA 和 SLAAC 仍未提供。
 
 ## 状态 ACL 与提交顺序
 
@@ -90,7 +90,7 @@ IPv4 NAT 的启用不影响上述 IPv6 协议选择。
 
 ## 管理、重启与验收
 
-管理协议为 v21，daemon 和 CLI 必须配套，旧协议明确拒绝。原有 `conntrack-status`、
+此阶段使用 v21，当前 [ND 阶段](nd6.md) 扩展为 v22，daemon 和 CLI 必须配套，旧协议明确拒绝。原有 `conntrack-status`、
 `conntrack-list [AFTER_ID [REVISION]]`、`conntrack-flush REVISION` 管理同一双栈集合。
 每页四条，按不复用的会话 ID 排序，成员增删使旧修订号失效；流量计数和状态可继续
 变化。列表增加 `family=ipv4/ipv6`，IPv6 会话地址使用方括号并完整显示转换前后端点。
@@ -123,5 +123,5 @@ worker 核对共享映射、MARK、原共享分段包不变和 mbuf 零泄漏。
 纯 IPv6 跟踪、NAT66 与 IPv4 SNAT 共存、状态 ACL/批量更新、完整线缆字节、错误路径、
 SIGKILL 后策略重放和会话清空、老化与端口复用。测试只创建并清理自己的私有接口。
 
-动态 ND/RA/SLAAC、RELATED/ICMPv6 错误转换、分片重组、NPTv6、hairpin、ALG、完整
+动态 ND 已在[后续阶段](nd6.md)接通；RA/SLAAC、RELATED/ICMPv6 错误转换、分片重组、NPTv6、hairpin、ALG、完整
 TCP 窗口验证、会话 HA、硬件有状态卸载、隧道和物理性能/长期稳定性目标仍未完成。

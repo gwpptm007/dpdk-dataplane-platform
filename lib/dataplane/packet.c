@@ -65,6 +65,7 @@ int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32
     while ((ether_type == DPPD_ETHER_TYPE_VLAN || ether_type == DPPD_ETHER_TYPE_QINQ) && packet->vlan_depth < 2U) {
         if (require_bytes(offset, DPPD_VLAN_HEADER_LEN, available_len, packet_len) != 0)
             return DPPD_PARSE_MALFORMED;
+        packet->vlan_tpid[packet->vlan_depth] = ether_type;
         packet->vlan_tci[packet->vlan_depth++] = read_be16(data + offset);
         ether_type = read_be16(data + offset + 2U);
         offset += DPPD_VLAN_HEADER_LEN;

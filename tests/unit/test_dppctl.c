@@ -371,5 +371,12 @@ int main(void)
     assert(request.payload.update_batch.rules[0].rule.fallback == DPPD_FALLBACK_REQUIRE_HARDWARE);
     args[3] = "invalid";
     assert(build_request(8, args, &request) == -EINVAL);
+    char *nd[] = {"nd6-list", "8", "9"};
+    assert(build_request(3, nd, &request) == 0 && request.operation == DPPD_MANAGEMENT_ND6_LIST);
+    assert(request.payload.conntrack.after_id == 8 && request.payload.conntrack.expected_revision == 9);
+    nd[0] = "nd6-flush";
+    assert(build_request(2, nd, &request) == 0 && request.operation == DPPD_MANAGEMENT_ND6_FLUSH);
+    nd[1] = "0";
+    assert(build_request(2, nd, &request) == -EINVAL);
     return 0;
 }

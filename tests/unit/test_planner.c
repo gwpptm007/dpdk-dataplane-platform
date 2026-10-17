@@ -116,5 +116,14 @@ int main(void)
     assert(dppd_plan_rule(&context, &rule, &plan) == -ENOENT);
     assert(plan.reason == DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND);
     assert(strcmp(dppd_plan_reason_name(plan.reason), "endpoint-not-found") == 0);
+    /** 即便硬件可安装入口规则，启用 ND 后也必须让本机控制报文到达 worker */
+    context.install_port_id = 10;
+    context.software_equivalent = true;
+    context.hardware_available = true;
+    context.neighbor_discovery = true;
+    rule = ingress_rule(DPPD_FALLBACK_PREFER_HARDWARE);
+    assert(dppd_plan_rule(&context, &rule, &plan) == 0 && plan.backend == DPPD_PLAN_BACKEND_SOFTWARE);
+    rule.fallback = DPPD_FALLBACK_REQUIRE_HARDWARE;
+    assert(dppd_plan_rule(&context, &rule, &plan) == -ENOTSUP);
     return 0;
 }

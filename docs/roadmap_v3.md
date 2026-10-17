@@ -132,17 +132,22 @@ TAP 命名空间验证无 `CAP_NET_ADMIN` 的进程可以读取和订阅链路�
 
 ## M2：可组合软件 pipeline
 
+2026-10-17 完成 [IPv6 动态 ND](nd6.md)：NS/NA、动态解析与有界首包、NUD 可达性、
+本机 DAD、VLAN 域隔离、静态优先和管理闭环接通。两套构建各 47/47 单测、sanitizer
+全部 47 项、单双队列共享首包与 NAT66、三种 VLAN 域的真实 TAP 和异常重启验收通过。
+动态状态不落盘，协议 v22。RA/SLAAC、Redirect、隧道及其余有状态/性能目标仍待推进。
+
 2026-10-17 完成 [IPv6 连接跟踪与 NAT66](nat66.md)：双栈 TCP/UDP 会话与状态 ACL、
 SNAT66、静态 DNAT66 和端口转发、完整校验和、地址族端口池隔离及回包还原已接通。
 两套构建各 46/46 单测、相关 sanitizer、单双队列正式 worker 和真实三 TAP 的状态、
 IPv4 共存、故障、重启及老化验收通过。协议 v21，规则/路由恢复而会话重启清空。
-动态 ND/RA、RELATED/ICMPv6、重组、hairpin、NPTv6、隧道和硬件/性能目标仍待推进。
+动态 ND 已在上述阶段补齐；RA/SLAAC、RELATED/ICMPv6、重组、hairpin、NPTv6、隧道和硬件/性能目标仍待推进。
 
 2026-10-17 完成 [IPv6 解析、ACL 与转发](ipv6.md)：有界扩展头、128 位地址条件和范围
 ACL、双栈最长前缀/静态邻居、MAC/Hop Limit 改写、CLI 与混合快照重启恢复已接通。
 两套构建各 45/45 单测、十一项 sanitizer、单双队列 200 次 IPv6 在线切换和真实 TAP
 的 TCP/UDP/ICMPv6、存储故障、批量 ACL 与 IPv4 NAT 共存验收通过。IPv6 会话/NAT 已在上述阶段补齐；
-动态 ND/RA、分片重组、完整扩展选项、ICMPv6 错误生成、隧道与性能目标仍未完成。
+动态 ND 已在上述阶段补齐；RA/SLAAC、分片重组、完整扩展选项、ICMPv6 错误生成、隧道与性能目标仍未完成。
 
 2026-10-17 完成 [静态 DNAT 与端口转发](dnat.md)：TCP/UDP 整地址、单端口和等长
 端口段、回包公网还原、逻辑 ACL/路由、SNAT 静态端口保留和管理分页查询已接通。
