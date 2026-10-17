@@ -28,7 +28,8 @@ SmartNIC/DPU 上全路径策略一致性及硬件 ACL 适配属于后续阶段�
 
 `acl-set` 固定使用软件后端，创建使用旧版本 0，更新必须指定查询到的精确旧版本，
 不接受 `any`。ID、版本和计数与已有 rule repository 共用，没有第二套 ACL 账本。
-管理协议更新至 v17，daemon 与 CLI 必须配套。
+ACL 首版为 v17，当前 [连接跟踪](conntrack_nat.md) 扩展为 v18，daemon 与 CLI 必须配套。
+`state:new,established` 等状态条件已接通，启用跟踪后所有规则强制经软件执行。
 
 ```sh
 # 端口 0：允许指定地址范围的 UDP，源端口 1000–2000，目的端口 8000–9000
@@ -45,7 +46,7 @@ SmartNIC/DPU 上全路径策略一致性及硬件 ACL 适配属于后续阶段�
 ```
 
 命令格式为 `acl-set ID PORT EXPECTED PRIORITY PROTOCOL SRC_CIDR DST_CIDR SRC_RANGE DST_RANGE
-allow|drop [count] [mark:N]`。范围接受 `any`、单值或 `LOW-HIGH`。`ipv4` 和 `ip:N` 的两个
+allow|drop [count] [mark:N] [state:STATES]`。范围接受 `any`、单值或 `LOW-HIGH`。`ipv4` 和 `ip:N` 的两个
 端口参数必须为 `any`，不能让无端口语义的规则悄悄忽略端口限制。
 示例中的版本 1 仅用于全新账本，实际更新、COUNT 和删除应使用 `get` 返回的版本。
 `delete ID GENERATION`、规则详情、安装状态、失败历史、统计和 telemetry 继续复用原接口。
@@ -127,5 +128,5 @@ UDP 范围边界、TCP 443、协议号和分片、优先级与 COUNT、TTL/校�
 
 net_ring 使用正式 worker 验证一队列/两队列的 ALLOW、范围、MARK、COUNT 及共享原包
 不变，保留原有四端口 17 类报文、1000 次路由热更新、零 mbuf 泄漏和二层回归。
-测试创建并清理自己的 TAP，不改实体网卡。IPv6 ACL、状态防火墙、连接跟踪/NAT、
-完整硬件策略一致性和性能目标属于后续工作，不计入本次 IPv4 软件 ACL 交付。
+测试创建并清理自己的 TAP，不改实体网卡。TCP/UDP 状态 ACL、连接跟踪和出站 SNAT
+已在后续 [有状态阶段](conntrack_nat.md) 接通；IPv6、完整硬件策略一致性和性能目标仍未完成。

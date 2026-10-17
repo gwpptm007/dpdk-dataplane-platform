@@ -32,6 +32,7 @@ struct dppd_planner_context {
     bool software_equivalent;
     /** 三层模式只接受入口策略，拒绝绕过工作线程的 transfer 和其他执行域 */
     bool ipv4_routing;
+    bool connection_tracking;
 };
 
 struct dppd_execution_plan {

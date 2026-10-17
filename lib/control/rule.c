@@ -39,6 +39,8 @@ static bool match_equal(const struct dppd_match *left, const struct dppd_match *
     case DPPD_MATCH_IP_PROTOCOL:
         return left->spec.protocol.value == right->spec.protocol.value &&
             left->spec.protocol.mask == right->spec.protocol.mask;
+    case DPPD_MATCH_CONNECTION_STATE:
+        return left->spec.connection_states == right->spec.connection_states;
     }
     return false;
 }
@@ -106,12 +108,16 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
 
     for (i = 0; i < rule->nb_matches; ++i) {
         const enum dppd_match_type type = rule->matches[i].type;
-        if (type < DPPD_MATCH_ETH || type > DPPD_MATCH_IP_PROTOCOL)
+        if (type < DPPD_MATCH_ETH || type > DPPD_MATCH_CONNECTION_STATE)
             return rule_error(error, error_len, "unsupported match type");
         if ((seen_matches & (1U << type)) != 0)
             return rule_error(error, error_len, "duplicate match type");
         seen_matches |= 1U << type;
-        if (type != DPPD_MATCH_REPRESENTED_PORT) {
+        if (type == DPPD_MATCH_CONNECTION_STATE &&
+            (rule->domain != DPPD_RULE_DOMAIN_INGRESS || rule->matches[i].spec.connection_states == 0 ||
+                (rule->matches[i].spec.connection_states & ~15U) != 0))
+            return rule_error(error, error_len, "invalid ingress connection state mask");
+        if (type != DPPD_MATCH_REPRESENTED_PORT && type != DPPD_MATCH_CONNECTION_STATE) {
             const uint8_t rank = type == DPPD_MATCH_ETH ? 1U
                 : type == DPPD_MATCH_IPV4               ? 2U
                 : type == DPPD_MATCH_IP_PROTOCOL        ? 3U

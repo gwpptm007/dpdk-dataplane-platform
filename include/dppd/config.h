@@ -11,6 +11,13 @@
 #define DPPD_STATE_PATH_CAPACITY 4096U
 #define DPPD_DEFAULT_RULE_CAPACITY 1024U
 
+/** 出站 SNAT 配置在启动时确定，不修改内核接口地址，也不把易失会话写进规则快照 */
+struct dppd_snat_config {
+    bool enabled;
+    uint16_t inside_port, outside_port, first_port, last_port;
+    uint32_t address_be;
+};
+
 struct dppd_config {
     /* ports 按相邻两项组成双向转发对，例如 0,1,2,3 表示 0↔1、2↔3 */
     uint16_t ports[DPPD_MAX_PORTS];
@@ -23,6 +30,8 @@ struct dppd_config {
     uint32_t duration_s;
     /* desired rule repository 的逻辑容量，不等价于 NIC rte_flow 硬件容量 */
     uint32_t rule_capacity;
+    uint32_t conntrack_capacity, conntrack_timeout_s;
+    struct dppd_snat_config snat;
     /* Unix 管理 socket 的文件系统路径，长度包含末尾 '\0' */
     char control_socket[DPPD_CONTROL_SOCKET_PATH_CAPACITY];
     /* 为空表示禁用持久化；非空时启动必须成功恢复或创建该 snapshot */

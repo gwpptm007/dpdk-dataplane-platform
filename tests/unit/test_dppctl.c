@@ -57,6 +57,26 @@ static void test_acl_arguments(void)
     close(fd);
     assert(unlink(path) == 0);
     assert(build_request(2, batch, &request) == -ENOENT);
+    char *stateful[] = {"acl-set", "12", "0", "0", "10", "udp", "any", "any", "any", "any", "allow", "count", "mark:9",
+        "state:new,established"};
+    assert(build_request(14, stateful, &request) == 0);
+    assert(request.payload.apply.rule.matches[3].type == DPPD_MATCH_CONNECTION_STATE);
+    assert(request.payload.apply.rule.matches[3].spec.connection_states == (DPPD_CT_NEW | DPPD_CT_ESTABLISHED));
+    stateful[13] = "state:new,,established";
+    assert(build_request(14, stateful, &request) == -EINVAL);
+    stateful[13] = "state:new,new";
+    assert(build_request(14, stateful, &request) == -EINVAL);
+    char *query[] = {"conntrack-list", "123", "7"};
+    assert(build_request(3, query, &request) == 0 && request.payload.conntrack.expected_revision == 7);
+    query[0] = "conntrack-flush";
+    assert(build_request(2, query, &request) == 0 && request.payload.conntrack.expected_revision == 123);
+    query[1] = "0";
+    assert(build_request(2, query, &request) == -EINVAL);
+    query[1] = "any";
+    assert(build_request(2, query, &request) == -EINVAL);
+    query[0] = "nat-status";
+    assert(build_request(1, query, &request) == 0 && request.operation == DPPD_MANAGEMENT_NAT_STATUS);
+    assert(build_request(2, query, &request) == -EINVAL);
 }
 
 /** 路由命令先完整解析再连接服务，错误文件不能被当成空配置发送 */

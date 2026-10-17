@@ -1,5 +1,19 @@
 # 集成验收
 
+## TCP/UDP 连接跟踪与出站 SNAT
+
+```sh
+sudo python3 tests/integration/conntrack_nat.py --build-dir build
+sudo python3 tests/integration/conntrack_nat.py --build-dir build-native
+python3 tests/integration/ipv4_traffic.py --build-dir build
+```
+
+2026-10-17，两套构建各 42/42 单测、六项相关 sanitizer 通过。自建空命名空间的三 TAP
+核对状态 ACL、UDP/TCP 握手、完整正反向字节和校验和、拒绝不建连/不刷新、表满、池满、
+分页/清空、空闲老化、单端口池复用、崩溃后会话清空与规则重放，以及缺少跟踪时拒绝
+恢复状态规则。正式单双队列 worker 另核对共用映射、跨队列回包和共享原包不变。
+只使用自己的虚拟接口，详见 [连接跟踪与 SNAT](../../docs/conntrack_nat.md)。
+
 ## IPv4 软件 ACL
 
 ```sh

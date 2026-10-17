@@ -39,6 +39,86 @@ static void flush_egress(struct dppd_worker *worker, const struct dppd_port *egr
     }
 }
 
+static enum dppd_drop_reason stateful_error(int error)
+{
+    switch (error) {
+    case -ENOSPC:
+        return DPPD_DROP_CT_FULL;
+    case -EADDRNOTAVAIL:
+        return DPPD_DROP_NAT_POOL;
+    case -ENOENT:
+        return DPPD_DROP_NAT_MISS;
+    case -EXDEV:
+        return DPPD_DROP_CT_ZONE;
+    case -ENOTSUP:
+        return DPPD_DROP_CT_UNSUPPORTED;
+    case -EBADMSG:
+        return DPPD_DROP_CT_CHECKSUM;
+    case -ETIMEDOUT:
+        return DPPD_DROP_TTL;
+    case -ENOMEM:
+        return DPPD_DROP_REWRITE;
+    default:
+        return DPPD_DROP_CT_INVALID;
+    }
+}
+
+/** 反向 NAT 先恢复逻辑目的地址供 ACL 和路由使用，线缆字节只在最终放行后统一改写 */
+static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **mbuf,
+    int parsed, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision)
+{
+    struct dppd_runtime *runtime = worker->runtime;
+    struct dppd_connection_attempt attempt = {0};
+    struct dppd_packet policy = *packet;
+    int rc = 0;
+    if (parsed != DPPD_PARSE_MALFORMED) {
+        if (packet->l4_type == DPPD_L4_TCP || packet->l4_type == DPPD_L4_UDP)
+            rc = dppd_ipv4_transport_validate(*mbuf, packet);
+        if (rc == 0)
+            rc = dppd_conntrack_begin(runtime->conntrack, ingress->port_id, packet, dppd_monotonic_ms(), &attempt);
+        policy.connection_state = rc == 0 ? attempt.state : DPPD_CT_INVALID;
+        if (rc == 0) {
+            policy.ipv4_src_be = attempt.policy.source_be;
+            policy.ipv4_dst_be = attempt.policy.destination_be;
+            policy.l4_src_port_be = attempt.policy.source_port_be;
+            policy.l4_dst_port_be = attempt.policy.destination_port_be;
+        }
+    }
+    if (parsed != DPPD_PARSE_MALFORMED && rc != 0) {
+        /** INVALID 规则仍可记录拒绝计数，但允许动作不能把校验错误或无会话回包放行 */
+        struct dppd_software_decision policy_result = {0};
+        dppd_software_backend_decide(runtime->software_backend, ingress->port_id, &policy, &policy_result);
+        memset(decision, 0, sizeof(*decision));
+        decision->drop_reason = policy_result.drop ? DPPD_DROP_POLICY : stateful_error(rc);
+        dppd_conntrack_finish(&attempt, 0, false);
+        return;
+    }
+    dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress->port_id,
+        parsed, &policy, decision);
+    if (decision->action != DPPD_PACKET_FORWARD) {
+        dppd_conntrack_finish(&attempt, 0, false);
+        return;
+    }
+    if (rc == 0) {
+        const struct dppd_port *egress = dppd_devices_find(&runtime->devices, decision->egress_port);
+        if (egress == NULL || !dppd_port_tx_available(egress)) {
+            decision->action = DPPD_PACKET_DROP;
+            decision->drop_reason = DPPD_DROP_EGRESS;
+            dppd_conntrack_finish(&attempt, 0, false);
+            return;
+        }
+        rc = dppd_ipv4_rewrite_flow(mbuf, packet, &decision->ipv4, egress->mac.addr_bytes,
+            attempt.nat ? &attempt.rewrite : NULL);
+    }
+    int commit = dppd_conntrack_finish(&attempt, decision->egress_port, rc == 0);
+    if (rc == 0)
+        rc = commit;
+    if (rc != 0) {
+        decision->action = DPPD_PACKET_DROP;
+        decision->drop_reason = stateful_error(rc);
+    }
+}
+
 /** 同一入口批次按实际出口分组，三层路由可以同时选择多个出口，报文始终只交付一次 */
 static void process_ingress(struct dppd_worker *worker, const struct dppd_port *ingress)
 {
@@ -57,7 +137,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
         runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;
     for (uint16_t i = 0; i < received; ++i) {
         struct dppd_pipeline_decision decision;
-        struct dppd_packet packet;
+        struct dppd_packet packet = {0};
         uint32_t length = rte_pktmbuf_pkt_len(rx[i]);
         delta.rx_bytes += length;
         int parsed = dppd_packet_parse_mbuf(rx[i], &packet);
@@ -65,8 +145,11 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             delta.rx_malformed++;
         else if (parsed == DPPD_PARSE_UNSUPPORTED)
             delta.rx_unsupported++;
-        dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router,
-            ingress->port_id, parsed, &packet, &decision);
+        if (runtime->conntrack != NULL)
+            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision);
+        else
+            dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router,
+                ingress->port_id, parsed, &packet, &decision);
         if (decision.action != DPPD_PACKET_FORWARD) {
             if (decision.drop_reason != DPPD_DROP_MALFORMED)
                 delta.policy_drops++;
@@ -78,6 +161,26 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
                 delta.no_neighbor_drops++;
             else if (decision.drop_reason == DPPD_DROP_IPV4_UNSUPPORTED)
                 delta.ipv4_unsupported_drops++;
+            else if (decision.drop_reason == DPPD_DROP_CT_INVALID)
+                delta.ct_invalid_drops++;
+            else if (decision.drop_reason == DPPD_DROP_CT_FULL)
+                delta.ct_full_drops++;
+            else if (decision.drop_reason == DPPD_DROP_CT_UNSUPPORTED)
+                delta.ct_unsupported_drops++;
+            else if (decision.drop_reason == DPPD_DROP_CT_ZONE)
+                delta.ct_zone_drops++;
+            else if (decision.drop_reason == DPPD_DROP_CT_CHECKSUM)
+                delta.ct_checksum_drops++;
+            else if (decision.drop_reason == DPPD_DROP_NAT_POOL)
+                delta.nat_pool_drops++;
+            else if (decision.drop_reason == DPPD_DROP_NAT_MISS)
+                delta.nat_miss_drops++;
+            else if (decision.drop_reason == DPPD_DROP_TTL)
+                delta.ipv4_ttl_drops++;
+            else if (decision.drop_reason == DPPD_DROP_REWRITE)
+                delta.ipv4_rewrite_drops++;
+            else if (decision.drop_reason == DPPD_DROP_EGRESS)
+                delta.egress_drops++;
             rte_pktmbuf_free(rx[i]);
             continue;
         }
@@ -89,7 +192,7 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             rte_pktmbuf_free(rx[i]);
             continue;
         }
-        if (decision.routed) {
+        if (decision.routed && runtime->conntrack == NULL) {
             int rc = dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);
             if (rc != 0) {
                 delta.policy_drops++;

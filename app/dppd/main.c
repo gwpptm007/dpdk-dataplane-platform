@@ -358,6 +358,7 @@ int main(int argc, char **argv)
      * 绑定临时对象，也不能在 runtime_start 后替换该地址
      */
     dppd_runtime_set_software_backend(&runtime, &control.software);
+    control.conntrack = runtime.conntrack;
     int routing_error = setup_ipv4_routing(&runtime, &control);
     if (routing_error != 0) {
         fprintf(stderr, "[dppd] IPv4 routing restore refused: %d\n", routing_error);
@@ -422,6 +423,8 @@ int main(int argc, char **argv)
                 fprintf(stderr, "[dppd] device monitoring failed during recovery isolation\n");
                 break;
             }
+            if (runtime.conntrack != NULL)
+                dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 128);
             loop_error = dppd_management_poll(&management);
             if (loop_error != 0) {
                 fprintf(stderr, "[dppd] recovery management processing failed: %d\n", loop_error);
@@ -493,6 +496,8 @@ int main(int argc, char **argv)
          * 管理请求只在主线程串行执行，repository 与硬件事务无需额外加锁；
          * poll 内部有连接预算，保证本循环仍能周期性观察 stop_signal
          */
+        if (runtime.conntrack != NULL)
+            dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 128);
         loop_error = dppd_management_poll(&management);
         if (loop_error != 0) {
             fprintf(stderr, "[dppd] management request processing failed: %d\n", loop_error);

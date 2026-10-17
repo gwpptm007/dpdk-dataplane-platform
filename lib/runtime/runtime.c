@@ -59,10 +59,20 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     if (rc != 0)
         return rc;
 
+    if (cfg->conntrack_capacity != 0) {
+        rc = dppd_conntrack_create(&runtime->conntrack, cfg->conntrack_capacity, cfg->conntrack_timeout_s, &cfg->snat);
+        if (rc != 0) {
+            dppd_devices_stop(&runtime->devices);
+            return rc;
+        }
+    }
+
     if (cfg->enable_pdump) {
         rc = rte_pdump_init();
         if (rc != 0) {
             fprintf(stderr, "[dppd] cannot initialize pdump service\n");
+            dppd_conntrack_destroy(runtime->conntrack);
+            runtime->conntrack = NULL;
             dppd_devices_stop(&runtime->devices);
             return -EIO;
         }
@@ -246,6 +256,8 @@ int dppd_runtime_destroy(struct dppd_runtime *runtime)
         (void)rte_pdump_uninit();
         runtime->pdump_initialized = false;
     }
+    dppd_conntrack_destroy(runtime->conntrack);
+    runtime->conntrack = NULL;
     /** 将端口关闭或回调注销错误交给进程入口，避免清理失败却报告正常退出 */
     return dppd_devices_stop(&runtime->devices);
 }

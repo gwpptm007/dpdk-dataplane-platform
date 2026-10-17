@@ -10,7 +10,7 @@ struct acl_row {
     uint64_t id;
     uint32_t group, priority, tag, src, src_mask, dst, dst_mask;
     uint16_t ingress, src_first, src_last, dst_first, dst_last;
-    uint8_t l4, protocol, protocol_mask;
+    uint8_t l4, protocol, protocol_mask, connection_states;
     bool ipv4, range;
 };
 
@@ -75,6 +75,9 @@ int dppd_acl_add(struct dppd_acl *acl, const struct dppd_rule *rule, uint32_t ta
             row.protocol = match->spec.protocol.value;
             row.protocol_mask = match->spec.protocol.mask;
             break;
+        case DPPD_MATCH_CONNECTION_STATE:
+            row.connection_states = (uint8_t)match->spec.connection_states;
+            break;
         case DPPD_MATCH_UDP:
         case DPPD_MATCH_TCP:
             row.l4 = match->type == DPPD_MATCH_UDP ? DPPD_L4_UDP : DPPD_L4_TCP;
@@ -108,6 +111,8 @@ int dppd_acl_add(struct dppd_acl *acl, const struct dppd_rule *rule, uint32_t ta
 /** IPv4 地址掩码按原网络字节比较，范围端口只转换一次，分片不能冒充端口为零的 TCP/UDP */
 static bool matches(const struct acl_row *row, const struct dppd_packet *packet)
 {
+    if (row->connection_states != 0 && (row->connection_states & packet->connection_state) == 0)
+        return false;
     if (row->ipv4 &&
         (packet->l3_type != DPPD_L3_IPV4 || (packet->ipv4_src_be & row->src_mask) != row->src ||
             (packet->ipv4_dst_be & row->dst_mask) != row->dst))

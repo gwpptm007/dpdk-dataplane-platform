@@ -8,6 +8,10 @@ test('packet parser', packet_test)
 acl_test = executable('test_acl', 'test_acl.c', dependencies: dppd_core_dep)
 test('compiled ACL and independent reference', acl_test)
 
+conntrack_test = executable('test_conntrack', 'test_conntrack.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'])
+test('connection tracking lifecycle and concurrency', conntrack_test)
+
 config_test = executable(
   'test_config',
   'test_config.c',
@@ -227,6 +231,7 @@ dppctl_test = executable(
   'test_dppctl',
   'test_dppctl.c',
   '../../app/dppctl/routing_cli.c',
+  '../../app/dppctl/conntrack_cli.c',
   include_directories: dppd_inc,
 )
 test('dppctl batch update arguments', dppctl_test)

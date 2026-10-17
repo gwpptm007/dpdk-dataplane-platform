@@ -6,6 +6,14 @@
 
 struct rte_mbuf;
 
+/** 状态是互斥位值，ACL 可以用位掩码同时选择多个状态，未启用跟踪时使用 UNTRACKED */
+enum dppd_connection_state {
+    DPPD_CT_UNTRACKED = 1,
+    DPPD_CT_NEW = 2,
+    DPPD_CT_ESTABLISHED = 4,
+    DPPD_CT_INVALID = 8,
+};
+
 /**
  * 解析结果区分三种情况：已识别、暂不支持、报文结构异常
  * OK 不代表已解析全部协议，例如 IPv4 分片和其他传输层协议也可返回 OK
@@ -54,6 +62,10 @@ struct dppd_packet {
     enum dppd_l4_type l4_type;
     /** IPv4 头中的原始协议编号，即使报文是分片也会记录 */
     uint8_t ip_protocol;
+    uint8_t connection_state;
+    uint8_t tcp_flags;
+    uint16_t ipv4_total_len;
+    uint32_t tcp_sequence_be, tcp_acknowledgment_be;
     /** 地址与端口保留网络字节序，便于与规则中同样格式的值按位匹配，不能直接当作主机数值 */
     uint32_t ipv4_src_be;
     uint32_t ipv4_dst_be;

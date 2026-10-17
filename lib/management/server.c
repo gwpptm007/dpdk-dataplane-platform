@@ -293,7 +293,8 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         request->operation != DPPD_MANAGEMENT_HEALTH_GET && request->operation != DPPD_MANAGEMENT_CAPABILITY_GET &&
         request->operation != DPPD_MANAGEMENT_RULE_METRICS && request->operation != DPPD_MANAGEMENT_RULE_LATENCY &&
         request->operation != DPPD_MANAGEMENT_RULE_HISTORY && request->operation != DPPD_MANAGEMENT_ROUTING_STATUS &&
-        request->operation != DPPD_MANAGEMENT_ROUTING_GET) {
+        request->operation != DPPD_MANAGEMENT_ROUTING_GET && request->operation != DPPD_MANAGEMENT_CONNTRACK_STATUS &&
+        request->operation != DPPD_MANAGEMENT_CONNTRACK_LIST && request->operation != DPPD_MANAGEMENT_NAT_STATUS) {
         response->status = -EUCLEAN;
         return 0;
     }
@@ -523,6 +524,19 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         break;
     case DPPD_MANAGEMENT_ROUTING_GET:
         rc = dppd_routing_get(control->routing, &response->payload.routing);
+        break;
+    case DPPD_MANAGEMENT_CONNTRACK_STATUS:
+    case DPPD_MANAGEMENT_NAT_STATUS:
+        dppd_conntrack_status(control->conntrack, dppd_monotonic_ms(), &response->payload.conntrack);
+        rc = 0;
+        break;
+    case DPPD_MANAGEMENT_CONNTRACK_LIST:
+        rc = dppd_conntrack_list(control->conntrack, dppd_monotonic_ms(), request->payload.conntrack.after_id,
+            request->payload.conntrack.expected_revision, &response->payload.connections);
+        break;
+    case DPPD_MANAGEMENT_CONNTRACK_FLUSH:
+        rc = dppd_conntrack_flush(control->conntrack, request->payload.conntrack.expected_revision);
+        dppd_conntrack_status(control->conntrack, dppd_monotonic_ms(), &response->payload.conntrack);
         break;
     case DPPD_MANAGEMENT_ROUTING_STATUS:
         dppd_routing_status(control->routing, &response->payload.routing_status);

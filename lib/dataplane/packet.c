@@ -54,6 +54,7 @@ int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32
 
     /** 初始以太网头检查成功后才清零输出，后续未解析的字段保持默认值 */
     memset(packet, 0, sizeof(*packet));
+    packet->connection_state = DPPD_CT_UNTRACKED;
     packet->packet_len = packet_len;
     packet->l2_len = DPPD_ETHER_HEADER_LEN;
     ether_type = read_be16(data + 12U);
@@ -113,6 +114,7 @@ int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32
 
         packet->l3_type = DPPD_L3_IPV4;
         packet->l3_len = ihl;
+        packet->ipv4_total_len = total_length;
         protocol = data[offset + 9U];
         packet->ip_protocol = protocol;
         /** 原样复制地址字节，既保留网络字节序，也避免把未对齐的报文地址强转为整数指针 */
@@ -169,6 +171,9 @@ int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32
                 return DPPD_PARSE_MALFORMED;
             packet->l4_type = DPPD_L4_TCP;
             packet->l4_len = tcp_length;
+            packet->tcp_flags = data[offset + 13U];
+            memcpy(&packet->tcp_sequence_be, data + offset + 4U, 4);
+            memcpy(&packet->tcp_acknowledgment_be, data + offset + 8U, 4);
             memcpy(&packet->l4_src_port_be, data + offset, sizeof(packet->l4_src_port_be));
             memcpy(&packet->l4_dst_port_be, data + offset + 2U, sizeof(packet->l4_dst_port_be));
             return DPPD_PARSE_OK;

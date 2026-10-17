@@ -42,6 +42,8 @@ dppd_sources = files(
   'lib/dataplane/ipv4_rewrite.c',
   'lib/dataplane/software_backend.c',
   'lib/dataplane/acl.c',
+  'lib/dataplane/conntrack.c',
+  'lib/dataplane/transport.c',
   'lib/dataplane/worker.c',
   'lib/offload/rte_flow.c',
   'lib/offload/rte_flow_backend.c',
@@ -77,6 +79,7 @@ executable(
   'dppctl',
   'app/dppctl/main.c',
   'app/dppctl/routing_cli.c',
+  'app/dppctl/conntrack_cli.c',
   include_directories: dppd_inc,
   install: false,
 )

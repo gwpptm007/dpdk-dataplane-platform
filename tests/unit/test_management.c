@@ -207,8 +207,56 @@ static void test_routing_management(struct dppd_control_service *control, const 
     assert(unlink(path) == 0 && unlink(lock) == 0 && rmdir(directory) == 0);
 }
 
+/** 正式管理分发可以读会话和精确清空，状态 ACL 必须在启用跟踪后才接受 */
+static void test_conntrack_management(void)
+{
+    struct dppd_topology topology = {.nb_endpoints = 1};
+    struct dppd_control_service control;
+    struct dppd_management_request request;
+    struct dppd_management_response response;
+    assert(dppd_control_init(&control, &topology, 8, NULL) == 0);
+    initialize_request(&request, DPPD_MANAGEMENT_RULE_APPLY);
+    struct dppd_rule *rule = &request.payload.apply.rule;
+    rule->id = 77;
+    rule->fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
+    rule->nb_matches = 2;
+    rule->matches[0].type = DPPD_MATCH_ETH;
+    rule->matches[1].type = DPPD_MATCH_CONNECTION_STATE;
+    rule->matches[1].spec.connection_states = DPPD_CT_NEW;
+    rule->nb_actions = 1;
+    rule->actions[0].type = DPPD_ACTION_ALLOW;
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -ENOTSUP);
+    assert(dppd_conntrack_create(&control.conntrack, 8, 60, NULL) == 0);
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
+    struct dppd_packet packet = {.l3_type = DPPD_L3_IPV4,
+        .l4_type = DPPD_L4_UDP,
+        .ip_protocol = 17,
+        .ipv4_src_be = htonl(0x0a000001),
+        .ipv4_dst_be = htonl(0xc6336401),
+        .l4_src_port_be = htons(1234),
+        .l4_dst_port_be = htons(443),
+        .packet_len = 64};
+    struct dppd_connection_attempt attempt;
+    assert(dppd_conntrack_begin(control.conntrack, 0, &packet, dppd_monotonic_ms(), &attempt) == 0);
+    assert(dppd_conntrack_finish(&attempt, 1, true) == 0);
+    initialize_request(&request, DPPD_MANAGEMENT_CONNTRACK_LIST);
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
+    assert(response.payload.connections.count == 1);
+    uint64_t revision = response.payload.connections.revision;
+    initialize_request(&request, DPPD_MANAGEMENT_CONNTRACK_FLUSH);
+    request.payload.conntrack.expected_revision = revision - 1;
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -ESTALE);
+    request.payload.conntrack.expected_revision = revision;
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
+    assert(response.payload.conntrack.active == 0);
+    struct dppd_conntrack *table = control.conntrack;
+    assert(dppd_control_fini(&control) == 0);
+    dppd_conntrack_destroy(table);
+}
+
 int main(void)
 {
+    test_conntrack_management();
     const struct dppd_flow_api api = {
         .validate = fake_validate,
         .create = fake_create,

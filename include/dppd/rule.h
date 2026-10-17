@@ -28,6 +28,7 @@ enum dppd_match_type {
     DPPD_MATCH_UDP_RANGE,
     DPPD_MATCH_TCP_RANGE,
     DPPD_MATCH_IP_PROTOCOL,
+    DPPD_MATCH_CONNECTION_STATE,
 };
 
 struct dppd_match_ipv4 {
@@ -55,6 +56,7 @@ struct dppd_match {
         struct dppd_match_ipv4 ipv4;
         struct dppd_match_l4 l4;
         struct dppd_match_l4_range range;
+        uint32_t connection_states;
         struct {
             uint8_t value, mask;
         } protocol;

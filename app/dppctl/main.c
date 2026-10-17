@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include "dppd/management.h"
 #include "routing_cli.h"
+#include "conntrack_cli.h"
 
 static void print_usage(const char *program)
 {
@@ -23,6 +24,10 @@ static void print_usage(const char *program)
         " SRC_CIDR DST_CIDR SRC_RANGE DST_RANGE allow|drop [count] [mark:N]\n",
         program);
     fprintf(stderr, "  %s [--socket PATH] acl-update-batch FILE\n", program);
+    fprintf(stderr, "  %s [--socket PATH] conntrack-status|nat-status\n", program);
+    fprintf(stderr, "  %s [--socket PATH] conntrack-list [AFTER_ID [REVISION]]\n", program);
+    fprintf(stderr, "  %s [--socket PATH] conntrack-flush REVISION\n", program);
+    fprintf(stderr, "  ACL modifiers also accept state:new,established,invalid,untracked\n");
     dppctl_routing_usage(program);
     fprintf(stderr, "  %s [--socket PATH] ping\n", program);
     fprintf(stderr, "  %s [--socket PATH] health\n", program);
@@ -239,6 +244,29 @@ static int parse_prefixed_u64(const char *text, const char *prefix, uint64_t max
     return parse_u64(text + prefix_length, 0, max, value);
 }
 
+/** 名称组合必须完整且不能重复，空项不能被分词函数悄悄忽略 */
+static int parse_connection_states(const char *text, uint32_t *mask)
+{
+    char copy[64];
+    size_t size = strlen(text);
+    if (size == 0 || size >= sizeof(copy) || text[0] == ',' || text[size - 1] == ',' || strstr(text, ",,") != NULL)
+        return -EINVAL;
+    strcpy(copy, text);
+    *mask = 0;
+    char *save = NULL;
+    for (char *word = strtok_r(copy, ",", &save); word != NULL; word = strtok_r(NULL, ",", &save)) {
+        uint32_t bit = strcmp(word, "new") == 0 ? DPPD_CT_NEW
+            : strcmp(word, "established") == 0  ? DPPD_CT_ESTABLISHED
+            : strcmp(word, "invalid") == 0      ? DPPD_CT_INVALID
+            : strcmp(word, "untracked") == 0    ? DPPD_CT_UNTRACKED
+                                                : 0;
+        if (bit == 0 || (*mask & bit) != 0)
+            return -EINVAL;
+        *mask |= bit;
+    }
+    return 0;
+}
+
 /*
  * apply-filter 的 action 使用紧凑 token，而不是依赖参数位置：
  * fate 必须首先给出 drop 或 queue:N；其后 modifier 可任意排序但不可重复
@@ -254,6 +282,7 @@ static int build_filter_actions(int argc, char **argv, int first, struct dppd_ru
     bool has_mark = false;
     bool has_priority = false;
     bool has_fallback = false;
+    bool has_state = false;
     int index;
 
     if (argc <= first)
@@ -274,6 +303,14 @@ static int build_filter_actions(int argc, char **argv, int first, struct dppd_ru
             if (has_count)
                 return -EINVAL;
             has_count = true;
+        } else if (strncmp(argv[index], "state:", 6) == 0) {
+            if (has_state || rule->nb_matches == DPPD_RULE_MAX_ITEMS)
+                return -EINVAL;
+            struct dppd_match *match = &rule->matches[rule->nb_matches++];
+            match->type = DPPD_MATCH_CONNECTION_STATE;
+            if (parse_connection_states(argv[index] + 6, &match->spec.connection_states) != 0)
+                return -EINVAL;
+            has_state = true;
         } else if (parse_prefixed_u64(argv[index], "mark:", UINT32_MAX, &value) == 0) {
             if (has_mark)
                 return -EINVAL;
@@ -407,7 +444,7 @@ static int parse_acl_range(const char *text, uint16_t *first, uint16_t *last)
 /** 复用正式规则请求和版本保护，ACL 固定使用软件执行，允许后继续原有二层或三层转发 */
 static int build_acl_request(int argc, char **argv, struct dppd_management_request *request)
 {
-    if (argc < 11 || argc > 13)
+    if (argc < 11 || argc > 14)
         return -EINVAL;
     initialize_request(request, DPPD_MANAGEMENT_RULE_APPLY);
     struct dppd_rule *rule = &request->payload.apply.rule;
@@ -447,7 +484,7 @@ static int build_acl_request(int argc, char **argv, struct dppd_management_reque
     if (strcmp(argv[10], "allow") != 0 && strcmp(argv[10], "drop") != 0)
         return -EINVAL;
     for (int i = 11; i < argc; ++i)
-        if (strcmp(argv[i], "count") != 0 && strncmp(argv[i], "mark:", 5) != 0)
+        if (strcmp(argv[i], "count") != 0 && strncmp(argv[i], "mark:", 5) != 0 && strncmp(argv[i], "state:", 6) != 0)
             return -EINVAL;
     return build_filter_actions(argc, argv, 10, rule);
 }
@@ -537,6 +574,9 @@ static int build_acl_batch(const char *path, struct dppd_management_request *req
 
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
+    int conntrack_result = dppctl_conntrack_build(argc, argv, request, initialize_request);
+    if (conntrack_result != -ENOSYS)
+        return conntrack_result;
     if (argc >= 1 && strcmp(argv[0], "acl-set") == 0)
         return build_acl_request(argc, argv, request);
     if (argc == 2 && strcmp(argv[0], "acl-update-batch") == 0)
@@ -1020,6 +1060,9 @@ static void print_rule_detail(const struct dppd_rule *rule)
         case DPPD_MATCH_IP_PROTOCOL:
             printf("ip-protocol value=%u mask=%u", match->spec.protocol.value, match->spec.protocol.mask);
             break;
+        case DPPD_MATCH_CONNECTION_STATE:
+            printf("connection-state mask=%u", match->spec.connection_states);
+            break;
         default:
             printf("unknown type=%d", match->type);
             break;
@@ -1108,7 +1151,7 @@ static void print_capability(const struct dppd_management_capability_profile *pr
 
 static void print_response(const struct dppd_management_response *response)
 {
-    if (dppctl_routing_print(response))
+    if (dppctl_conntrack_print(response) || dppctl_routing_print(response))
         return;
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释 */
     switch (response->operation) {

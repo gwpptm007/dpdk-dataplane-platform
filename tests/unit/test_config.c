@@ -74,5 +74,22 @@ int main(void)
     assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
     routing[2] = "";
     assert(dppd_config_parse(5, routing, &config) == DPPD_CONFIG_ERROR);
+    /** 只有显式三层模式允许跟踪，NAT 还必须引用两个已经配置的不同端口 */
+    char *tracking[] = {"dppd", "--conntrack", "128", "--ct-timeout", "2", "--ipv4-routing", "/tmp/routes", "--snat",
+        "0,1,203.0.113.1,40000-40001"};
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_OK);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    assert(config.conntrack_capacity == 128 && config.conntrack_timeout_s == 2 && config.snat.first_port == 40000);
+    config.routing_path[0] = '\0';
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    tracking[8] = "0,2,203.0.113.1,40000-40001";
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_OK);
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    tracking[8] = "0,1,203.0.113.1,40001-40000";
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
+    tracking[8] = "0,1,224.0.0.1,40000-40001";
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
+    tracking[8] = "0,0,203.0.113.1,40000-40001";
+    assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
     return 0;
 }

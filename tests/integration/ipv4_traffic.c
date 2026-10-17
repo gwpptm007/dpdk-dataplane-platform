@@ -451,6 +451,112 @@ static void configure_queues(struct fixture *fixture)
     assert(false);
 }
 
+/** 同一流从不同 RX 队列进出也必须共用映射，回包恢复内网地址，共享原包保持不变 */
+static void stateful_queues(struct fixture *fixture)
+{
+    dppd_runtime_request_stop(&fixture->runtime);
+    assert(dppd_runtime_wait(&fixture->runtime) == 0);
+    struct dppd_ipv4_configuration routes;
+    assert(dppd_ipv4_router_get(fixture->router, &routes) == 0);
+    routes.routes[routes.route_count++] = (struct dppd_ipv4_route){.prefix_be = ip("198.18.0.0"),
+        .depth = 16,
+        .port_id = 0,
+        .gateway_be = ip("192.0.2.10")};
+    routes.neighbors[routes.neighbor_count++] =
+        (struct dppd_ipv4_neighbor){.port_id = 0, .address_be = ip("192.0.2.10"), .mac = {2, 0, 0, 0, 0, 10}};
+    assert(dppd_ipv4_router_replace(fixture->router, routes.generation, &routes, NULL, NULL) == 0);
+    struct dppd_snat_config nat = {.enabled = true,
+        .inside_port = 0,
+        .outside_port = 1,
+        .address_be = ip("192.0.2.250"),
+        .first_port = 40000,
+        .last_port = 40007};
+    assert(dppd_conntrack_create(&fixture->runtime.conntrack, 32, 60, &nat) == 0);
+    fixture->control.conntrack = fixture->runtime.conntrack;
+    assert(dppd_runtime_start(&fixture->runtime) == 0);
+    uint16_t mapped = 0;
+    uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
+    for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+        struct rte_mbuf *mbuf = make_packet(fixture, 13, queue, 991);
+        assert(rte_ring_enqueue(fixture->rx[0][queue], mbuf) == 0);
+        fixture->sent++;
+        void *object;
+        while (rte_ring_dequeue(fixture->tx[1][queue], &object) != 0) {
+            assert(rte_get_timer_cycles() < deadline);
+            rte_pause();
+        }
+        uint8_t expected[FRAME_SIZE], buffer[FRAME_SIZE];
+        fill_frame(expected, 13, 991);
+        const uint8_t *output = rte_pktmbuf_read(object, 0, FRAME_SIZE, buffer);
+        assert(output != NULL);
+        uint16_t observed;
+        memcpy(&observed, output + 34, 2);
+        assert(ntohs(observed) >= 40000 && ntohs(observed) <= 40007);
+        if (queue == 0)
+            mapped = observed;
+        assert(observed == mapped);
+        memcpy(expected, (uint8_t[]){2, 0, 0, 0, 0, 1}, 6);
+        memcpy(expected + 6, fixture->runtime.devices.ports[1].mac.addr_bytes, 6);
+        memcpy(expected + 26, &nat.address_be, 4);
+        memcpy(expected + 34, &mapped, 2);
+        expected[22]--;
+        expected[24] = expected[25] = 0;
+        uint16_t crc = checksum(expected + 14, 20);
+        expected[24] = (uint8_t)(crc >> 8);
+        expected[25] = (uint8_t)crc;
+        assert(memcmp(output, expected, FRAME_SIZE) == 0);
+        rte_pktmbuf_free(object);
+        fixture->forwarded++;
+        struct rte_mbuf *retained = fixture->retained[queue][13];
+        fill_frame(expected, 13, 991);
+        assert(memcmp(rte_pktmbuf_read(retained, 0, FRAME_SIZE, buffer), expected, FRAME_SIZE) == 0);
+        rte_pktmbuf_free(retained);
+        fixture->retained[queue][13] = NULL;
+    }
+    for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+        uint8_t wire[FRAME_SIZE], expected[FRAME_SIZE], buffer[FRAME_SIZE];
+        fill_frame(wire, 0, 992);
+        uint32_t remote = ip("203.0.113.7"), internal = ip("198.18.0.1");
+        memcpy(wire + 26, &remote, 4);
+        memcpy(wire + 30, &nat.address_be, 4);
+        uint16_t remote_port = htons(5678), internal_port = htons(1234);
+        memcpy(wire + 34, &remote_port, 2);
+        memcpy(wire + 36, &mapped, 2);
+        wire[24] = wire[25] = 0;
+        uint16_t crc = checksum(wire + 14, 20);
+        wire[24] = (uint8_t)(crc >> 8);
+        wire[25] = (uint8_t)crc;
+        memcpy(expected, wire, FRAME_SIZE);
+        memcpy(expected, (uint8_t[]){2, 0, 0, 0, 0, 10}, 6);
+        memcpy(expected + 6, fixture->runtime.devices.ports[0].mac.addr_bytes, 6);
+        memcpy(expected + 30, &internal, 4);
+        memcpy(expected + 36, &internal_port, 2);
+        expected[22]--;
+        expected[24] = expected[25] = 0;
+        crc = checksum(expected + 14, 20);
+        expected[24] = (uint8_t)(crc >> 8);
+        expected[25] = (uint8_t)crc;
+        struct rte_mbuf *mbuf = rte_pktmbuf_alloc(fixture->pool);
+        assert(mbuf != NULL);
+        memcpy(rte_pktmbuf_append(mbuf, FRAME_SIZE), wire, FRAME_SIZE);
+        assert(rte_ring_enqueue(fixture->rx[1][queue], mbuf) == 0);
+        fixture->sent++;
+        void *object;
+        while (rte_ring_dequeue(fixture->tx[0][queue], &object) != 0) {
+            assert(rte_get_timer_cycles() < deadline);
+            rte_pause();
+        }
+        assert(memcmp(rte_pktmbuf_read(object, 0, FRAME_SIZE, buffer), expected, FRAME_SIZE) == 0);
+        rte_pktmbuf_free(object);
+        fixture->forwarded++;
+    }
+    struct dppd_connection_page page;
+    assert(dppd_conntrack_list(fixture->runtime.conntrack, dppd_monotonic_ms(), 0, 0, &page) == 0 && page.count == 1);
+    assert(page.entries[0].seen_reply && page.entries[0].packets[0] == fixture->queues &&
+        page.entries[0].packets[1] == fixture->queues);
+    printf("PASS conntrack/NAT worker queues=%u shared-session=1 original-unchanged=yes\n", fixture->queues);
+}
+
 static void run_case(uint16_t queues)
 {
     struct fixture *fixture = calloc(1, sizeof(*fixture));
@@ -511,6 +617,7 @@ static void run_case(uint16_t queues)
     hot_updates(fixture);
     acl_allow_path(fixture);
     failure_paths(fixture);
+    stateful_queues(fixture);
     dppd_runtime_request_stop(&fixture->runtime);
     assert(dppd_runtime_wait(&fixture->runtime) == 0);
     struct dppd_stats_values statistics;

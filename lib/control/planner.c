@@ -72,6 +72,21 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
     if (dppd_topology_find(context->topology, context->install_port_id) == NULL)
         return reject(plan, DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND, -ENOENT);
 
+    for (uint16_t i = 0; i < rule->nb_matches; ++i)
+        if (!context->connection_tracking && rule->matches[i].type == DPPD_MATCH_CONNECTION_STATE &&
+            (rule->matches[i].spec.connection_states & ~1U) != 0)
+            return reject(plan, DPPD_PLAN_REASON_SOFTWARE_UNAVAILABLE, -ENOTSUP);
+    /** 有状态处理必须看到两个方向，不能安装绕过会话表的硬件动作或交换域直转 */
+    if (context->connection_tracking) {
+        if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || !context->software_equivalent ||
+            rule->fallback == DPPD_FALLBACK_REQUIRE_HARDWARE)
+            return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);
+        plan->backend = DPPD_PLAN_BACKEND_SOFTWARE;
+        plan->fallback_used = rule->fallback != DPPD_FALLBACK_SOFTWARE_ONLY;
+        plan->reason = plan->fallback_used ? DPPD_PLAN_REASON_SOFTWARE_FALLBACK : DPPD_PLAN_REASON_SOFTWARE_REQUESTED;
+        return 0;
+    }
+
     if (rule->fallback == DPPD_FALLBACK_SOFTWARE_ONLY) {
         if (!context->software_equivalent)
             return reject(plan, DPPD_PLAN_REASON_SOFTWARE_UNAVAILABLE, -ENOTSUP);

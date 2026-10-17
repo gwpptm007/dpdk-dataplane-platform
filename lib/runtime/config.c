@@ -2,6 +2,7 @@
 #include "dppd/management.h"
 
 #include <errno.h>
+#include <arpa/inet.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,45 @@ static int parse_ports(const char *text, struct dppd_config *cfg)
     return 0;
 }
 
+/** 参数只描述转换策略，不修改 Linux 地址，四段必须完整且不能遗漏端口池边界 */
+static int parse_snat(const char *text, struct dppd_snat_config *nat)
+{
+    char copy[128];
+    if (text == NULL || strlen(text) >= sizeof(copy))
+        return -1;
+    strcpy(copy, text);
+    char *fields[4], *cursor = copy;
+    for (unsigned int i = 0; i < 4; ++i) {
+        fields[i] = cursor;
+        char *comma = strchr(cursor, ',');
+        if ((i < 3 && comma == NULL) || (i == 3 && comma != NULL))
+            return -1;
+        if (comma != NULL) {
+            *comma = '\0';
+            cursor = comma + 1;
+        }
+    }
+    uint32_t inside, outside, first, last;
+    char *dash = strchr(fields[3], '-');
+    if (dash == NULL)
+        return -1;
+    *dash++ = '\0';
+    if (parse_u32(fields[0], 0, UINT16_MAX - 1U, &inside) != 0 ||
+        parse_u32(fields[1], 0, UINT16_MAX - 1U, &outside) != 0 || inside == outside ||
+        inet_pton(AF_INET, fields[2], &nat->address_be) != 1 || parse_u32(fields[3], 1, UINT16_MAX, &first) != 0 ||
+        parse_u32(dash, 1, UINT16_MAX, &last) != 0 || first > last)
+        return -1;
+    uint32_t address = ntohl(nat->address_be);
+    if (address < 0x01000000U || (address >> 24) == 127 || address >= 0xe0000000U)
+        return -1;
+    nat->enabled = true;
+    nat->inside_port = (uint16_t)inside;
+    nat->outside_port = (uint16_t)outside;
+    nat->first_port = (uint16_t)first;
+    nat->last_port = (uint16_t)last;
+    return 0;
+}
+
 void dppd_config_defaults(struct dppd_config *cfg)
 {
     /* 先清零确保新增字段有确定默认值，再覆盖可运行的最小双端口配置 */
@@ -66,6 +106,7 @@ void dppd_config_defaults(struct dppd_config *cfg)
     cfg->mbuf_cache = 256;
     cfg->stats_period_ms = 1000;
     cfg->rule_capacity = DPPD_DEFAULT_RULE_CAPACITY;
+    cfg->conntrack_timeout_s = 300;
     /* sizeof 字符串字面量包含末尾 '\0'，复制后路径一定终止 */
     memcpy(cfg->control_socket, DPPD_MANAGEMENT_DEFAULT_SOCKET, sizeof(DPPD_MANAGEMENT_DEFAULT_SOCKET));
     cfg->promiscuous = false;
@@ -90,6 +131,9 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"tap-owner-cookie", no_argument, NULL, 1006},
         {"recovery-monitor", required_argument, NULL, 1007},
         {"ipv4-routing", required_argument, NULL, 1008},
+        {"conntrack", required_argument, NULL, 1009},
+        {"ct-timeout", required_argument, NULL, 1010},
+        {"snat", required_argument, NULL, 1011},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -181,6 +225,18 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
                 return DPPD_CONFIG_ERROR;
             strcpy(cfg->routing_path, optarg);
             break;
+        case 1009:
+            if (parse_u32(optarg, 1, 65536, &cfg->conntrack_capacity) != 0)
+                return DPPD_CONFIG_ERROR;
+            break;
+        case 1010:
+            if (parse_u32(optarg, 1, 86400, &cfg->conntrack_timeout_s) != 0)
+                return DPPD_CONFIG_ERROR;
+            break;
+        case 1011:
+            if (parse_snat(optarg, &cfg->snat) != 0)
+                return DPPD_CONFIG_ERROR;
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -210,6 +266,28 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
 
     if (cfg == NULL || error == NULL || error_len == 0)
         return -1;
+    if ((cfg->conntrack_capacity != 0 && cfg->routing_path[0] == '\0') ||
+        (cfg->snat.enabled && cfg->conntrack_capacity == 0) || cfg->conntrack_capacity > 65536 ||
+        cfg->conntrack_timeout_s == 0 || cfg->conntrack_timeout_s > 86400) {
+        snprintf(error, error_len,
+            "conntrack requires IPv4 routing, a bounded capacity and valid timeout; SNAT requires conntrack");
+        return -1;
+    }
+    if (cfg->snat.enabled) {
+        uint32_t address = ntohl(cfg->snat.address_be);
+        bool inside = false, outside = false;
+        for (uint16_t index = 0; index < cfg->nb_ports && index < DPPD_MAX_PORTS; ++index) {
+            inside |= cfg->ports[index] == cfg->snat.inside_port;
+            outside |= cfg->ports[index] == cfg->snat.outside_port;
+        }
+        if (!inside || !outside || address < 0x01000000U || (address >> 24) == 127 || address >= 0xe0000000U ||
+            cfg->snat.inside_port == cfg->snat.outside_port || cfg->snat.first_port == 0 ||
+            cfg->snat.first_port > cfg->snat.last_port) {
+            snprintf(error, error_len,
+                "SNAT requires distinct configured inside/outside ports and a nonempty port pool");
+            return -1;
+        }
+    }
     if (cfg->recovery_monitor[0] != '\0' &&
         (cfg->recovery_path[0] == '\0' || strcmp(cfg->recovery_monitor, cfg->recovery_path) == 0 ||
             strcmp(cfg->recovery_monitor, cfg->state_path) == 0)) {
@@ -281,6 +359,9 @@ void dppd_config_print_usage(const char *program)
     printf("  --rule-capacity N   maximum number of desired rules (default %u)\n", DPPD_DEFAULT_RULE_CAPACITY);
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");
     printf("  --ipv4-routing P    enable IPv4 routing with a durable route and static-neighbor snapshot\n");
+    printf("  --conntrack N       track IPv4 TCP/UDP sessions, capacity 1..65536, requires IPv4 routing\n");
+    printf("  --ct-timeout N      established idle timeout in seconds (default 300)\n");
+    printf("  --snat I,O,IP,A-B   translate inside I to outside O using public IPv4 and TCP/UDP port pool\n");
     printf("  --recovery-path P   guard hardware replay after an unclean exit (requires state-path)\n");
     printf("  --tap-owner-cookie require native TAP owner cookie (patched driver and recovery-path)\n");
     printf("  --recovery-monitor P require a live monitor session before hardware installation\n");
@@ -302,4 +383,7 @@ void dppd_config_dump(const struct dppd_config *cfg)
         cfg->promiscuous ? "on" : "off", cfg->enable_pdump ? "on" : "off");
     if (cfg->routing_path[0] != '\0')
         printf("[dppd] forwarding=ipv4-routing routing-path=%s\n", cfg->routing_path);
+    if (cfg->conntrack_capacity != 0)
+        printf("[dppd] conntrack capacity=%u timeout=%us snat=%s\n", cfg->conntrack_capacity, cfg->conntrack_timeout_s,
+            cfg->snat.enabled ? "on" : "off");
 }

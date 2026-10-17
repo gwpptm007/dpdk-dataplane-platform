@@ -34,6 +34,8 @@ struct dppd_control_service {
     struct dppd_software_backend software;
     /** 可选三层配置由控制面拥有，runtime 只借用其中的路由器 */
     struct dppd_routing_service *routing;
+    /** 会话由 runtime 持有，规则规划只据此限制硬件旁路，控制面不负责销毁 */
+    struct dppd_conntrack *conntrack;
     uint64_t next_transaction_id;
     /* persistence path 由 service 动态持有；NULL 表示未启用自动 snapshot */
     char *persistence_path;

@@ -6,6 +6,7 @@
 #include "dppd/control.h"
 #include "dppd/link.h"
 #include "dppd/stats_values.h"
+#include "dppd/conntrack.h"
 
 /*
  * 管理协议版本在请求和响应中显式传递。当前实现不做版本协商：版本不一致时
@@ -16,7 +17,8 @@
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload
  */
 /** v16 扩展三层转发统计，后续路由配置命令使用同一版 ABI，旧版客户端必须拒绝 */
-#define DPPD_MANAGEMENT_VERSION 17U
+/** v18 增加会话查询与清空、NAT 状态、状态 ACL 和有状态丢弃原因 */
+#define DPPD_MANAGEMENT_VERSION 18U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -79,6 +81,10 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_NEIGHBOR_SET,
     DPPD_MANAGEMENT_NEIGHBOR_DELETE,
     DPPD_MANAGEMENT_ROUTING_FLUSH,
+    DPPD_MANAGEMENT_CONNTRACK_STATUS,
+    DPPD_MANAGEMENT_CONNTRACK_LIST,
+    DPPD_MANAGEMENT_CONNTRACK_FLUSH,
+    DPPD_MANAGEMENT_NAT_STATUS,
 };
 
 /*
@@ -93,6 +99,9 @@ struct dppd_management_request {
     uint32_t size;       /* 必须等于发送方 sizeof(*request) */
     uint64_t request_id; /* 客户端生成；响应原样回显，用于请求/响应配对 */
     union {
+        struct {
+            uint64_t after_id, expected_revision;
+        } conntrack;
         struct {
             uint64_t expected_generation;
             struct dppd_ipv4_configuration configuration;
@@ -330,6 +339,8 @@ struct dppd_management_response {
     int32_t status;
     uint32_t reserved;
     union {
+        struct dppd_conntrack_status conntrack;
+        struct dppd_connection_page connections;
         struct dppd_routing_status routing_status;
         struct dppd_ipv4_configuration routing;
         struct {

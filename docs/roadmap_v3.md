@@ -132,15 +132,22 @@ TAP 命名空间验证无 `CAP_NET_ADMIN` 的进程可以读取和订阅链路�
 
 ## M2：可组合软件 pipeline
 
+2026-10-17 完成 [TCP/UDP 跟踪与出站 SNAT](conntrack_nat.md)：双向会话、握手状态、
+状态 ACL、管理、老化和资源回收先接通，再完成 SNAT、回包还原及完整校验和。两套
+构建各 42/42 单测、六项 sanitizer、单双队列和真实 TAP 双向验收通过。会话重启清空，
+规则和路由重放，NAT 策略保留启动参数。静态 DNAT、IPv6、ICMP/RELATED、会话复制、
+硬件有状态处理及性能目标未计为完成。
+
 2026-10-17 完成 [IPv4 软件 ACL 闭环](acl.md)：允许/拒绝、地址与端口范围、协议号、
 优先级、MARK/COUNT、正式 CLI、两到四条规则原子更新及持久重放均已接通。两套构建
 各 41/41 单测、真实 TAP 范围/分片/版本/重启/同步故障、单双队列 MARK/COW 与既有
-二层/三层回归通过。IPv6 ACL、NAT/conntrack、硬件全路径策略和性能目标仍待后续实现。
+二层/三层回归通过。TCP/UDP 跟踪和出站 SNAT 已在上述阶段补齐，其余边界仍待后续实现。
 
 2026-10-17 完成 [IPv4 三层转发闭环](ipv4_routing.md)：路由与静态邻居原子快照、
 最长前缀、改写、显式 daemon 模式、CLI 管理和持久重启恢复均已接通。两套构建各
 40/40 单测，三 TAP 真实收发和存储故障、四端口在线更新及旧二层回归通过。
-该三层阶段覆盖 IPv4 LPM/rewrite/static-neighbor，软件 ACL 已在上述阶段补齐，NAT 和其他 stage 未计为完成。
+该三层阶段覆盖 IPv4 LPM/rewrite/static-neighbor，软件 ACL、TCP/UDP 跟踪与出站 SNAT
+已在上述阶段补齐，其他 stage 和完整 NAT 家族未计为完成。
 
 交付：exact match、ACL、LPM、rewrite、neighbor、conntrack/NAT 独立 stage；批量计数；IPv6 和常用 tunnel parser。
 

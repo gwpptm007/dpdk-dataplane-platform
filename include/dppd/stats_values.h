@@ -22,7 +22,14 @@
     F(ipv4_ttl_drops)         \
     F(ipv4_checksum_drops)    \
     F(ipv4_unsupported_drops) \
-    F(ipv4_rewrite_drops)
+    F(ipv4_rewrite_drops)     \
+    F(ct_invalid_drops)       \
+    F(ct_full_drops)          \
+    F(ct_unsupported_drops)   \
+    F(ct_zone_drops)          \
+    F(ct_checksum_drops)      \
+    F(nat_pool_drops)         \
+    F(nat_miss_drops)
 
 struct dppd_stats_values {
 #define DPPD_STATS_VALUE(field) uint64_t field;

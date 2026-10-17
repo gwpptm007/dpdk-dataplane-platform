@@ -121,6 +121,21 @@ static void test_boundaries(void)
     value.matches[2].spec.range.dst_first_be = htons(100);
     assert(dppd_acl_add(acl, &value, 1) == -EINVAL);
     value = rule(1);
+    value.nb_matches = 4;
+    value.matches[3].type = DPPD_MATCH_CONNECTION_STATE;
+    value.matches[3].spec.connection_states = DPPD_CT_NEW | DPPD_CT_ESTABLISHED;
+    assert(dppd_acl_add(acl, &value, 1) == 0);
+    packet.l3_type = DPPD_L3_IPV4;
+    packet.l4_type = DPPD_L4_UDP;
+    packet.connection_state = DPPD_CT_UNTRACKED;
+    assert(dppd_acl_classify(acl, 3, &packet) == 0);
+    packet.connection_state = DPPD_CT_NEW;
+    assert(dppd_acl_classify(acl, 3, &packet) == 1);
+    packet.connection_state = DPPD_CT_ESTABLISHED;
+    assert(dppd_acl_classify(acl, 3, &packet) == 1);
+    packet.connection_state = DPPD_CT_INVALID;
+    assert(dppd_acl_classify(acl, 3, &packet) == 0);
+    value = rule(1);
     /** 新增语义不能假装已有硬件等价实现，必须在调用 PMD 前明确拒绝 */
     value.fallback = DPPD_FALLBACK_REQUIRE_HARDWARE;
     struct dppd_flow_error flow_error;

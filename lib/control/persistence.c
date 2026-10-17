@@ -161,6 +161,9 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
             encoded[4] = match->spec.protocol.value;
             encoded[5] = match->spec.protocol.mask;
             break;
+        case DPPD_MATCH_CONNECTION_STATE:
+            put_u32_le(encoded + 4, match->spec.connection_states);
+            break;
         default:
             return -EINVAL;
         }
@@ -252,6 +255,9 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint
         case DPPD_MATCH_IP_PROTOCOL:
             match->spec.protocol.value = encoded[4];
             match->spec.protocol.mask = encoded[5];
+            break;
+        case DPPD_MATCH_CONNECTION_STATE:
+            match->spec.connection_states = get_u32_le(encoded + 4);
             break;
         default:
             return -EBADMSG;

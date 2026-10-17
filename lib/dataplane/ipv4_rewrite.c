@@ -41,8 +41,8 @@ static void write_header(struct rte_mbuf *mbuf, const uint8_t *header, uint16_t 
     }
 }
 
-int dppd_ipv4_rewrite(struct rte_mbuf **mbuf, const struct dppd_packet *packet, const struct dppd_ipv4_forward *forward,
-    const uint8_t source_mac[6])
+int dppd_ipv4_rewrite_flow(struct rte_mbuf **mbuf, const struct dppd_packet *packet,
+    const struct dppd_ipv4_forward *forward, const uint8_t source_mac[6], const struct dppd_flow_tuple *translation)
 {
     if (mbuf == NULL || *mbuf == NULL || packet == NULL || forward == NULL || source_mac == NULL ||
         !valid_mac(source_mac) || !valid_mac(forward->destination_mac))
@@ -50,8 +50,17 @@ int dppd_ipv4_rewrite(struct rte_mbuf **mbuf, const struct dppd_packet *packet, 
     if (packet->l3_type != DPPD_L3_IPV4 || packet->l2_len < 14 || packet->l2_len > 22 || packet->l3_len < 20 ||
         packet->l3_len > 60 || (packet->l3_len & 3U) != 0 || packet->packet_len != rte_pktmbuf_pkt_len(*mbuf))
         return -EINVAL;
-    uint8_t header[82];
+    if (translation != NULL) {
+        int rc = dppd_ipv4_transport_validate(*mbuf, packet);
+        if (rc != 0)
+            return rc;
+        if (translation->protocol != packet->ip_protocol)
+            return -EINVAL;
+    }
+    uint8_t header[102];
     uint16_t length = packet->l2_len + packet->l3_len;
+    if (translation != NULL)
+        length += packet->l4_type == DPPD_L4_TCP ? 20 : 8;
     const void *source = rte_pktmbuf_read(*mbuf, 0, length, header);
     if (source == NULL)
         return -EINVAL;
@@ -77,6 +86,35 @@ int dppd_ipv4_rewrite(struct rte_mbuf **mbuf, const struct dppd_packet *packet, 
     /* 所有校验都已通过，先在局部头部完成改写，再取得独占报文副本 */
     memcpy(header, forward->destination_mac, 6);
     memcpy(header + 6, source_mac, 6);
+    if (translation != NULL) {
+        uint8_t *l4 = ipv4 + packet->l3_len;
+        uint16_t checksum_offset = packet->l4_type == DPPD_L4_TCP ? 16 : 6;
+        uint16_t old_checksum = (uint16_t)((uint16_t)l4[checksum_offset] << 8 | l4[checksum_offset + 1]);
+        uint8_t old[12], updated[12];
+        memcpy(old, ipv4 + 12, 8);
+        memcpy(old + 8, l4, 4);
+        memcpy(ipv4 + 12, &translation->source_be, 4);
+        memcpy(ipv4 + 16, &translation->destination_be, 4);
+        memcpy(l4, &translation->source_port_be, 2);
+        memcpy(l4 + 2, &translation->destination_port_be, 2);
+        memcpy(updated, ipv4 + 12, 8);
+        memcpy(updated + 8, l4, 4);
+        /** 按一补数增量更新地址与端口，UDP 原校验和为零时继续保留禁用校验的语义 */
+        if (packet->l4_type == DPPD_L4_TCP || old_checksum != 0) {
+            uint32_t sum = (uint16_t)~old_checksum;
+            for (unsigned int i = 0; i < sizeof(old); i += 2) {
+                sum += (uint16_t) ~((uint16_t)old[i] << 8 | old[i + 1]);
+                sum += (uint16_t)((uint16_t)updated[i] << 8 | updated[i + 1]);
+            }
+            while (sum >> 16)
+                sum = (sum & UINT16_MAX) + (sum >> 16);
+            uint16_t value = (uint16_t)~sum;
+            if (value == 0 && packet->l4_type == DPPD_L4_UDP)
+                value = UINT16_MAX;
+            l4[checksum_offset] = (uint8_t)(value >> 8);
+            l4[checksum_offset + 1] = (uint8_t)value;
+        }
+    }
     ipv4[8]--;
     ipv4[10] = ipv4[11] = 0;
     uint16_t updated = checksum(ipv4, packet->l3_len);
@@ -104,4 +142,10 @@ int dppd_ipv4_rewrite(struct rte_mbuf **mbuf, const struct dppd_packet *packet, 
         *mbuf = writable;
     }
     return 0;
+}
+
+int dppd_ipv4_rewrite(struct rte_mbuf **mbuf, const struct dppd_packet *packet, const struct dppd_ipv4_forward *forward,
+    const uint8_t source_mac[6])
+{
+    return dppd_ipv4_rewrite_flow(mbuf, packet, forward, source_mac, NULL);
 }

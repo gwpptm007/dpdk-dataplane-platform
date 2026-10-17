@@ -8,6 +8,7 @@
 #include "dppd/device.h"
 #include "dppd/pipeline.h"
 #include "dppd/stats.h"
+#include "dppd/conntrack.h"
 
 struct dppd_runtime;
 struct dppd_software_backend;
@@ -50,6 +51,8 @@ struct dppd_runtime {
     struct dppd_software_backend *software_backend;
     /** 可选路由器由控制面持有，只在工作线程启动前绑定，退出并注销读者后才能释放 */
     struct dppd_ipv4_router *ipv4_router;
+    /** runtime 拥有易失会话，先停止全部线程再释放，控制面仅借用此指针 */
+    struct dppd_conntrack *conntrack;
     struct dppd_worker workers[DPPD_MAX_WORKERS];
     uint16_t nb_workers;
     /** 停止请求只通知线程结束循环，不表示线程已经退出；释放共享资源前仍需等待 */
