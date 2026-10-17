@@ -121,6 +121,18 @@ sudo python3 tests/integration/recovery_inspect.py --build-dir build-native
 读取到的 TC 规则列表完全一致；隔离 systemd 命名空间本身仍应按本页的 `systemd-run` 示例
 核查。
 
+监护进程也有六个普通用户回归场景，可单独执行：
+
+```bash
+sudo python3 tests/integration/recovery_monitor.py --build-dir build --unprivileged
+sudo python3 tests/integration/recovery_monitor.py --build-dir build-native --unprivileged
+```
+
+这些场景核对正在运行的监护进程的全部 capability 集为空，附加组为空，且不能通过后续
+执行获得新权限；监护和查询均以同一普通用户运行。正常停止、进程被杀、接口重建及改名、
+恢复文件替换和事件丢失分别核对持久证据，详见[监护验证记录](recovery_monitor.md#验证)。
+测试驱动仍以 root 创建自己的 TAP 和注入接口变化，不安装或修改部署服务。
+
 验证完成且相关服务已停止后，管理员可删除专用命名空间。删除前先确认其中只含这次部署
 自建的接口；删除命名空间会删除其 TAP：
 

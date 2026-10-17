@@ -121,12 +121,13 @@ def run_case(build):
 
             # 恢复查询只读取内核规则，降低到普通用户后也必须能完成核对
             nobody = pwd.getpwnam("nobody")
+            check(nobody.pw_uid != 0 and nobody.pw_gid != 0, "test account must not be root")
             os.chown(directory, nobody.pw_uid, nobody.pw_gid)
             os.chown(guard, nobody.pw_uid, nobody.pw_gid)
             guard.chmod(0o600)
             unprivileged = ["setpriv", "--reuid", str(nobody.pw_uid), "--regid", str(nobody.pw_gid),
-                            "--clear-groups", "--bounding-set=-net_admin", "--inh-caps=-net_admin",
-                            "--ambient-caps=-net_admin", "--no-new-privs"]
+                            "--clear-groups", "--bounding-set=-all", "--inh-caps=-all",
+                            "--ambient-caps=-all", "--no-new-privs"]
             restricted_inspection = run(*unprivileged, build / "dppd-recovery", "inspect", guard, revision)
             restricted_plan = run(*unprivileged, build / "dppd-recovery", "plan", guard, revision)
             check(restricted_inspection.count("status=coordinates-match complete=yes") == 2,

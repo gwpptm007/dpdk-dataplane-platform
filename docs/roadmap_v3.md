@@ -111,6 +111,11 @@ TAP 命名空间验证无 `CAP_NET_ADMIN` 的进程可以读取和订阅链路�
 状态保持不变。此范例只约束按配置启动的服务，尚未形成由程序检查的完整写入者清单，
 也未补齐启动前历史证明；计划仍标记 `writer-exclusion=no executable=no`，不执行跨进程删除。
 
+2026-10-17，增加无 capability 的普通用户监护回归。两套构建各通过十五个真实 TAP
+场景，其中六个直接核对监护进程 UID/GID、空附加组、五个 capability 集为零和禁止获得
+新权限，覆盖停止、中断、接口重建及改名、恢复文件替换和事件丢失。恢复工具的只读查询
+也使用清空全部 capability 集的普通用户回归通过，详见[部署权限验证](recovery_namespace_deployment.md)。
+
 交付：
 
 - capability profile 与 PMD probe cache（本机诊断基础已完成）；

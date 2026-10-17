@@ -4,8 +4,10 @@
 import argparse
 import errno
 import fcntl
+import json
 import os
 from pathlib import Path
+import pwd
 import signal
 import struct
 import subprocess
@@ -17,7 +19,7 @@ from health_readiness import clean_environment, daemon_command
 from recovery_isolation import wait_for
 
 
-def run_case(build, mode, native):
+def run_case(build, mode, native, unprivileged=False):
     """分别强制结束两个独立进程，验证持久证据不会因进程重启重新变成可信"""
     environment = clean_environment()
     owned = {}
@@ -39,6 +41,16 @@ def run_case(build, mode, native):
     with tempfile.TemporaryDirectory(prefix="dppd-monitor-") as temporary:
         directory = Path(temporary)
         (directory / "storage").mkdir()
+        prefix = []
+        if unprivileged:
+            account = pwd.getpwnam("nobody")
+            check(account.pw_uid != 0 and account.pw_gid != 0, "test account must not be root")
+            # 只把本次临时目录交给普通用户，TAP 的创建和变化仍由测试驱动负责
+            for path in (directory, directory / "storage"):
+                os.chown(path, account.pw_uid, account.pw_gid)
+            prefix = ["setpriv", "--reuid", str(account.pw_uid), "--regid", str(account.pw_gid),
+                      "--clear-groups", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all",
+                      "--no-new-privs"]
         guard, state = directory / "recovery", directory / "storage/state.bin"
         session, log, daemon_log = directory / "session", directory / "monitor.log", directory / "daemon.log"
         interfaces = (f"dm{os.getpid()}a", f"dm{os.getpid()}b")
@@ -47,7 +59,7 @@ def run_case(build, mode, native):
         command = [str(executable), "run", str(guard), str(state), str(session), *mapping]
 
         def show(expected, reason=None):
-            output = run(build / "dppd-monitor", "show", session)
+            output = run(*prefix, build / "dppd-monitor", "show", session)
             check(f"state={expected} " in output and "freshness=unverified executable=no" in output, output)
             if reason:
                 check(f"reason={reason} " in output, output)
@@ -64,15 +76,35 @@ def run_case(build, mode, native):
                 run("ip", "tuntap", "add", "dev", name, "mode", "tap", "multi_queue")
                 owned[name] = Path(f"/sys/class/net/{name}/ifindex").read_text()
             # 参数错误必须在创建恢复文件和会话文件之前退出
-            run(*command[:-2], mapping[0], mapping[0], error=errno.EINVAL)
+            run(*prefix, *command[:-2], mapping[0], mapping[0], error=errno.EINVAL)
             check(not guard.exists() and not session.exists(), "invalid mapping created files")
             with log.open("w") as output:
-                monitor = subprocess.Popen(command, env=environment, stdout=output, stderr=subprocess.STDOUT)
+                monitor = subprocess.Popen([*prefix, *command], env=environment, stdout=output,
+                                           stderr=subprocess.STDOUT)
             wait_for(monitor, lambda: "monitor ready session=" in log.read_text(), "monitor readiness")
             initial = show("active")
             check("writer-lock=held" in initial and (session.stat().st_mode & 0o777) == 0o600, initial)
             nonce = fields(initial.splitlines()[1])["session"]
             check(len(nonce) == 32 and int(nonce, 16) != 0 and session.stat().st_size == 5760, initial)
+            if unprivileged:
+                # 直接核对真正监护进程的内核凭据，不能只凭启动命令推断权限已经下降
+                check(int(fields(initial.splitlines()[1])["recorded-pid"]) == monitor.pid, initial)
+                status = dict(line.split(":", 1) for line in Path(f"/proc/{monitor.pid}/status").read_text().splitlines())
+                check(list(map(int, status["Uid"].split())) == [account.pw_uid] * 4, "monitor retained a root UID")
+                check(list(map(int, status["Gid"].split())) == [account.pw_gid] * 4, "monitor retained a root GID")
+                check(not status["Groups"].strip() and status["NoNewPrivs"].strip() == "1",
+                      "monitor retained supplementary groups or allows new privileges")
+                for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+                    check(int(status[name], 16) == 0, f"monitor retained {name}")
+                check(guard.stat().st_uid == session.stat().st_uid == account.pw_uid,
+                      "monitor evidence files are not owned by its user")
+                before = json.loads(run("tc", "-j", "qdisc", "show", "dev", interfaces[0]))
+                denied = subprocess.run([*prefix, "tc", "qdisc", "add", "dev", interfaces[0], "ingress"],
+                                        env=environment, capture_output=True, text=True, timeout=10)
+                check(denied.returncode != 0 and "Operation not permitted" in denied.stderr,
+                      denied.stdout + denied.stderr)
+                check(json.loads(run("tc", "-j", "qdisc", "show", "dev", interfaces[0])) == before,
+                      "denied TC write changed the TAP qdiscs")
 
             if mode in ("business-first", "monitor-first", "both", "stop-after-business"):
                 daemon_cmd = daemon_command(build, directory, 1, interfaces) + ["--recovery-path", str(guard)]
@@ -128,13 +160,18 @@ def run_case(build, mode, native):
                     monitor.wait(timeout=10)
                     check(monitor.returncode == 0, log.read_text())
                     show("stopped", "stop-requested")
+            elif mode == "killed":
+                kill(monitor)
+                frozen = session.read_bytes()
+                show("interrupted", "writer-missing")
+                check(session.read_bytes() == frozen, "interrupted query changed session evidence")
             elif mode == "stopped":
                 monitor.terminate()
                 monitor.wait(timeout=10)
                 check(monitor.returncode == 0, log.read_text())
                 show("stopped", "stop-requested")
                 frozen = session.read_bytes()
-                run(*command, error=errno.EEXIST)
+                run(*prefix, *command, error=errno.EEXIST)
                 check(session.read_bytes() == frozen, "restart replaced terminal evidence")
             elif mode == "paused-recreate":
                 monitor.send_signal(signal.SIGSTOP)
@@ -180,11 +217,11 @@ def run_case(build, mode, native):
                 output = show("invalid", "observer-lost")
                 check(f"error={-errno.ENOBUFS}" in output, output)
             check((guard.read_bytes(), state.read_bytes()) == baseline, "monitor changed recovery file or snapshot")
-            output = run(build / "dppd-monitor", "show", session)
+            output = run(*prefix, build / "dppd-monitor", "show", session)
             check(f"session={nonce} " in output, "session identity changed")
         except Exception as error:
             details = "\n".join(path.read_text() for path in (log, daemon_log) if path.exists())
-            raise AssertionError(f"case={mode}\n{details}") from error
+            raise AssertionError(f"case={mode} unprivileged={unprivileged}\n{details}") from error
         finally:
             for process in (monitor, daemon):
                 if process is not None and process.poll() is None:
@@ -192,7 +229,8 @@ def run_case(build, mode, native):
                     process.wait(timeout=10)
             for name in tuple(owned):
                 remove(name)
-    print(f"PASS independent recovery monitor {mode} native={native}: durable evidence, unchanged recovery/snapshot",
+    print(f"PASS independent recovery monitor {mode} native={native} unprivileged={unprivileged}: "
+          "durable evidence, unchanged recovery/snapshot",
           flush=True)
 
 
@@ -200,11 +238,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument("--native", action="store_true", help="use patched TAP owner cookies for business rules")
+    parser.add_argument("--unprivileged", action="store_true", help="run only the six monitor cases without capabilities")
     arguments = parser.parse_args()
     check(os.geteuid() == 0, "monitor integration tests need root for test-owned TAPs")
-    for mode in ("business-first", "monitor-first", "both", "stop-after-business", "stopped", "paused-recreate",
-                 "rename", "guard-replaced", "lost"):
-        run_case(arguments.build_dir.resolve(), mode, arguments.native)
+    build = arguments.build_dir.resolve()
+    if not arguments.unprivileged:
+        for mode in ("business-first", "monitor-first", "both", "stop-after-business", "stopped", "paused-recreate",
+                     "rename", "guard-replaced", "lost"):
+            run_case(build, mode, arguments.native)
+    for mode in ("stopped", "killed", "paused-recreate", "rename", "guard-replaced", "lost"):
+        run_case(build, mode, arguments.native, unprivileged=True)
 
 
 if __name__ == "__main__":

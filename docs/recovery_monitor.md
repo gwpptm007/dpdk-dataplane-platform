@@ -110,9 +110,10 @@ CRC 字段按零计算校验和；CRC 只发现损坏，不提供身份认证。
 独立进程、持久失效证据以及可选的 [业务握手与安装检查](recovery_monitor_handshake.md)
 已完成。离线 `show` 仍不主动握手，文件及被占用的锁仍不能证明当前活性。
 
-独占业务登记与 [只读交接检查](recovery_writer_handoff.md) 已完成，下一步建立部署权限
-边界，再把证据接入清理计划。监护允许正常 TC 写入，
-尚未约束其他写入者，也没有实现检查到删除之间的隔离。事件订阅本身不能补证启动前
+独占业务登记与 [只读交接检查](recovery_writer_handoff.md) 已完成，`plan-monitored` 已在
+租约内关联存活监护与只读计划。[部署权限配置](recovery_namespace_deployment.md) 将网络
+管理权限只授予业务服务，监护和恢复工具可清空 capability 集运行。程序尚未证明其他
+写入者都被排除，也没有实现检查到删除之间的隔离。事件订阅本身不能补证启动前
 的历史，不能单独把当前记录解释成连续历史的完整证明；实际跨进程删除仍未实现。
 
 ## 验证
@@ -137,3 +138,23 @@ sudo python3 tests/integration/recovery_monitor.py --build-dir build-native --na
 既有八个查询窗口场景、原生标识与内容核验、旧格式/锁/版本的只读检查，以及两种
 构建下的六个真实创建窗口一并回归通过。Linux 验证源码与工作区的 138 个源码、头文件、
 Python、Meson 和补丁文件按忽略换行差异的 SHA-256 核对一致。
+
+2026-10-17，两个构建各通过 **15 个真实 TAP 场景**，包括原有九个场景和新增六个
+普通用户场景：正常停止、强制结束、暂停期间同名同索引重建、接口改名、恢复文件替换
+及事件丢失。新场景以 `nobody` 运行监护和 `show`，直接读取监护 PID 的 `/proc` 状态，
+核对全部 UID/GID、空附加组、五个 capability 集均为零及 `NoNewPrivs=1`。
+
+测试同时核对证据文件属于监护用户、拒绝的 TC 写入没有改变 qdisc、普通链路属性和 TC
+更新不会结束生命周期监护。正常停止和失效证据正确落盘，强制结束后只读查询报告中断，
+全过程保持原恢复记录及业务快照不变。事件丢失仍仅使用独立测试入口注入。
+
+只运行新增的六个场景可使用以下参数；运行测试的驱动仍须为 root，以创建及回收自有
+TAP，受测监护进程则使用无 capability 的普通用户：
+
+```sh
+sudo python3 tests/integration/recovery_monitor.py --build-dir build --unprivileged
+sudo python3 tests/integration/recovery_monitor.py --build-dir build-native --unprivileged
+```
+
+权限场景需要 Linux `/proc`、iproute2、提供 `setpriv` 的 util-linux，以及非 root 的
+`nobody` 账户。完整运行命令默认包含这六个场景。
