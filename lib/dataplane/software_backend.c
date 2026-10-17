@@ -1,5 +1,6 @@
 #include "dppd/software_backend.h"
 #include "dppd/acl.h"
+#include "dppd/exact.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -42,7 +43,7 @@ struct dppd_software_rule_object {
 
 /**
  * 一次发布对应一个完整规则视图。objects 是按 backend capacity 固定分配的柔性数组；
- * 数组后面紧接同容量的编译 ACL，匹配项和动作、计数器随同一指针一次发布
+ * 数组后面紧接精确匹配表和编译 ACL，匹配项和动作、计数器随同一指针一次发布
  */
 struct dppd_software_classifier_snapshot {
     uint32_t count;
@@ -66,13 +67,19 @@ struct dppd_software_pending_rule {
 static size_t snapshot_size(uint32_t capacity)
 {
     return sizeof(struct dppd_software_classifier_snapshot) +
-        (size_t)capacity * sizeof(struct dppd_software_rule_object) + dppd_acl_size(capacity);
+        (size_t)capacity * sizeof(struct dppd_software_rule_object) + dppd_exact_size(capacity) +
+        dppd_acl_size(capacity);
 }
 
 /** 规则对象按八字节对齐，尾部 ACL 随整张快照分配和回收，不持有另一份活跃指针 */
+static struct dppd_exact *snapshot_exact(struct dppd_software_classifier_snapshot *snapshot, uint32_t capacity)
+{
+    return (struct dppd_exact *)(snapshot->objects + capacity);
+}
+
 static struct dppd_acl *snapshot_acl(struct dppd_software_classifier_snapshot *snapshot, uint32_t capacity)
 {
-    return (struct dppd_acl *)(snapshot->objects + capacity);
+    return (struct dppd_acl *)((uint8_t *)snapshot_exact(snapshot, capacity) + dppd_exact_size(capacity));
 }
 
 static void metrics_put(struct dppd_software_rule_metrics *metrics)
@@ -112,6 +119,7 @@ static struct dppd_software_classifier_snapshot *snapshot_clone(const struct dpp
     if (copy == NULL)
         return NULL;
     dppd_acl_init(snapshot_acl(copy, capacity), capacity);
+    dppd_exact_init(snapshot_exact(copy, capacity), capacity);
     if (source == NULL)
         return copy;
     copy->count = source->count;
@@ -174,10 +182,13 @@ static int publish_locked(struct dppd_software_backend *backend, struct dppd_sof
 
     /** 发布前完成匹配编译，失败时旧 ACL、动作和 COUNT 全部保持原样 */
     struct dppd_acl *acl = dppd_acl_init(snapshot_acl(next, backend->capacity), backend->capacity);
+    struct dppd_exact *exact = dppd_exact_init(snapshot_exact(next, backend->capacity), backend->capacity);
     for (uint32_t i = 0; i < backend->capacity; ++i) {
         if (next->objects[i].metrics == NULL)
             continue;
-        int rc = dppd_acl_add(acl, &next->objects[i].rule, i + 1);
+        int rc = dppd_exact_add(exact, &next->objects[i].rule, i + 1);
+        if (rc == -ENOTSUP)
+            rc = dppd_acl_add(acl, &next->objects[i].rule, i + 1);
         if (rc != 0)
             return rc;
     }
@@ -749,6 +760,18 @@ void dppd_software_backend_worker_unregister(struct dppd_software_backend *backe
     (void)rte_rcu_qsbr_thread_unregister(backend->qsbr, worker_id);
 }
 
+/** 两个独立匹配阶段共享 IR 排序，精确匹配不能越过优先级更高的通配 ACL */
+static bool rule_before(const struct dppd_rule *a, uint32_t a_tag, const struct dppd_rule *b, uint32_t b_tag)
+{
+    if (a->group != b->group)
+        return a->group < b->group;
+    if (a->priority != b->priority)
+        return a->priority < b->priority;
+    if (a->id != b->id)
+        return a->id < b->id;
+    return a_tag < b_tag;
+}
+
 void dppd_software_backend_decide(struct dppd_software_backend *backend, uint16_t ingress_port,
     const struct dppd_packet *packet, struct dppd_software_decision *decision)
 {
@@ -764,6 +787,10 @@ void dppd_software_backend_decide(struct dppd_software_backend *backend, uint16_
      */
     active = atomic_load_explicit(&backend->active, memory_order_acquire);
     uint32_t tag = dppd_acl_classify(snapshot_acl(active, backend->capacity), ingress_port, packet);
+    uint32_t exact_tag = dppd_exact_classify(snapshot_exact(active, backend->capacity), ingress_port, packet);
+    if (exact_tag != 0 &&
+        (tag == 0 || rule_before(&active->objects[exact_tag - 1].rule, exact_tag, &active->objects[tag - 1].rule, tag)))
+        tag = exact_tag;
     if (tag != 0)
         selected = &active->objects[tag - 1];
     if (selected != NULL) {

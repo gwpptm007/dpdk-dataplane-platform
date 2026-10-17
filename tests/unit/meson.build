@@ -8,6 +8,9 @@ test('packet parser', packet_test)
 acl_test = executable('test_acl', 'test_acl.c', dependencies: dppd_core_dep)
 test('compiled ACL and independent reference', acl_test)
 
+exact_test = executable('test_exact', 'test_exact.c', dependencies: dppd_core_dep)
+test('exact match hash and independent IR reference', exact_test)
+
 conntrack_test = executable('test_conntrack', 'test_conntrack.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=calloc'])
 test('connection tracking lifecycle and concurrency', conntrack_test)

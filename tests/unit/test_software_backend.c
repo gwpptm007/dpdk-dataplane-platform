@@ -118,6 +118,35 @@ int main(void)
     assert(dppd_software_backend_query_count(&backend, 1, 1, &hits, &bytes) == 0);
     assert(hits == 2 && bytes == 256);
 
+    /** 精确与通配阶段按统一优先级竞争，拒绝规则不能被精确查找提前放行 */
+    preferred = make_rule(2, 10, 11, true);
+    preferred.matches[1].spec.ipv4.src_mask_be = 0;
+    install(&backend, &preferred);
+    dppd_software_backend_decide(&backend, 5, &packet, &decision);
+    dppd_software_backend_worker_quiescent(&backend, 0);
+    assert(decision.mark_id == 11);
+    assert(dppd_software_backend_query_count(&backend, 2, 2, &hits, &bytes) == 0);
+    assert(hits == 1 && bytes == 128);
+    assert(dppd_software_backend_remove_version(&backend, 2, 2) == 0);
+    preferred.priority = 30;
+    install(&backend, &preferred);
+    dppd_software_backend_decide(&backend, 5, &packet, &decision);
+    dppd_software_backend_worker_quiescent(&backend, 0);
+    assert(decision.mark_id == 7);
+    assert(dppd_software_backend_query_count(&backend, 2, 2, &hits, &bytes) == 0);
+    assert(hits == 0 && bytes == 0);
+
+    /** 端口相同的分片不能命中精确五元组，地址族切换也不能复用残留 IPv4 字段 */
+    packet.l4_type = DPPD_L4_FRAGMENT;
+    dppd_software_backend_decide(&backend, 5, &packet, &decision);
+    assert(!decision.matched);
+    packet.l4_type = DPPD_L4_TCP;
+    packet.l3_type = DPPD_L3_IPV6;
+    dppd_software_backend_decide(&backend, 5, &packet, &decision);
+    assert(!decision.matched);
+    dppd_software_backend_worker_quiescent(&backend, 0);
+    assert(dppd_software_backend_remove_version(&backend, 2, 2) == 0);
+
     unsupported = counted;
     unsupported.id = 3;
     unsupported.generation = 3;
