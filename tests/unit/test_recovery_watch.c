@@ -225,5 +225,28 @@ int main(void)
     test_events();
     test_receive_errors();
     test_lifetime();
+    /* 受控查询只允许同一接口的普通状态通知，不能因此忽略并发 TC 修改 */
+    struct dppd_recovery_record record = {.count = 1};
+    record.ports[0].identity.ifindex = 17;
+    strcpy(record.ports[0].identity.ifname, "owned");
+    struct dppd_recovery_watch watch = {.fd = -1};
+    assert(dppd_recovery_watch_open(&watch, &record) == 0);
+    watch.identity_only_links = true;
+    make_link(17, "owned");
+    receive_fault = 13;
+    receives = 0;
+    assert(dppd_recovery_watch_check(&watch) == 0);
+    notification.header.nlmsg_type = RTM_NEWTFILTER;
+    notification.header.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg));
+    receives = 0;
+    assert(dppd_recovery_watch_check(&watch) == -ESTALE && watch.tc_changed);
+    dppd_recovery_watch_close(&watch);
+    assert(dppd_recovery_watch_open(&watch, &record) == 0);
+    watch.identity_only_links = true;
+    make_link(17, "owned");
+    notification.header.nlmsg_type = RTM_DELLINK;
+    receives = 0;
+    assert(dppd_recovery_watch_check(&watch) == -ESTALE && watch.link_changed);
+    dppd_recovery_watch_close(&watch);
     return 0;
 }

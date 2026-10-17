@@ -116,6 +116,10 @@ TAP 命名空间验证无 `CAP_NET_ADMIN` 的进程可以读取和订阅链路�
 新权限，覆盖停止、中断、接口重建及改名、恢复文件替换和事件丢失。恢复工具的只读查询
 也使用清空全部 capability 集的普通用户回归通过，详见[部署权限验证](recovery_namespace_deployment.md)。
 
+2026-10-17 已接通[受控本地 TAP 恢复闭环](recovery_managed_scope.md)：在新建私有网络
+命名空间内落实写入权限与接口连续性，业务退出后精确删除、独立日志逐条提交、失败
+续接及快照重启。普通离线计划保持只读；不把这项能力推广为其他 PMD 或实体设备恢复。
+
 交付：
 
 - capability profile 与 PMD probe cache（本机诊断基础已完成）；

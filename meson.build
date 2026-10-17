@@ -25,6 +25,9 @@ dppd_sources = files(
   'lib/control/recovery_watch.c',
   'lib/control/recovery_monitor.c',
   'lib/control/recovery_scope.c',
+  'lib/control/cleanup_journal.c',
+  'lib/control/recovery_cleanup.c',
+  'lib/control/recovery_delete.c',
   'lib/control/monitor_channel.c',
   'lib/control/tap_content.c',
   'lib/control/planner.c',
@@ -88,8 +91,13 @@ executable(
 )
 
 executable('dppd-monitor', 'app/dppd_monitor/main.c', dependencies: dppd_core_dep, install: false)
+executable('dppd-scope', 'app/dppd_scope/main.c', dependencies: dppd_core_dep, install: false)
 
 if get_option('tests')
+  # 正式启动器逻辑保持一致，仅把恢复角色指向带确定性暂停点的测试工具
+  executable('dppd-scope-test', 'app/dppd_scope/main.c', dependencies: dppd_core_dep,
+    c_args: ['-DDPPD_SCOPE_RECOVERY_PROGRAM="tests/integration/test_cleanup_window"',
+             '-DDPPD_SCOPE_BUSINESS_PROGRAM="tests/integration/test_scope_business_window"'], install: false)
   subdir('tests/unit')
   subdir('tests/integration')
 endif

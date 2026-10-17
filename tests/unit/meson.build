@@ -177,6 +177,12 @@ test('cooperative writer recovery handoff', monitor_handoff_test)
 recovery_scope_test = executable('test_recovery_scope', 'test_recovery_scope.c', dependencies: dppd_core_dep)
 test('managed recovery process restrictions', recovery_scope_test)
 
+# 短写、同步失败、原子替换失败和日志篡改不能被当作已完成删除
+cleanup_journal_test = executable('test_cleanup_journal', 'test_cleanup_journal.c',
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=pwrite64', '-Wl,--wrap=fsync', '-Wl,--wrap=rename', '-Wl,--wrap=renameat2'])
+test('durable managed cleanup journal', cleanup_journal_test)
+
 # 持久化意图、结果和删除事件，覆盖驱动前后写盘故障及清理时的真实 handle 回收
 recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attempt.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])

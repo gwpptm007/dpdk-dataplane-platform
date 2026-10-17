@@ -29,7 +29,7 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - 本机 `rule-status` 查询实际后端、安装端口、COUNT 配置和后端提交耗时，详见 [规则安装状态](docs/rule_status.md)；
 - 本机 `health/ready`、全部未就绪原因、工作线程实际状态和异常结束监控，详见 [健康与就绪](docs/health_readiness.md)。
 
-当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v15）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency/rule-history` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。跨进程自动 reconciliation、degraded recovery 和 flow template 是下一阶段工作，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
+当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v15）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency/rule-history` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。受控本地 TAP 跨进程恢复已接通；其他 PMD 的自动 reconciliation、degraded recovery 和 flow template 仍待实现，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
 
 ## 快速开始
 
@@ -54,8 +54,8 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 新恢复文件 v5 同时保存逐次安装线索，最多 256 个记录槽位，只有成功删除的槽位可复用。
 适配后的 DPDK 21.11.9 TAP 可显式启用 `--tap-owner-cookie`，在创建前持久保存随机标识，
 随本地 DROP/QUEUE 一次写入内核并回读；创建前保存预期内容，创建后和离线检查均核对
-匹配条件、动作与作用范围，识别同标识修改和共享动作。其他 PMD、接口实例连续性证明
-和自动清理仍待实现，见 [TAP 内容核验](docs/tap_rule_verification.md)。新增
+匹配条件、动作与作用范围，识别同标识修改和共享动作，见
+[TAP 内容核验](docs/tap_rule_verification.md)。其他 PMD 自动清理仍需专用适配。新增
 `dppd-recovery plan PATH REVISION` 可列出观察候选、拒绝原因和删除前提，跨登记端口
 检查重复标识，保持只读且不可执行，详见 [精确清理计划](docs/recovery_plan.md)。
 计划查询期间还会监听链路和 TC 变化，中途重建、修改或接收丢包时撤销候选，见
@@ -65,8 +65,14 @@ daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
 会话持久绑定至恢复记录 v6，失效后停止安装并退出，见 [监护握手](docs/recovery_monitor_handshake.md)。
 已增加独占业务登记和 `handoff-check PATH REVISION SESSION_PATH` 只读交接检查，
 业务确认退出后才允许单个恢复租约；`plan-monitored PATH REVISION SESSION_PATH` 可在租约
-内生成关联计划，详见 [写入者与恢复交接](docs/recovery_writer_handoff.md)。外部写入权限隔离、
-完整历史证明及自动删除仍待实现。
+内生成关联计划，详见 [写入者与恢复交接](docs/recovery_writer_handoff.md)。
+
+`dppd-scope run PRIVATE_DIRECTORY UID GID --native` 提供受控本地 TAP 的完整恢复入口：
+root 启动器创建私有网络命名空间和自己的两个 TAP，先监护再启动非 root 业务，业务崩溃
+后核对原生标识、内容、范围与接口连续性，精确清理并逐条保存结果，再以新会话重放
+快照。清理中断可在同一活作用域内续接，监护或启动器失效则保留恢复保护。该入口固定
+使用 `--no-pci`，不接管实体网卡；普通离线查询不获得自动删除权限。部署要求、重试
+边界和完整验收见 [受控 TAP 恢复闭环](docs/recovery_managed_scope.md)。
 
 ```bash
 bash scripts/build.sh

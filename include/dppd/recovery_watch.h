@@ -12,6 +12,8 @@ struct dppd_recovery_watch {
     bool link_changed, tc_changed;
     /** 生命周期模式允许普通链路状态和 TC 更新，但删除、改名、身份冲突仍使会话失效 */
     bool lifetime_only;
+    /** 受控清理允许载波等链路状态通知，但 TC 变化仍使本次完整查询失效 */
+    bool identity_only_links;
     uint32_t count;
     struct {
         uint32_t ifindex;

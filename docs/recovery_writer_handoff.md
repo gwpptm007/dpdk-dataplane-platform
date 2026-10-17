@@ -8,6 +8,9 @@
 这里的“受控”指遵守项目入口的业务与恢复工具。管理员、其他 TC 程序及直接使用内核
 接口的程序尚未被部署权限隔离，所以输出始终保留 `writer-exclusion=no executable=no`。
 
+独立的[受控本地 TAP 启动器](recovery_managed_scope.md) 随后落实专用网络命名空间和
+进程权限边界，并接通实际清理与重启；本页手工交接命令继续保持只读和精确版本租约。
+
 ## 业务登记
 
 启动方式沿用 [业务与监护握手](recovery_monitor_handshake.md)。业务核对完整 TAP 映射

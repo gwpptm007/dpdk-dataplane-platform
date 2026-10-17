@@ -37,7 +37,8 @@ static int link_event(struct dppd_recovery_watch *watch, const struct nlmsghdr *
         bool same_index = watch->links[index].ifindex == (uint32_t)link->ifi_index;
         bool same_name = strcmp(watch->links[index].ifname, name) == 0;
         if ((same_index || same_name) &&
-            (!watch->lifetime_only || header->nlmsg_type == RTM_DELLINK || !same_index || !same_name))
+            (!(watch->lifetime_only || watch->identity_only_links) || header->nlmsg_type == RTM_DELLINK ||
+                !same_index || !same_name))
             watch->link_changed = true;
     }
     return 0;

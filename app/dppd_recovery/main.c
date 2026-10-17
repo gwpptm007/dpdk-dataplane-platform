@@ -9,6 +9,7 @@
 #include "dppd/recovery_watch.h"
 #include "dppd/monitor_channel.h"
 #include "dppd/recovery_scope.h"
+#include "dppd/recovery_cleanup.h"
 
 static struct dppd_recovery_scope managed_scope = {.fd = -1};
 
@@ -20,6 +21,7 @@ static int usage(const char *program)
     fprintf(stderr, "       %s plan PATH REVISION\n", program);
     fprintf(stderr, "       %s plan-monitored PATH REVISION SESSION_PATH\n", program);
     fprintf(stderr, "       %s handoff-check PATH REVISION SESSION_PATH\n", program);
+    fprintf(stderr, "       %s clean-managed PATH REVISION SESSION_PATH (managed scope only)\n", program);
     fprintf(stderr, "       %s acknowledge-clean PATH REVISION --external-cleanup-complete\n", program);
     return EXIT_FAILURE;
 }
@@ -285,22 +287,32 @@ int main(int argc, char **argv)
     bool plan = argc == 4 && strcmp(argv[1], "plan") == 0;
     bool monitored_plan = argc == 5 && strcmp(argv[1], "plan-monitored") == 0;
     bool handoff = argc == 5 && strcmp(argv[1], "handoff-check") == 0;
+    bool clean = argc == 5 && strcmp(argv[1], "clean-managed") == 0;
     int rc;
 
     if (!(argc == 3 && strcmp(argv[1], "show") == 0) && !acknowledge && !inspect && !plan && !handoff &&
-        !monitored_plan)
+        !monitored_plan && !clean)
         return usage(argv[0]);
-    if ((inspect || plan || handoff || monitored_plan) && revision_number(argv[3], &revision) != 0)
+    if ((inspect || plan || handoff || monitored_plan || clean) && revision_number(argv[3], &revision) != 0)
         return usage(argv[0]);
     if (acknowledge &&
         (strcmp(argv[4], "--external-cleanup-complete") != 0 || revision_number(argv[3], &revision) != 0))
         return usage(argv[0]);
+    /* 普通离线入口没有删除权限，先拒绝再接触恢复文件 */
+    if (clean && !managed_scope.enabled) {
+        fprintf(stderr, "managed cleanup requires a live supervisor scope\n");
+        return EXIT_FAILURE;
+    }
     rc = dppd_recovery_guard_open(&guard, argv[2], NULL);
     if (rc != 0) {
         fprintf(stderr, "recovery record unavailable: %s (%d)\n", strerror(-rc), rc);
         return EXIT_FAILURE;
     }
-    if (handoff) {
+    if (clean) {
+        rc = revision != guard.record.revision ? -ESTALE : dppd_recovery_cleanup(&guard, argv[4], &managed_scope);
+        if (rc != 0)
+            fprintf(stderr, "managed cleanup refused: %s (%d)\n", strerror(-rc), rc);
+    } else if (handoff) {
         struct dppd_monitor_client client = {.fd = -1};
         rc = dppd_monitor_recovery_open(&client, argv[4], &guard, revision);
         if (rc == 0)
@@ -392,5 +404,5 @@ int main(int argc, char **argv)
         }
     }
     dppd_recovery_guard_close(&guard);
-    return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    return rc == 0 ? EXIT_SUCCESS : clean && dppd_recovery_cleanup_retryable(rc) ? 75 : EXIT_FAILURE;
 }

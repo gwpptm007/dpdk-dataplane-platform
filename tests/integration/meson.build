@@ -62,6 +62,13 @@ executable('test_monitor_handoff_window', '../../app/dppd_recovery/main.c', 'mon
 # 测试专用启动器新建网络命名空间，检查三个正式入口的降权、线程启动和授权拒绝
 executable('test_recovery_scope_fixture', 'recovery_scope_fixture.c', dependencies: dppd_core_dep, install: false)
 
+# 暂停真实清理调用前后并制造一次删除或结果保存失败，不在正式程序中添加开关
+executable('test_cleanup_window', 'cleanup_window.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=dppd_recovery_delete_filter', '-Wl,--wrap=dppd_cleanup_journal_set',
+              '-Wl,--wrap=dppd_monitor_recovery_open', '-Wl,--wrap=dppd_recovery_guard_acknowledge'], install: false)
+executable('test_scope_business_window', 'scope_business_window.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=dppd_recovery_guard_created'], install: false)
+
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', required: false)
 if ring_pmd.found()
   executable(

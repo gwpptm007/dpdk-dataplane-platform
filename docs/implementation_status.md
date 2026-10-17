@@ -2,11 +2,19 @@
 
 状态只表示代码是否真实存在，不以目录或占位接口计入完成度。
 
+2026-10-17 已接通[受控本地 TAP 跨进程恢复闭环](recovery_managed_scope.md)：正式
+`dppd-scope` 在自己的私有网络命名空间内管理监护、唯一业务和单个清理进程，业务退出
+后按原生标识、内容、范围与持续监护精确删除，独立日志逐条落盘并支持同作用域续接，
+全部完成后才以新会话重放快照。原生构建 20 个完整场景通过，系统构建验证缺少标识
+明确拒绝及软件无残留重启。普通离线工具仍只读；其他 PMD、实体设备复位和旧作用域
+领养仍需另行设计，不能套用本能力。以下日期条目保留当时状态，当前能力以本段及
+模块表为准。
+
 2026-10-17 开始落实[受控 TAP 恢复作用域](recovery_managed_scope.md)：新增实时匿名授权
 通道、非 root 角色权限核验和两阶段进程限制，三个正式入口均在受控模式初始化设备前
 核验。业务保留 NET_ADMIN 而监护无 capability，禁止派生独立写入进程与切换命名空间，
 允许 DPDK 工作线程。两套构建各 36 项单测及各十三个作用域场景通过；正式启动器、
-精确删除、逐条落盘续接和快照重启闭环仍在实现，当前不提供自动删除入口。
+精确删除、逐条落盘续接和快照重启随后在上述闭环中接通。
 
 2026-10-11 完成 [受控写入者登记与只读交接检查](recovery_writer_handoff.md)：监护以
 内核凭据和 pidfd 独占登记业务，业务退出后按精确 revision 与持锁描述符发放单个恢复
@@ -136,7 +144,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | capability profile / probe cache | 已实现本机诊断闭环 | 设备/固件/DPDK 身份、描述符和既有 queue/RSS/offload；完整规则校验结果缓存五秒、64 槽、强制刷新与失效；成功观察集合不承诺任意组合；正式安装始终新校验 |
 | rule IR | 已实现第一版 | 有序 match/action、domain/fallback、持久化 install port 和语义校验 |
 | rule repository | 已实现内存版和可选写路径 | 稳定 ID、单调 generation、幂等 CRUD、乐观并发、按 ID 稳定分页；control 可在 mutation 后保存完整 snapshot |
-| snapshot persistence | 已实现 v2、v1 单端口迁移、进程内隔离与可选跨进程保护 | 保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；恢复记录 v5 保存逐次线索、可选原生标识与预期内容；本地 TAP DROP/QUEUE 标识、内容和当前范围核验已实现，接口实例连续性与自动清理未实现 |
+| snapshot persistence | 已实现 v2、v1 单端口迁移、进程内隔离、跨进程保护与受控 TAP 恢复 | 保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；恢复记录 v6 与原生标识、预期内容、监护及匿名授权绑定；受控本地 TAP DROP/QUEUE 可精确清理、独立日志续接及快照重启，其他 PMD 仍需外部核对 |
 | planner | 已实现第一版 | 明确 software/rte_flow 选择、fallback reason 与 transfer domain 校验 |
 | rte_flow | 已实现事务 backend | validate 与 create 分离；对象仓库持有 handle；批量失败逆序 destroy |
 | 等价软件 fallback | 已实现最小集合 | ingress Ethernet/IPv4/UDP/TCP、DROP/MARK/COUNT；`prefer` 仅在 validate 失败时回退，QUEUE/transfer 拒绝降级；immutable snapshot + DPDK QSBR 非阻塞回收已接入 |
@@ -240,5 +248,5 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 - 硬件规则更新采用“先创建新 generation，再删除旧 generation”；若 PMD 拒绝重叠规则，更新失败并保留旧规则，当前不承诺跨 PMD 的无损原子替换。
 - management v15 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
 - 批量更新保留 `rule_capacity + 1` 的 backend 容量。纯软件路径整批替换快照、复用旧槽位，满表可更新；每次分类使用完整旧表或新表，新版本 COUNT 归零，未更新规则保留计数。硬件及混合路径仍需要临时容量，只保证账本整批发布；PREFER 可能整表替换但最终成为混合计划时，会在安装前复查软件空间。
-- daemon 为安全起见不会自动删除启动前已存在的 socket 路径；异常退出后需由部署脚本确认没有存活进程再清理残留文件。
-- snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready`、`capability-show`、`rule-metrics/rule-latency/rule-history` 与规则 telemetry 的进程内隔离模式。可选 `--recovery-path` 已提供异常退出后的重放阻断与外部清理确认；PMD 专用自动残留清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md) 与 [恢复保护](recovery_guard.md)。
+- 普通 daemon 不自动删除启动前已存在的 socket；`dppd-scope` 只在自己确认旧业务退出后清除私有目录内属于服务账户的管理 socket。
+- snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready`、`capability-show`、`rule-metrics/rule-latency/rule-history` 与规则 telemetry 的进程内隔离模式。可选 `--recovery-path` 已提供异常退出后的重放阻断与外部清理确认；受控本地 TAP 的自动清理与快照重启已接通，其他 PMD 自动清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md) 与 [恢复保护](recovery_guard.md)。
