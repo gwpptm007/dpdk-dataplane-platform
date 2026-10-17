@@ -174,6 +174,9 @@ test('recovery monitor handshake', monitor_channel_test)
 monitor_handoff_test = executable('test_monitor_handoff', 'test_monitor_handoff.c', dependencies: dppd_core_dep)
 test('cooperative writer recovery handoff', monitor_handoff_test)
 
+recovery_scope_test = executable('test_recovery_scope', 'test_recovery_scope.c', dependencies: dppd_core_dep)
+test('managed recovery process restrictions', recovery_scope_test)
+
 # 持久化意图、结果和删除事件，覆盖驱动前后写盘故障及清理时的真实 handle 回收
 recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attempt.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])

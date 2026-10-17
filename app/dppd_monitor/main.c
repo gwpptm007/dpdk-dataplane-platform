@@ -15,8 +15,10 @@
 #include "dppd/recovery_monitor.h"
 #include "dppd/recovery_watch.h"
 #include "dppd/monitor_channel.h"
+#include "dppd/recovery_scope.h"
 
 static volatile sig_atomic_t stopping;
+static struct dppd_recovery_scope managed_scope = {.fd = -1};
 
 static void stop_requested(int signal_number)
 {
@@ -83,7 +85,12 @@ struct monitor_context {
 static int check_session(void *context)
 {
     struct monitor_context *monitor = context;
-    int rc = recovery_file_unchanged(monitor->binding_fd, monitor->record);
+    int rc = dppd_scope_check(&managed_scope);
+    if (rc != 0) {
+        monitor->reason = DPPD_MONITOR_OBSERVER_LOST;
+        return rc;
+    }
+    rc = recovery_file_unchanged(monitor->binding_fd, monitor->record);
     if (rc != 0) {
         monitor->reason = DPPD_MONITOR_RECORD_REPLACED;
         return rc;
@@ -253,6 +260,11 @@ static int show_monitor(const char *path)
 
 int main(int argc, char **argv)
 {
+    int scope_error = dppd_scope_open(&managed_scope, DPPD_SCOPE_MONITOR);
+    if (scope_error != 0) {
+        fprintf(stderr, "recovery monitor scope refused: %d\n", scope_error);
+        return EXIT_FAILURE;
+    }
     int rc;
     if (argc == 3 && strcmp(argv[1], "show") == 0)
         rc = show_monitor(argv[2]);

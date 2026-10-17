@@ -8,6 +8,9 @@
 #include "dppd/recovery_plan.h"
 #include "dppd/recovery_watch.h"
 #include "dppd/monitor_channel.h"
+#include "dppd/recovery_scope.h"
+
+static struct dppd_recovery_scope managed_scope = {.fd = -1};
 
 /** 离线工具不初始化 EAL，inspect 和 plan 只读内核，确认命令要求已完成外部清理 */
 static int usage(const char *program)
@@ -270,6 +273,11 @@ static int plan_record(const struct dppd_recovery_record *record, uint64_t revis
 /** 查询和确认均持有排他锁，正在运行的 daemon 不允许离线工具改写或观察半成品 */
 int main(int argc, char **argv)
 {
+    int scope_error = dppd_scope_open(&managed_scope, DPPD_SCOPE_RECOVERY);
+    if (scope_error != 0) {
+        fprintf(stderr, "recovery scope refused: %d\n", scope_error);
+        return EXIT_FAILURE;
+    }
     struct dppd_recovery_guard guard;
     uint64_t revision = 0;
     bool acknowledge = argc == 5 && strcmp(argv[1], "acknowledge-clean") == 0;

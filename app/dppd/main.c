@@ -16,10 +16,12 @@
 #include "dppd/runtime.h"
 #include "dppd/recovery_guard.h"
 #include "dppd/recovery_inspect.h"
+#include "dppd/recovery_scope.h"
 #include "dppd/monitor_channel.h"
 #include "dppd/telemetry.h"
 
 static volatile sig_atomic_t stop_signal;
+static struct dppd_recovery_scope managed_scope = {.fd = -1};
 
 /** 恢复记录与已捕获设备身份只由主线程借用，软件 worker 不访问文件或这些指针 */
 struct recovery_context {
@@ -55,6 +57,9 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
 
     if (port == NULL || endpoint == NULL || !port->identity.device_name_known)
         return -ENODEV;
+    rc = dppd_scope_check(&managed_scope);
+    if (rc != 0)
+        return rc;
     if (recovery->monitor->error != 0)
         return recovery->monitor->error;
     memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
@@ -106,7 +111,8 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
     /** 观察是附加线索，失败仍允许有意图保护的创建，之后明确记录无法观察 */
     recovery->before_error = observe_recovery_port(recovery, &recovery->before);
     /** 写盘与内核查询可能耗时，进入驱动前再取一次新回复，不能复用启动时的确认 */
-    return dppd_monitor_client_check(recovery->monitor);
+    rc = dppd_scope_check(&managed_scope);
+    return rc != 0 ? rc : dppd_monitor_client_check(recovery->monitor);
 }
 
 /** 记录失败只报告一次并保持故障锁存，避免清理阶段反复刷屏或把不确定记录覆盖为干净 */
@@ -136,6 +142,8 @@ static int finish_recovery_create(void *context, uint64_t attempt, int create_er
     if (rc != 0)
         recovery_record_error(recovery, rc);
     /** 创建期间监护也可能退出，失败时保留真实 handle 交给事务回滚 */
+    if (rc == 0 && create_error == 0)
+        rc = dppd_scope_check(&managed_scope);
     if (rc == 0 && create_error == 0)
         rc = dppd_monitor_client_check(recovery->monitor);
     /**
@@ -218,6 +226,12 @@ static int bind_monitor(const struct dppd_config *config, struct dppd_recovery_g
 
 int main(int argc, char **argv)
 {
+    /* 受控入口必须先封住进程派生和权限变化，再让 EAL 创建线程或访问 TAP */
+    int scope_error = dppd_scope_open(&managed_scope, DPPD_SCOPE_BUSINESS);
+    if (scope_error != 0) {
+        fprintf(stderr, "[dppd] managed scope refused: %d\n", scope_error);
+        return EXIT_FAILURE;
+    }
     struct dppd_config config;
     struct dppd_control_service control;
     struct dppd_management_server management;
@@ -395,6 +409,11 @@ int main(int argc, char **argv)
     while (!stop_signal) {
         const uint64_t now = rte_get_timer_cycles();
 
+        loop_error = dppd_scope_check(&managed_scope);
+        if (loop_error != 0) {
+            fprintf(stderr, "[dppd] managed scope lost; stopping workers: %d\n", loop_error);
+            break;
+        }
         loop_error = dppd_monitor_client_check(&monitor_client);
         if (loop_error != 0) {
             fprintf(stderr, "[dppd] recovery monitor unavailable; stopping workers: %d\n", loop_error);

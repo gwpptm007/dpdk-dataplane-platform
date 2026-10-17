@@ -24,6 +24,7 @@ dppd_sources = files(
   'lib/control/recovery_plan.c',
   'lib/control/recovery_watch.c',
   'lib/control/recovery_monitor.c',
+  'lib/control/recovery_scope.c',
   'lib/control/monitor_channel.c',
   'lib/control/tap_content.c',
   'lib/control/planner.c',
