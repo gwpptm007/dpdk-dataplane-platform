@@ -8,6 +8,7 @@
 #include "dppd/rule_repository.h"
 #include "dppd/software_backend.h"
 #include "dppd/routing.h"
+#include "dppd/age.h"
 
 /** 每批最多处理四条已有规则，限制临时资源需求，也让请求和结果保持固定的小规模 */
 #define DPPD_CONTROL_BATCH_UPDATE_MAX 4U
@@ -49,6 +50,9 @@ struct dppd_control_service {
     int recovery_last_error;
     /** 仅管理线程更新的请求指标，逐包路径不读取它，也不增加时钟、锁或内存分配 */
     struct dppd_rule_observation observation;
+    /** AGE 由管理线程轮询，错误必须经过完整一轮成功核对才能清除 */
+    struct dppd_age_status age;
+    int age_cycle_error;
 };
 
 struct dppd_control_apply_result {

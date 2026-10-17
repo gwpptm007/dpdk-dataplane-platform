@@ -79,6 +79,8 @@ enum dppd_action_type {
     DPPD_ACTION_REPRESENTED_PORT,
     /** 结束本次软件 ACL 匹配并继续后续转发，不承诺绕过路由或允许无效报文 */
     DPPD_ACTION_ALLOW,
+    /** 超过指定秒数没有命中时报告老化，是否删除由控制面按精确版本决定 */
+    DPPD_ACTION_AGE,
 };
 
 struct dppd_action {
@@ -87,6 +89,7 @@ struct dppd_action {
         uint16_t queue_id;
         uint32_t mark_id;
         uint16_t ethdev_port_id;
+        uint32_t age_timeout_seconds;
     } conf;
 };
 

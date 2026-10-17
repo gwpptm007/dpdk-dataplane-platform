@@ -27,5 +27,6 @@ transfer 方向、源/目的端点、COUNT 和所有配置对象的存活时间�
 系统 DPDK 21.11.9 严格编译、普通及 ASan/UBSan 契约测试通过。
 
 这是模拟驱动入口的契约测试，未证明 mlx5、BlueField 或非 mlx5 实机支持这些规则。
-AGE 和 indirect/shared action 目前没有规则 IR、正式管理及完整生命周期路径，仍为未完成；
-不会仅因 DPDK 头文件中存在 API，就登记为已交付能力。
+后续已接通 [AGE 控制与模拟闭环](m3_age.md)，契约测试也覆盖 AGE 参数与独立查询。
+indirect/shared action 仍待实现；真实 PMD 的 AGE 和共享动作支持仍需单独验收，
+不会仅因 DPDK 头文件中存在 API，就登记为硬件已验证能力。

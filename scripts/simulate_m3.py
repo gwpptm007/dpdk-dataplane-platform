@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""不用实体网卡演练 M3 的规则、报文、计数和回滚，结果明确标记为功能模拟"""
+"""不用实体网卡演练 M3 的规则、报文、计数、闲置老化和回滚，结果明确标记为功能模拟"""
 
 import argparse
 from datetime import datetime, timezone
@@ -110,13 +110,15 @@ class Fixture:
     def status(self):
         return fields(self.io_request("status"))
 
-    def install(self, rule_id, source, destination, template="pair", bidirectional=False, priority=10, error=None):
+    def install(self, rule_id, source, destination, template="pair", bidirectional=False, priority=10, error=None,
+                age=0, count=True):
         direction = "bidir" if bidirectional else "oneway"
+        modifiers = (["count"] if count else []) + ([f"age:{age}"] if age else []) + [f"priority:{priority}"]
         plan = self.ctl("transfer-plan", rule_id, 0, source, destination, template, direction,
-                        "count", f"priority:{priority}")
+                        *modifiers)
         generation = fields(plan.splitlines()[0])["repository-generation"]
         result = self.ctl("transfer-apply", rule_id, 0, source, destination, template, direction, generation,
-                          "count", f"priority:{priority}", error=error)
+                          *modifiers, error=error)
         return [fields(line) for line in result.splitlines() if line.startswith("edge=")]
 
     def delete(self, edges):
@@ -133,6 +135,17 @@ class Fixture:
     def count(self, edge, packets, length):
         result = fields(self.ctl("count", edge["id"], edge["generation"]))
         check(result.get("hits") == str(packets) and result.get("bytes") == str(length), str(result))
+
+    def wait_status(self, predicate, message, timeout=4):
+        """等待真实控制循环完成有限轮询，超时则保留最后状态帮助定位问题"""
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            last = self.status()
+            if predicate(last):
+                return last
+            time.sleep(0.02)
+        raise RuntimeError(message + ": " + str(last))
 
 
 def exercise(simulator, passed):
@@ -225,6 +238,105 @@ def exercise(simulator, passed):
     passed("补偿失败隔离全部转发、重试后仍需重启、正式快照重放且 COUNT 归零")
 
 
+def exercise_age(simulator, passed):
+    """AGE 使用独立闲置时钟，COUNTER 查询和累计值都不能代替老化条件"""
+    before = simulator.status()
+    for request in ("advance -1", "advance abc", "advance 1 extra", "advance 18446744073709551615",
+                    "advance 18446744073709551616", "advance", b"advance 1\x00suffix",
+                    "fault age-query 1 advance -1", "fault age-query 0 advance 1",
+                    "fault age-query 1 advance 18446744073709551615", "fault missing 1 advance 1"):
+        check(exchange(simulator.io, request).startswith("error "), "坏时钟请求没有拒绝")
+        check(simulator.status() == before, "坏时钟请求改变了偏移或规则状态")
+    passed("虚拟时钟完整输入及溢出拒绝，失败请求不推进时间")
+
+    # 不推进虚拟时间，等待正式主循环根据真实闲置时间自动删除没有 COUNT 的 AGE 规则
+    idle = simulator.install(6000, 0, 2, age=1, count=False)
+    idle_state = fields(simulator.ctl("rule-age", idle[0]["id"], idle[0]["generation"]))
+    check(idle_state.get("aged") == "no", "新规则被错误标记为已老化")
+    check(fields(simulator.ctl("age-status")).get("tracked") == "1", "公开 AGE 状态没有登记规则")
+    simulator.ctl("count", idle[0]["id"], idle[0]["generation"], error=errno.ENODATA)
+    simulator.wait_status(lambda state: state["installed"] == "0" and state["desired"] == "0",
+                          "自然闲置的 AGE 没有自动删除")
+    simulator.ctl("get", 6000, error=errno.ENOENT)
+    passed("无 COUNT 的 AGE 规则通过真实闲置自动回收")
+
+    # COUNT 只记录实际注入报文，没有 AGE 的规则不会因计数不再变化而被当成已过期
+    permanent = simulator.install(6100, 0, 2, count=True)
+    simulator.ctl("rule-age", permanent[0]["id"], permanent[0]["generation"], error=errno.ENODATA)
+    expiring = simulator.install(6101, 1, 3, age=3, count=False)
+    simulator.inject(0, 2, 6100, frame())
+    simulator.inject(1, 3, 6101, frame(73))
+    simulator.ctl("count", expiring[0]["id"], expiring[0]["generation"], error=errno.ENODATA)
+    simulator.io_request("fault query 1")
+    simulator.io_request("advance 3")
+    simulator.wait_status(lambda state: state["installed"] == "1" and state["desired"] == "1",
+                          "AGE 被 COUNT 查询故障影响或错误删除无 AGE 规则")
+    simulator.ctl("get", 6101, error=errno.ENOENT)
+    simulator.ctl("count", permanent[0]["id"], permanent[0]["generation"], error=errno.EIO)
+    simulator.count(permanent[0], 1, 64)
+    simulator.io_request("advance 30")
+    simulator.inject(0, 2, 6100, frame())
+    simulator.count(permanent[0], 2, 128)
+    simulator.delete(permanent)
+    passed("AGE 与 COUNT 独立，无 AGE 的规则不老化，COUNT 查询故障不妨碍过期回收")
+
+    # 每次真正命中都刷新闲置起点，创建以来的总时间超过超时也不应误删仍有流量的规则
+    renewed = simulator.install(6200, 0, 2, age=5)
+    simulator.inject(0, 2, 6200, frame())
+    simulator.io_request("advance 4")
+    check(simulator.status()["installed"] == "1", "未达到闲置超时就删除了规则")
+    idle_state = fields(simulator.ctl("rule-age", renewed[0]["id"], renewed[0]["generation"]))
+    check(idle_state.get("aged") == "no" and idle_state.get("idle-seconds") == "4", str(idle_state))
+    simulator.inject(0, 2, 6200, frame(73))
+    renewed_state = fields(simulator.ctl("rule-age", renewed[0]["id"], renewed[0]["generation"]))
+    check(renewed_state.get("aged") == "no" and renewed_state.get("idle-seconds") == "0", str(renewed_state))
+    simulator.io_request("advance 4")
+    check(simulator.status()["installed"] == "1", "命中没有延后 AGE 闲置起点")
+    simulator.count(renewed[0], 2, 137)
+    simulator.io_request("advance 1")
+    simulator.wait_status(lambda state: state["installed"] == "0" and state["desired"] == "0",
+                          "达到续期后的闲置边界没有回收")
+    simulator.ctl("get", 6200, error=errno.ENOENT)
+    simulator.stop()
+    simulator.start()
+    check(simulator.status()["installed"] == "0" and simulator.status()["desired"] == "0",
+          "成功过期删除的规则在恢复正式快照后复活")
+    simulator.ctl("get", 6200, error=errno.ENOENT)
+    check(simulator.io_request(f"inject 0 {frame().hex()}").startswith("drop "), "过期规则重启后仍在转发")
+    passed("报文命中续期、精确闲置边界及过期快照重启不复活")
+
+    # advance 的响应同时保存本次轮询结果，即使进程随后被调度延迟也能核对失败瞬间的状态
+    failed = simulator.install(6300, 0, 2, age=3)
+    simulator.inject(0, 2, 6300, frame())
+    before = simulator.status()
+    result = fields(simulator.io_request("fault remove 1 advance 3"))
+    check(result.get("installed") == "1" and result.get("desired") == "1" and
+          result.get("age_error") == str(-errno.EBUSY), "过期删除失败未保留规则: " + str(result))
+    simulator.io_request("advance 1")
+    state = simulator.wait_status(lambda current: current["installed"] == "0" and current["desired"] == "0" and
+                                 current["age_error"] == "0", "过期删除失败后没有重试成功")
+    check(int(state["removes"]) - int(before["removes"]) == 2, "AGE 删除没有按失败后重试的顺序调用驱动")
+    simulator.ctl("get", failed[0]["id"], error=errno.ENOENT)
+    simulator.stop()
+    simulator.start()
+    check(simulator.status()["installed"] == "0", "删除重试成功的规则在重启后复活")
+    passed("AGE 删除失败保留实际和账本，节流重试成功后持久化且重启不复活")
+
+    # AGE 查询故障不会清 COUNT，也不能允许未知老化状态下的报文偷偷刷新闲置时间
+    tracked = simulator.install(6400, 0, 2, age=10)
+    simulator.inject(0, 2, 6400, frame())
+    result = fields(simulator.io_request("fault age-query 1 advance 1"))
+    check(result.get("age_error") == str(-errno.EIO) and result.get("installed") == "1",
+          "AGE 查询故障未保留规则: " + str(result))
+    simulator.count(tracked[0], 1, 64)
+    simulator.io_request("advance 1")
+    simulator.wait_status(lambda state: state["age_error"] == "0", "AGE 查询故障没有恢复")
+    simulator.inject(0, 2, 6400, frame(73))
+    simulator.count(tracked[0], 2, 137)
+    simulator.delete(tracked)
+    passed("AGE 查询故障独立于 COUNT，恢复后继续准确计数和命中续期")
+
+
 def demo(args):
     root = Path(__file__).resolve().parents[1]
     build = args.build_dir.resolve()
@@ -252,6 +364,7 @@ def demo(args):
             try:
                 simulator.start()
                 exercise(simulator, passed)
+                exercise_age(simulator, passed)
             finally:
                 simulator.stop()
         check(source_digest(root) == report["source_sha256"], "演练期间源码变化，不能报告同版本通过")
@@ -297,21 +410,24 @@ def serve(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    automatic = commands.add_parser("demo", help="自动演练七种模板、报文计数、回滚与重启")
+    automatic = commands.add_parser("demo", help="自动演练七种模板、报文计数、闲置老化、回滚与重启")
     automatic.add_argument("--build-dir", type=Path, default=Path("build"))
     automatic.add_argument("--report-dir", type=Path)
     server = commands.add_parser("serve", help="启动可供真实 dppctl 操作的独立模拟服务")
     server.add_argument("--build-dir", type=Path, default=Path("build"))
     server.add_argument("--directory", type=Path, required=True)
-    for name in ("inject", "status", "fault", "clear-faults"):
+    for name in ("inject", "status", "fault", "clear-faults", "advance"):
         client = commands.add_parser(name)
         client.add_argument("--io-socket", type=Path, required=True)
         if name == "inject":
             client.add_argument("--source", type=int, required=True)
             client.add_argument("--frame", required=True, help="完整以太网帧的十六进制文本")
         if name == "fault":
-            client.add_argument("operation", choices=("validate", "create", "remove", "query"))
+            client.add_argument("operation", choices=("validate", "create", "remove", "query", "age-query"))
             client.add_argument("after", type=int, help="该操作第几次后续调用时失败一次")
+            client.add_argument("--advance", type=int, help="同一条模拟消息内设置故障并推进秒数，避免后台轮询竞态")
+        if name == "advance":
+            client.add_argument("seconds", type=int, help="为模拟单调时钟增加的秒数，不改变系统时钟")
     args = parser.parse_args()
     if args.command == "demo":
         return demo(args)
@@ -323,6 +439,10 @@ def main():
             request += f" {args.source} {args.frame}"
         elif request == "fault":
             request += f" {args.operation} {args.after}"
+            if args.advance is not None:
+                request += f" advance {args.advance}"
+        elif request == "advance":
+            request += f" {args.seconds}"
         response = exchange(args.io_socket, request)
         print(response)
         return 1 if response.startswith("error ") else 0

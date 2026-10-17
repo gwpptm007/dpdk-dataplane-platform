@@ -254,6 +254,9 @@ int dppd_rule_repository_remove(struct dppd_rule_repository *repository, uint64_
     if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)
         return -ESTALE;
 
+    /** 删除同样需要一个新的有效版本，不能先清空记录再发现版本号已耗尽 */
+    if (repository->generation >= UINT64_MAX - 1U)
+        return -EOVERFLOW;
     memset(record, 0, sizeof(*record));
     repository->count--;
     *removed = true;

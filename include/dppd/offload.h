@@ -14,6 +14,14 @@ struct dppd_flow_handle {
     uint16_t port_id;
     struct rte_flow *flow;
     bool has_count;
+    bool has_age;
+};
+
+/** 老化状态与空闲秒数分别判断，驱动没有提供秒数时不能把零当作刚刚命中 */
+struct dppd_flow_age_result {
+    bool aged;
+    bool sec_since_last_hit_valid;
+    uint32_t sec_since_last_hit;
 };
 
 struct dppd_flow_error {
@@ -35,6 +43,9 @@ int dppd_flow_install(uint16_t port_id, const struct dppd_rule *rule, struct dpp
 int dppd_flow_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *error);
 /** 驱动必须同时提供包数和字节数，缺少任一项返回 ENODATA，失败时两个输出值均保持不变 */
 int dppd_flow_query_count(const struct dppd_flow_handle *handle, uint64_t *hits, uint64_t *bytes,
+    struct dppd_flow_error *error);
+/** 直接查询 AGE 动作，失败保留输出，秒数无效时保留无效标记并将该数值规范为零 */
+int dppd_flow_query_age(const struct dppd_flow_handle *handle, struct dppd_flow_age_result *result,
     struct dppd_flow_error *error);
 int dppd_flow_flush(uint16_t port_id, struct dppd_flow_error *error);
 

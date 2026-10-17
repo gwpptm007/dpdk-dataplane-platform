@@ -38,6 +38,8 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] health\n", program);
     fprintf(stderr, "  %s [--socket PATH] ready\n", program);
     fprintf(stderr, "  %s [--socket PATH] persistence-status\n", program);
+    fprintf(stderr, "  %s [--socket PATH] age-status\n", program);
+    fprintf(stderr, "  %s [--socket PATH] rule-age RULE_ID EXPECTED_GENERATION\n", program);
     fprintf(stderr, "  %s [--socket PATH] persistence-flush\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-retry\n", program);
@@ -716,6 +718,10 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
         initialize_request(request, DPPD_MANAGEMENT_PING);
         return 0;
     }
+    if (argc == 1 && strcmp(argv[0], "age-status") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_AGE_STATUS);
+        return 0;
+    }
     if (argc == 1 && strcmp(argv[0], "persistence-status") == 0) {
         initialize_request(request, DPPD_MANAGEMENT_PERSISTENCE_STATUS);
         return 0;
@@ -794,8 +800,9 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
         }
         return 0;
     }
-    if (argc == 3 && strcmp(argv[0], "count") == 0) {
-        initialize_request(request, DPPD_MANAGEMENT_RULE_COUNT_QUERY);
+    if (argc == 3 && (strcmp(argv[0], "count") == 0 || strcmp(argv[0], "rule-age") == 0)) {
+        initialize_request(request,
+            strcmp(argv[0], "count") == 0 ? DPPD_MANAGEMENT_RULE_COUNT_QUERY : DPPD_MANAGEMENT_RULE_AGE_QUERY);
         if (parse_u64(argv[1], 1, UINT64_MAX, &request->payload.count_query.rule_id) != 0 ||
             parse_expected(argv[2], &request->payload.count_query.expected_generation) != 0)
             return -EINVAL;
@@ -1142,6 +1149,9 @@ static void print_rule_detail(const struct dppd_rule *rule)
         case DPPD_ACTION_COUNT:
             printf("count");
             break;
+        case DPPD_ACTION_AGE:
+            printf("age timeout-seconds=%u", action->conf.age_timeout_seconds);
+            break;
         case DPPD_ACTION_REPRESENTED_PORT:
             printf("represented-port port=%u", action->conf.ethdev_port_id);
             break;
@@ -1211,6 +1221,24 @@ static int print_response(const struct dppd_management_response *response)
         return 0;
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_AGE_STATUS: {
+        const struct dppd_age_status *age = &response->payload.age_status;
+        printf("age-status tracked=%u polls=%" PRIu64 " queries=%" PRIu64 " expired=%" PRIu64 " query-errors=%" PRIu64
+               " delete-errors=%" PRIu64 " last-error=%d last-rule=%" PRIu64 "\n",
+            age->tracked, age->polls, age->queries, age->expired, age->query_errors, age->delete_errors,
+            age->last_error, age->last_rule_id);
+        break;
+    }
+    case DPPD_MANAGEMENT_RULE_AGE_QUERY: {
+        const struct dppd_control_age_result *age = &response->payload.age_result;
+        printf("rule-age rule=%" PRIu64 " generation=%" PRIu64 " aged=%s idle-seconds=", age->rule_id, age->generation,
+            age->state.aged ? "yes" : "no");
+        if (age->state.sec_since_last_hit_valid)
+            printf("%u\n", age->state.sec_since_last_hit);
+        else
+            printf("unknown\n");
+        break;
+    }
     case DPPD_MANAGEMENT_RULE_HISTORY: {
         const struct dppd_rule_history_page *page = &response->payload.rule_history;
 

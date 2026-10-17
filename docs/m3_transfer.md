@@ -1,12 +1,13 @@
 # M3 端点角色与 transfer 规则图
 
-当前已实现有来源的端点角色发现、七种规则图模板、只读规划和正式整批安装入口。
+当前已实现有来源的端点角色发现、七种规则图模板、只读规划和正式整批安装入口，
+并接通 [AGE 闲置老化](m3_age.md) 的规则动作、驱动查询、精确版本回收和持久化。
 现有模拟与虚拟端口测试用于验证控制逻辑、拒绝路径和失败补偿，不能据此宣称真实 SmartNIC 卸载验收完成。
 环境事实见 [2026-10-18 盘点](m3_environment_20261018.md)，底层方向与计数约束见
 [驱动调用契约](m3_flow_contract.md)。
 
-管理协议已升至 **v24**，daemon 与 `dppctl` 必须由同一版本配套构建和更新。
-端点角色及 transfer 请求改变了本地结构体布局，旧协议会被明确拒绝为 `EPROTO`，
+当前管理协议为 **v25**，daemon 与 `dppctl` 必须由同一版本配套构建和更新。
+AGE 查询、状态与 transfer 超时字段使用当前布局，旧协议会被明确拒绝为 `EPROTO`，
 当前没有版本协商或跨架构 ABI 兼容承诺。现有 net_ring 验收包含旧版本拒绝检查。
 
 ## 端点身份来自哪里
@@ -52,15 +53,16 @@ PF 父子模板要求双方都有相同的 PF 编号。此外，双方必须都�
 省略 controller 时的共同命名域，都会拒绝，不能因为两边都写着 `pf0` 就认定是同一 PF。
 
 `oneway` 生成一条源到目的的规则；`bidir` 生成两条，第二条反向。
-规则 ID 为 `ID` 和 `ID+1`，必须事先都不存在。图固定使用 group 0，可选 `count` 和
-`priority:N`，不隐式添加 JUMP 或通配入口。相同交换域、group、优先级下与已有入口相交的
+双向规则 ID 为 `ID` 和 `ID+1`，单向只使用 `ID`；使用的 ID 必须事先不存在。
+图固定使用 group 0，可选 `count`、`priority:N` 和 `age:SECONDS`，不隐式添加 JUMP
+或通配入口。相同交换域、group、优先级下与已有入口相交的
 transfer 规则会在驱动调用前拒绝，避免规则含义依赖不明确的匹配顺序。
 
 ## plan、apply 与版本约束
 
 ```text
-transfer-plan ID INSTALL SRC DST TEMPLATE oneway|bidir [count] [priority:N]
-transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED [count] [priority:N]
+transfer-plan ID INSTALL SRC DST TEMPLATE oneway|bidir [count] [priority:N] [age:SECONDS]
+transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED [count] [priority:N] [age:SECONDS]
 ```
 
 `INSTALL` 是规则安装所在的 ethdev，`SRC/DST` 是明确的源、目的端点，三者不能混用。
@@ -103,6 +105,12 @@ transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED [count] [priori
 不要把全局账本版本当作每条规则的版本。
 COUNT 查询要求驱动同时提供有效包数和字节数，否则返回 `ENODATA`，不能把缺失值解释为零。
 
+`age:SECONDS` 只接受 1 到 16777215 秒；省略时不添加 AGE。COUNT 与 AGE 各自独立，
+双向图的每条边拥有自己的闲置状态。`age-status` 查询控制服务的扫描、回收和错误，
+`rule-age ID EXPECTED` 查询当前版本的驱动 AGE 结果，`EXPECTED` 允许精确版本或 `any`。
+到期删除会推进全局账本版本，因此可能使另一次尚未执行的 plan 过期。
+驱动不支持 AGE 时明确失败，不用软件计时或 COUNT 猜测来代替，见 [AGE 说明](m3_age.md)。
+
 ## 整批执行和失败恢复
 
 apply 复用正式的整批创建事务：先校验全批，再创建对象，全部创建完成后发布 desired 账本并保存快照。
@@ -118,7 +126,7 @@ apply 复用正式的整批创建事务：先校验全批，再创建对象，�
 ## 现在可以复现什么
 
 可直接运行的正向功能演练已提供独立模拟服务，支持真实 dppctl、原始帧输入、
-七种模板、COUNT、故障与重启，见 [操作说明](m3_simulation.md)。
+七种模板、COUNT/AGE、可推进的闲置时钟、故障与重启，见 [操作说明](m3_simulation.md)。
 
 现有平台已具备可用的模拟驱动入口、普通用户 net_ring 及独占临时 TAP 测试条件。
 可以安装需要的软件或补充仿真，但软件不能生成真实 NIC ASIC 或证明硬件交换旁路。
@@ -147,7 +155,8 @@ net_ring 集成脚本启动正式 daemon 与 CLI，检查重复 plan/apply、全
 
 ## 尚未完成或尚未验收
 
-AGE 和 indirect/shared action 尚未形成规则 IR、正式管理与完整资源生命周期，不能登记为已实现。
+AGE 的控制路径和功能模拟已接通，但真实 PMD 的计时、命中续期与资源回收尚未验收。
+indirect/shared action 尚未形成规则 IR、正式管理与完整资源生命周期，不能登记为已实现。
 现有通用失败恢复和模拟补偿不等于端点移除、真实 device reset 后已经完成硬件 reconciliation。
 这些变化还需要实际设备、端点身份重新发现、handle 失效和规则重建的端到端验证。
 

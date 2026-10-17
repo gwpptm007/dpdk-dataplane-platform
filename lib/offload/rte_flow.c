@@ -28,6 +28,7 @@ struct compiled_flow {
     struct rte_flow_action_queue queue[DPPD_RULE_MAX_ACTIONS];
     struct rte_flow_action_mark mark[DPPD_RULE_MAX_ACTIONS];
     struct rte_flow_action_count count[DPPD_RULE_MAX_ACTIONS];
+    struct rte_flow_action_age age[DPPD_RULE_MAX_ACTIONS];
     struct rte_flow_action_ethdev ethdev_action[DPPD_RULE_MAX_ACTIONS];
 };
 
@@ -127,6 +128,13 @@ static int compile_action(const struct dppd_action *source, uint16_t index, uint
         compiled->count[index].id = (uint32_t)rule_id;
         action->type = RTE_FLOW_ACTION_TYPE_COUNT;
         action->conf = &compiled->count[index];
+        return 0;
+    case DPPD_ACTION_AGE:
+        compiled->age[index].timeout = source->conf.age_timeout_seconds;
+        /** NULL 使用驱动返回的 flow 指针作身份，不让驱动保留当前栈帧中的上下文指针 */
+        compiled->age[index].context = NULL;
+        action->type = RTE_FLOW_ACTION_TYPE_AGE;
+        action->conf = &compiled->age[index];
         return 0;
     case DPPD_ACTION_REPRESENTED_PORT:
         compiled->ethdev_action[index].port_id = source->conf.ethdev_port_id;
@@ -277,10 +285,10 @@ static int flow_create(uint16_t port_id, const struct dppd_rule *rule, const uin
     handle->port_id = port_id;
     handle->flow = flow;
     for (i = 0; i < rule->nb_actions; ++i) {
-        if (rule->actions[i].type == DPPD_ACTION_COUNT) {
+        if (rule->actions[i].type == DPPD_ACTION_COUNT)
             handle->has_count = true;
-            break;
-        }
+        if (rule->actions[i].type == DPPD_ACTION_AGE)
+            handle->has_age = true;
     }
     return 0;
 }
@@ -374,6 +382,28 @@ int dppd_flow_query_count(const struct dppd_flow_handle *handle, uint64_t *hits,
     /** 两项都确认有效后一次返回，任何失败都保留调用方原有的两个输出值 */
     *hits = query.hits;
     *bytes = query.bytes;
+    return 0;
+}
+
+/** AGE 的有效位由驱动决定，既不读取 COUNT，也不根据软件时间猜测硬件是否老化 */
+int dppd_flow_query_age(const struct dppd_flow_handle *handle, struct dppd_flow_age_result *result,
+    struct dppd_flow_error *error)
+{
+    const struct rte_flow_action action = {.type = RTE_FLOW_ACTION_TYPE_AGE};
+    struct rte_flow_query_age query = {0};
+    struct rte_flow_error flow_error = {0};
+
+    clear_error(error);
+    if (handle == NULL || handle->flow == NULL || result == NULL)
+        return report_error(error, -EINVAL, "query age", NULL);
+    if (!handle->has_age)
+        return report_error(error, -ENODATA, "query age action", NULL);
+    int rc = rte_flow_query(handle->port_id, handle->flow, &action, &query, &flow_error);
+    if (rc != 0)
+        return report_error(error, rc, "query age", &flow_error);
+    *result = (struct dppd_flow_age_result){.aged = query.aged,
+        .sec_since_last_hit_valid = query.sec_since_last_hit_valid,
+        .sec_since_last_hit = query.sec_since_last_hit_valid ? query.sec_since_last_hit : 0};
     return 0;
 }
 

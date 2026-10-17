@@ -2,6 +2,7 @@
 #include "dppd/install_time.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +15,8 @@ struct dppd_rte_flow_object {
     bool occupied;
     /** 驱动的创建调用已经成功，实际对象由 handle 保存 */
     bool installed;
+    /** 从准备阶段保留 AGE 意图，查询时核对 handle，不能靠驱动回填的标志补猜 */
+    bool has_age;
     uint64_t rule_id;
     uint64_t generation;
     /** 精确关联本次驱动调用的磁盘记录，业务 ID 和版本相同的补偿重建也不复用 */
@@ -189,6 +192,8 @@ static int transaction_prepare(void *context, const struct dppd_transaction_item
     for (action = 0; action < item->rule.nb_actions; ++action) {
         if (item->rule.actions[action].type == DPPD_ACTION_COUNT)
             object->installation.has_count = true;
+        if (item->rule.actions[action].type == DPPD_ACTION_AGE)
+            object->has_age = true;
     }
     *token = (uintptr_t)object;
     return 0;
@@ -279,6 +284,7 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend, uint32_t c
         .create_owned = dppd_flow_create_owned,
         .remove = dppd_flow_remove,
         .query_count = dppd_flow_query_count,
+        .query_age = dppd_flow_query_age,
     };
     int rc;
 
@@ -509,4 +515,44 @@ int dppd_rte_flow_backend_query_count(const struct dppd_rte_flow_backend *backen
     if (backend->api.query_count == NULL)
         return -ENOTSUP;
     return backend->api.query_count(handle, hits, bytes, error);
+}
+
+static int age_query_error(struct dppd_flow_error *error, int rc, const char *message)
+{
+    if (error != NULL) {
+        error->code = rc;
+        snprintf(error->message, sizeof(error->message), "query age: %s", message);
+    }
+    return rc;
+}
+
+/** 只查询账本指定的已安装版本，准备中的槽位、新版本或异常 handle 都不能代替它 */
+int dppd_rte_flow_backend_query_age(const struct dppd_rte_flow_backend *backend, uint64_t rule_id, uint64_t generation,
+    struct dppd_flow_age_result *result, struct dppd_flow_error *error)
+{
+    if (error != NULL)
+        memset(error, 0, sizeof(*error));
+    if (backend == NULL || backend->objects == NULL || rule_id == 0 || generation == 0 || generation == UINT64_MAX ||
+        result == NULL)
+        return age_query_error(error, -EINVAL, "invalid backend, identity or output");
+    const struct dppd_rte_flow_object *object = find_object_const(backend, rule_id, generation);
+    if (object == NULL || !object->installed)
+        return age_query_error(error, -ENOENT, "installed version not found");
+    const struct dppd_flow_handle *handle = &object->handle;
+    if (handle->flow == NULL || handle->rule_id != rule_id || handle->rule_generation != generation ||
+        handle->port_id != object->installation.install_port_id || handle->has_age != object->has_age)
+        return age_query_error(error, -EUCLEAN, "installed handle identity does not match");
+    if (!object->has_age)
+        return age_query_error(error, -ENODATA, "rule has no AGE action");
+    if (backend->api.query_age == NULL)
+        return age_query_error(error, -ENOTSUP, "driver does not provide AGE query");
+    /** 自定义驱动接口也可能在报错前写入结果，先用局部副本接收，成功后才发布 */
+    struct dppd_flow_age_result next = {0};
+    int rc = backend->api.query_age(handle, &next, error);
+    if (rc == 0) {
+        if (!next.sec_since_last_hit_valid)
+            next.sec_since_last_hit = 0;
+        *result = next;
+    }
+    return rc;
 }

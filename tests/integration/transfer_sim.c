@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SIM_RULE_CAPACITY 128U
@@ -23,12 +24,14 @@
 #define SIM_FRAME_CAPACITY 2048U
 #define SIM_MARKER ".dppd-transfer-simulation"
 #define SIM_LOCK ".dppd-transfer-simulation.lock"
+#define SIM_SECOND_NS UINT64_C(1000000000)
+#define SIM_AGE_SECONDS_LIMIT UINT32_C(0xffffff)
 
 /** 此程序只演练控制逻辑和报文字节，不创建真实 ethdev，也不向任何网卡发送报文 */
 struct simulated_flow {
     bool used;
     struct dppd_rule rule;
-    uint64_t hits, bytes;
+    uint64_t hits, bytes, last_hit_ns;
 };
 
 struct simulator {
@@ -37,7 +40,9 @@ struct simulator {
     struct dppd_management_server management;
     struct simulated_flow flows[SIM_RULE_CAPACITY + 1U];
     uint64_t validates, creates, removes, queries, forwarded, dropped;
-    uint64_t faults[4];
+    uint64_t faults[5];
+    uint64_t clock_offset_ns, age_queries;
+    int clock_error;
 };
 
 struct owned_socket {
@@ -59,6 +64,33 @@ struct options {
 static struct simulator simulation;
 static volatile sig_atomic_t stopping;
 static const char marker_content[] = "dppd_transfer_sim/v1\nsimulation=yes\nhardware-acceptance=not-run\n";
+
+/** 单调实时时间加上演练偏移，既能等待自然闲置，也能不等几秒就核对老化边界 */
+static int simulation_now(uint64_t *now_ns)
+{
+    struct timespec current;
+    if (clock_gettime(CLOCK_MONOTONIC, &current) != 0)
+        return -errno;
+    if (current.tv_sec < 0 || (uint64_t)current.tv_sec > UINT64_MAX / SIM_SECOND_NS)
+        return -EOVERFLOW;
+    uint64_t seconds = (uint64_t)current.tv_sec * SIM_SECOND_NS;
+    if ((uint64_t)current.tv_nsec > UINT64_MAX - seconds)
+        return -EOVERFLOW;
+    uint64_t real_ns = seconds + (uint64_t)current.tv_nsec;
+    if (simulation.clock_offset_ns > UINT64_MAX - real_ns)
+        return -EOVERFLOW;
+    *now_ns = real_ns + simulation.clock_offset_ns;
+    return 0;
+}
+
+/** 老化失败仍保留管理入口，错误和重试节流由正式控制服务记录，不用退出掩盖残留对象 */
+static void poll_ages(void)
+{
+    uint64_t now_ns;
+    simulation.clock_error = simulation_now(&now_ns);
+    if (simulation.clock_error == 0)
+        (void)dppd_control_age_poll(&simulation.control, now_ns, DPPD_AGE_POLL_BUDGET);
+}
 
 static void on_signal(int signal_number)
 {
@@ -92,6 +124,15 @@ static void increment(uint64_t *value)
         ++*value;
 }
 
+/** COUNT 和 AGE 各自按类型查找，是否有计数不能用动作个数来代替判断 */
+static const struct dppd_action *find_action(const struct dppd_rule *rule, enum dppd_action_type type)
+{
+    for (uint16_t i = 0; i < rule->nb_actions; ++i)
+        if (rule->actions[i].type == type)
+            return &rule->actions[i];
+    return NULL;
+}
+
 /** 模拟器只承诺平坦的端点直转，不接受无法在 inject 中等价解释的协议条件或动作 */
 static int supported_rule(uint16_t port_id, const struct dppd_rule *rule)
 {
@@ -100,10 +141,12 @@ static int supported_rule(uint16_t port_id, const struct dppd_rule *rule)
         return -EINVAL;
     if (rule->domain != DPPD_RULE_DOMAIN_TRANSFER || rule->group != 0 || rule->nb_matches != 2 ||
         rule->matches[0].type != DPPD_MATCH_REPRESENTED_PORT || rule->matches[1].type != DPPD_MATCH_ETH ||
-        (rule->nb_actions != 1 && rule->nb_actions != 2) ||
-        rule->actions[rule->nb_actions - 1U].type != DPPD_ACTION_REPRESENTED_PORT ||
-        (rule->nb_actions == 2 && rule->actions[0].type != DPPD_ACTION_COUNT))
+        rule->nb_actions < 1 || rule->nb_actions > 3 ||
+        rule->actions[rule->nb_actions - 1U].type != DPPD_ACTION_REPRESENTED_PORT)
         return -ENOTSUP;
+    for (uint16_t i = 0; i + 1U < rule->nb_actions; ++i)
+        if (rule->actions[i].type != DPPD_ACTION_COUNT && rule->actions[i].type != DPPD_ACTION_AGE)
+            return -ENOTSUP;
     const struct dppd_endpoint *install = dppd_topology_find(&simulation.devices.topology, port_id);
     const struct dppd_endpoint *source =
         dppd_topology_find(&simulation.devices.topology, rule->matches[0].spec.ethdev_port_id);
@@ -138,6 +181,10 @@ static int simulated_create(uint16_t port_id, const struct dppd_rule *rule, stru
         return flow_error(error, rc, "unsupported simulated rule");
     if (handle == NULL || rule->generation == 0 || rule->generation == DPPD_RULE_GENERATION_ANY)
         return flow_error(error, -EINVAL, "invalid handle or generation");
+    uint64_t now_ns;
+    rc = simulation_now(&now_ns);
+    if (rc != 0)
+        return flow_error(error, rc, "simulated clock exhausted");
     for (unsigned int i = 0; i < SIM_RULE_CAPACITY + 1U; ++i) {
         struct simulated_flow *flow = &simulation.flows[i];
         if (flow->used)
@@ -145,11 +192,13 @@ static int simulated_create(uint16_t port_id, const struct dppd_rule *rule, stru
         memset(flow, 0, sizeof(*flow));
         flow->used = true;
         flow->rule = *rule;
+        flow->last_hit_ns = now_ns;
         *handle = (struct dppd_flow_handle){.rule_id = rule->id,
             .rule_generation = rule->generation,
             .port_id = port_id,
             .flow = (struct rte_flow *)flow,
-            .has_count = rule->nb_actions == 2};
+            .has_count = find_action(rule, DPPD_ACTION_COUNT) != NULL,
+            .has_age = find_action(rule, DPPD_ACTION_AGE) != NULL};
         return flow_error(error, 0, NULL);
     }
     return flow_error(error, -ENOSPC, "simulated handle capacity exhausted");
@@ -164,7 +213,8 @@ static struct simulated_flow *find_flow(const struct dppd_flow_handle *handle)
         struct simulated_flow *flow = &simulation.flows[i];
         if ((const void *)handle->flow == (const void *)flow && flow->used && flow->rule.id == handle->rule_id &&
             flow->rule.generation == handle->rule_generation && flow->rule.install_port_id == handle->port_id &&
-            handle->has_count == (flow->rule.nb_actions == 2))
+            handle->has_count == (find_action(&flow->rule, DPPD_ACTION_COUNT) != NULL) &&
+            handle->has_age == (find_action(&flow->rule, DPPD_ACTION_AGE) != NULL))
             return flow;
     }
     return NULL;
@@ -199,10 +249,35 @@ static int simulated_query(const struct dppd_flow_handle *handle, uint64_t *hits
     return flow_error(error, 0, NULL);
 }
 
+/** AGE 只比较最近命中的闲置时长，不读取或清除 COUNT，也不在查询回调中自行删除规则 */
+static int simulated_query_age(const struct dppd_flow_handle *handle, struct dppd_flow_age_result *result,
+    struct dppd_flow_error *error)
+{
+    increment(&simulation.age_queries);
+    if (should_fail(4))
+        return flow_error(error, -EIO, "injected AGE query failure");
+    struct simulated_flow *flow = find_flow(handle);
+    if (flow == NULL || result == NULL)
+        return flow_error(error, -EINVAL, "invalid simulated AGE query");
+    const struct dppd_action *age = find_action(&flow->rule, DPPD_ACTION_AGE);
+    if (age == NULL)
+        return flow_error(error, -ENODATA, "rule has no AGE");
+    uint64_t now_ns;
+    int rc = simulation_now(&now_ns);
+    if (rc != 0 || now_ns < flow->last_hit_ns)
+        return flow_error(error, rc != 0 ? rc : -EUCLEAN, "invalid simulated idle clock");
+    uint64_t idle_seconds = (now_ns - flow->last_hit_ns) / SIM_SECOND_NS;
+    *result = (struct dppd_flow_age_result){.aged = idle_seconds >= age->conf.age_timeout_seconds,
+        .sec_since_last_hit_valid = idle_seconds <= SIM_AGE_SECONDS_LIMIT,
+        .sec_since_last_hit = idle_seconds <= SIM_AGE_SECONDS_LIMIT ? (uint32_t)idle_seconds : 0};
+    return flow_error(error, 0, NULL);
+}
+
 static const struct dppd_flow_api simulated_api = {.validate = simulated_validate,
     .create = simulated_create,
     .remove = simulated_remove,
-    .query_count = simulated_query};
+    .query_count = simulated_query,
+    .query_age = simulated_query_age};
 
 /** 端点名称只是公开夹具，driver 明确标为 simulation，不能把解析来源当作真实硬件证据 */
 static int make_devices(struct dppd_device_set *devices)
@@ -281,6 +356,32 @@ static unsigned int installed_count(void)
     return count;
 }
 
+/** 只计算可安全推进的偏移，调用方完成全部参数检查前不能修改时钟或故障计划 */
+static int advance_delta(const char *text, uint64_t *delta)
+{
+    uint64_t seconds, now_ns;
+    int rc = parse_number(text, UINT64_MAX, &seconds);
+    if (rc != 0)
+        return rc;
+    if (seconds > UINT64_MAX / SIM_SECOND_NS)
+        return -EOVERFLOW;
+    rc = simulation_now(&now_ns);
+    if (rc != 0)
+        return rc;
+    *delta = seconds * SIM_SECOND_NS;
+    return *delta > UINT64_MAX - now_ns ? -EOVERFLOW : 0;
+}
+
+static void advance_and_poll(uint64_t delta, char *reply, size_t capacity)
+{
+    simulation.clock_offset_ns += delta;
+    poll_ages();
+    snprintf(reply, capacity, "ok advanced_seconds=%" PRIu64 " age_error=%d installed=%u desired=%u simulation=yes",
+        simulation.clock_offset_ns / SIM_SECOND_NS,
+        simulation.clock_error != 0 ? simulation.clock_error : simulation.control.age.last_error, installed_count(),
+        dppd_rule_repository_count(&simulation.control.rules));
+}
+
 /** 先核对完整输入和服务状态，再选择唯一最优规则，任何错误都不会增加命中计数 */
 static int inject(const char *source_text, const char *hex, char *reply, size_t capacity)
 {
@@ -295,7 +396,8 @@ static int inject(const char *source_text, const char *hex, char *reply, size_t 
     for (size_t i = 0; i < digits; ++i)
         if (hex_digit(hex[i]) < 0)
             return -EINVAL;
-    if (simulation.control.recovery_state != DPPD_CONTROL_RECOVERY_READY || simulation.control.persistence_dirty)
+    if (simulation.control.recovery_state != DPPD_CONTROL_RECOVERY_READY || simulation.control.persistence_dirty ||
+        simulation.control.age.last_error != 0 || simulation.clock_error != 0)
         return -EUCLEAN;
     if (dppd_software_backend_count(&simulation.control.software) != 0)
         return -ENOTSUP;
@@ -320,9 +422,14 @@ static int inject(const char *source_text, const char *hex, char *reply, size_t 
         snprintf(reply, capacity, "drop reason=no-match simulation=yes");
         return 0;
     }
+    uint64_t now_ns;
+    int rc = simulation_now(&now_ns);
+    if (rc != 0)
+        return rc;
+    bool with_count = find_action(&selected->rule, DPPD_ACTION_COUNT) != NULL;
     size_t length = digits / 2U;
     if (simulation.forwarded == UINT64_MAX ||
-        (selected->rule.nb_actions == 2 && (selected->hits == UINT64_MAX || selected->bytes > UINT64_MAX - length)))
+        (with_count && (selected->hits == UINT64_MAX || selected->bytes > UINT64_MAX - length)))
         return -EOVERFLOW;
     int written = snprintf(reply, capacity,
         "forward source=%" PRIu64 " destination=%u rule=%" PRIu64 " length=%zu frame=%s simulation=yes", source,
@@ -330,7 +437,8 @@ static int inject(const char *source_text, const char *hex, char *reply, size_t 
     if (written < 0 || (size_t)written >= capacity)
         return -EOVERFLOW;
     ++simulation.forwarded;
-    if (selected->rule.nb_actions == 2) {
+    selected->last_hit_ns = now_ns;
+    if (with_count) {
         ++selected->hits;
         selected->bytes += length;
     }
@@ -352,11 +460,14 @@ static int io_request(char *request, char *reply, size_t capacity)
     if (count == 1 && strcmp(tokens[0], "status") == 0) {
         snprintf(reply, capacity,
             "status installed=%u validates=%" PRIu64 " creates=%" PRIu64 " removes=%" PRIu64 " queries=%" PRIu64
-            " forwarded=%" PRIu64 " dropped=%" PRIu64
-            " desired=%u recovery=%u software=%u simulation=yes hardware-acceptance=not-run",
+            " forwarded=%" PRIu64 " dropped=%" PRIu64 " desired=%u recovery=%u software=%u age_queries=%" PRIu64
+            " age_error=%d advanced_seconds=%" PRIu64 " simulation=yes hardware-acceptance=not-run",
             installed_count(), simulation.validates, simulation.creates, simulation.removes, simulation.queries,
             simulation.forwarded, simulation.dropped, dppd_rule_repository_count(&simulation.control.rules),
-            (unsigned int)simulation.control.recovery_state, dppd_software_backend_count(&simulation.control.software));
+            (unsigned int)simulation.control.recovery_state, dppd_software_backend_count(&simulation.control.software),
+            simulation.age_queries,
+            simulation.clock_error != 0 ? simulation.clock_error : simulation.control.age.last_error,
+            simulation.clock_offset_ns / SIM_SECOND_NS);
         return 0;
     }
     if (count == 1 && strcmp(tokens[0], "clear-faults") == 0) {
@@ -364,15 +475,33 @@ static int io_request(char *request, char *reply, size_t capacity)
         snprintf(reply, capacity, "ok simulation=yes");
         return 0;
     }
-    if (count == 3 && strcmp(tokens[0], "fault") == 0) {
-        static const char *const operations[] = {"validate", "create", "remove", "query"};
-        uint64_t remaining;
+    if (count == 2 && strcmp(tokens[0], "advance") == 0) {
+        uint64_t delta;
+        int rc = advance_delta(tokens[1], &delta);
+        if (rc != 0)
+            return rc;
+        /** 参数与溢出检查全部完成后才推进，失败的请求不会偷偷改变老化时间 */
+        advance_and_poll(delta, reply, capacity);
+        return 0;
+    }
+    if ((count == 3 || (count == 5 && strcmp(tokens[3], "advance") == 0)) && strcmp(tokens[0], "fault") == 0) {
+        static const char *const operations[] = {"validate", "create", "remove", "query", "age-query"};
+        uint64_t remaining, delta = 0;
         if (parse_number(tokens[2], UINT64_MAX, &remaining) != 0 || remaining == 0)
             return -EINVAL;
-        for (unsigned int i = 0; i < 4; ++i)
+        if (count == 5) {
+            int rc = advance_delta(tokens[4], &delta);
+            if (rc != 0)
+                return rc;
+        }
+        for (unsigned int i = 0; i < 5; ++i)
             if (strcmp(tokens[1], operations[i]) == 0) {
+                /** 一条消息内设置故障并推进，避免自动轮询抢先消费本来要观察的故障 */
                 simulation.faults[i] = remaining;
-                snprintf(reply, capacity, "ok simulation=yes");
+                if (count == 5)
+                    advance_and_poll(delta, reply, capacity);
+                else
+                    snprintf(reply, capacity, "ok simulation=yes");
                 return 0;
             }
         return -EINVAL;
@@ -674,6 +803,7 @@ int main(int argc, char **argv)
     printf("READY simulation=yes socket=%s io-socket=%s state=%s hardware-acceptance=not-run\n", options.management,
         options.io, options.persistent ? options.state : "none");
     while (!stopping) {
+        poll_ages();
         struct pollfd ready[2] = {{.fd = simulation.management.socket_fd, .events = POLLIN},
             {.fd = io.fd, .events = POLLIN}};
         int polled = poll(ready, 2, 100);

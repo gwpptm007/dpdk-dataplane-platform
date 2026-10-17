@@ -19,6 +19,10 @@ struct dppd_persisted_snapshot {
  * 保存使用同目录临时文件、fsync、rename 和目录 fsync
  * 成功返回时，新文件已经原子替换旧快照。rename 前失败时旧文件保持不变；
  * rename 后目录 fsync 失败时新文件已可见，但掉电持久性不能保证
+ *
+ * 包含 AGE 的规则使用 v4，仅保存配置的超时秒数，不保存已过空闲时间或驱动 context
+ * 读取后仍须由正式创建流程重建对象，因此重启会重新开始空闲计时
+ * 无 AGE 的快照继续写原有 v2/v3，旧 v1 仍只允许通过显式迁移入口读取
  */
 int dppd_persistence_save(const char *path, const struct dppd_rule_repository *repository);
 

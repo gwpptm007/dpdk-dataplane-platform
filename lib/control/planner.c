@@ -66,6 +66,11 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
     plan->install_port_id = context->install_port_id;
     if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0)
         return reject(plan, DPPD_PLAN_REASON_INVALID_RULE, -EINVAL);
+    /** AGE 必须由驱动报告空闲状态，即使调用方误称等价，也不能选择软件执行 */
+    bool software_equivalent = context->software_equivalent;
+    for (uint16_t i = 0; i < rule->nb_actions; ++i)
+        if (rule->actions[i].type == DPPD_ACTION_AGE)
+            software_equivalent = false;
     if (context->ipv4_routing && rule->domain != DPPD_RULE_DOMAIN_INGRESS)
         return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);
 
@@ -81,7 +86,7 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
         ipv6 |= rule->matches[i].type == DPPD_MATCH_IPV6;
     /** 有状态处理和当前 IPv6 ACL 只走软件，不安装会绕过本阶段语义的硬件对象 */
     if (context->connection_tracking || context->neighbor_discovery || ipv6) {
-        if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || !context->software_equivalent ||
+        if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || !software_equivalent ||
             rule->fallback == DPPD_FALLBACK_REQUIRE_HARDWARE)
             return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);
         plan->backend = DPPD_PLAN_BACKEND_SOFTWARE;
@@ -91,7 +96,7 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
     }
 
     if (rule->fallback == DPPD_FALLBACK_SOFTWARE_ONLY) {
-        if (!context->software_equivalent)
+        if (!software_equivalent)
             return reject(plan, DPPD_PLAN_REASON_SOFTWARE_UNAVAILABLE, -ENOTSUP);
         if (rule->domain == DPPD_RULE_DOMAIN_TRANSFER)
             return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);
@@ -115,7 +120,7 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
 
     if (rule->fallback == DPPD_FALLBACK_REQUIRE_HARDWARE)
         return reject(plan, DPPD_PLAN_REASON_HARDWARE_UNAVAILABLE, -ENOTSUP);
-    if (!context->software_equivalent)
+    if (!software_equivalent)
         /* 没有等价软件语义时，PREFER_HARDWARE 也不能静默降级 */
         return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);
     if (rule->domain == DPPD_RULE_DOMAIN_TRANSFER)

@@ -81,9 +81,75 @@ static void test_queue_semantics(void)
             }
 }
 
+/** 即使调用方误报软件等价，AGE 也不能变成普通 DROP 或依赖 COUNT 猜测空闲状态 */
+static void test_age_semantics(void)
+{
+    struct dppd_topology discovered = topology();
+    for (unsigned int counted = 0; counted < 2; ++counted)
+        for (unsigned int feature = 0; feature < 5; ++feature)
+            for (unsigned int hardware = 0; hardware < 2; ++hardware)
+                for (enum dppd_fallback_policy policy = DPPD_FALLBACK_REQUIRE_HARDWARE;
+                     policy <= DPPD_FALLBACK_SOFTWARE_ONLY; ++policy) {
+                    struct dppd_rule rule = ingress_rule(policy);
+                    rule.install_port_id = 10;
+                    rule.nb_actions = counted ? 3 : 2;
+                    if (counted)
+                        rule.actions[0].type = DPPD_ACTION_COUNT;
+                    rule.actions[counted].type = DPPD_ACTION_AGE;
+                    rule.actions[counted].conf.age_timeout_seconds = 60;
+                    rule.actions[counted + 1U].type = DPPD_ACTION_DROP;
+                    if (feature == 3) {
+                        rule.nb_matches = 2;
+                        rule.matches[1].type = DPPD_MATCH_IPV6;
+                    }
+                    struct dppd_planner_context context = {.topology = &discovered,
+                        .install_port_id = 10,
+                        .hardware_available = hardware != 0,
+                        .software_equivalent = true,
+                        .connection_tracking = feature == 1 || feature == 4,
+                        .neighbor_discovery = feature == 2 || feature == 4};
+                    assert(!dppd_software_backend_rule_supported(&rule));
+                    struct dppd_execution_plan plan;
+                    int rc = dppd_plan_rule(&context, &rule, &plan);
+                    if (feature == 0 && hardware && policy != DPPD_FALLBACK_SOFTWARE_ONLY) {
+                        assert(rc == 0 && plan.backend == DPPD_PLAN_BACKEND_RTE_FLOW && plan.requires_validation);
+                        assert(plan.reason == DPPD_PLAN_REASON_HARDWARE_SELECTED && !plan.fallback_used);
+                        assert(plan.rule_id == rule.id && plan.rule_generation == rule.generation &&
+                            plan.install_port_id == 10);
+                    } else {
+                        assert(rc == -ENOTSUP && !plan.fallback_used && !plan.requires_validation);
+                        enum dppd_plan_reason expected = feature != 0  ? DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK
+                            : policy == DPPD_FALLBACK_SOFTWARE_ONLY    ? DPPD_PLAN_REASON_SOFTWARE_UNAVAILABLE
+                            : policy == DPPD_FALLBACK_REQUIRE_HARDWARE ? DPPD_PLAN_REASON_HARDWARE_UNAVAILABLE
+                                                                       : DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK;
+                        assert(plan.reason == expected);
+                    }
+                }
+
+    /** 有明确交换域的 transfer 仍可选择硬件，但没有硬件时绝不能退成软件 */
+    struct dppd_rule rule = transfer_rule();
+    rule.nb_actions = 2;
+    rule.actions[1] = rule.actions[0];
+    rule.actions[0].type = DPPD_ACTION_AGE;
+    rule.actions[0].conf.age_timeout_seconds = 0xffffffU;
+    struct dppd_planner_context context = {.topology = &discovered,
+        .install_port_id = 10,
+        .hardware_available = true,
+        .software_equivalent = true};
+    struct dppd_execution_plan plan;
+    assert(!dppd_software_backend_rule_supported(&rule));
+    assert(dppd_plan_rule(&context, &rule, &plan) == 0 && plan.backend == DPPD_PLAN_BACKEND_RTE_FLOW &&
+        plan.requires_validation && !plan.fallback_used);
+    rule.fallback = DPPD_FALLBACK_PREFER_HARDWARE;
+    context.hardware_available = false;
+    assert(dppd_plan_rule(&context, &rule, &plan) == -ENOTSUP && !plan.fallback_used);
+    assert(plan.reason == DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK);
+}
+
 int main(void)
 {
     test_queue_semantics();
+    test_age_semantics();
     struct dppd_topology discovered = topology();
     struct dppd_planner_context context = {
         .topology = &discovered,

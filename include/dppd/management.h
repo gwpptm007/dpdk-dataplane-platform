@@ -21,7 +21,8 @@
 /** v16 扩展三层转发统计，后续路由配置命令使用同一版 ABI，旧版客户端必须拒绝 */
 /** v22 增加动态 ND、DAD 就绪状态和缓存管理，daemon 与 CLI 必须配套更新 */
 /** v24 增加有来源的端点角色与 transfer 图规划/整批安装，旧客户端必须配套更新 */
-#define DPPD_MANAGEMENT_VERSION 24U
+/** v25 增加 AGE 策略和老化状态，客户端与 daemon 必须配套更新 */
+#define DPPD_MANAGEMENT_VERSION 25U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -98,6 +99,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_ND6_FLUSH,
     DPPD_MANAGEMENT_TRANSFER_PLAN,
     DPPD_MANAGEMENT_TRANSFER_APPLY,
+    DPPD_MANAGEMENT_AGE_STATUS,
+    DPPD_MANAGEMENT_RULE_AGE_QUERY,
 };
 
 /*
@@ -435,6 +438,8 @@ struct dppd_management_response {
         struct dppd_rule_metrics rule_metrics;
         struct dppd_rule_latency_report rule_latency;
         struct dppd_rule_history_page rule_history;
+        struct dppd_age_status age_status;
+        struct dppd_control_age_result age_result;
         struct {
             struct dppd_transfer_graph graph;
             struct dppd_control_apply_result results[DPPD_TRANSFER_MAX_EDGES];

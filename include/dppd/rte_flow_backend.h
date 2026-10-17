@@ -27,6 +27,9 @@ struct dppd_flow_api {
     /** 标识非零时必须调用此接口，缺失时明确报错，不能回退到不带标识的 create */
     int (*create_owned)(uint16_t port_id, const struct dppd_rule *rule, const uint8_t cookie[DPPD_TAP_COOKIE_SIZE],
         struct dppd_flow_handle *handle, struct dppd_flow_error *error);
+    /** 可选的真实老化查询，没有接口时明确返回不支持，不用 COUNT 差值替代 */
+    int (*query_age)(const struct dppd_flow_handle *handle, struct dppd_flow_age_result *result,
+        struct dppd_flow_error *error);
 };
 
 struct dppd_rte_flow_object;
@@ -98,5 +101,8 @@ int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend, uint3
  */
 int dppd_rte_flow_backend_query_count(const struct dppd_rte_flow_backend *backend, uint64_t rule_id,
     uint64_t generation, uint64_t *hits, uint64_t *bytes, struct dppd_flow_error *error);
+/** 只查指定已安装版本，没有 AGE 返回 ENODATA，没有查询接口返回 ENOTSUP，失败保留输出 */
+int dppd_rte_flow_backend_query_age(const struct dppd_rte_flow_backend *backend, uint64_t rule_id, uint64_t generation,
+    struct dppd_flow_age_result *result, struct dppd_flow_error *error);
 
 #endif

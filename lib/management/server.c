@@ -386,12 +386,20 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         request->operation != DPPD_MANAGEMENT_ROUTING_GET && request->operation != DPPD_MANAGEMENT_CONNTRACK_STATUS &&
         request->operation != DPPD_MANAGEMENT_CONNTRACK_LIST && request->operation != DPPD_MANAGEMENT_NAT_STATUS &&
         request->operation != DPPD_MANAGEMENT_DNAT_LIST && request->operation != DPPD_MANAGEMENT_ND6_STATUS &&
-        request->operation != DPPD_MANAGEMENT_ND6_LIST && request->operation != DPPD_MANAGEMENT_TRANSFER_PLAN) {
+        request->operation != DPPD_MANAGEMENT_ND6_LIST && request->operation != DPPD_MANAGEMENT_TRANSFER_PLAN &&
+        request->operation != DPPD_MANAGEMENT_AGE_STATUS) {
         response->status = -EUCLEAN;
         return 0;
     }
 
     switch (request->operation) {
+    case DPPD_MANAGEMENT_AGE_STATUS:
+        rc = dppd_control_age_status(control, &response->payload.age_status);
+        break;
+    case DPPD_MANAGEMENT_RULE_AGE_QUERY:
+        rc = dppd_control_query_age(control, request->payload.count_query.rule_id,
+            request->payload.count_query.expected_generation, &response->payload.age_result);
+        break;
     case DPPD_MANAGEMENT_TRANSFER_PLAN:
     case DPPD_MANAGEMENT_TRANSFER_APPLY:
         rc = dppd_control_transfer(control, &request->payload.transfer,

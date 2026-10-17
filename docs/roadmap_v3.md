@@ -200,7 +200,9 @@ QUEUE 是否存在软件等价语义必须先完成设计，不能静默模拟�
 不登记为实机硬件验收。可重复运行入口、验证记录和未完成项见 [M3 验收](m3_acceptance.md)。
 已增加 [独立功能模拟服务](m3_simulation.md)，可用真实命令行和报文字节演练正向图、
 COUNT、故障与重启，134 的私有工具和 DPDK 环境也已完成严格构建与核心验证。
-AGE/indirect、真实 mlx5 与非 mlx5 卸载、CPU 旁路、端点移除/设备复位恢复仍需推进，
+已接通 [AGE 控制与模拟闭环](m3_age.md)：独立 AGE 查询、有限预算轮询、精确删除、
+v4 快照和故障重试，协议 v25；三套同版本核心验收通过，未过期规则重启重新计时。
+indirect/shared、真实 PMD 的 AGE、mlx5 与非 mlx5 卸载、CPU 旁路、端点移除/设备复位恢复仍需推进，
 整个 M3 尚未完成。
 
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。

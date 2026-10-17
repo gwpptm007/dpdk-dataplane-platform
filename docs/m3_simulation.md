@@ -1,13 +1,13 @@
 # 不用实体网卡的 M3 功能演练
 
 现在可以用真实 `dppctl` 完成正向演练：规划和安装 transfer 图、输入报文字节、查看
-转发端点与 COUNT，再制造失败，观察回滚、恢复隔离和快照重放。演练不需要 root、
+转发端点与 COUNT、AGE 闲置老化，再制造失败，观察回滚、恢复隔离和快照重放。演练不需要 root、
 hugepage 或 Mellanox 设备。开发工具与 134 的私有 DPDK 环境见
 [环境准备](m3_simulation_environment.md)。
 
 模拟器是 `tests=true` 才构建的独立程序 `tests/integration/dppd_transfer_sim`，
 它复用正式管理协议、控制事务、规则账本和持久化，只替换驱动入口与端点夹具。
-正式 `dppd` 不链接模拟代码，管理协议仍为 v24。
+正式 `dppd` 不链接模拟代码。当前管理协议为 v25，模拟器和 `dppctl` 也必须配套构建。
 
 ## 一条命令运行完整演练
 
@@ -29,7 +29,9 @@ python3 scripts/simulate_m3.py demo --build-dir build
 
 脚本逐项检查七种模板的单向和双向转发、逐字节帧内容、方向独立计数、优先级切换、
 14/2048 字节帧、错误输入无副作用、查询失败不清计数、批量创建与补偿失败、隔离后
-禁止转发及快照重启恢复。任何一项失败都返回非零，不会继续报告全部通过。
+禁止转发及快照重启恢复。新增 AGE 演练覆盖自然闲置回收、命中续期、COUNT 独立性、
+虚拟时钟、查询与删除失败重试，以及成功过期保存后重启不复活。任何一项失败都返回
+非零，不会继续报告全部通过；AGE 的完整语义见 [闲置老化说明](m3_age.md)。
 
 结果与模拟器日志保存在 `build/m3-simulation/`。报告明确保留
 `simulation=true`、`hardware_acceptance=not_run`、`complete_m3_validation=false`，
@@ -73,13 +75,50 @@ python3 scripts/simulate_m3.py fault --io-socket /tmp/dppd-my-m3-demo/io.sock cr
 python3 scripts/simulate_m3.py clear-faults --io-socket /tmp/dppd-my-m3-demo/io.sock
 ```
 
-`validate/create/remove/query` 分别注入 `ENOTSUP/ENOSPC/EBUSY/EIO`。要观察失败，
+`validate/create/remove/query` 分别注入 `ENOTSUP/ENOSPC/EBUSY/EIO`，`age-query` 单独
+注入 AGE 查询的 `EIO`，不会消费 COUNT 查询的故障计划。要观察失败，
 在设置后执行相应操作；上面最后一条是独立的故障清除示例。
 补偿失败时 `status` 会区分 desired 账本与 installed 模拟句柄，不能把残留对象当作
 正常转发规则。`reconcile-retry` 后仍需重启，符合正式控制面的隔离约定。
 
 第一个终端按 Ctrl+C 正常退出会清理自己的两个 socket，保留模拟规则文件，
 再次使用相同目录启动会从快照恢复规则，COUNT 从零重新累计。
+
+## AGE 与可推进的模拟时钟
+
+在 transfer 命令中加入 `age:N`，表示命中后闲置 N 秒才到期，范围为 1 到 16777215 秒。
+它可以与 `count` 一起使用，也可以单独使用。下面假设当前 plan 确实返回全局版本 0：
+
+```sh
+./build/dppctl --socket /tmp/dppd-my-m3-demo/ctl.sock transfer-plan 200 0 0 2 uplink-vf oneway count age:5
+./build/dppctl --socket /tmp/dppd-my-m3-demo/ctl.sock transfer-apply 200 0 0 2 uplink-vf oneway 0 count age:5
+./build/dppctl --socket /tmp/dppd-my-m3-demo/ctl.sock age-status
+./build/dppctl --socket /tmp/dppd-my-m3-demo/ctl.sock rule-age 200 any
+python3 scripts/simulate_m3.py advance --io-socket /tmp/dppd-my-m3-demo/io.sock 5
+```
+
+如果先做过前一节演练，必须改用本次 plan 的实际版本；也应选择没有同优先级入口冲突
+的规则或清理之前的图。成功注入报文会刷新该方向的闲置起点，COUNT 查询不会续期。
+没有使用 `advance` 时，模拟器仍随真实单调时间前进并自动轮询，不是暂停的静态时钟。
+`advance` 只增加本进程的模拟偏移，不修改系统时钟；负数、溢出或多余参数均被拒绝。
+
+AGE 会在后台查询。为了避免故障刚设置就被后台提前消费，可以用一条消息设置故障、
+推进时间并保存本次轮询结果：
+
+```sh
+python3 scripts/simulate_m3.py fault --io-socket /tmp/dppd-my-m3-demo/io.sock age-query 1 --advance 1
+python3 scripts/simulate_m3.py fault --io-socket /tmp/dppd-my-m3-demo/io.sock remove 1 --advance 5
+```
+
+两条命令是独立的故障示例，应在相应 AGE 规则仍存在时分别演练。内部文本形式为
+`fault age-query 1 advance 1`，所有参数核对成功后才一起生效。响应包含本次推进后的
+`age_error`、`installed` 和 `desired`；`status` 还提供 `age_queries` 和 `advanced_seconds`。
+错误后的重试至少间隔一秒，`clear-faults` 不会直接清掉控制服务保留的老化错误；
+只有完整一轮重新核对成功才撤销该错误。老化状态不确定时，模拟器保守拒绝注入。
+
+成功过期删除并保存的规则不会因快照重放而复活。虚拟偏移、最近命中时间和 COUNT
+不写入快照；未过期规则重启后重新获得完整的闲置窗口，不能用此演练证明跨重启保留
+原有计时。双向图的两条边独立命中、独立计时和回收，不承诺同时过期或原子删除。
 
 ## 固定端点夹具
 
@@ -98,7 +137,7 @@ PCI 值只是合成夹具，没有执行真实设备发现。
 
 ## 支持范围与状态隔离
 
-报文演练只解释 group 0 的明确源端点、通配 Ethernet、可选 COUNT 和明确目的端点。
+报文演练只解释 group 0 的明确源端点、通配 Ethernet、可选 COUNT/AGE 和明确目的端点。
 输入是 14 到 2048 字节的完整十六进制帧，按最低 priority 选择唯一规则，保留原始
 字节；无匹配时丢弃，同优先级歧义时拒绝。模拟器不会执行真实软件 worker、协议栈、
 ACL/NAT/ND 或其他硬件动作；出现软件规则、持久化 dirty 或恢复隔离时拒绝注入。
@@ -108,11 +147,16 @@ ACL/NAT/ND 或其他硬件动作；出现软件规则、持久化 dirty 或恢�
 模拟标记，拒绝接管无标记的已有快照，不覆盖已有 socket。不要将模拟快照或目录
 用于正式 `dppd`，两者不提供双向状态导入承诺。
 
-该工具证明已实现控制逻辑在可控端点与报文字节上的行为。AGE、indirect/shared action
-和设备 reset 后 reconciliation 尚未实现，不能由模拟器自动补齐。真实 PMD 支持、
+该工具证明已实现控制逻辑在可控端点与报文字节上的行为。AGE 已接入规则、正式查询与
+轮询回收，并由虚拟时钟演练；indirect/shared action 和设备 reset 后 reconciliation
+尚未实现，不能由模拟器自动补齐。真实 PMD 的 AGE 支持、
 ASIC 卸载、CPU 旁路及硬件性能继续按 [M3 验收](m3_acceptance.md) 单独登记。
 
-## 本轮验证结果
+## AGE 接入前的功能模拟验收记录
+
+以下为 AGE 接入前、管理协议 v24 的历史结果。55/55 单测、224 文件源码摘要和十组
+演练只证明当时版本，不能直接用作当前 v25 和 AGE 代码的最终验收记录。当前 AGE
+轮次的三套结果和 228 文件源码摘要见 [AGE 验收记录](m3_age.md)。
 
 2026-10-18，三套构建全部通过 `tests=true`、`werror=true` 的统一核心验收：
 

@@ -28,7 +28,7 @@ static inline const char *dppd_transfer_template_name(unsigned int type)
 /** 只表达新建的一对端点，apply 必须携带 plan 返回的精确账本版本 */
 struct dppd_transfer_spec {
     uint64_t first_rule_id, expected_repository_generation;
-    uint32_t priority;
+    uint32_t priority, age_timeout_seconds;
     uint16_t install_port_id, source_port_id, destination_port_id;
     uint8_t scenario, bidirectional, with_count;
     uint8_t reserved[7];

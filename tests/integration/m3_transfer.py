@@ -4,6 +4,7 @@
 import argparse
 import errno
 from pathlib import Path
+import re
 import socket
 import struct
 import subprocess
@@ -12,6 +13,9 @@ import tempfile
 from batch_update import check, fields
 from health_readiness import clean_environment, daemon_command
 from recovery_isolation import stop, wait_for
+
+MANAGEMENT_VERSION = int(re.search(r"^#define DPPD_MANAGEMENT_VERSION (\d+)U", (
+    Path(__file__).resolve().parents[2] / "include/dppd/management.h").read_text(), re.M).group(1))
 
 
 def reject_old_protocol(build, directory, target, environment):
@@ -31,9 +35,10 @@ def reject_old_protocol(build, directory, target, environment):
                 request = bytearray(connection.recv(1024 * 1024))
                 check(len(request) >= 16, "CLI request has no complete header")
                 version, operation, size, request_id = struct.unpack_from("=HHIQ", request)
-                check(version == 24 and operation == 1 and size == len(request), "unexpected current request header")
-                # 保留真实请求长度和请求编号，只把版本退回 v23
-                struct.pack_into("=H", request, 0, 23)
+                check(version == MANAGEMENT_VERSION and operation == 1 and size == len(request),
+                      "unexpected current request header")
+                # 只回退版本，保留实际 C 请求大小，后续协议升级仍检查相邻旧版本被拒绝
+                struct.pack_into("=H", request, 0, MANAGEMENT_VERSION - 1)
                 with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as upstream:
                     upstream.settimeout(5)
                     upstream.connect(str(target))
@@ -41,7 +46,7 @@ def reject_old_protocol(build, directory, target, environment):
                     response = upstream.recv(1024 * 1024)
                 check(len(response) >= 24, "old protocol response has no complete header")
                 reply_version, reply_operation, reply_size, reply_id, status, _ = struct.unpack_from("=HHIQiI", response)
-                check(reply_version == 24 and reply_operation == operation and reply_size == len(response) and
+                check(reply_version == MANAGEMENT_VERSION and reply_operation == operation and reply_size == len(response) and
                       reply_id == request_id and status == -errno.EPROTO, "old protocol was not explicitly rejected")
                 connection.sendall(response)
             stdout, stderr = client.communicate(timeout=5)
@@ -111,7 +116,7 @@ def run_case(build):
         def unchanged(generation, total, saved, count=None):
             """拒绝操作不能改变账本、COUNT、驱动校验次数或磁盘快照"""
             ping = fields(ctl("ping"))
-            check(ping["version"] == "24" and ping["generation"] == str(generation) and
+            check(ping["version"] == str(MANAGEMENT_VERSION) and ping["generation"] == str(generation) and
                   ping["rules"] == str(total), str(ping))
             health = fields(ctl("health"))
             check(health["live"] == "yes" and health["ready"] == "yes" and
@@ -201,9 +206,9 @@ def run_case(build):
         finally:
             if daemon is not None:
                 stop(daemon)
-        print("PASS virtual-negative-acceptance net_ring: v24 identity evidence, transfer plan/apply refusal, "
+        print(f"PASS virtual-negative-acceptance net_ring: v{MANAGEMENT_VERSION} identity evidence, transfer plan/apply refusal, "
               "all templates, no desired/COUNT/snapshot/PMD side effects, repeated requests, health, "
-              "software lifecycle/replay, v23 rejection, cleanup; hardware-acceptance=not-run", flush=True)
+              "software lifecycle/replay, old-version rejection, cleanup; hardware-acceptance=not-run", flush=True)
 
 
 def main():

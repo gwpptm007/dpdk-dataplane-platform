@@ -64,7 +64,8 @@ int dppd_transfer_graph_build(const struct dppd_planner_context *context, const 
     if (context == NULL || context->topology == NULL || spec == NULL || graph == NULL ||
         context->topology->nb_endpoints > DPPD_MAX_PORTS || spec->first_rule_id == 0 ||
         spec->first_rule_id == UINT64_MAX || spec->scenario >= DPPD_TRANSFER_TEMPLATE_COUNT ||
-        spec->bidirectional > 1 || spec->with_count > 1 || memcmp(spec->reserved, zero, sizeof(zero)) != 0)
+        spec->bidirectional > 1 || spec->with_count > 1 || spec->age_timeout_seconds > 0xffffffU ||
+        memcmp(spec->reserved, zero, sizeof(zero)) != 0)
         return fail(-EINVAL, "invalid transfer specification", message, message_size);
     if (spec->source_port_id == spec->destination_port_id)
         return fail(-EINVAL, "source and destination must differ", message, message_size);
@@ -101,9 +102,17 @@ int dppd_transfer_graph_build(const struct dppd_planner_context *context, const 
         rule->matches[0].type = DPPD_MATCH_REPRESENTED_PORT;
         rule->matches[0].spec.ethdev_port_id = i == 0 ? spec->source_port_id : spec->destination_port_id;
         rule->matches[1].type = DPPD_MATCH_ETH;
-        rule->nb_actions = spec->with_count ? 2 : 1;
-        if (spec->with_count)
-            rule->actions[0].type = DPPD_ACTION_COUNT;
+        rule->nb_actions = 1;
+        uint16_t action = 0;
+        if (spec->with_count) {
+            rule->actions[action++].type = DPPD_ACTION_COUNT;
+            ++rule->nb_actions;
+        }
+        if (spec->age_timeout_seconds != 0) {
+            rule->actions[action].type = DPPD_ACTION_AGE;
+            rule->actions[action++].conf.age_timeout_seconds = spec->age_timeout_seconds;
+            ++rule->nb_actions;
+        }
         rule->actions[rule->nb_actions - 1].type = DPPD_ACTION_REPRESENTED_PORT;
         rule->actions[rule->nb_actions - 1].conf.ethdev_port_id =
             i == 0 ? spec->destination_port_id : spec->source_port_id;

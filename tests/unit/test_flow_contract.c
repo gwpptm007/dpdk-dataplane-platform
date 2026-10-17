@@ -13,6 +13,10 @@ static unsigned int validate_calls, create_calls, destroy_calls, query_calls, fl
 static int validate_result, create_error, destroy_result, query_result, flush_result;
 static bool query_hits_set, query_bytes_set;
 static uint64_t query_hits, query_bytes;
+static unsigned int age_queries;
+static int age_query_result;
+static bool age_aged, age_seconds_valid;
+static uint32_t age_seconds;
 static struct rte_flow *const installed_flow = (struct rte_flow *)(uintptr_t)0x1234;
 
 int __wrap_rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr, const struct rte_flow_item *items,
@@ -96,6 +100,12 @@ static void check_compiled(uint16_t port, const struct rte_flow_attr *attr, cons
             assert(count->id == (uint32_t)expected->id);
             break;
         }
+        case DPPD_ACTION_AGE: {
+            const struct rte_flow_action_age *age = actions[i].conf;
+            assert(actions[i].type == RTE_FLOW_ACTION_TYPE_AGE && age != NULL);
+            assert(age->timeout == action->conf.age_timeout_seconds && age->reserved == 0 && age->context == NULL);
+            break;
+        }
         case DPPD_ACTION_REPRESENTED_PORT:
             assert(actions[i].type == RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT && actions[i].conf != NULL);
             assert(((const struct rte_flow_action_ethdev *)actions[i].conf)->port_id == action->conf.ethdev_port_id);
@@ -138,8 +148,19 @@ int __wrap_rte_flow_destroy(uint16_t port, struct rte_flow *flow, struct rte_flo
 int __wrap_rte_flow_query(uint16_t port, struct rte_flow *flow, const struct rte_flow_action *action, void *data,
     struct rte_flow_error *error)
 {
-    struct rte_flow_query_count *query = data;
     assert(port == install_port && flow == installed_flow);
+    if (action->type == RTE_FLOW_ACTION_TYPE_AGE) {
+        struct rte_flow_query_age *query = data;
+        assert(action->conf == NULL && query->reserved == 0 && !query->aged && !query->sec_since_last_hit_valid);
+        assert(query->sec_since_last_hit == 0);
+        age_queries++;
+        query->aged = age_aged;
+        query->sec_since_last_hit_valid = age_seconds_valid;
+        query->sec_since_last_hit = age_seconds;
+        error->message = "driver age query failed";
+        return age_query_result;
+    }
+    struct rte_flow_query_count *query = data;
     assert(action->type == RTE_FLOW_ACTION_TYPE_COUNT && action->conf == NULL);
     assert(!query->reset && !query->hits_set && !query->bytes_set && query->reserved == 0);
     assert(query->hits == 0 && query->bytes == 0);
@@ -308,10 +329,63 @@ static void counters(void)
     assert(query_calls == queried);
 }
 
+/** 捕获真正交给 PMD 的 AGE 配置和查询，老化状态不能由 COUNT 或无效秒数推算 */
+static void aging(void)
+{
+    struct dppd_rule rule = make_rule();
+    struct dppd_flow_handle handle;
+    struct dppd_flow_error error;
+    struct dppd_flow_age_result result;
+    rule.actions[2] = rule.actions[1];
+    rule.actions[1] = (struct dppd_action){.type = DPPD_ACTION_AGE, .conf.age_timeout_seconds = 1};
+    rule.nb_actions = 3;
+    expected = &rule;
+    for (unsigned int boundary = 0; boundary < 2; ++boundary) {
+        rule.actions[1].conf.age_timeout_seconds = boundary == 0 ? 1 : 0xffffffU;
+        assert(dppd_flow_install(install_port, &rule, &handle, &error) == 0);
+        assert(handle.has_age && handle.has_count);
+        age_seconds = 0xffffffU;
+        unsigned int count_queries = query_calls;
+        for (unsigned int flags = 0; flags < 4; ++flags) {
+            age_aged = (flags & 1U) != 0;
+            age_seconds_valid = (flags & 2U) != 0;
+            assert(dppd_flow_query_age(&handle, &result, &error) == 0);
+            assert(result.aged == age_aged && result.sec_since_last_hit_valid == age_seconds_valid);
+            assert(result.sec_since_last_hit == (age_seconds_valid ? age_seconds : 0));
+            assert(error.code == 0 && error.message[0] == '\0');
+        }
+        assert(query_calls == count_queries);
+        age_query_result = -ENOTSUP;
+        result =
+            (struct dppd_flow_age_result){.aged = true, .sec_since_last_hit_valid = true, .sec_since_last_hit = 17};
+        assert(dppd_flow_query_age(&handle, &result, &error) == -ENOTSUP);
+        assert(result.aged && result.sec_since_last_hit_valid && result.sec_since_last_hit == 17);
+        assert(error.code == -ENOTSUP && strstr(error.message, "driver age query failed") != NULL);
+        age_query_result = 0;
+        handle.has_age = false;
+        unsigned int queried = age_queries;
+        assert(dppd_flow_query_age(&handle, &result, &error) == -ENODATA);
+        assert(result.aged && result.sec_since_last_hit_valid && result.sec_since_last_hit == 17);
+        handle.has_age = true;
+        assert(dppd_flow_query_age(&handle, NULL, &error) == -EINVAL);
+        assert(dppd_flow_query_age(NULL, &result, &error) == -EINVAL);
+        assert(age_queries == queried);
+        assert(dppd_flow_remove(&handle, &error) == 0 && !handle.has_age);
+        assert(dppd_flow_query_age(&handle, &result, &error) == -EINVAL);
+    }
+    unsigned int validated = validate_calls, created = create_calls;
+    rule.actions[1].conf.age_timeout_seconds = 0;
+    assert(dppd_flow_install(install_port, &rule, &handle, &error) == -EINVAL);
+    rule.actions[1].conf.age_timeout_seconds = 0x1000000U;
+    assert(dppd_flow_install(install_port, &rule, &handle, &error) == -EINVAL);
+    assert(validate_calls == validated && create_calls == created);
+}
+
 int main(void)
 {
     compilation();
     failures();
     counters();
+    aging();
     return 0;
 }

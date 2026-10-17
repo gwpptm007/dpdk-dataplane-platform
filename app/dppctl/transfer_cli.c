@@ -25,9 +25,11 @@ static int number(const char *text, uint64_t maximum, uint64_t *output)
 void dppctl_transfer_usage(const char *program)
 {
     fprintf(stderr,
-        "  %s [--socket PATH] transfer-plan ID INSTALL SRC DST TEMPLATE oneway|bidir [count] [priority:N]\n", program);
+        "  %s [--socket PATH] transfer-plan ID INSTALL SRC DST TEMPLATE oneway|bidir [count] [priority:N] [age:SECONDS]\n",
+        program);
     fprintf(stderr,
-        "  %s [--socket PATH] transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED [count] [priority:N]\n",
+        "  %s [--socket PATH] transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED"
+        " [count] [priority:N] [age:SECONDS]\n",
         program);
     fprintf(stderr,
         "  TEMPLATE: pair|uplink-vf|uplink-sf|pf-vf|pf-sf|vf-vf|sf-sf; apply uses plan repository generation\n");
@@ -40,7 +42,7 @@ int dppctl_transfer_build(int argc, char **argv, struct dppd_management_request 
         return -ENOSYS;
     bool apply = strcmp(argv[0], "transfer-apply") == 0;
     int base = apply ? 8 : 7;
-    if (argc < base || argc > base + 2)
+    if (argc < base || argc > base + 3)
         return -EINVAL;
     initialize(request, apply ? DPPD_MANAGEMENT_TRANSFER_APPLY : DPPD_MANAGEMENT_TRANSFER_PLAN);
     struct dppd_transfer_spec *spec = &request->payload.transfer;
@@ -69,13 +71,17 @@ int dppctl_transfer_build(int argc, char **argv, struct dppd_management_request 
     spec->expected_repository_generation = DPPD_RULE_GENERATION_ANY;
     if (apply && number(argv[7], UINT64_MAX - 1, &spec->expected_repository_generation) != 0)
         return -EINVAL;
-    bool priority = false;
+    bool priority = false, age = false;
     for (int i = base; i < argc; ++i) {
         if (strcmp(argv[i], "count") == 0 && !spec->with_count)
             spec->with_count = 1;
         else if (strncmp(argv[i], "priority:", 9) == 0 && !priority && number(argv[i] + 9, UINT32_MAX, &value) == 0) {
             spec->priority = (uint32_t)value;
             priority = true;
+        } else if (strncmp(argv[i], "age:", 4) == 0 && !age && number(argv[i] + 4, 0xffffffU, &value) == 0 &&
+            value != 0) {
+            spec->age_timeout_seconds = (uint32_t)value;
+            age = true;
         } else
             return -EINVAL;
     }
@@ -92,12 +98,22 @@ static bool graph_valid(const struct dppd_transfer_graph *graph)
         if (rule->nb_matches == 0 || rule->nb_matches > DPPD_RULE_MAX_ITEMS || rule->nb_actions == 0 ||
             rule->nb_actions > DPPD_RULE_MAX_ACTIONS)
             return false;
-        if (rule->nb_matches != 2 || rule->nb_actions > 2)
+        if (rule->nb_matches != 2 || rule->nb_actions > 3)
             return false;
         if (rule->matches[0].type != DPPD_MATCH_REPRESENTED_PORT || rule->matches[1].type != DPPD_MATCH_ETH ||
-            rule->actions[rule->nb_actions - 1U].type != DPPD_ACTION_REPRESENTED_PORT ||
-            (rule->nb_actions == 2 && rule->actions[0].type != DPPD_ACTION_COUNT))
+            rule->actions[rule->nb_actions - 1U].type != DPPD_ACTION_REPRESENTED_PORT)
             return false;
+        bool count = false, age = false;
+        for (uint16_t item = 0; item + 1U < rule->nb_actions; ++item) {
+            const struct dppd_action *action = &rule->actions[item];
+            if (action->type == DPPD_ACTION_COUNT && !count && !age)
+                count = true;
+            else if (action->type == DPPD_ACTION_AGE && !age && action->conf.age_timeout_seconds != 0 &&
+                action->conf.age_timeout_seconds <= 0xffffffU)
+                age = true;
+            else
+                return false;
+        }
     }
     return true;
 }
@@ -116,11 +132,17 @@ int dppctl_transfer_print(const struct dppd_management_response *response)
         graph->switch_domain_id, graph->count);
     for (uint16_t i = 0; i < graph->count; ++i) {
         const struct dppd_rule *rule = &graph->rules[i];
+        bool count = false;
+        uint32_t timeout = 0;
+        for (uint16_t item = 0; item < rule->nb_actions; ++item) {
+            count |= rule->actions[item].type == DPPD_ACTION_COUNT;
+            if (rule->actions[item].type == DPPD_ACTION_AGE)
+                timeout = rule->actions[item].conf.age_timeout_seconds;
+        }
         printf("edge=%u id=%" PRIu64 " generation=%" PRIu64
-               " install=%u source=%u destination=%u priority=%u count=%s\n",
+               " install=%u source=%u destination=%u priority=%u count=%s age-seconds=%u\n",
             i, rule->id, rule->generation, rule->install_port_id, rule->matches[0].spec.ethdev_port_id,
-            rule->actions[rule->nb_actions - 1].conf.ethdev_port_id, rule->priority,
-            rule->nb_actions == 2 ? "yes" : "no");
+            rule->actions[rule->nb_actions - 1].conf.ethdev_port_id, rule->priority, count ? "yes" : "no", timeout);
     }
     printf("%.*s\n", DPPD_TRANSFER_MESSAGE_SIZE, response->payload.transfer.message);
     return 1;

@@ -504,6 +504,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "[dppd] management request processing failed: %d\n", loop_error);
             break;
         }
+        /** AGE 查询失败只保留错误并重试，不把缺少驱动数据当作已经过期 */
+        (void)dppd_control_age_poll(&control, dppd_monotonic_ms() * UINT64_C(1000000), DPPD_AGE_POLL_BUDGET);
         /** 整轮请求处理完再发布，不让独立查询线程看到整批更新的中间账本 */
         if (dppd_telemetry_publish_rules(&control) != 0)
             fprintf(stderr, "[dppd] rule telemetry snapshot unavailable\n");

@@ -360,6 +360,91 @@ static void test_transfer_arguments(void)
     }
 }
 
+/** AGE 仅扩展 transfer 入口，秒数、组合选项和查询参数都必须完整校验 */
+static void test_age_arguments(void)
+{
+    struct dppd_management_request request;
+    char *plan[] = {"transfer-plan", "100", "5", "6", "7", "pair", "bidir", "age:1", "count", "priority:23", "extra"};
+    assert(build_request(7, plan, &request) == 0 && request.payload.transfer.age_timeout_seconds == 0);
+    assert(build_request(8, plan, &request) == 0 && request.operation == DPPD_MANAGEMENT_TRANSFER_PLAN);
+    assert(request.payload.transfer.age_timeout_seconds == 1 && !request.payload.transfer.with_count);
+    assert(build_request(10, plan, &request) == 0);
+    assert(request.payload.transfer.age_timeout_seconds == 1 && request.payload.transfer.with_count &&
+        request.payload.transfer.priority == 23 && request.payload.transfer.bidirectional);
+    plan[7] = "count";
+    plan[8] = "priority:23";
+    plan[9] = "age:16777215";
+    assert(build_request(10, plan, &request) == 0);
+    assert(request.payload.transfer.age_timeout_seconds == 0xffffffU && request.payload.transfer.with_count);
+    assert(build_request(11, plan, &request) == -EINVAL);
+
+    const char *invalid[] = {"age:", "age:0", "age:16777216", "age:4294967296", "age:18446744073709551616", "age:-1",
+        "age:+1", "age: 1", "age:1 ", "age:1x", "age:0x10", "age:1.5", "AGE:1", "age:any"};
+    for (unsigned int i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        plan[7] = (char *)invalid[i];
+        assert(build_request(8, plan, &request) == -EINVAL);
+    }
+    plan[7] = "age:1";
+    plan[8] = "age:2";
+    assert(build_request(9, plan, &request) == -EINVAL);
+    plan[8] = "count";
+    plan[9] = "age:2";
+    assert(build_request(10, plan, &request) == -EINVAL);
+    plan[9] = "count";
+    assert(build_request(10, plan, &request) == -EINVAL);
+
+    char *apply[] = {"transfer-apply", "100", "5", "6", "7", "uplink-vf", "bidir", "7", "age:16777215", "count",
+        "priority:19", "extra"};
+    assert(build_request(11, apply, &request) == 0 && request.operation == DPPD_MANAGEMENT_TRANSFER_APPLY);
+    assert(request.payload.transfer.age_timeout_seconds == 0xffffffU && request.payload.transfer.with_count);
+    assert(request.payload.transfer.expected_repository_generation == 7 && request.payload.transfer.priority == 19);
+    assert(build_request(12, apply, &request) == -EINVAL);
+    for (unsigned int i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        apply[8] = (char *)invalid[i];
+        assert(build_request(9, apply, &request) == -EINVAL);
+    }
+    apply[8] = "age:1";
+    apply[9] = "age:2";
+    assert(build_request(10, apply, &request) == -EINVAL);
+    apply[8] = "count";
+    apply[9] = "priority:19";
+    apply[10] = "age:1";
+    assert(build_request(11, apply, &request) == 0 && request.payload.transfer.age_timeout_seconds == 1);
+
+    char *status[] = {"age-status", "extra"};
+    memset(&request, 0xa5, sizeof(request));
+    assert(build_request(1, status, &request) == 0 && request.operation == DPPD_MANAGEMENT_AGE_STATUS);
+    assert(request.version == DPPD_MANAGEMENT_VERSION && request.size == sizeof(request));
+    const uint8_t *payload = (const uint8_t *)&request.payload;
+    for (unsigned int i = 0; i < sizeof(request.payload); ++i)
+        assert(payload[i] == 0);
+    assert(build_request(2, status, &request) == -EINVAL);
+
+    char *query[] = {"rule-age", "100", "any", "extra"};
+    assert(build_request(3, query, &request) == 0 && request.operation == DPPD_MANAGEMENT_RULE_AGE_QUERY);
+    assert(request.payload.count_query.rule_id == 100 &&
+        request.payload.count_query.expected_generation == DPPD_RULE_GENERATION_ANY);
+    query[2] = "7";
+    assert(build_request(3, query, &request) == 0 && request.payload.count_query.expected_generation == 7);
+    query[2] = "18446744073709551614";
+    assert(
+        build_request(3, query, &request) == 0 && request.payload.count_query.expected_generation == UINT64_MAX - 1U);
+    assert(build_request(1, query, &request) == -EINVAL);
+    assert(build_request(2, query, &request) == -EINVAL);
+    assert(build_request(4, query, &request) == -EINVAL);
+    const char *bad_generation[] = {"-1", "", "wrong", "18446744073709551615", "18446744073709551616"};
+    for (unsigned int i = 0; i < sizeof(bad_generation) / sizeof(*bad_generation); ++i) {
+        query[2] = (char *)bad_generation[i];
+        assert(build_request(3, query, &request) == -EINVAL);
+    }
+    const char *bad_id[] = {"0", "-1", "", "wrong", "18446744073709551616"};
+    query[2] = "any";
+    for (unsigned int i = 0; i < sizeof(bad_id) / sizeof(*bad_id); ++i) {
+        query[1] = (char *)bad_id[i];
+        assert(build_request(3, query, &request) == -EINVAL);
+    }
+}
+
 /** 捕获两个输出流，既检查明确报错，也防止坏响应先打印一半成功图再停止 */
 static void check_transfer_print(const struct dppd_management_response *response, bool recognized, bool valid)
 {
@@ -484,6 +569,7 @@ int main(void)
     test_probe_arguments();
     test_history_arguments();
     test_transfer_arguments();
+    test_age_arguments();
     test_transfer_print();
 
     /** 健康与就绪命令都使用无参数的状态查询，额外参数必须明确拒绝 */

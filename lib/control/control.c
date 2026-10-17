@@ -925,6 +925,9 @@ static int control_remove_batch_impl(struct dppd_control_service *service,
     rc = persistence_write_preflight(service);
     if (rc != 0)
         return rc;
+    /** 整批删除会逐条推进版本，在删除任何实际对象前确认不会使用 ANY 保留值 */
+    if (dppd_rule_repository_generation(&service->rules) >= UINT64_MAX - request_count)
+        return -EOVERFLOW;
     observe_stage(service, DPPD_RULE_STAGE_PREPARE);
     items = calloc(request_count, sizeof(*items));
     if (items == NULL)
@@ -1332,6 +1335,8 @@ static int control_remove_impl(struct dppd_control_service *service, uint64_t ru
         return rc;
     if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != existing.generation)
         return -ESTALE;
+    if (dppd_rule_repository_generation(&service->rules) >= UINT64_MAX - 1U)
+        return -EOVERFLOW;
     observe_rule(service, DPPD_RULE_STAGE_REMOVE, &existing, existing.install_port_id, NULL);
     rc = remove_actual_rule(service, rule_id, existing.generation);
     if (rc != 0)

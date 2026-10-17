@@ -17,6 +17,11 @@ flow_contract_test = executable('test_flow_contract', 'test_flow_contract.c', de
               '-Wl,--wrap=rte_flow_query', '-Wl,--wrap=rte_flow_flush'])
 test('transfer compilation and hardware counter validity', flow_contract_test)
 
+age_contract_test = executable('test_age_contract', 'test_age_contract.c', dependencies: dppd_core_dep)
+test('AGE driver contract and exact generation', age_contract_test)
+age_test = executable('test_age', 'test_age.c', dependencies: dppd_core_dep)
+test('AGE automatic expiry and persistence', age_test)
+
 transfer_test = executable('test_transfer', 'test_transfer.c', dependencies: dppd_core_dep)
 test('simulated transfer templates and control lifecycle', transfer_test)
 
