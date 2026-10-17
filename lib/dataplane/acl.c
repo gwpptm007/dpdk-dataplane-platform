@@ -11,7 +11,8 @@ struct acl_row {
     uint32_t group, priority, tag, src, src_mask, dst, dst_mask;
     uint16_t ingress, src_first, src_last, dst_first, dst_last;
     uint8_t l4, protocol, protocol_mask, connection_states;
-    bool ipv4, range;
+    bool ipv4, ipv6, range;
+    struct dppd_match_ipv6 address6;
 };
 
 struct dppd_acl {
@@ -75,6 +76,10 @@ int dppd_acl_add(struct dppd_acl *acl, const struct dppd_rule *rule, uint32_t ta
             row.protocol = match->spec.protocol.value;
             row.protocol_mask = match->spec.protocol.mask;
             break;
+        case DPPD_MATCH_IPV6:
+            row.ipv6 = true;
+            row.address6 = match->spec.ipv6;
+            break;
         case DPPD_MATCH_CONNECTION_STATE:
             row.connection_states = (uint8_t)match->spec.connection_states;
             break;
@@ -119,6 +124,15 @@ static bool matches(const struct acl_row *row, const struct dppd_packet *packet)
         return false;
     if ((packet->ip_protocol & row->protocol_mask) != (row->protocol & row->protocol_mask))
         return false;
+    if (row->ipv6) {
+        if (packet->l3_type != DPPD_L3_IPV6)
+            return false;
+        for (unsigned int i = 0; i < 16; ++i)
+            if ((packet->ipv6_src[i] & row->address6.src_mask[i]) !=
+                    (row->address6.src[i] & row->address6.src_mask[i]) ||
+                (packet->ipv6_dst[i] & row->address6.dst_mask[i]) != (row->address6.dst[i] & row->address6.dst_mask[i]))
+                return false;
+    }
     if (row->l4 == 0)
         return true;
     if (packet->l4_type != row->l4)

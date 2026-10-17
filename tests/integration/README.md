@@ -1,5 +1,19 @@
 # 集成验收
 
+## IPv6 解析、ACL 与转发
+
+```sh
+sudo python3 tests/integration/ipv6_traffic.py --build-dir build
+sudo python3 tests/integration/ipv6_traffic.py --build-dir build-native
+python3 tests/integration/ipv4_traffic.py --build-dir build
+```
+
+2026-10-17，两套构建各 45/45 单测和十一项相关 sanitizer 通过。三 TAP 检查 IPv6
+TCP/UDP/ICMPv6、双 VLAN、填充扩展头、/0、/64、/65、/128 路由与静态邻居、范围及批量
+ACL、完整输出字节/校验和、丢弃原因、混合快照重启、存储故障与 IPv4 SNAT 共存。
+正式单双队列 worker 另检查 200 次 IPv6 在线路由切换、MARK/COUNT、共享分段包原样
+保留、IPv4 NAT 会话不变及 mbuf 零泄漏。只使用自建虚拟接口，见 [IPv6](../../docs/ipv6.md)。
+
 ## 静态 DNAT 与端口转发
 
 ```sh

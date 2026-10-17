@@ -15,6 +15,7 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - IPv4 软件 ACL 的允许/拒绝、TCP/UDP 端口范围、协议号、MARK/COUNT、原子批量更新和持久重启恢复，见 [ACL 闭环](docs/acl.md)；
 - 可选 TCP/UDP 连接跟踪、状态 ACL、会话查询/清空/老化，以及跨队列出站 SNAT 和回包还原，见 [连接跟踪与 SNAT](docs/conntrack_nat.md)；
 - IPv4 TCP/UDP 静态 DNAT、单端口和端口段转发、双向回包及与 SNAT 共存，见 [静态 DNAT](docs/dnat.md)；
+- IPv6 解析、软件 ACL、双栈 LPM/静态邻居、Hop Limit 改写及混合快照重启恢复，见 [IPv6 闭环](docs/ipv6.md)；
 - ethdev/representor/switch-domain 拓扑发现；
 - 统一 rule IR 到 `rte_flow` 的真实 validate/create/query/destroy/flush；
 - 带稳定 ID、generation、幂等更新和乐观并发控制的 rule repository；
@@ -33,11 +34,11 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - 本机 `rule-status` 查询实际后端、安装端口、COUNT 配置和后端提交耗时，详见 [规则安装状态](docs/rule_status.md)；
 - 本机 `health/ready`、全部未就绪原因、工作线程实际状态和异常结束监控，详见 [健康与就绪](docs/health_readiness.md)。
 
-当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v19）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency/rule-history` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。受控本地 TAP 跨进程恢复已接通；其他 PMD 的自动 reconciliation、degraded recovery 和 flow template 仍待实现，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
+当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v20）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2/v3 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency/rule-history` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。受控本地 TAP 跨进程恢复已接通；其他 PMD 的自动 reconciliation、degraded recovery 和 flow template 仍待实现，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
 
 ## 快速开始
 
-管理协议 v19 增加静态 DNAT 查询和会话映射信息，保留会话管理、NAT 状态、状态 ACL 和跟踪丢弃原因，保留 ACL、路由/邻居、规则历史、耗时、指标、能力画像和探测，
+管理协议 v20 增加 IPv6 ACL、双栈路由/邻居及 IPv6 丢弃原因，保留静态 DNAT 查询和会话映射信息，保留会话管理、NAT 状态、状态 ACL 和跟踪丢弃原因，保留 ACL、路由/邻居、规则历史、耗时、指标、能力画像和探测，
 保留 `rule-status` 的实际后端与提交耗时、`health/ready` 的线程状态和 `port-show` 的链路状态。
 daemon 持续检测链路，出口断开时释放
 需要转发的报文并记录 egress drops，恢复后沿用原规则、COUNT 和 snapshot 自动
@@ -102,6 +103,9 @@ sudo ./build/dppd -l 0-2 -n 4 -- --ports 0,1 --queues 2 --burst 64 --promisc
 
 静态服务可再加 `--dnat 1,0,tcp,203.0.113.9,443,10.10.0.9,8443`，将外口 1 的公网
 443 转给内口 0 的后端 8443；`dnat-list [AFTER_ID]` 分页查询，详见 [端口转发](docs/dnat.md)。
+
+`--ip-routing PATH` 开启双栈路由，兼容原 `--ipv4-routing` 参数。IPv6 使用 `acl6-set`、
+`route6-set` 和 `neighbor6-set` 管理，支持 IPv4 NAT 同进程共存，详见 [IPv6 使用与验收](docs/ipv6.md)。
 
 完整环境准备、运行、telemetry 与抓包方式见 [构建与运行](docs/build_and_run.md)。架构语义和扩展边界见 [V3 架构](docs/architecture_v3.md)。
 代码排版、中文注释和格式检查命令见 [代码风格约定](docs/code_style.md)。

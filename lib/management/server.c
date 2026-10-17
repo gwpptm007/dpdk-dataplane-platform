@@ -174,6 +174,76 @@ static void build_health(const struct dppd_control_service *control, const struc
     output->ready = output->blockers == 0;
 }
 
+/** IPv6 单项修改仍提交完整双栈副本，不能用一族的修改覆盖另一族的活跃配置 */
+static int routing_change6(struct dppd_routing_service *service, const struct dppd_management_request *request)
+{
+    struct dppd_routing_status status;
+    dppd_routing_status(service, &status);
+    if (!status.enabled || status.dirty)
+        return status.enabled ? -EUCLEAN : -ENODEV;
+    bool route =
+        request->operation == DPPD_MANAGEMENT_ROUTE6_SET || request->operation == DPPD_MANAGEMENT_ROUTE6_DELETE;
+    bool remove =
+        request->operation == DPPD_MANAGEMENT_ROUTE6_DELETE || request->operation == DPPD_MANAGEMENT_NEIGHBOR6_DELETE;
+    uint64_t expected =
+        route ? request->payload.route6.expected_generation : request->payload.neighbor6.expected_generation;
+    if (expected == 0 || expected != status.generation)
+        return expected == 0 ? -EINVAL : -ESTALE;
+    struct dppd_ipv4_configuration configuration;
+    int rc = dppd_routing_get(service, &configuration);
+    if (rc != 0)
+        return rc;
+    if (route) {
+        const struct dppd_ipv6_route *entry = &request->payload.route6.entry;
+        const uint8_t zero[16] = {0};
+        if (entry->depth > 128 || entry->reserved != 0 ||
+            (remove && (entry->port_id != 0 || memcmp(entry->gateway, zero, 16) != 0)))
+            return -EINVAL;
+        uint32_t i = 0;
+        while (i < configuration.route6_count &&
+            (configuration.routes6[i].depth != entry->depth ||
+                memcmp(configuration.routes6[i].prefix, entry->prefix, 16) != 0))
+            i++;
+        if (remove) {
+            if (i == configuration.route6_count)
+                return -ENOENT;
+            memmove(configuration.routes6 + i, configuration.routes6 + i + 1,
+                (configuration.route6_count - i - 1) * sizeof(*entry));
+            configuration.route6_count--;
+        } else {
+            if (i == DPPD_IPV4_ROUTE_LIMIT)
+                return -ENOSPC;
+            configuration.routes6[i] = *entry;
+            if (i == configuration.route6_count)
+                configuration.route6_count++;
+        }
+    } else {
+        const struct dppd_ipv6_neighbor *entry = &request->payload.neighbor6.entry;
+        const uint8_t zero[6] = {0};
+        if (remove && memcmp(entry->mac, zero, 6) != 0)
+            return -EINVAL;
+        uint32_t i = 0;
+        while (i < configuration.neighbor6_count &&
+            (configuration.neighbors6[i].port_id != entry->port_id ||
+                memcmp(configuration.neighbors6[i].address, entry->address, 16) != 0))
+            i++;
+        if (remove) {
+            if (i == configuration.neighbor6_count)
+                return -ENOENT;
+            memmove(configuration.neighbors6 + i, configuration.neighbors6 + i + 1,
+                (configuration.neighbor6_count - i - 1) * sizeof(*entry));
+            configuration.neighbor6_count--;
+        } else {
+            if (i == DPPD_IPV4_NEIGHBOR_LIMIT)
+                return -ENOSPC;
+            configuration.neighbors6[i] = *entry;
+            if (i == configuration.neighbor6_count)
+                configuration.neighbor6_count++;
+        }
+    }
+    return dppd_routing_replace(service, expected, &configuration);
+}
+
 /** 单条管理修改也在完整副本上执行，路由和邻居的读取与提交共用精确全局版本 */
 static int routing_change(struct dppd_routing_service *service, const struct dppd_management_request *request)
 {
@@ -560,6 +630,13 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         break;
     case DPPD_MANAGEMENT_ROUTING_FLUSH:
         rc = dppd_routing_flush(control->routing);
+        dppd_routing_status(control->routing, &response->payload.routing_status);
+        break;
+    case DPPD_MANAGEMENT_ROUTE6_SET:
+    case DPPD_MANAGEMENT_ROUTE6_DELETE:
+    case DPPD_MANAGEMENT_NEIGHBOR6_SET:
+    case DPPD_MANAGEMENT_NEIGHBOR6_DELETE:
+        rc = routing_change6(control->routing, request);
         dppd_routing_status(control->routing, &response->payload.routing_status);
         break;
     default:

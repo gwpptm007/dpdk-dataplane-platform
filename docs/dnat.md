@@ -102,7 +102,7 @@ DNAT 会话只占连接跟踪容量，不从动态池借端口；取消、老化
 ./build/dppctl conntrack-list
 ```
 
-管理协议升级为 v19，daemon 和 CLI 必须配套。`nat-status` 返回 SNAT 开关及静态规则
+本阶段管理协议为 v19，后续 [IPv6](ipv6.md) 扩展为 v20，daemon 和 CLI 必须配套。`nat-status` 返回 SNAT 开关及静态规则
 数量；`dnat-list` 每页最多四条，返回配置 ID、内外口、协议和两端地址/端口段。游标
 是上一页的 `next-id`，超过末尾返回空页；启动配置不可变，不借用会话 revision。
 `conntrack-list` 显示 `kind=dnat` 和 `dnat-rule`，保留原始及转换五元组、状态和两向
@@ -132,6 +132,6 @@ Ubuntu 22.04 / DPDK 21.11.9 的系统与原生 TAP 标识补丁构建均使用 `
 校验和，覆盖整地址、端口段两端、TCP 握手、UDP 零校验、VLAN、ACL 拒绝不刷新、
 错误报文、无路由/邻居、出口错误、满表、端口池保留、清空、过期及崩溃重启。
 
-测试只在自己新建的空网络命名空间创建和清理 TAP，不改变实体接口。IPv6、ICMP/
+测试只在自己新建的空网络命名空间创建和清理 TAP，不改变实体接口。IPv6 解析/ACL/转发已在[后续阶段](ipv6.md)接通，IPv6 NAT、ICMP/
 RELATED 转换、分片重组、hairpin、ALG、动态后端和负载均衡、运行时策略更新、会话
 复制和硬件有状态卸载未实现，不能按整个 M2 完成计算。

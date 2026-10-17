@@ -41,14 +41,17 @@ void dppd_pipeline_decide_routed(const struct dppd_forwarding_snapshot *snapshot
         decision->mark_id = software_decision.mark_id;
     }
     if (router != NULL) {
-        if (packet == NULL || packet->l3_type != DPPD_L3_IPV4) {
+        if (packet == NULL || (packet->l3_type != DPPD_L3_IPV4 && packet->l3_type != DPPD_L3_IPV6)) {
             decision->drop_reason = DPPD_DROP_IPV4_UNSUPPORTED;
             return;
         }
-        int rc = dppd_ipv4_router_lookup(router, packet->ipv4_dst_be, &decision->ipv4);
+        bool ipv6 = packet->l3_type == DPPD_L3_IPV6;
+        int rc = ipv6 ? dppd_ipv6_router_lookup(router, packet->ipv6_dst, &decision->ipv4)
+                      : dppd_ipv4_router_lookup(router, packet->ipv4_dst_be, &decision->ipv4);
         if (rc != 0) {
             decision->drop_reason = rc == -ENOENT ? DPPD_DROP_NO_ROUTE
                 : rc == -EHOSTUNREACH             ? DPPD_DROP_NO_NEIGHBOR
+                : ipv6                            ? DPPD_DROP_IPV6_UNSUPPORTED
                                                   : DPPD_DROP_IPV4_UNSUPPORTED;
             return;
         }

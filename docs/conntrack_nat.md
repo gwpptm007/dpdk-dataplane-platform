@@ -159,6 +159,7 @@ python3 tests/integration/software_traffic.py --build-dir build
 单端口池复用、SIGKILL 后会话清空与策略重放，以及禁用跟踪时拒绝恢复状态规则。
 测试只创建和删除自己的虚拟接口，不改实体网卡。既有 ACL、二层及 IPv4 路由回归保留。
 
-静态 DNAT/端口转发已在[后续阶段](dnat.md)接通。IPv6、RELATED/ICMP 错误转换、
+静态 DNAT/端口转发已在[后续阶段](dnat.md)接通。IPv6 跟踪/NAT66、RELATED/ICMP 错误转换、
 分片重组、hairpin、ALG、完整 TCP 窗口验证、会话复制和硬件有状态卸载仍未实现。
 它们不计入 TCP/UDP 跟踪及出站 SNAT 闭环，后续按独立目标推进。
+IPv6 解析、ACL 与静态转发已在 [IPv6 阶段](ipv6.md)接通，与 IPv4 NAT 共存但不进入其会话表。

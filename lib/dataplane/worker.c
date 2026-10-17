@@ -1,6 +1,7 @@
 #include "dppd/runtime.h"
 #include "dppd/software_backend.h"
 #include "dppd/ipv4_rewrite.h"
+#include "dppd/ipv6.h"
 
 #include <string.h>
 #include <errno.h>
@@ -145,7 +146,8 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             delta.rx_malformed++;
         else if (parsed == DPPD_PARSE_UNSUPPORTED)
             delta.rx_unsupported++;
-        if (runtime->conntrack != NULL)
+        /** IPv6 继续使用未跟踪的双栈路由，不能送入只认识 IPv4 五元组的会话与 NAT 表 */
+        if (runtime->conntrack != NULL && packet.l3_type != DPPD_L3_IPV6)
             stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision);
         else
             dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router,
@@ -161,6 +163,8 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
                 delta.no_neighbor_drops++;
             else if (decision.drop_reason == DPPD_DROP_IPV4_UNSUPPORTED)
                 delta.ipv4_unsupported_drops++;
+            else if (decision.drop_reason == DPPD_DROP_IPV6_UNSUPPORTED)
+                delta.ipv6_unsupported_drops++;
             else if (decision.drop_reason == DPPD_DROP_CT_INVALID)
                 delta.ct_invalid_drops++;
             else if (decision.drop_reason == DPPD_DROP_CT_FULL)
@@ -192,11 +196,22 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
             rte_pktmbuf_free(rx[i]);
             continue;
         }
-        if (decision.routed && runtime->conntrack == NULL) {
-            int rc = dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);
+        if (decision.routed && (runtime->conntrack == NULL || packet.l3_type == DPPD_L3_IPV6)) {
+            bool ipv6 = packet.l3_type == DPPD_L3_IPV6;
+            int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)
+                          : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);
             if (rc != 0) {
                 delta.policy_drops++;
-                if (rc == -ETIMEDOUT)
+                if (ipv6) {
+                    if (rc == -ETIMEDOUT)
+                        delta.ipv6_hop_drops++;
+                    else if (rc == -EBADMSG)
+                        delta.ipv6_checksum_drops++;
+                    else if (rc == -ENOTSUP)
+                        delta.ipv6_unsupported_drops++;
+                    else
+                        delta.ipv6_rewrite_drops++;
+                } else if (rc == -ETIMEDOUT)
                     delta.ipv4_ttl_drops++;
                 else if (rc == -EBADMSG)
                     delta.ipv4_checksum_drops++;

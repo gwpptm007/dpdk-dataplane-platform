@@ -28,7 +28,7 @@ SmartNIC/DPU 上全路径策略一致性及硬件 ACL 适配属于后续阶段�
 
 `acl-set` 固定使用软件后端，创建使用旧版本 0，更新必须指定查询到的精确旧版本，
 不接受 `any`。ID、版本和计数与已有 rule repository 共用，没有第二套 ACL 账本。
-ACL 首版为 v17，当前[静态 DNAT](dnat.md) 已扩展为 v19，daemon 与 CLI 必须配套。
+ACL 首版为 v17，当前 [IPv6](ipv6.md) 已扩展为 v20，daemon 与 CLI 必须配套。
 `state:new,established` 等状态条件已接通，启用跟踪后所有规则强制经软件执行。
 
 ```sh
@@ -129,4 +129,4 @@ UDP 范围边界、TCP 443、协议号和分片、优先级与 COUNT、TTL/校�
 net_ring 使用正式 worker 验证一队列/两队列的 ALLOW、范围、MARK、COUNT 及共享原包
 不变，保留原有四端口 17 类报文、1000 次路由热更新、零 mbuf 泄漏和二层回归。
 测试创建并清理自己的 TAP，不改实体网卡。TCP/UDP 状态 ACL、连接跟踪和出站 SNAT
-已在后续 [有状态阶段](conntrack_nat.md) 接通；IPv6、完整硬件策略一致性和性能目标仍未完成。
+已在后续 [有状态阶段](conntrack_nat.md) 接通；[IPv6 ACL 与转发](ipv6.md) 也已接通，完整硬件策略一致性和性能目标仍未完成。

@@ -29,6 +29,13 @@ static bool reference_match(const struct dppd_rule *rule, uint16_t port, const s
                 ((packet->ipv4_src_be ^ m->spec.ipv4.src_be) & m->spec.ipv4.src_mask_be) != 0 ||
                 ((packet->ipv4_dst_be ^ m->spec.ipv4.dst_be) & m->spec.ipv4.dst_mask_be) != 0)
                 return false;
+        } else if (m->type == DPPD_MATCH_IPV6) {
+            if (packet->l3_type != DPPD_L3_IPV6)
+                return false;
+            for (unsigned int byte = 0; byte < 16; ++byte)
+                if (((packet->ipv6_src[byte] ^ m->spec.ipv6.src[byte]) & m->spec.ipv6.src_mask[byte]) != 0 ||
+                    ((packet->ipv6_dst[byte] ^ m->spec.ipv6.dst[byte]) & m->spec.ipv6.dst_mask[byte]) != 0)
+                    return false;
         } else if (m->type == DPPD_MATCH_IP_PROTOCOL) {
             if (((packet->ip_protocol ^ m->spec.protocol.value) & m->spec.protocol.mask) != 0)
                 return false;
@@ -213,8 +220,41 @@ static void test_reference(void)
     free(acl);
 }
 
+/** 以独立解释器核对 IPv6 任意掩码、范围边界和地址族隔离，不能让 IPv6 通配匹配 IPv4 */
+static void test_ipv6_reference(void)
+{
+    struct dppd_rule rules[32];
+    struct dppd_acl *acl = dppd_acl_init(calloc(1, dppd_acl_size(32)), 32);
+    assert(acl != NULL);
+    for (unsigned int i = 0; i < 32; ++i) {
+        rules[i] = rule(i + 1);
+        rules[i].matches[1].type = DPPD_MATCH_IPV6;
+        struct dppd_match_ipv6 *ip = &rules[i].matches[1].spec.ipv6;
+        for (unsigned int byte = 0; byte < 16; ++byte) {
+            ip->src[byte] = (uint8_t)next_random();
+            ip->dst[byte] = (uint8_t)next_random();
+            ip->src_mask[byte] = (uint8_t)next_random();
+            ip->dst_mask[byte] = (uint8_t)next_random();
+        }
+        assert(dppd_acl_add(acl, &rules[i], i + 1) == 0);
+    }
+    for (unsigned int sample = 0; sample < 20000; ++sample) {
+        const struct dppd_rule *basis = &rules[next_random() % 32];
+        struct dppd_packet packet = {.l3_type = sample % 5 == 0 ? DPPD_L3_IPV4 : DPPD_L3_IPV6,
+            .l4_type = sample % 7 == 0 ? DPPD_L4_FRAGMENT : DPPD_L4_UDP,
+            .ip_protocol = 17,
+            .l4_src_port_be = htons((uint16_t)(999 + sample % 1003)),
+            .l4_dst_port_be = htons((uint16_t)(79 + sample % 13))};
+        memcpy(packet.ipv6_src, basis->matches[1].spec.ipv6.src, 16);
+        memcpy(packet.ipv6_dst, basis->matches[1].spec.ipv6.dst, 16);
+        assert(dppd_acl_classify(acl, 3, &packet) == reference(rules, 32, 3, &packet));
+    }
+    free(acl);
+}
+
 int main(void)
 {
+    test_ipv6_reference();
     test_boundaries();
     test_reference();
     return 0;

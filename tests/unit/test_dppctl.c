@@ -86,6 +86,32 @@ static void test_acl_arguments(void)
     assert(build_request(2, query, &request) == -EINVAL);
 }
 
+/** IPv6 前缀和地址族不能混用，非整字节掩码与范围端口完整保留，跟踪状态不能伪造 */
+static void test_ipv6_arguments(void)
+{
+    struct dppd_management_request request;
+    char *arguments[] = {"acl6-set", "90", "0", "0", "10", "tcp", "2001:db8:1::ffff/65", "2001:db8:2::7/128",
+        "1000-2000", "443", "allow", "count", "state:untracked"};
+    assert(build_request(13, arguments, &request) == 0);
+    assert(request.payload.apply.rule.matches[1].type == DPPD_MATCH_IPV6);
+    assert(request.payload.apply.rule.matches[1].spec.ipv6.src_mask[8] == 0x80);
+    assert(request.payload.apply.rule.matches[1].spec.ipv6.src[15] == 0);
+    arguments[12] = "state:established";
+    assert(build_request(13, arguments, &request) == -EINVAL);
+    arguments[12] = "state:untracked";
+    arguments[6] = "192.0.2.0/24";
+    assert(build_request(13, arguments, &request) == -EINVAL);
+    char *route[] = {"route6-set", "2001:db8:2::7/65", "1", "fe80::1", "9"};
+    assert(build_request(5, route, &request) == 0 && request.operation == DPPD_MANAGEMENT_ROUTE6_SET);
+    assert(request.payload.route6.entry.depth == 65 && request.payload.route6.entry.prefix[15] == 0);
+    route[1] = "2001:db8::/129";
+    assert(build_request(5, route, &request) == -EINVAL);
+    char *neighbor[] = {"neighbor6-set", "1", "fe80::1", "02:00:00:00:00:01", "9"};
+    assert(build_request(5, neighbor, &request) == 0 && request.operation == DPPD_MANAGEMENT_NEIGHBOR6_SET);
+    neighbor[2] = "fe80::1%eth0";
+    assert(build_request(5, neighbor, &request) == -EINVAL);
+}
+
 /** 路由命令先完整解析再连接服务，错误文件不能被当成空配置发送 */
 static void test_routing_arguments(void)
 {
@@ -275,6 +301,7 @@ int main(void)
     test_status_arguments();
     test_acl_arguments();
     test_routing_arguments();
+    test_ipv6_arguments();
     test_probe_arguments();
     test_history_arguments();
 

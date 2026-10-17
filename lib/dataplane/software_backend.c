@@ -210,7 +210,7 @@ bool dppd_software_backend_rule_supported(const struct dppd_rule *rule)
     if (rule == NULL || rule->domain != DPPD_RULE_DOMAIN_INGRESS)
         return false;
     for (i = 0; i < rule->nb_matches; ++i) {
-        if (rule->matches[i].type < DPPD_MATCH_ETH || rule->matches[i].type > DPPD_MATCH_CONNECTION_STATE ||
+        if (rule->matches[i].type < DPPD_MATCH_ETH || rule->matches[i].type > DPPD_MATCH_IPV6 ||
             rule->matches[i].type == DPPD_MATCH_REPRESENTED_PORT)
             return false;
     }

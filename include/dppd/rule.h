@@ -29,6 +29,7 @@ enum dppd_match_type {
     DPPD_MATCH_TCP_RANGE,
     DPPD_MATCH_IP_PROTOCOL,
     DPPD_MATCH_CONNECTION_STATE,
+    DPPD_MATCH_IPV6,
 };
 
 struct dppd_match_ipv4 {
@@ -45,6 +46,11 @@ struct dppd_match_l4 {
     uint16_t dst_mask_be;
 };
 
+/** 按字节保存地址和掩码，既支持 CIDR，也保留规则 IR 原有的任意掩码比较语义 */
+struct dppd_match_ipv6 {
+    uint8_t src[16], src_mask[16], dst[16], dst_mask[16];
+};
+
 /** 范围包含两个端点，四个端口数值都保存为网络字节序，不能把上界当作掩码 */
 struct dppd_match_l4_range {
     uint16_t src_first_be, src_last_be, dst_first_be, dst_last_be;
@@ -54,6 +60,7 @@ struct dppd_match {
     enum dppd_match_type type;
     union {
         struct dppd_match_ipv4 ipv4;
+        struct dppd_match_ipv6 ipv6;
         struct dppd_match_l4 l4;
         struct dppd_match_l4_range range;
         uint32_t connection_states;

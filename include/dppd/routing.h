@@ -4,6 +4,7 @@
 #include "dppd/ipv4_router.h"
 
 #define DPPD_ROUTING_FILE_SIZE 11712U
+#define DPPD_ROUTING_DUAL_FILE_SIZE 28096U
 
 struct dppd_routing_service;
 
@@ -18,7 +19,7 @@ struct dppd_routing_status {
     uint8_t reserved[2];
     int32_t last_error;
     uint64_t generation, persisted_generation;
-    uint32_t route_count, neighbor_count;
+    uint32_t route_count, neighbor_count, route6_count, neighbor6_count;
 };
 
 /** 创建文件前检查规范路径，路由快照和锁不得覆盖其他存储文件或管理 socket */

@@ -24,6 +24,7 @@ static void print_usage(const char *program)
         " SRC_CIDR DST_CIDR SRC_RANGE DST_RANGE allow|drop [count] [mark:N]\n",
         program);
     fprintf(stderr, "  %s [--socket PATH] acl-update-batch FILE\n", program);
+    fprintf(stderr, "  IPv6 uses acl6-set and acl6-update-batch; PROTOCOL accepts ipv6, udp, tcp or ip:N\n");
     fprintf(stderr, "  %s [--socket PATH] conntrack-status|nat-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] conntrack-list [AFTER_ID [REVISION]]\n", program);
     fprintf(stderr, "  %s [--socket PATH] conntrack-flush REVISION\n", program);
@@ -442,6 +443,34 @@ static int parse_acl_range(const char *text, uint16_t *first, uint16_t *last)
     return 0;
 }
 
+/** 按位生成完整的一百二十八位掩码，不能用四个主机整数拼接后误换字节序 */
+static int parse_ipv6_cidr(const char *text, uint8_t address[16], uint8_t mask[16])
+{
+    if (strcmp(text, "any") == 0) {
+        memset(address, 0, 16);
+        memset(mask, 0, 16);
+        return 0;
+    }
+    char copy[INET6_ADDRSTRLEN + 5];
+    if (strlen(text) >= sizeof(copy))
+        return -EINVAL;
+    strcpy(copy, text);
+    char *slash = strchr(copy, '/');
+    if (slash == NULL)
+        return -EINVAL;
+    *slash++ = '\0';
+    uint64_t depth;
+    if (*slash < '0' || *slash > '9' || parse_u64(slash, 0, 128, &depth) != 0 ||
+        inet_pton(AF_INET6, copy, address) != 1)
+        return -EINVAL;
+    memset(mask, 0, 16);
+    for (unsigned int bit = 0; bit < depth; ++bit)
+        mask[bit / 8] |= (uint8_t)(0x80U >> (bit % 8));
+    for (unsigned int i = 0; i < 16; ++i)
+        address[i] &= mask[i];
+    return 0;
+}
+
 /** 复用正式规则请求和版本保护，ACL 固定使用软件执行，允许后继续原有二层或三层转发 */
 static int build_acl_request(int argc, char **argv, struct dppd_management_request *request)
 {
@@ -461,8 +490,13 @@ static int build_acl_request(int argc, char **argv, struct dppd_management_reque
     rule->nb_matches = 2;
     rule->matches[0].type = DPPD_MATCH_ETH;
     struct dppd_match *ip = &rule->matches[1], *transport = &rule->matches[2];
-    ip->type = DPPD_MATCH_IPV4;
-    if (parse_ipv4_cidr(argv[6], &ip->spec.ipv4.src_be, &ip->spec.ipv4.src_mask_be) != 0 ||
+    bool ipv6 = strcmp(argv[0], "acl6-set") == 0;
+    ip->type = ipv6 ? DPPD_MATCH_IPV6 : DPPD_MATCH_IPV4;
+    if (ipv6) {
+        if (parse_ipv6_cidr(argv[6], ip->spec.ipv6.src, ip->spec.ipv6.src_mask) != 0 ||
+            parse_ipv6_cidr(argv[7], ip->spec.ipv6.dst, ip->spec.ipv6.dst_mask) != 0)
+            return -EINVAL;
+    } else if (parse_ipv4_cidr(argv[6], &ip->spec.ipv4.src_be, &ip->spec.ipv4.src_mask_be) != 0 ||
         parse_ipv4_cidr(argv[7], &ip->spec.ipv4.dst_be, &ip->spec.ipv4.dst_mask_be) != 0)
         return -EINVAL;
     if (strcmp(argv[5], "udp") == 0 || strcmp(argv[5], "tcp") == 0) {
@@ -479,7 +513,7 @@ static int build_acl_request(int argc, char **argv, struct dppd_management_reque
             transport->spec.protocol.value = (uint8_t)protocol;
             transport->spec.protocol.mask = UINT8_MAX;
             rule->nb_matches++;
-        } else if (strcmp(argv[5], "ipv4") != 0)
+        } else if (strcmp(argv[5], ipv6 ? "ipv6" : "ipv4") != 0)
             return -EINVAL;
     }
     if (strcmp(argv[10], "allow") != 0 && strcmp(argv[10], "drop") != 0)
@@ -487,11 +521,17 @@ static int build_acl_request(int argc, char **argv, struct dppd_management_reque
     for (int i = 11; i < argc; ++i)
         if (strcmp(argv[i], "count") != 0 && strncmp(argv[i], "mark:", 5) != 0 && strncmp(argv[i], "state:", 6) != 0)
             return -EINVAL;
-    return build_filter_actions(argc, argv, 10, rule);
+    int rc = build_filter_actions(argc, argv, 10, rule);
+    if (rc == 0 && ipv6)
+        for (uint16_t i = 0; i < rule->nb_matches; ++i)
+            if (rule->matches[i].type == DPPD_MATCH_CONNECTION_STATE &&
+                (rule->matches[i].spec.connection_states & ~1U) != 0)
+                return -EINVAL;
+    return rc;
 }
 
 /** 文件中的两到四条规则全部解析成功才发送，服务端再核对全部旧版本并原子更新 */
-static int build_acl_batch(const char *path, struct dppd_management_request *request)
+static int build_acl_batch(const char *path, struct dppd_management_request *request, bool ipv6)
 {
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
@@ -540,7 +580,7 @@ static int build_acl_batch(const char *path, struct dppd_management_request *req
         char *comment = strchr(line, '#');
         if (comment != NULL)
             *comment = '\0';
-        char *args[15] = {"acl-set"}, *save = NULL;
+        char *args[15] = {ipv6 ? "acl6-set" : "acl-set"}, *save = NULL;
         int count = 1;
         for (char *word = strtok_r(line, " \r\n\t", &save); word != NULL; word = strtok_r(NULL, " \r\n\t", &save)) {
             if (count == 15) {
@@ -578,10 +618,10 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
     int conntrack_result = dppctl_conntrack_build(argc, argv, request, initialize_request);
     if (conntrack_result != -ENOSYS)
         return conntrack_result;
-    if (argc >= 1 && strcmp(argv[0], "acl-set") == 0)
+    if (argc >= 1 && (strcmp(argv[0], "acl-set") == 0 || strcmp(argv[0], "acl6-set") == 0))
         return build_acl_request(argc, argv, request);
-    if (argc == 2 && strcmp(argv[0], "acl-update-batch") == 0)
-        return build_acl_batch(argv[1], request);
+    if (argc == 2 && (strcmp(argv[0], "acl-update-batch") == 0 || strcmp(argv[0], "acl6-update-batch") == 0))
+        return build_acl_batch(argv[1], request, strcmp(argv[0], "acl6-update-batch") == 0);
     uint64_t value;
     int routing_result = dppctl_routing_build(argc, argv, request, initialize_request);
     if (routing_result != -ENOSYS)
@@ -1037,6 +1077,16 @@ static void print_rule_detail(const struct dppd_rule *rule)
             print_ipv4_value("src", match->spec.ipv4.src_be, match->spec.ipv4.src_mask_be);
             print_ipv4_value("dst", match->spec.ipv4.dst_be, match->spec.ipv4.dst_mask_be);
             break;
+        case DPPD_MATCH_IPV6: {
+            char source[INET6_ADDRSTRLEN], destination[INET6_ADDRSTRLEN], source_mask[INET6_ADDRSTRLEN],
+                destination_mask[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, match->spec.ipv6.src, source, sizeof(source));
+            inet_ntop(AF_INET6, match->spec.ipv6.dst, destination, sizeof(destination));
+            inet_ntop(AF_INET6, match->spec.ipv6.src_mask, source_mask, sizeof(source_mask));
+            inet_ntop(AF_INET6, match->spec.ipv6.dst_mask, destination_mask, sizeof(destination_mask));
+            printf("ipv6 src=%s mask=%s dst=%s mask=%s", source, source_mask, destination, destination_mask);
+            break;
+        }
         case DPPD_MATCH_UDP:
         case DPPD_MATCH_TCP:
             printf("%s", match->type == DPPD_MATCH_UDP ? "udp" : "tcp");

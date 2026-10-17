@@ -1,4 +1,5 @@
 #include "dppd/packet.h"
+#include "dppd/ipv6.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -84,6 +85,8 @@ int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32
         return DPPD_PARSE_OK;
     }
 
+    if (ether_type == 0x86ddU)
+        return dppd_ipv6_parse(data, available_len, packet_len, packet);
     /** 其他以太网协议暂不深入解析，这种情况与报文头被截断不同 */
     if (ether_type != DPPD_ETHER_TYPE_IPV4)
         return DPPD_PARSE_UNSUPPORTED;

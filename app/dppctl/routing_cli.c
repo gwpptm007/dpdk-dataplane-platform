@@ -77,18 +77,69 @@ static int neighbor_key(char **arguments, struct dppd_ipv4_neighbor *neighbor)
     return 0;
 }
 
-static int neighbor_entry(char **arguments, struct dppd_ipv4_neighbor *neighbor)
+static int mac_address(const char *mac, uint8_t bytes[6])
 {
-    if (neighbor_key(arguments, neighbor) != 0 || strlen(arguments[2]) != 17)
+    if (strlen(mac) != 17)
         return -EINVAL;
-    const char *mac = arguments[2];
     for (unsigned int i = 0; i < 6; ++i) {
         int first = hex_digit(mac[i * 3]), second = hex_digit(mac[i * 3 + 1]);
         if (first < 0 || second < 0 || (i < 5 && mac[i * 3 + 2] != ':'))
             return -EINVAL;
-        neighbor->mac[i] = (uint8_t)((unsigned int)first * 16 + (unsigned int)second);
+        bytes[i] = (uint8_t)((unsigned int)first * 16 + (unsigned int)second);
     }
     return 0;
+}
+
+static int neighbor_entry(char **arguments, struct dppd_ipv4_neighbor *neighbor)
+{
+    return neighbor_key(arguments, neighbor) == 0 ? mac_address(arguments[2], neighbor->mac) : -EINVAL;
+}
+
+/** IPv6 前缀仍做规范化，逐位清除主机位，处理 /65 等非整字节边界 */
+static int prefix6(const char *text, struct dppd_ipv6_route *route)
+{
+    char copy[INET6_ADDRSTRLEN + 5];
+    if (strlen(text) >= sizeof(copy))
+        return -EINVAL;
+    strcpy(copy, text);
+    char *slash = strchr(copy, '/');
+    if (slash == NULL)
+        return -EINVAL;
+    *slash++ = '\0';
+    uint64_t depth;
+    if (integer(slash, 128, &depth) != 0 || inet_pton(AF_INET6, copy, route->prefix) != 1)
+        return -EINVAL;
+    route->depth = (uint8_t)depth;
+    for (unsigned int bit = (unsigned int)depth; bit < 128; ++bit)
+        route->prefix[bit / 8] &= (uint8_t) ~(0x80U >> (bit % 8));
+    return 0;
+}
+
+static int route6_entry(char **arguments, struct dppd_ipv6_route *route)
+{
+    uint64_t port;
+    if (prefix6(arguments[0], route) != 0 || integer(arguments[1], UINT16_MAX - 1U, &port) != 0)
+        return -EINVAL;
+    route->port_id = (uint16_t)port;
+    if (strcmp(arguments[2], "direct") == 0)
+        memset(route->gateway, 0, 16);
+    else if (inet_pton(AF_INET6, arguments[2], route->gateway) != 1)
+        return -EINVAL;
+    return 0;
+}
+
+static int neighbor6_key(char **arguments, struct dppd_ipv6_neighbor *neighbor)
+{
+    uint64_t port;
+    if (integer(arguments[0], UINT16_MAX - 1U, &port) != 0 || inet_pton(AF_INET6, arguments[1], neighbor->address) != 1)
+        return -EINVAL;
+    neighbor->port_id = (uint16_t)port;
+    return 0;
+}
+
+static int neighbor6_entry(char **arguments, struct dppd_ipv6_neighbor *neighbor)
+{
+    return neighbor6_key(arguments, neighbor) == 0 ? mac_address(arguments[2], neighbor->mac) : -EINVAL;
 }
 
 /** 整表文件只接受有界普通文件，每行一条 route 或 neighbor，任何一行错误都不发请求 */
@@ -161,6 +212,11 @@ static int read_configuration(const char *path, struct dppd_ipv4_configuration *
             rc = route_entry(arguments + 1, &configuration->routes[configuration->route_count++]);
         } else if (strcmp(arguments[0], "neighbor") == 0 && configuration->neighbor_count < DPPD_IPV4_NEIGHBOR_LIMIT) {
             rc = neighbor_entry(arguments + 1, &configuration->neighbors[configuration->neighbor_count++]);
+        } else if (strcmp(arguments[0], "route6") == 0 && configuration->route6_count < DPPD_IPV4_ROUTE_LIMIT) {
+            rc = route6_entry(arguments + 1, &configuration->routes6[configuration->route6_count++]);
+        } else if (strcmp(arguments[0], "neighbor6") == 0 &&
+            configuration->neighbor6_count < DPPD_IPV4_NEIGHBOR_LIMIT) {
+            rc = neighbor6_entry(arguments + 1, &configuration->neighbors6[configuration->neighbor6_count++]);
         } else
             rc = -EINVAL;
         if (rc != 0)
@@ -192,6 +248,14 @@ int dppctl_routing_build(int argc, char **argv, struct dppd_management_request *
         operation = DPPD_MANAGEMENT_NEIGHBOR_SET;
     else if (strcmp(argv[0], "neighbor-delete") == 0)
         operation = DPPD_MANAGEMENT_NEIGHBOR_DELETE;
+    else if (strcmp(argv[0], "route6-set") == 0)
+        operation = DPPD_MANAGEMENT_ROUTE6_SET;
+    else if (strcmp(argv[0], "route6-delete") == 0)
+        operation = DPPD_MANAGEMENT_ROUTE6_DELETE;
+    else if (strcmp(argv[0], "neighbor6-set") == 0)
+        operation = DPPD_MANAGEMENT_NEIGHBOR6_SET;
+    else if (strcmp(argv[0], "neighbor6-delete") == 0)
+        operation = DPPD_MANAGEMENT_NEIGHBOR6_DELETE;
     else
         return -ENOSYS;
     initialize(request, operation);
@@ -207,6 +271,18 @@ int dppctl_routing_build(int argc, char **argv, struct dppd_management_request *
         request->payload.routing_replace.expected_generation = generation;
         return read_configuration(argv[1], &request->payload.routing_replace.configuration);
     }
+    if (operation == DPPD_MANAGEMENT_ROUTE6_SET || operation == DPPD_MANAGEMENT_ROUTE6_DELETE) {
+        request->payload.route6.expected_generation = generation;
+        return operation == DPPD_MANAGEMENT_ROUTE6_SET
+            ? (argc == 5 ? route6_entry(argv + 1, &request->payload.route6.entry) : -EINVAL)
+            : (argc == 3 ? prefix6(argv[1], &request->payload.route6.entry) : -EINVAL);
+    }
+    if (operation == DPPD_MANAGEMENT_NEIGHBOR6_SET || operation == DPPD_MANAGEMENT_NEIGHBOR6_DELETE) {
+        request->payload.neighbor6.expected_generation = generation;
+        return operation == DPPD_MANAGEMENT_NEIGHBOR6_SET
+            ? (argc == 5 ? neighbor6_entry(argv + 1, &request->payload.neighbor6.entry) : -EINVAL)
+            : (argc == 4 ? neighbor6_key(argv + 1, &request->payload.neighbor6.entry) : -EINVAL);
+    }
     if (operation == DPPD_MANAGEMENT_ROUTE_SET || operation == DPPD_MANAGEMENT_ROUTE_DELETE) {
         request->payload.route.expected_generation = generation;
         if (operation == DPPD_MANAGEMENT_ROUTE_SET)
@@ -221,19 +297,22 @@ int dppctl_routing_build(int argc, char **argv, struct dppd_management_request *
 
 bool dppctl_routing_print(const struct dppd_management_response *response)
 {
-    if (response->operation < DPPD_MANAGEMENT_ROUTING_STATUS || response->operation > DPPD_MANAGEMENT_ROUTING_FLUSH)
+    if ((response->operation < DPPD_MANAGEMENT_ROUTING_STATUS || response->operation > DPPD_MANAGEMENT_ROUTING_FLUSH) &&
+        (response->operation < DPPD_MANAGEMENT_ROUTE6_SET || response->operation > DPPD_MANAGEMENT_NEIGHBOR6_DELETE))
         return false;
     if (response->operation != DPPD_MANAGEMENT_ROUTING_GET) {
         const struct dppd_routing_status *status = &response->payload.routing_status;
         printf("routing enabled=%s dirty=%s generation=%" PRIu64 " persisted-generation=%" PRIu64
-               " routes=%u neighbors=%u last-error=%d\n",
+               " routes=%u neighbors=%u routes6=%u neighbors6=%u last-error=%d\n",
             status->enabled ? "yes" : "no", status->dirty ? "yes" : "no", status->generation,
-            status->persisted_generation, status->route_count, status->neighbor_count, status->last_error);
+            status->persisted_generation, status->route_count, status->neighbor_count, status->route6_count,
+            status->neighbor6_count, status->last_error);
         return true;
     }
     const struct dppd_ipv4_configuration *configuration = &response->payload.routing;
-    printf("routing generation=%" PRIu64 " routes=%u neighbors=%u\n", configuration->generation,
-        configuration->route_count, configuration->neighbor_count);
+    printf("routing generation=%" PRIu64 " routes=%u neighbors=%u routes6=%u neighbors6=%u\n",
+        configuration->generation, configuration->route_count, configuration->neighbor_count,
+        configuration->route6_count, configuration->neighbor6_count);
     char address[INET_ADDRSTRLEN], next_hop[INET_ADDRSTRLEN];
     for (uint32_t i = 0; i < configuration->route_count; ++i) {
         const struct dppd_ipv4_route *route = &configuration->routes[i];
@@ -248,6 +327,21 @@ bool dppctl_routing_print(const struct dppd_management_response *response)
         printf("neighbor port=%u address=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n", neighbor->port_id, address,
             neighbor->mac[0], neighbor->mac[1], neighbor->mac[2], neighbor->mac[3], neighbor->mac[4], neighbor->mac[5]);
     }
+    const uint8_t zero[16] = {0};
+    char address6[INET6_ADDRSTRLEN], next6[INET6_ADDRSTRLEN];
+    for (uint32_t i = 0; i < configuration->route6_count; ++i) {
+        const struct dppd_ipv6_route *route = &configuration->routes6[i];
+        inet_ntop(AF_INET6, route->prefix, address6, sizeof(address6));
+        inet_ntop(AF_INET6, route->gateway, next6, sizeof(next6));
+        printf("route6 prefix=%s/%u port=%u next-hop=%s\n", address6, route->depth, route->port_id,
+            memcmp(route->gateway, zero, 16) != 0 ? next6 : "direct");
+    }
+    for (uint32_t i = 0; i < configuration->neighbor6_count; ++i) {
+        const struct dppd_ipv6_neighbor *neighbor = &configuration->neighbors6[i];
+        inet_ntop(AF_INET6, neighbor->address, address6, sizeof(address6));
+        printf("neighbor6 port=%u address=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n", neighbor->port_id, address6,
+            neighbor->mac[0], neighbor->mac[1], neighbor->mac[2], neighbor->mac[3], neighbor->mac[4], neighbor->mac[5]);
+    }
     return true;
 }
 
@@ -259,4 +353,5 @@ void dppctl_routing_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] neighbor-set PORT IP MAC EXPECTED_GENERATION\n", program);
     fprintf(stderr, "  %s [--socket PATH] neighbor-delete PORT IP EXPECTED_GENERATION\n", program);
     fprintf(stderr, "  %s [--socket PATH] routing-replace FILE EXPECTED_GENERATION\n", program);
+    fprintf(stderr, "  IPv6 uses route6-set/delete and neighbor6-set/delete with the same arguments\n");
 }

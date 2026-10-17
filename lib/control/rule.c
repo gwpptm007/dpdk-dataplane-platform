@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <arpa/inet.h>
 #include <stdio.h>
+#include <string.h>
 
 static int rule_error(char *error, uint32_t error_len, const char *message)
 {
@@ -23,6 +24,8 @@ static bool match_equal(const struct dppd_match *left, const struct dppd_match *
             left->spec.ipv4.src_mask_be == right->spec.ipv4.src_mask_be &&
             left->spec.ipv4.dst_be == right->spec.ipv4.dst_be &&
             left->spec.ipv4.dst_mask_be == right->spec.ipv4.dst_mask_be;
+    case DPPD_MATCH_IPV6:
+        return memcmp(&left->spec.ipv6, &right->spec.ipv6, sizeof(left->spec.ipv6)) == 0;
     case DPPD_MATCH_UDP:
     case DPPD_MATCH_TCP:
         return left->spec.l4.src_be == right->spec.l4.src_be &&
@@ -92,6 +95,7 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
     uint32_t seen_matches = 0;
     uint32_t seen_actions = 0;
     bool seen_ipv4 = false;
+    bool seen_ipv6 = false;
     bool seen_l4 = false;
     uint8_t last_protocol_rank = 0;
 
@@ -108,7 +112,7 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
 
     for (i = 0; i < rule->nb_matches; ++i) {
         const enum dppd_match_type type = rule->matches[i].type;
-        if (type < DPPD_MATCH_ETH || type > DPPD_MATCH_CONNECTION_STATE)
+        if (type < DPPD_MATCH_ETH || type > DPPD_MATCH_IPV6)
             return rule_error(error, error_len, "unsupported match type");
         if ((seen_matches & (1U << type)) != 0)
             return rule_error(error, error_len, "duplicate match type");
@@ -118,23 +122,28 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
                 (rule->matches[i].spec.connection_states & ~15U) != 0))
             return rule_error(error, error_len, "invalid ingress connection state mask");
         if (type != DPPD_MATCH_REPRESENTED_PORT && type != DPPD_MATCH_CONNECTION_STATE) {
-            const uint8_t rank = type == DPPD_MATCH_ETH ? 1U
-                : type == DPPD_MATCH_IPV4               ? 2U
-                : type == DPPD_MATCH_IP_PROTOCOL        ? 3U
-                                                        : 4U;
+            const uint8_t rank = type == DPPD_MATCH_ETH              ? 1U
+                : type == DPPD_MATCH_IPV4 || type == DPPD_MATCH_IPV6 ? 2U
+                : type == DPPD_MATCH_IP_PROTOCOL                     ? 3U
+                                                                     : 4U;
             if (rank < last_protocol_rank)
                 return rule_error(error, error_len, "protocol matches are out of order");
             last_protocol_rank = rank;
         }
         if (type == DPPD_MATCH_REPRESENTED_PORT && rule->domain != DPPD_RULE_DOMAIN_TRANSFER)
             return rule_error(error, error_len, "represented-port matches require transfer domain");
-        if (type == DPPD_MATCH_IPV4) {
+        if (type == DPPD_MATCH_IPV4 || type == DPPD_MATCH_IPV6) {
             if (seen_l4)
-                return rule_error(error, error_len, "IPv4 must precede L4 matches");
-            seen_ipv4 = true;
+                return rule_error(error, error_len, "IP must precede L4 matches");
+            if (seen_ipv4 || seen_ipv6)
+                return rule_error(error, error_len, "only one IP address family is allowed");
+            seen_ipv4 = type == DPPD_MATCH_IPV4;
+            seen_ipv6 = type == DPPD_MATCH_IPV6;
+            if (seen_ipv6 && rule->domain != DPPD_RULE_DOMAIN_INGRESS)
+                return rule_error(error, error_len, "IPv6 ACL requires ingress domain");
         }
-        if (type == DPPD_MATCH_IP_PROTOCOL && !seen_ipv4)
-            return rule_error(error, error_len, "IP protocol requires a preceding IPv4 match");
+        if (type == DPPD_MATCH_IP_PROTOCOL && !seen_ipv4 && !seen_ipv6)
+            return rule_error(error, error_len, "IP protocol requires a preceding IP match");
         if (type == DPPD_MATCH_UDP_RANGE || type == DPPD_MATCH_TCP_RANGE) {
             const struct dppd_match_l4_range *range = &rule->matches[i].spec.range;
             if (ntohs(range->src_first_be) > ntohs(range->src_last_be) ||
@@ -143,13 +152,20 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
         }
         if (type == DPPD_MATCH_UDP || type == DPPD_MATCH_TCP || type == DPPD_MATCH_UDP_RANGE ||
             type == DPPD_MATCH_TCP_RANGE) {
-            if (!seen_ipv4)
-                return rule_error(error, error_len, "UDP/TCP requires a preceding IPv4 match");
+            if (!seen_ipv4 && !seen_ipv6)
+                return rule_error(error, error_len, "UDP/TCP requires a preceding IP match");
             if (seen_l4)
                 return rule_error(error, error_len, "only one L4 match is allowed");
             seen_l4 = true;
         }
     }
+
+    /** 当前会话表只处理 IPv4，IPv6 不能声明实际上不会产生的 NEW 或 ESTABLISHED 状态 */
+    if (seen_ipv6)
+        for (i = 0; i < rule->nb_matches; ++i)
+            if (rule->matches[i].type == DPPD_MATCH_CONNECTION_STATE &&
+                (rule->matches[i].spec.connection_states & ~1U) != 0)
+                return rule_error(error, error_len, "IPv6 supports only untracked state");
 
     for (i = 0; i < rule->nb_actions; ++i) {
         const enum dppd_action_type type = rule->actions[i].type;

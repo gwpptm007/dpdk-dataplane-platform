@@ -45,6 +45,7 @@ class Fixture:
         self.names = [f"d4{os.getpid() % 100000}{c}" for c in "abc"]
         self.indices, self.links = [], []
         self.extra_arguments = []
+        self.routing_option = "--ipv4-routing"
 
     def create(self):
         for name in self.names:
@@ -69,7 +70,7 @@ class Fixture:
         command += [f"--vdev=net_tap{i},iface={name}" for i, name in enumerate(self.names)]
         command += ["--", "--ports", "0,1,2", "--queues", "1", "--mbufs", "8191", "--cache", "0",
                     "--control-socket", str(self.socket), "--state-path", str(self.directory / "rules"),
-                    "--ipv4-routing", str(self.snapshot)]
+                    self.routing_option, str(self.snapshot)]
         command += self.extra_arguments
         with self.log.open("w") as output:
             self.process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)

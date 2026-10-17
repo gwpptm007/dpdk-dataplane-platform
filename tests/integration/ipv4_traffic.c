@@ -95,8 +95,9 @@ static void fill_frame(uint8_t frame[FRAME_SIZE], unsigned int kind, unsigned in
     if (kind == 6)
         header[10] ^= 1;
     else if (kind == 7) {
-        frame[12] = 0x86;
-        frame[13] = 0xdd;
+        /** IPv6 已可解析，这里改用实验 EtherType 继续验证未知网络协议的原有拒绝路径 */
+        frame[12] = 0x88;
+        frame[13] = 0xb5;
     } else if (kind == 8)
         header[2] = 0xff;
     memcpy(frame + 100, &tag, sizeof(tag));
@@ -620,6 +621,110 @@ static void stateful_queues(struct fixture *fixture)
     dnat_queues(fixture, &dnat);
 }
 
+/** 在 IPv4 NAT 已运行时加入 IPv6，验证跨队列、联合快照更新、分段共享包及 MARK/COUNT */
+static void ipv6_queues(struct fixture *fixture)
+{
+    struct dppd_ipv4_configuration configuration;
+    assert(dppd_ipv4_router_get(fixture->router, &configuration) == 0);
+    configuration.route6_count = 1;
+    configuration.neighbor6_count = 2;
+    struct dppd_ipv6_route *route = &configuration.routes6[0];
+    memset(route, 0, sizeof(*route));
+    assert(inet_pton(AF_INET6, "2001:db8:2::", route->prefix) == 1);
+    assert(inet_pton(AF_INET6, "fe80::1", route->gateway) == 1);
+    route->depth = 64;
+    for (unsigned int i = 0; i < 2; ++i) {
+        struct dppd_ipv6_neighbor *neighbor = &configuration.neighbors6[i];
+        memset(neighbor, 0, sizeof(*neighbor));
+        memcpy(neighbor->address, route->gateway, 16);
+        neighbor->port_id = (uint16_t)(i + 1);
+        neighbor->mac[0] = 2;
+        neighbor->mac[5] = (uint8_t)(i + 1);
+    }
+    struct dppd_rule allow = {.id = 990, .fallback = DPPD_FALLBACK_SOFTWARE_ONLY, .nb_matches = 4, .nb_actions = 3};
+    allow.matches[0].type = DPPD_MATCH_ETH;
+    allow.matches[1].type = DPPD_MATCH_IPV6;
+    memcpy(allow.matches[1].spec.ipv6.dst, route->prefix, 16);
+    memset(allow.matches[1].spec.ipv6.dst_mask, 255, 8);
+    allow.matches[2].type = DPPD_MATCH_UDP_RANGE;
+    allow.matches[2].spec.range = (struct dppd_match_l4_range){.src_first_be = htons(1000),
+        .src_last_be = htons(2000),
+        .dst_first_be = htons(5000),
+        .dst_last_be = htons(6000)};
+    allow.matches[3].type = DPPD_MATCH_CONNECTION_STATE;
+    allow.matches[3].spec.connection_states = DPPD_CT_UNTRACKED;
+    allow.actions[0] = (struct dppd_action){.type = DPPD_ACTION_MARK, .conf.mark_id = 0x600d};
+    allow.actions[1].type = DPPD_ACTION_COUNT;
+    allow.actions[2].type = DPPD_ACTION_ALLOW;
+    struct dppd_control_apply_result applied;
+    assert(dppd_control_apply(&fixture->control, 0, &allow, 0, &applied) == 0);
+    for (unsigned int round = 0; round < 200; ++round) {
+        uint16_t egress = (uint16_t)(1 + round % 2), queue = (uint16_t)(round % fixture->queues);
+        route->port_id = egress;
+        assert(dppd_ipv4_router_replace(fixture->router, configuration.generation, &configuration, NULL, NULL) == 0);
+        configuration.generation++;
+        uint8_t wire[FRAME_SIZE] = {0}, expected[FRAME_SIZE], buffer[FRAME_SIZE], pseudo[FRAME_SIZE + 40] = {0};
+        unsigned int l2 = round % 2 == 0 ? 14 : 18;
+        wire[0] = wire[6] = 2;
+        if (l2 == 18) {
+            wire[12] = 0x81;
+            wire[15] = 7;
+        }
+        wire[l2 - 2] = 0x86;
+        wire[l2 - 1] = 0xdd;
+        uint8_t *ip = wire + l2, *udp = ip + 40;
+        ip[0] = 0x6a;
+        ip[3] = 0x55;
+        ip[5] = (uint8_t)(FRAME_SIZE - l2 - 40);
+        ip[6] = 17;
+        ip[7] = 64;
+        assert(inet_pton(AF_INET6, "2001:db8:1::1", ip + 8) == 1);
+        assert(inet_pton(AF_INET6, "2001:db8:2::7", ip + 24) == 1);
+        memcpy(udp, (uint8_t[]){4, 0xd2, 0x16, 0x2e, 0, (uint8_t)(FRAME_SIZE - l2 - 40), 0, 0}, 8);
+        memcpy(pseudo, ip + 8, 32);
+        pseudo[35] = ip[5];
+        pseudo[39] = 17;
+        memcpy(pseudo + 40, udp, ip[5]);
+        uint16_t crc = checksum(pseudo, (uint16_t)(40 + ip[5]));
+        udp[6] = (uint8_t)(crc >> 8);
+        udp[7] = (uint8_t)crc;
+        memcpy(expected, wire, FRAME_SIZE);
+        memcpy(expected, configuration.neighbors6[egress - 1].mac, 6);
+        memcpy(expected + 6, fixture->runtime.devices.ports[egress].mac.addr_bytes, 6);
+        expected[l2 + 7]--;
+        struct rte_mbuf *original = rte_pktmbuf_alloc(fixture->pool), *tail = rte_pktmbuf_alloc(fixture->pool);
+        assert(original != NULL && tail != NULL);
+        memcpy(rte_pktmbuf_append(original, 33), wire, 33);
+        memcpy(rte_pktmbuf_append(tail, FRAME_SIZE - 33), wire + 33, FRAME_SIZE - 33);
+        assert(rte_pktmbuf_chain(original, tail) == 0);
+        rte_mbuf_refcnt_update(original, 1);
+        rte_mbuf_refcnt_update(tail, 1);
+        assert(rte_ring_enqueue(fixture->rx[0][queue], original) == 0);
+        fixture->sent++;
+        void *object;
+        uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
+        while (rte_ring_dequeue(fixture->tx[egress][queue], &object) != 0) {
+            assert(rte_get_timer_cycles() < deadline);
+            rte_pause();
+        }
+        assert(memcmp(rte_pktmbuf_read(object, 0, FRAME_SIZE, buffer), expected, FRAME_SIZE) == 0);
+        assert(((struct rte_mbuf *)object)->hash.fdir.hi == 0x600d);
+        assert(memcmp(rte_pktmbuf_read(original, 0, FRAME_SIZE, buffer), wire, FRAME_SIZE) == 0);
+        assert((original->ol_flags & RTE_MBUF_F_RX_FDIR_ID) == 0);
+        rte_pktmbuf_free(object);
+        rte_pktmbuf_free(original);
+        fixture->forwarded++;
+    }
+    uint64_t hits, bytes;
+    assert(dppd_software_backend_query_count(&fixture->control.software, 990, applied.generation, &hits, &bytes) == 0);
+    assert(hits == 200 && bytes == 200 * FRAME_SIZE);
+    struct dppd_conntrack_status status;
+    dppd_conntrack_status(fixture->runtime.conntrack, dppd_monotonic_ms(), &status);
+    assert(status.active == 2);
+    printf("PASS IPv6 worker queues=%u updates=200 MARK+COUNT=yes shared-chain=unchanged IPv4-NAT=isolated\n",
+        fixture->queues);
+}
+
 static void run_case(uint16_t queues)
 {
     struct fixture *fixture = calloc(1, sizeof(*fixture));
@@ -681,6 +786,7 @@ static void run_case(uint16_t queues)
     acl_allow_path(fixture);
     failure_paths(fixture);
     stateful_queues(fixture);
+    ipv6_queues(fixture);
     dppd_runtime_request_stop(&fixture->runtime);
     assert(dppd_runtime_wait(&fixture->runtime) == 0);
     struct dppd_stats_values statistics;

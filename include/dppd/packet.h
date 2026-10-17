@@ -31,9 +31,10 @@ enum dppd_l3_type {
     DPPD_L3_NONE = 0,
     DPPD_L3_ARP,
     DPPD_L3_IPV4,
+    DPPD_L3_IPV6,
 };
 
-/** 传输层分类；FRAGMENT 表示未重组的 IPv4 分片，不提供可用于 TCP 或 UDP 匹配的端口 */
+/** 传输层分类；FRAGMENT 表示未重组的 IPv4 或 IPv6 分片，不提供可用于端口匹配的字段 */
 enum dppd_l4_type {
     DPPD_L4_NONE = 0,
     DPPD_L4_UDP,
@@ -60,7 +61,7 @@ struct dppd_packet {
     uint8_t vlan_depth;
     enum dppd_l3_type l3_type;
     enum dppd_l4_type l4_type;
-    /** IPv4 头中的原始协议编号，即使报文是分片也会记录 */
+    /** IPv4 原始协议或 IPv6 扩展头之后的最终协议，分片也记录协议但不提取端口 */
     uint8_t ip_protocol;
     uint8_t connection_state;
     uint8_t tcp_flags;
@@ -69,6 +70,10 @@ struct dppd_packet {
     /** 地址与端口保留网络字节序，便于与规则中同样格式的值按位匹配，不能直接当作主机数值 */
     uint32_t ipv4_src_be;
     uint32_t ipv4_dst_be;
+    /** IPv6 地址按线缆顺序保存，扩展头计入 l3_len，ip_protocol 是最终的 Next Header */
+    uint8_t ipv6_src[16], ipv6_dst[16];
+    uint16_t ipv6_payload_len;
+    bool ipv6_unsupported;
     uint16_t l4_src_port_be;
     uint16_t l4_dst_port_be;
     /** IPv4 的 MF 位，表示后面还有分片；末尾分片此位为假，但仍可能属于 FRAGMENT */

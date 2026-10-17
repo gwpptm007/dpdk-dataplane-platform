@@ -43,6 +43,7 @@ enum dppd_drop_reason {
     DPPD_DROP_TTL,
     DPPD_DROP_REWRITE,
     DPPD_DROP_EGRESS,
+    DPPD_DROP_IPV6_UNSUPPORTED,
 };
 
 /** 单个报文的处理结果；只有转发决定中的出口端口和标记才会被工作线程用于发送 */
@@ -72,7 +73,7 @@ int dppd_snapshot_lookup_peer(const struct dppd_forwarding_snapshot *snapshot, u
 void dppd_pipeline_decide(const struct dppd_forwarding_snapshot *snapshot,
     struct dppd_software_backend *software_backend, uint16_t ingress_port, int parse_status,
     const struct dppd_packet *packet, struct dppd_pipeline_decision *decision);
-/** 路由器非空时走 IPv4 单播路由，未命中不回退固定端口对，软件策略仍先执行 */
+/** 路由器非空时走对应地址族的单播路由，未命中不回退固定端口对，软件策略仍先执行 */
 void dppd_pipeline_decide_routed(const struct dppd_forwarding_snapshot *snapshot,
     struct dppd_software_backend *software_backend, struct dppd_ipv4_router *router, uint16_t ingress_port,
     int parse_status, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision);

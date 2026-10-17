@@ -252,6 +252,7 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"tap-owner-cookie", no_argument, NULL, 1006},
         {"recovery-monitor", required_argument, NULL, 1007},
         {"ipv4-routing", required_argument, NULL, 1008},
+        {"ip-routing", required_argument, NULL, 1008},
         {"conntrack", required_argument, NULL, 1009},
         {"ct-timeout", required_argument, NULL, 1010},
         {"snat", required_argument, NULL, 1011},
@@ -497,6 +498,7 @@ void dppd_config_print_usage(const char *program)
     printf("  --rule-capacity N   maximum number of desired rules (default %u)\n", DPPD_DEFAULT_RULE_CAPACITY);
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");
     printf("  --ipv4-routing P    enable IPv4 routing with a durable route and static-neighbor snapshot\n");
+    printf("  --ip-routing P      enable dual-stack routing; ipv4-routing remains a compatible alias\n");
     printf("  --conntrack N       track IPv4 TCP/UDP sessions, capacity 1..65536, requires IPv4 routing\n");
     printf("  --ct-timeout N      established idle timeout in seconds (default 300)\n");
     printf("  --snat I,O,IP,A-B   translate inside I to outside O using public IPv4 and TCP/UDP port pool\n");

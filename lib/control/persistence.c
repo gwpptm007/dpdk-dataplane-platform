@@ -14,7 +14,10 @@
 
 #define DPPD_SNAPSHOT_V1_VERSION 1U
 #define DPPD_SNAPSHOT_V2_VERSION 2U
-#define DPPD_SNAPSHOT_VERSION DPPD_SNAPSHOT_V2_VERSION
+#define DPPD_SNAPSHOT_V3_VERSION 3U
+#define DPPD_SNAPSHOT_V3_MATCH_SIZE 68U
+#define DPPD_SNAPSHOT_V3_RECORD_SIZE \
+    (40U + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_V3_MATCH_SIZE + DPPD_RULE_MAX_ACTIONS * 8U)
 #define DPPD_SNAPSHOT_HEADER_SIZE 48U
 #define DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE 36U
 #define DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE 40U
@@ -102,7 +105,7 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t length)
     return crc;
 }
 
-static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
+static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t match_size)
 {
     char validation_error[128];
     uint16_t i;
@@ -110,7 +113,9 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
     if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0 || rule->id == 0 ||
         rule->generation == 0)
         return -EINVAL;
-    memset(output, 0, DPPD_SNAPSHOT_RECORD_SIZE);
+    memset(output, 0,
+        DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * match_size +
+            DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE);
     put_u64_le(output, rule->id);
     put_u64_le(output + 8, rule->generation);
     put_u32_le(output + 16, (uint32_t)rule->domain);
@@ -124,7 +129,7 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
 
     for (i = 0; i < rule->nb_matches; ++i) {
         const struct dppd_match *match = &rule->matches[i];
-        uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + i * DPPD_SNAPSHOT_MATCH_SIZE;
+        uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + i * match_size;
 
         put_u32_le(encoded, (uint32_t)match->type);
         /*
@@ -133,6 +138,11 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
          */
         switch (match->type) {
         case DPPD_MATCH_ETH:
+            break;
+        case DPPD_MATCH_IPV6:
+            if (match_size != DPPD_SNAPSHOT_V3_MATCH_SIZE)
+                return -EINVAL;
+            memcpy(encoded + 4, &match->spec.ipv6, sizeof(match->spec.ipv6));
             break;
         case DPPD_MATCH_IPV4:
             memcpy(encoded + 4, &match->spec.ipv4.src_be, 4);
@@ -171,8 +181,8 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
 
     for (i = 0; i < rule->nb_actions; ++i) {
         const struct dppd_action *action = &rule->actions[i];
-        uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE +
-            i * DPPD_SNAPSHOT_ACTION_SIZE;
+        uint8_t *encoded =
+            output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * match_size + i * DPPD_SNAPSHOT_ACTION_SIZE;
 
         put_u32_le(encoded, (uint32_t)action->type);
         switch (action->type) {
@@ -198,10 +208,11 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
 
 /*
  * v1 与 v2 的 match/action 编码完全相同，只是 v1 缺少 install_port_id 和
- * 两字节保留位。将布局参数化可保证迁移读取与正常读取共享同一套 IR 校验
+ * 两字节保留位；v3 另将匹配槽扩展为完整 IPv6 地址与掩码
+ * 将布局参数化可保证迁移读取与正常读取共享同一套 IR 校验
  */
 static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint32_t rule_header_size,
-    bool contains_install_port)
+    bool contains_install_port, uint32_t match_size)
 {
     char validation_error[128];
     uint16_t i;
@@ -223,11 +234,16 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint
 
     for (i = 0; i < rule->nb_matches; ++i) {
         struct dppd_match *match = &rule->matches[i];
-        const uint8_t *encoded = input + rule_header_size + i * DPPD_SNAPSHOT_MATCH_SIZE;
+        const uint8_t *encoded = input + rule_header_size + i * match_size;
 
         match->type = (enum dppd_match_type)get_u32_le(encoded);
         switch (match->type) {
         case DPPD_MATCH_ETH:
+            break;
+        case DPPD_MATCH_IPV6:
+            if (match_size != DPPD_SNAPSHOT_V3_MATCH_SIZE)
+                return -EBADMSG;
+            memcpy(&match->spec.ipv6, encoded + 4, sizeof(match->spec.ipv6));
             break;
         case DPPD_MATCH_IPV4:
             memcpy(&match->spec.ipv4.src_be, encoded + 4, 4);
@@ -267,7 +283,7 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint
     for (i = 0; i < rule->nb_actions; ++i) {
         struct dppd_action *action = &rule->actions[i];
         const uint8_t *encoded =
-            input + rule_header_size + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_MATCH_SIZE + i * DPPD_SNAPSHOT_ACTION_SIZE;
+            input + rule_header_size + DPPD_RULE_MAX_ITEMS * match_size + i * DPPD_SNAPSHOT_ACTION_SIZE;
 
         action->type = (enum dppd_action_type)get_u32_le(encoded);
         switch (action->type) {
@@ -371,6 +387,8 @@ int dppd_persistence_save(const char *path, const struct dppd_rule_repository *r
     uint64_t generation;
     uint64_t payload_size;
     uint32_t count;
+    uint32_t match_size = DPPD_SNAPSHOT_MATCH_SIZE, record_size = DPPD_SNAPSHOT_RECORD_SIZE;
+    uint32_t version = DPPD_SNAPSHOT_V2_VERSION;
     uint32_t listed = 0;
     uint32_t checksum;
     uint32_t i;
@@ -390,8 +408,7 @@ int dppd_persistence_save(const char *path, const struct dppd_rule_repository *r
 
     if (count != 0) {
         rules = calloc(count, sizeof(*rules));
-        payload = calloc(1, (size_t)payload_size);
-        if (rules == NULL || payload == NULL) {
+        if (rules == NULL) {
             rc = -ENOMEM;
             goto cleanup;
         }
@@ -402,8 +419,26 @@ int dppd_persistence_save(const char *path, const struct dppd_rule_repository *r
             rc = -EUCLEAN;
             goto cleanup;
         }
+        /** 只有包含 IPv6 匹配时才扩展磁盘记录，旧 IPv4 快照继续按 v2 写出 */
+        for (i = 0; i < count; ++i)
+            for (uint16_t item = 0; item < rules[i].nb_matches; ++item)
+                if (rules[i].matches[item].type == DPPD_MATCH_IPV6) {
+                    version = DPPD_SNAPSHOT_V3_VERSION;
+                    match_size = DPPD_SNAPSHOT_V3_MATCH_SIZE;
+                    record_size = DPPD_SNAPSHOT_V3_RECORD_SIZE;
+                }
+        payload_size = (uint64_t)count * record_size;
+        if (payload_size > SIZE_MAX) {
+            rc = -EOVERFLOW;
+            goto cleanup;
+        }
+        payload = calloc(1, (size_t)payload_size);
+        if (payload == NULL) {
+            rc = -ENOMEM;
+            goto cleanup;
+        }
         for (i = 0; i < count; ++i) {
-            rc = encode_rule(&rules[i], payload + i * DPPD_SNAPSHOT_RECORD_SIZE);
+            rc = encode_rule(&rules[i], payload + i * record_size, match_size);
             if (rc != 0)
                 goto cleanup;
         }
@@ -411,9 +446,9 @@ int dppd_persistence_save(const char *path, const struct dppd_rule_repository *r
 
     memset(header, 0, sizeof(header));
     memcpy(header, snapshot_magic, sizeof(snapshot_magic));
-    put_u32_le(header + 8, DPPD_SNAPSHOT_VERSION);
+    put_u32_le(header + 8, version);
     put_u32_le(header + 12, DPPD_SNAPSHOT_HEADER_SIZE);
-    put_u32_le(header + 16, DPPD_SNAPSHOT_RECORD_SIZE);
+    put_u32_le(header + 16, record_size);
     put_u32_le(header + 20, count);
     put_u64_le(header + 24, generation);
     put_u64_le(header + 32, payload_size);
@@ -465,16 +500,21 @@ typedef int (*dppd_snapshot_rule_decoder)(const uint8_t *input, struct dppd_rule
 
 static int decode_rule_v2(const uint8_t *input, struct dppd_rule *rule)
 {
-    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true);
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_MATCH_SIZE);
+}
+
+static int decode_rule_v3(const uint8_t *input, struct dppd_rule *rule)
+{
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_V3_MATCH_SIZE);
 }
 
 static int decode_rule_v1(const uint8_t *input, struct dppd_rule *rule)
 {
-    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE, false);
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE, false, DPPD_SNAPSHOT_MATCH_SIZE);
 }
 
 /*
- * 版本选择在这里集中完成：正常启动只传入 v2，迁移工具才传入 v1。这样不会
+ * 版本选择在这里集中完成：正常启动接受带安装端口的 v2/v3，迁移工具才传入 v1。这样不会
  * 因为新增迁移能力而让守护进程误把缺少安装端口的旧快照当成可恢复状态
  */
 static int load_snapshot_version(const char *path, struct dppd_persisted_snapshot *snapshot, uint32_t expected_version,
@@ -519,6 +559,19 @@ static int load_snapshot_version(const char *path, struct dppd_persisted_snapsho
      * v1 没有 install_port_id，无法无歧义重放。对已识别但不兼容的版本返回
      * EPROTONOSUPPORT，和随机损坏使用的 EBADMSG 明确区分，便于迁移工具诊断
      */
+    if (expected_version == 0) {
+        expected_version = get_u32_le(header + 8);
+        if (expected_version == DPPD_SNAPSHOT_V2_VERSION) {
+            expected_record_size = DPPD_SNAPSHOT_V2_RECORD_SIZE;
+            decode_rule = decode_rule_v2;
+        } else if (expected_version == DPPD_SNAPSHOT_V3_VERSION) {
+            expected_record_size = DPPD_SNAPSHOT_V3_RECORD_SIZE;
+            decode_rule = decode_rule_v3;
+        } else {
+            rc = -EPROTONOSUPPORT;
+            goto cleanup;
+        }
+    }
     if (get_u32_le(header + 8) != expected_version) {
         rc = -EPROTONOSUPPORT;
         goto cleanup;
@@ -586,8 +639,7 @@ cleanup:
 
 int dppd_persistence_load(const char *path, struct dppd_persisted_snapshot *snapshot)
 {
-    return load_snapshot_version(path, snapshot, DPPD_SNAPSHOT_V2_VERSION, DPPD_SNAPSHOT_V2_RECORD_SIZE,
-        decode_rule_v2);
+    return load_snapshot_version(path, snapshot, 0, 0, NULL);
 }
 
 int dppd_persistence_load_v1_for_migration(const char *path, struct dppd_persisted_snapshot *snapshot)

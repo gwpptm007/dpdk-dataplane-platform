@@ -112,6 +112,14 @@ ipv4_rewrite_test = executable('test_ipv4_rewrite', 'test_ipv4_rewrite.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=rte_pktmbuf_copy'])
 test('IPv4 routed packet rewrite', ipv4_rewrite_test)
 
+ipv6_packet_test = executable('test_ipv6_packet', 'test_ipv6_packet.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_pktmbuf_copy'])
+test('IPv6 parser and scattered packet rewrite', ipv6_packet_test)
+
+ipv6_control_test = executable('test_ipv6_control', 'test_ipv6_control.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=fsync'])
+test('IPv6 LPM and compatible durable snapshots', ipv6_control_test)
+
 # 完整配置先落盘后发布，验证单实例锁、损坏拒绝和替换后同步失败的显式修复
 routing_test = executable('test_routing', 'test_routing.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=pwrite64', '-Wl,--wrap=fsync', '-Wl,--wrap=rename', '-Wl,--wrap=renameat2'])

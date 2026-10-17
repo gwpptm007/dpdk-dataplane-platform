@@ -17,8 +17,8 @@
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload
  */
 /** v16 扩展三层转发统计，后续路由配置命令使用同一版 ABI，旧版客户端必须拒绝 */
-/** v19 增加静态 DNAT 分页查询、策略数量和会话对应的静态规则编号 */
-#define DPPD_MANAGEMENT_VERSION 19U
+/** v20 增加 IPv6 ACL、双栈路由和邻居配置，以及 IPv6 专用丢弃统计 */
+#define DPPD_MANAGEMENT_VERSION 20U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -86,6 +86,10 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_CONNTRACK_FLUSH,
     DPPD_MANAGEMENT_NAT_STATUS,
     DPPD_MANAGEMENT_DNAT_LIST,
+    DPPD_MANAGEMENT_ROUTE6_SET,
+    DPPD_MANAGEMENT_ROUTE6_DELETE,
+    DPPD_MANAGEMENT_NEIGHBOR6_SET,
+    DPPD_MANAGEMENT_NEIGHBOR6_DELETE,
 };
 
 /*
@@ -115,6 +119,14 @@ struct dppd_management_request {
             uint64_t expected_generation;
             struct dppd_ipv4_neighbor entry;
         } neighbor;
+        struct {
+            uint64_t expected_generation;
+            struct dppd_ipv6_route entry;
+        } route6;
+        struct {
+            uint64_t expected_generation;
+            struct dppd_ipv6_neighbor entry;
+        } neighbor6;
         struct {
             uint16_t port_id;
             uint16_t queue_id;

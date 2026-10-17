@@ -1,4 +1,5 @@
 #include "dppd/ipv4_router.h"
+#include "dppd/ipv6.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -24,7 +25,7 @@ struct routing_snapshot {
     struct dppd_ipv4_configuration configuration;
     struct routing_snapshot *retired_next;
     uint64_t retired_token;
-    uint32_t node_count;
+    uint32_t node_count, root6;
     struct route_node nodes[];
 };
 
@@ -71,13 +72,67 @@ static int compare_neighbor(const void *left, const void *right)
     return first == second ? 0 : first < second ? -1 : 1;
 }
 
+static int compare_route6(const void *left, const void *right)
+{
+    const struct dppd_ipv6_route *a = left, *b = right;
+    int address = memcmp(a->prefix, b->prefix, 16);
+    return address != 0 ? address : (int)a->depth - b->depth;
+}
+
+static int compare_neighbor6(const void *left, const void *right)
+{
+    const struct dppd_ipv6_neighbor *a = left, *b = right;
+    return a->port_id != b->port_id ? (int)a->port_id - b->port_id : memcmp(a->address, b->address, 16);
+}
+
+/** 每个地址族有独立根节点，IPv6 按线缆字节逐位建树，非整字节前缀也保持精确 */
+static int compile6(const struct dppd_ipv4_router *router, struct routing_snapshot *snapshot)
+{
+    struct dppd_ipv4_configuration *configuration = &snapshot->configuration;
+    qsort(configuration->routes6, configuration->route6_count, sizeof(*configuration->routes6), compare_route6);
+    qsort(configuration->neighbors6, configuration->neighbor6_count, sizeof(*configuration->neighbors6),
+        compare_neighbor6);
+    const uint8_t zero[16] = {0};
+    snapshot->root6 = snapshot->node_count++;
+    for (uint32_t i = 0; i < configuration->route6_count; ++i) {
+        const struct dppd_ipv6_route *route = &configuration->routes6[i];
+        if (route->depth > 128 || route->reserved != 0 || !port_present(router, route->port_id) ||
+            (memcmp(route->gateway, zero, 16) != 0 && !dppd_ipv6_unicast(route->gateway, true)))
+            return -EINVAL;
+        for (unsigned int bit = route->depth; bit < 128; ++bit)
+            if ((route->prefix[bit / 8] & (0x80U >> (bit % 8))) != 0)
+                return -EINVAL;
+        if (i != 0 && compare_route6(route - 1, route) == 0)
+            return -EEXIST;
+        uint32_t node = snapshot->root6;
+        for (unsigned int bit = 0; bit < route->depth; ++bit) {
+            unsigned int branch = (route->prefix[bit / 8] >> (7U - bit % 8)) & 1U;
+            if (snapshot->nodes[node].child[branch] == 0)
+                snapshot->nodes[node].child[branch] = snapshot->node_count++;
+            node = snapshot->nodes[node].child[branch];
+        }
+        snapshot->nodes[node].route = i + 1;
+    }
+    for (uint32_t i = 0; i < configuration->neighbor6_count; ++i) {
+        const struct dppd_ipv6_neighbor *neighbor = &configuration->neighbors6[i];
+        const uint8_t empty_mac[6] = {0};
+        if (!port_present(router, neighbor->port_id) || !dppd_ipv6_unicast(neighbor->address, true) ||
+            (neighbor->mac[0] & 1U) != 0 || memcmp(neighbor->mac, empty_mac, 6) == 0)
+            return -EINVAL;
+        if (i != 0 && compare_neighbor6(neighbor - 1, neighbor) == 0)
+            return -EEXIST;
+    }
+    return 0;
+}
+
 /** 控制面先构造并验证全部内容，不能把半张路由表或无效邻居发布给工作线程 */
 static int compile(const struct dppd_ipv4_router *router, const struct dppd_ipv4_configuration *input,
     struct routing_snapshot **result)
 {
-    if (input->route_count > DPPD_IPV4_ROUTE_LIMIT || input->neighbor_count > DPPD_IPV4_NEIGHBOR_LIMIT)
+    if (input->route_count > DPPD_IPV4_ROUTE_LIMIT || input->neighbor_count > DPPD_IPV4_NEIGHBOR_LIMIT ||
+        input->route6_count > DPPD_IPV4_ROUTE_LIMIT || input->neighbor6_count > DPPD_IPV4_NEIGHBOR_LIMIT)
         return -E2BIG;
-    size_t capacity = (size_t)input->route_count * 32 + 1;
+    size_t capacity = (size_t)input->route_count * 32 + (size_t)input->route6_count * 128 + 2;
     struct routing_snapshot *snapshot = calloc(1, sizeof(*snapshot) + capacity * sizeof(struct route_node));
     if (snapshot == NULL)
         return -ENOMEM;
@@ -87,6 +142,10 @@ static int compile(const struct dppd_ipv4_router *router, const struct dppd_ipv4
     configuration->neighbor_count = input->neighbor_count;
     memcpy(configuration->routes, input->routes, input->route_count * sizeof(input->routes[0]));
     memcpy(configuration->neighbors, input->neighbors, input->neighbor_count * sizeof(input->neighbors[0]));
+    configuration->route6_count = input->route6_count;
+    configuration->neighbor6_count = input->neighbor6_count;
+    memcpy(configuration->routes6, input->routes6, input->route6_count * sizeof(*input->routes6));
+    memcpy(configuration->neighbors6, input->neighbors6, input->neighbor6_count * sizeof(*input->neighbors6));
     qsort(configuration->routes, configuration->route_count, sizeof(configuration->routes[0]), compare_route);
     qsort(configuration->neighbors, configuration->neighbor_count, sizeof(configuration->neighbors[0]),
         compare_neighbor);
@@ -125,6 +184,9 @@ static int compile(const struct dppd_ipv4_router *router, const struct dppd_ipv4
             goto fail;
         }
     }
+    rc = compile6(router, snapshot);
+    if (rc != 0)
+        goto fail;
     *result = snapshot;
     return 0;
 fail:
@@ -212,6 +274,41 @@ int dppd_ipv4_router_destroy(struct dppd_ipv4_router *router)
     pthread_mutex_destroy(&router->writer);
     free(router->qsbr);
     free(router);
+    return 0;
+}
+
+int dppd_ipv6_router_lookup(struct dppd_ipv4_router *router, const uint8_t destination[16],
+    struct dppd_ipv4_forward *forward)
+{
+    if (router == NULL || destination == NULL || forward == NULL)
+        return -EINVAL;
+    memset(forward, 0, sizeof(*forward));
+    if (!dppd_ipv6_unicast(destination, false))
+        return -EAFNOSUPPORT;
+    const struct routing_snapshot *snapshot = atomic_load_explicit(&router->active, memory_order_acquire);
+    const struct dppd_ipv4_configuration *configuration = &snapshot->configuration;
+    uint32_t node = snapshot->root6, selected = snapshot->nodes[node].route;
+    for (unsigned int bit = 0; bit < 128; ++bit) {
+        node = snapshot->nodes[node].child[(destination[bit / 8] >> (7U - bit % 8)) & 1U];
+        if (node == 0)
+            break;
+        if (snapshot->nodes[node].route != 0)
+            selected = snapshot->nodes[node].route;
+    }
+    if (selected == 0)
+        return -ENOENT;
+    const struct dppd_ipv6_route *route = &configuration->routes6[selected - 1];
+    struct dppd_ipv6_neighbor key = {.port_id = route->port_id};
+    const uint8_t zero[16] = {0};
+    memcpy(key.address, memcmp(route->gateway, zero, 16) == 0 ? destination : route->gateway, 16);
+    const struct dppd_ipv6_neighbor *neighbor =
+        bsearch(&key, configuration->neighbors6, configuration->neighbor6_count, sizeof(key), compare_neighbor6);
+    if (neighbor == NULL)
+        return -EHOSTUNREACH;
+    forward->generation = configuration->generation;
+    forward->port_id = route->port_id;
+    memcpy(forward->next_hop6, key.address, 16);
+    memcpy(forward->destination_mac, neighbor->mac, 6);
     return 0;
 }
 

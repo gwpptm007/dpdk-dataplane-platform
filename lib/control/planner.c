@@ -76,8 +76,11 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
         if (!context->connection_tracking && rule->matches[i].type == DPPD_MATCH_CONNECTION_STATE &&
             (rule->matches[i].spec.connection_states & ~1U) != 0)
             return reject(plan, DPPD_PLAN_REASON_SOFTWARE_UNAVAILABLE, -ENOTSUP);
-    /** 有状态处理必须看到两个方向，不能安装绕过会话表的硬件动作或交换域直转 */
-    if (context->connection_tracking) {
+    bool ipv6 = false;
+    for (uint16_t i = 0; i < rule->nb_matches; ++i)
+        ipv6 |= rule->matches[i].type == DPPD_MATCH_IPV6;
+    /** 有状态处理和当前 IPv6 ACL 只走软件，不安装会绕过本阶段语义的硬件对象 */
+    if (context->connection_tracking || ipv6) {
         if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || !context->software_equivalent ||
             rule->fallback == DPPD_FALLBACK_REQUIRE_HARDWARE)
             return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);

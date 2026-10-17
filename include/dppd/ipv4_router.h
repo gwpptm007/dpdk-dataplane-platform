@@ -25,12 +25,29 @@ struct dppd_ipv4_neighbor {
     uint8_t mac[6];
 };
 
+/** IPv6 地址按字节保存，下一跳全零表示直连，链路本地下一跳由 port_id 区分作用域 */
+struct dppd_ipv6_route {
+    uint8_t prefix[16], gateway[16];
+    uint16_t port_id;
+    uint8_t depth, reserved;
+};
+
+struct dppd_ipv6_neighbor {
+    uint8_t address[16];
+    uint16_t port_id;
+    uint8_t mac[6];
+};
+
 /** 路由和邻居共用版本，未使用的数组元素由实现清零，不直接作为磁盘格式 */
 struct dppd_ipv4_configuration {
     uint64_t generation;
     uint32_t route_count, neighbor_count;
     struct dppd_ipv4_route routes[DPPD_IPV4_ROUTE_LIMIT];
     struct dppd_ipv4_neighbor neighbors[DPPD_IPV4_NEIGHBOR_LIMIT];
+    /** 两个地址族共用一次发布和版本，不能让工作线程读到半次双栈更新 */
+    uint32_t route6_count, neighbor6_count;
+    struct dppd_ipv6_route routes6[DPPD_IPV4_ROUTE_LIMIT];
+    struct dppd_ipv6_neighbor neighbors6[DPPD_IPV4_NEIGHBOR_LIMIT];
 };
 
 /** 只复制单个报文需要的结果，不把快照内部指针交给后续报文改写步骤 */
@@ -39,6 +56,7 @@ struct dppd_ipv4_forward {
     uint32_t next_hop_be;
     uint16_t port_id;
     uint8_t destination_mac[6];
+    uint8_t next_hop6[16];
 };
 
 /** 初始配置为 NULL 时创建版本一的空表，恢复文件可传入已核验且版本非零的完整配置 */
@@ -62,6 +80,8 @@ void dppd_ipv4_router_reader_quiescent(struct dppd_ipv4_router *router, unsigned
 void dppd_ipv4_router_reader_unregister(struct dppd_ipv4_router *router, unsigned int reader);
 /** 调用线程必须已注册，无路由返回 ENOENT，最长匹配的下一跳缺失返回 EHOSTUNREACH */
 int dppd_ipv4_router_lookup(struct dppd_ipv4_router *router, uint32_t destination_be,
+    struct dppd_ipv4_forward *forward);
+int dppd_ipv6_router_lookup(struct dppd_ipv4_router *router, const uint8_t destination[16],
     struct dppd_ipv4_forward *forward);
 
 #endif

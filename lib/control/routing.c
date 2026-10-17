@@ -14,6 +14,8 @@
 #define BINDING_SIZE 216U
 #define ROUTE_OFFSET (HEADER_SIZE + DPPD_MAX_PORTS * BINDING_SIZE)
 #define NEIGHBOR_OFFSET (ROUTE_OFFSET + 16U * DPPD_IPV4_ROUTE_LIMIT)
+#define ROUTE6_OFFSET DPPD_ROUTING_FILE_SIZE
+#define NEIGHBOR6_OFFSET (ROUTE6_OFFSET + 40U * DPPD_IPV4_ROUTE_LIMIT)
 
 struct dppd_routing_service {
     struct dppd_ipv4_router *router;
@@ -23,7 +25,8 @@ struct dppd_routing_service {
     uint64_t persisted_generation;
     char path[DPPD_STATE_PATH_CAPACITY], lock_path[DPPD_STATE_PATH_CAPACITY], parent[DPPD_STATE_PATH_CAPACITY];
     struct dppd_routing_binding bindings[DPPD_MAX_PORTS];
-    uint8_t expected[DPPD_ROUTING_FILE_SIZE];
+    uint32_t expected_size;
+    uint8_t expected[DPPD_ROUTING_DUAL_FILE_SIZE];
 };
 
 static void put(uint8_t *target, uint64_t value, unsigned int width)
@@ -40,10 +43,10 @@ static uint64_t get(const uint8_t *bytes, unsigned int width)
     return value;
 }
 
-static uint32_t checksum(const uint8_t *bytes)
+static uint32_t checksum(const uint8_t *bytes, uint32_t size)
 {
     uint32_t value = UINT32_MAX;
-    for (size_t i = 0; i < DPPD_ROUTING_FILE_SIZE; ++i) {
+    for (size_t i = 0; i < size; ++i) {
         value ^= i >= 32 && i < 36 ? 0 : bytes[i];
         for (unsigned int bit = 0; bit < 8; ++bit)
             value = (value >> 1) ^ (0xedb88320U & (0U - (value & 1U)));
@@ -52,13 +55,18 @@ static uint32_t checksum(const uint8_t *bytes)
 }
 
 /** 固定头部、端口映射、路由和邻居分别编码，IP 字节直接复制，其他整数明确用小端 */
-static void encode(const struct dppd_routing_service *service, const struct dppd_ipv4_configuration *configuration,
-    uint8_t bytes[DPPD_ROUTING_FILE_SIZE])
+static uint32_t encode(const struct dppd_routing_service *service, const struct dppd_ipv4_configuration *configuration,
+    uint8_t bytes[DPPD_ROUTING_DUAL_FILE_SIZE])
 {
-    memset(bytes, 0, DPPD_ROUTING_FILE_SIZE);
+    /** 纯 IPv4 文件继续使用旧版，首次出现 IPv6 后保留双栈格式，避免故障修复时降级 */
+    uint32_t size = service->expected_size == DPPD_ROUTING_DUAL_FILE_SIZE || configuration->route6_count != 0 ||
+            configuration->neighbor6_count != 0
+        ? DPPD_ROUTING_DUAL_FILE_SIZE
+        : DPPD_ROUTING_FILE_SIZE;
+    memset(bytes, 0, size);
     memcpy(bytes, "DPPIPV41", 8);
-    put(bytes + 8, 1, 4);
-    put(bytes + 12, DPPD_ROUTING_FILE_SIZE, 4);
+    put(bytes + 8, size == DPPD_ROUTING_FILE_SIZE ? 1 : 2, 4);
+    put(bytes + 12, size, 4);
     put(bytes + 16, configuration->generation, 8);
     put(bytes + 24, configuration->route_count, 4);
     put(bytes + 28, configuration->neighbor_count, 4);
@@ -86,15 +94,38 @@ static void encode(const struct dppd_routing_service *service, const struct dppd
         put(entry + 4, neighbor->port_id, 2);
         memcpy(entry + 6, neighbor->mac, 6);
     }
-    put(bytes + 32, checksum(bytes), 4);
+    if (size == DPPD_ROUTING_DUAL_FILE_SIZE) {
+        put(bytes + 40, configuration->route6_count, 4);
+        put(bytes + 44, configuration->neighbor6_count, 4);
+        for (uint32_t i = 0; i < configuration->route6_count; ++i) {
+            uint8_t *entry = bytes + ROUTE6_OFFSET + 40U * i;
+            const struct dppd_ipv6_route *route = &configuration->routes6[i];
+            memcpy(entry, route->prefix, 16);
+            memcpy(entry + 16, route->gateway, 16);
+            put(entry + 32, route->port_id, 2);
+            entry[34] = route->depth;
+        }
+        for (uint32_t i = 0; i < configuration->neighbor6_count; ++i) {
+            uint8_t *entry = bytes + NEIGHBOR6_OFFSET + 24U * i;
+            const struct dppd_ipv6_neighbor *neighbor = &configuration->neighbors6[i];
+            memcpy(entry, neighbor->address, 16);
+            put(entry + 16, neighbor->port_id, 2);
+            memcpy(entry + 18, neighbor->mac, 6);
+        }
+    }
+    put(bytes + 32, checksum(bytes, size), 4);
+    return size;
 }
 
 static int decode(struct dppd_routing_service *service, const uint8_t *bytes,
     struct dppd_ipv4_configuration *configuration)
 {
-    if (memcmp(bytes, "DPPIPV41", 8) != 0 || get(bytes + 8, 4) != 1 || get(bytes + 12, 4) != DPPD_ROUTING_FILE_SIZE ||
-        get(bytes + 32, 4) != checksum(bytes) || get(bytes + 24, 4) > DPPD_IPV4_ROUTE_LIMIT ||
-        get(bytes + 28, 4) > DPPD_IPV4_NEIGHBOR_LIMIT)
+    uint32_t size = service->expected_size;
+    bool dual = size == DPPD_ROUTING_DUAL_FILE_SIZE;
+    if (memcmp(bytes, "DPPIPV41", 8) != 0 || get(bytes + 8, 4) != (dual ? 2U : 1U) || get(bytes + 12, 4) != size ||
+        get(bytes + 32, 4) != checksum(bytes, size) || get(bytes + 24, 4) > DPPD_IPV4_ROUTE_LIMIT ||
+        get(bytes + 28, 4) > DPPD_IPV4_NEIGHBOR_LIMIT ||
+        (dual && (get(bytes + 40, 4) > DPPD_IPV4_ROUTE_LIMIT || get(bytes + 44, 4) > DPPD_IPV4_NEIGHBOR_LIMIT)))
         return -EBADMSG;
     memset(configuration, 0, sizeof(*configuration));
     configuration->generation = get(bytes + 16, 8);
@@ -115,10 +146,29 @@ static int decode(struct dppd_routing_service *service, const uint8_t *bytes,
         neighbor->port_id = (uint16_t)get(entry + 4, 2);
         memcpy(neighbor->mac, entry + 6, 6);
     }
-    uint8_t canonical[DPPD_ROUTING_FILE_SIZE];
+    if (dual) {
+        configuration->route6_count = (uint32_t)get(bytes + 40, 4);
+        configuration->neighbor6_count = (uint32_t)get(bytes + 44, 4);
+        for (uint32_t i = 0; i < configuration->route6_count; ++i) {
+            const uint8_t *entry = bytes + ROUTE6_OFFSET + 40U * i;
+            struct dppd_ipv6_route *route = &configuration->routes6[i];
+            memcpy(route->prefix, entry, 16);
+            memcpy(route->gateway, entry + 16, 16);
+            route->port_id = (uint16_t)get(entry + 32, 2);
+            route->depth = entry[34];
+        }
+        for (uint32_t i = 0; i < configuration->neighbor6_count; ++i) {
+            const uint8_t *entry = bytes + NEIGHBOR6_OFFSET + 24U * i;
+            struct dppd_ipv6_neighbor *neighbor = &configuration->neighbors6[i];
+            memcpy(neighbor->address, entry, 16);
+            neighbor->port_id = (uint16_t)get(entry + 16, 2);
+            memcpy(neighbor->mac, entry + 18, 6);
+        }
+    }
+    uint8_t canonical[DPPD_ROUTING_DUAL_FILE_SIZE];
     encode(service, configuration, canonical);
     /* 完整比较同时约束端口身份、保留位、字符串尾部和未使用槽位 */
-    return memcmp(bytes, canonical, sizeof(canonical)) == 0 ? 0 : -EXDEV;
+    return memcmp(bytes, canonical, size) == 0 ? 0 : -EXDEV;
 }
 
 static int file_identity(int fd, const char *path, off_t size)
@@ -156,11 +206,11 @@ static int unchanged(struct dppd_routing_service *service)
         return -ESTALE;
     int rc = file_identity(service->lock_fd, service->lock_path, 0);
     if (rc == 0 && service->snapshot_fd >= 0) {
-        rc = file_identity(service->snapshot_fd, service->path, DPPD_ROUTING_FILE_SIZE);
-        uint8_t bytes[DPPD_ROUTING_FILE_SIZE];
+        rc = file_identity(service->snapshot_fd, service->path, service->expected_size);
+        uint8_t bytes[DPPD_ROUTING_DUAL_FILE_SIZE];
         if (rc == 0)
-            rc = read_exact(service->snapshot_fd, bytes, sizeof(bytes));
-        if (rc == 0 && memcmp(bytes, service->expected, sizeof(bytes)) != 0)
+            rc = read_exact(service->snapshot_fd, bytes, service->expected_size);
+        if (rc == 0 && memcmp(bytes, service->expected, service->expected_size) != 0)
             rc = -EBADMSG;
     }
     return rc;
@@ -183,11 +233,11 @@ static int save(void *context, const struct dppd_ipv4_configuration *configurati
         rc = -errno;
         goto fail;
     }
-    uint8_t bytes[DPPD_ROUTING_FILE_SIZE];
-    encode(service, configuration, bytes);
+    uint8_t bytes[DPPD_ROUTING_DUAL_FILE_SIZE];
+    uint32_t size = encode(service, configuration, bytes);
     size_t done = 0;
-    while (done < sizeof(bytes)) {
-        ssize_t written = pwrite(fd, bytes + done, sizeof(bytes) - done, (off_t)done);
+    while (done < size) {
+        ssize_t written = pwrite(fd, bytes + done, size - done, (off_t)done);
         if (written < 0 && errno == EINTR)
             continue;
         if (written <= 0) {
@@ -212,7 +262,8 @@ static int save(void *context, const struct dppd_ipv4_configuration *configurati
     if (service->snapshot_fd >= 0)
         close(service->snapshot_fd);
     service->snapshot_fd = fd;
-    memcpy(service->expected, bytes, sizeof(bytes));
+    service->expected_size = size;
+    memcpy(service->expected, bytes, size);
     fd = -1;
     if (fsync(service->directory_fd) != 0) {
         rc = -errno;
@@ -348,9 +399,19 @@ int dppd_routing_open(struct dppd_routing_service **result, const char *path,
     struct dppd_ipv4_configuration initial = {.generation = 1};
     service->snapshot_fd = open(service->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (service->snapshot_fd >= 0) {
-        rc = file_identity(service->snapshot_fd, service->path, DPPD_ROUTING_FILE_SIZE);
+        struct stat metadata;
+        if (fstat(service->snapshot_fd, &metadata) != 0) {
+            rc = -errno;
+            goto fail;
+        }
+        if (metadata.st_size != DPPD_ROUTING_FILE_SIZE && metadata.st_size != DPPD_ROUTING_DUAL_FILE_SIZE) {
+            rc = -EBADMSG;
+            goto fail;
+        }
+        service->expected_size = (uint32_t)metadata.st_size;
+        rc = file_identity(service->snapshot_fd, service->path, service->expected_size);
         if (rc == 0)
-            rc = read_exact(service->snapshot_fd, service->expected, sizeof(service->expected));
+            rc = read_exact(service->snapshot_fd, service->expected, service->expected_size);
         if (rc == 0)
             rc = decode(service, service->expected, &initial);
     } else if (errno != ENOENT)
@@ -363,9 +424,9 @@ int dppd_routing_open(struct dppd_routing_service **result, const char *path,
     struct dppd_ipv4_configuration canonical;
     rc = dppd_ipv4_router_get(service->router, &canonical);
     if (rc == 0 && service->snapshot_fd >= 0) {
-        uint8_t bytes[DPPD_ROUTING_FILE_SIZE];
+        uint8_t bytes[DPPD_ROUTING_DUAL_FILE_SIZE];
         encode(service, &canonical, bytes);
-        if (memcmp(bytes, service->expected, sizeof(bytes)) != 0)
+        if (memcmp(bytes, service->expected, service->expected_size) != 0)
             rc = -EBADMSG;
         if (rc == 0)
             rc = unchanged(service);
@@ -447,4 +508,6 @@ void dppd_routing_status(struct dppd_routing_service *service, struct dppd_routi
     status->persisted_generation = service->persisted_generation;
     status->route_count = configuration.route_count;
     status->neighbor_count = configuration.neighbor_count;
+    status->route6_count = configuration.route6_count;
+    status->neighbor6_count = configuration.neighbor6_count;
 }
