@@ -150,8 +150,11 @@ static int compile_rule(const struct dppd_rule *rule, struct compiled_flow *comp
         compiled->attr.ingress = 1;
     else if (rule->domain == DPPD_RULE_DOMAIN_EGRESS)
         compiled->attr.egress = 1;
-    else
+    else {
+        /** transfer 将规则交给交换域，仍需指定入方向以匹配源端口进入交换域的报文 */
+        compiled->attr.ingress = 1;
         compiled->attr.transfer = 1;
+    }
 
     for (i = 0; i < rule->nb_matches; ++i) {
         rc = compile_match(&rule->matches[i], i, compiled);
@@ -363,8 +366,14 @@ int dppd_flow_query_count(const struct dppd_flow_handle *handle, uint64_t *hits,
     rc = rte_flow_query(handle->port_id, handle->flow, &action, &query, &flow_error);
     if (rc != 0)
         return report_error(error, rc, "query count", &flow_error);
-    *hits = query.hits_set ? query.hits : 0;
-    *bytes = query.bytes_set ? query.bytes : 0;
+    /** 有效位未设置表示驱动没有提供该计数，不能把缺失结果解释成零命中 */
+    if (!query.hits_set || !query.bytes_set) {
+        flow_error.message = "driver did not provide both packet and byte counters";
+        return report_error(error, -ENODATA, "query count", &flow_error);
+    }
+    /** 两项都确认有效后一次返回，任何失败都保留调用方原有的两个输出值 */
+    *hits = query.hits;
+    *bytes = query.bytes;
     return 0;
 }
 

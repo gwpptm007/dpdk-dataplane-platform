@@ -33,6 +33,7 @@ int dppd_flow_create_owned(uint16_t port_id, const struct dppd_rule *rule, const
 int dppd_flow_install(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
     struct dppd_flow_error *error);
 int dppd_flow_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *error);
+/** 驱动必须同时提供包数和字节数，缺少任一项返回 ENODATA，失败时两个输出值均保持不变 */
 int dppd_flow_query_count(const struct dppd_flow_handle *handle, uint64_t *hits, uint64_t *bytes,
     struct dppd_flow_error *error);
 int dppd_flow_flush(uint16_t port_id, struct dppd_flow_error *error);
