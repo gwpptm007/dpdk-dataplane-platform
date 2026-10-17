@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <string.h>
 #include "dppd/planner.h"
+#include "dppd/software_backend.h"
 
 static struct dppd_rule ingress_rule(enum dppd_fallback_policy fallback)
 {
@@ -51,8 +52,38 @@ static struct dppd_topology topology(void)
     return result;
 }
 
+/** QUEUE 的 RX 分流不能由 TX 队列冒充，三种策略和软件强制模式都不得静默模拟 */
+static void test_queue_semantics(void)
+{
+    struct dppd_topology discovered = topology();
+    for (unsigned int feature = 0; feature < 3; ++feature)
+        for (unsigned int hardware = 0; hardware < 2; ++hardware)
+            for (enum dppd_fallback_policy policy = DPPD_FALLBACK_REQUIRE_HARDWARE;
+                 policy <= DPPD_FALLBACK_SOFTWARE_ONLY; ++policy) {
+                struct dppd_rule rule = ingress_rule(policy);
+                rule.install_port_id = 10;
+                rule.actions[0].type = DPPD_ACTION_QUEUE;
+                rule.actions[0].conf.queue_id = 1;
+                struct dppd_planner_context context = {.topology = &discovered,
+                    .install_port_id = 10,
+                    .hardware_available = hardware != 0,
+                    .software_equivalent = dppd_software_backend_rule_supported(&rule),
+                    .connection_tracking = feature == 1,
+                    .neighbor_discovery = feature == 2};
+                assert(!context.software_equivalent);
+                struct dppd_execution_plan plan;
+                int rc = dppd_plan_rule(&context, &rule, &plan);
+                if (feature == 0 && hardware && policy != DPPD_FALLBACK_SOFTWARE_ONLY) {
+                    assert(rc == 0 && plan.backend == DPPD_PLAN_BACKEND_RTE_FLOW && plan.requires_validation);
+                    assert(!plan.fallback_used);
+                } else
+                    assert(rc == -ENOTSUP && !plan.fallback_used);
+            }
+}
+
 int main(void)
 {
+    test_queue_semantics();
     struct dppd_topology discovered = topology();
     struct dppd_planner_context context = {
         .topology = &discovered,

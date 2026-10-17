@@ -14,6 +14,9 @@ test('exact match hash and independent IR reference', exact_test)
 count_batch_test = executable('test_software_count_batch', 'test_software_count_batch.c', dependencies: dppd_core_dep)
 test('batched rule counters and protected version lifetime', count_batch_test)
 
+tunnel_test = executable('test_tunnel', 'test_tunnel.c', dependencies: dppd_core_dep)
+test('bounded tunnel parsing and scattered packet boundaries', tunnel_test)
+
 conntrack_test = executable('test_conntrack', 'test_conntrack.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=calloc'])
 test('connection tracking lifecycle and concurrency', conntrack_test)

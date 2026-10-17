@@ -38,7 +38,12 @@
     F(nd6_tx_packets)         \
     F(nd6_queued)             \
     F(nd6_queue_drops)        \
-    F(nd6_not_ready_drops)
+    F(nd6_not_ready_drops)    \
+    F(tunnel_vxlan_packets)   \
+    F(tunnel_geneve_packets)  \
+    F(tunnel_gre_packets)     \
+    F(tunnel_malformed)       \
+    F(tunnel_unsupported)
 
 struct dppd_stats_values {
 #define DPPD_STATS_VALUE(field) uint64_t field;

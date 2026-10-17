@@ -1,5 +1,6 @@
 #include "dppd/packet.h"
 #include "dppd/ipv6.h"
+#include "dppd/tunnel.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -44,7 +45,7 @@ static int require_bytes(uint32_t offset, uint32_t length, uint32_t available_le
 }
 
 /** 按以太网、VLAN、网络层、传输层逐层前进，只在边界检查成功后访问对应字段 */
-int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
+int dppd_packet_parse_headers(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
     struct dppd_packet *packet)
 {
     uint32_t offset;
@@ -187,4 +188,14 @@ int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32
         packet->l4_type = DPPD_L4_OTHER;
         return DPPD_PARSE_OK;
     }
+}
+
+/** 中转策略仍读取外层，内层错误独立记录，不能把关键选项的终端限制套用到中转路由 */
+int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
+    struct dppd_packet *packet)
+{
+    int rc = dppd_packet_parse_headers(data, available_len, packet_len, packet);
+    if (rc == DPPD_PARSE_OK)
+        (void)dppd_tunnel_parse_buffer(data, available_len, packet_len, packet);
+    return rc;
 }

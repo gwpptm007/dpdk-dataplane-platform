@@ -202,6 +202,14 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             delta.rx_bytes += length;
         int parsed = dppd_packet_parse_mbuf(rx[i], &packet);
         packet.neighbor_retry = retry;
+        /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */
+        if (!retry) {
+            delta.tunnel_vxlan_packets += packet.tunnel.type == DPPD_TUNNEL_VXLAN;
+            delta.tunnel_geneve_packets += packet.tunnel.type == DPPD_TUNNEL_GENEVE;
+            delta.tunnel_gre_packets += packet.tunnel.type == DPPD_TUNNEL_GRE;
+            delta.tunnel_malformed += packet.tunnel.status == DPPD_PARSE_MALFORMED;
+            delta.tunnel_unsupported += packet.tunnel.status == DPPD_PARSE_UNSUPPORTED;
+        }
         if (parsed == DPPD_PARSE_MALFORMED)
             delta.rx_malformed++;
         else if (parsed == DPPD_PARSE_UNSUPPORTED)

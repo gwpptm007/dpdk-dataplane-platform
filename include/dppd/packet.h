@@ -43,6 +43,30 @@ enum dppd_l4_type {
     DPPD_L4_OTHER,
 };
 
+enum dppd_tunnel_type {
+    DPPD_TUNNEL_NONE = 0,
+    DPPD_TUNNEL_VXLAN,
+    DPPD_TUNNEL_GENEVE,
+    DPPD_TUNNEL_GRE,
+};
+
+/** 隧道只提供一层只读元数据，外层地址、端口、VLAN 与转发策略始终保留原义 */
+struct dppd_tunnel_info {
+    enum dppd_tunnel_type type;
+    int status;
+    uint32_t identifier, sequence, inner_offset, inner_length;
+    uint16_t header_len, inner_protocol;
+    bool has_key, has_sequence, has_checksum, critical, inner_valid;
+    enum dppd_l3_type inner_l3;
+    enum dppd_l4_type inner_l4;
+    uint8_t inner_ip_protocol;
+    uint8_t inner_vlan_depth;
+    uint16_t inner_vlan_tci[2], inner_vlan_tpid[2];
+    uint32_t inner_src_be, inner_dst_be;
+    uint8_t inner_src6[16], inner_dst6[16];
+    uint16_t inner_src_port_be, inner_dst_port_be;
+};
+
 /**
  * 从报文头提取的字段副本，不保存原始报文指针，也不拥有报文内存
  * 软件规则匹配使用这里的字段，读取协议专用字段前必须先检查对应的协议类型
@@ -82,6 +106,7 @@ struct dppd_packet {
     bool ipv4_more_fragments;
     /** ND 等待包重走最新策略时不重复累计接收与 COUNT，报文字节中没有这个内部标记 */
     bool neighbor_retry;
+    struct dppd_tunnel_info tunnel;
 };
 
 /**
@@ -91,6 +116,9 @@ struct dppd_packet {
  * 本函数不验证校验和、不重组分片，也不解析应用层内容，packet 必须为有效输出对象
  */
 int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
+    struct dppd_packet *packet);
+/** 基础解析供隧道内部复用，不递归进入下一级隧道，也不覆盖外层元数据 */
+int dppd_packet_parse_headers(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
     struct dppd_packet *packet);
 /** 从单段或多段 mbuf 提取有限长度的连续报文头后解析，不修改、不释放原始报文 */
 int dppd_packet_parse_mbuf(const struct rte_mbuf *mbuf, struct dppd_packet *packet);

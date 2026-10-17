@@ -7,7 +7,7 @@
  * 只准备固定大小的报文头缓冲区，不复制整包负载
  * 可容纳双 VLAN、IPv6 固定头、有界扩展头链和最长 TCP 头，不复制整个数据负载
  */
-#define DPPD_HEADER_SCRATCH 512U
+#define DPPD_HEADER_SCRATCH 1024U
 
 /** 将可能分散在多个内存段的报文头交给连续缓冲区解析器，保持原始 mbuf 的布局不变 */
 int dppd_packet_parse_mbuf(const struct rte_mbuf *mbuf, struct dppd_packet *packet)

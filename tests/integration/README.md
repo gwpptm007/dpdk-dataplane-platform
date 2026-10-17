@@ -1,5 +1,18 @@
 # 集成验收
 
+## M2 整体验收
+
+```sh
+sudo python3 scripts/verify_m2.py --build-dir build --tap
+sudo python3 tests/integration/tunnel_traffic.py --build-dir build
+```
+
+统一入口要求 `tests=true`、`werror=true`，包含全部单测、单双队列正式 worker，以及
+IPv4 路由、ACL、连接跟踪、DNAT、IPv6、NAT66、ND 和 VXLAN/Geneve/GRE 的真实 TAP
+验收。任一失败、单测跳过或源码中途变化均使结果失败，日志和摘要保存到构建目录
+`m2-acceptance/`，见 [M2 验收记录](../../docs/m2_acceptance.md) 和
+[隧道使用边界](../../docs/tunnels.md)。
+
 ## IPv6 动态邻居发现
 
 ```sh

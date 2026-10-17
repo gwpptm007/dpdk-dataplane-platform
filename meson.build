@@ -46,6 +46,7 @@ dppd_sources = files(
   'lib/dataplane/software_backend.c',
   'lib/dataplane/acl.c',
   'lib/dataplane/exact.c',
+  'lib/dataplane/tunnel.c',
   'lib/dataplane/conntrack.c',
   'lib/dataplane/transport.c',
   'lib/dataplane/worker.c',
