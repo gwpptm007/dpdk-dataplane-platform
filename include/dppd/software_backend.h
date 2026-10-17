@@ -14,6 +14,25 @@
 struct dppd_software_classifier_snapshot;
 struct dppd_software_retired_snapshot;
 struct rte_rcu_qsbr;
+struct dppd_software_backend;
+struct dppd_software_decision;
+struct dppd_software_rule_metrics;
+
+/** 每批先合并相同规则版本的 COUNT，满 32 个不同对象时先提交再继续接收 */
+#define DPPD_SOFTWARE_COUNT_BATCH_SIZE 32U
+struct dppd_software_count_batch {
+    uint16_t count;
+    struct {
+        struct dppd_software_rule_metrics *metrics;
+        uint64_t hits, bytes;
+    } entries[DPPD_SOFTWARE_COUNT_BATCH_SIZE];
+};
+
+/** 批次初始清零，必须在 QSBR 静默、线程下线或退出前提交，不能跨越快照保护期 */
+void dppd_software_count_batch_flush(struct dppd_software_count_batch *batch);
+/** 与逐包判定完全相同，只将 COUNT 暂存到调用方的批次，NULL 表示立即累计 */
+void dppd_software_backend_decide_counted(struct dppd_software_backend *backend, uint16_t ingress_port,
+    const struct dppd_packet *packet, struct dppd_software_decision *decision, struct dppd_software_count_batch *batch);
 
 /**
  * 软件 classifier 的活跃规则集采用不可变 snapshot：worker 只原子读取 active

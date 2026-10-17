@@ -772,8 +772,41 @@ static bool rule_before(const struct dppd_rule *a, uint32_t a_tag, const struct 
     return a_tag < b_tag;
 }
 
-void dppd_software_backend_decide(struct dppd_software_backend *backend, uint16_t ingress_port,
-    const struct dppd_packet *packet, struct dppd_software_decision *decision)
+void dppd_software_count_batch_flush(struct dppd_software_count_batch *batch)
+{
+    if (batch == NULL)
+        return;
+    for (uint16_t i = 0; i < batch->count; ++i) {
+        atomic_fetch_add_explicit(&batch->entries[i].metrics->hits, batch->entries[i].hits, memory_order_relaxed);
+        atomic_fetch_add_explicit(&batch->entries[i].metrics->bytes, batch->entries[i].bytes, memory_order_relaxed);
+    }
+    batch->count = 0;
+}
+
+/** 对象身份包含规则版本，不能只按规则 ID 合并新旧版本的命中 */
+static void count_packet(struct dppd_software_rule_metrics *metrics, uint32_t bytes,
+    struct dppd_software_count_batch *batch)
+{
+    if (batch == NULL) {
+        atomic_fetch_add_explicit(&metrics->hits, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&metrics->bytes, bytes, memory_order_relaxed);
+        return;
+    }
+    for (uint16_t i = 0; i < batch->count; ++i)
+        if (batch->entries[i].metrics == metrics) {
+            batch->entries[i].hits++;
+            batch->entries[i].bytes += bytes;
+            return;
+        }
+    if (batch->count == DPPD_SOFTWARE_COUNT_BATCH_SIZE)
+        dppd_software_count_batch_flush(batch);
+    batch->entries[batch->count].metrics = metrics;
+    batch->entries[batch->count].hits = 1;
+    batch->entries[batch->count++].bytes = bytes;
+}
+
+void dppd_software_backend_decide_counted(struct dppd_software_backend *backend, uint16_t ingress_port,
+    const struct dppd_packet *packet, struct dppd_software_decision *decision, struct dppd_software_count_batch *batch)
 {
     struct dppd_software_classifier_snapshot *active;
     struct dppd_software_rule_object *selected = NULL;
@@ -810,10 +843,14 @@ void dppd_software_backend_decide(struct dppd_software_backend *backend, uint16_
             else if (source->type == DPPD_ACTION_MARK) {
                 decision->has_mark = true;
                 decision->mark_id = source->conf.mark_id;
-            } else if (source->type == DPPD_ACTION_COUNT && !packet->neighbor_retry) {
-                atomic_fetch_add_explicit(&selected->metrics->hits, 1, memory_order_relaxed);
-                atomic_fetch_add_explicit(&selected->metrics->bytes, packet->packet_len, memory_order_relaxed);
-            }
+            } else if (source->type == DPPD_ACTION_COUNT && !packet->neighbor_retry)
+                count_packet(selected->metrics, packet->packet_len, batch);
         }
     }
+}
+
+void dppd_software_backend_decide(struct dppd_software_backend *backend, uint16_t ingress_port,
+    const struct dppd_packet *packet, struct dppd_software_decision *decision)
+{
+    dppd_software_backend_decide_counted(backend, ingress_port, packet, decision, NULL);
 }

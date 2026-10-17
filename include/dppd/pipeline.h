@@ -7,6 +7,7 @@
 #include "dppd/ipv4_router.h"
 
 struct dppd_software_backend;
+struct dppd_software_count_batch;
 
 /** 一条静态端口配对记录：从 ingress_port 收到的报文默认交给 egress_port */
 struct dppd_port_peer {
@@ -79,5 +80,10 @@ void dppd_pipeline_decide(const struct dppd_forwarding_snapshot *snapshot,
 void dppd_pipeline_decide_routed(const struct dppd_forwarding_snapshot *snapshot,
     struct dppd_software_backend *software_backend, struct dppd_ipv4_router *router, uint16_t ingress_port,
     int parse_status, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision);
+/** 正式 worker 将同一接收批次的规则 COUNT 归并，调用方负责在 QSBR 静默前提交 */
+void dppd_pipeline_decide_counted(const struct dppd_forwarding_snapshot *snapshot,
+    struct dppd_software_backend *software_backend, struct dppd_ipv4_router *router, uint16_t ingress_port,
+    int parse_status, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision,
+    struct dppd_software_count_batch *counts);
 
 #endif

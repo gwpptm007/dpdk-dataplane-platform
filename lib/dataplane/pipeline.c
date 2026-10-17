@@ -8,9 +8,10 @@
  * 把解析结果、软件策略和静态端口配对合成为处理决定，不在这里发送或释放报文
  * 畸形报文最先丢弃；不支持解析的协议并不等于畸形，仍可按已有字段匹配或查路由
  */
-void dppd_pipeline_decide_routed(const struct dppd_forwarding_snapshot *snapshot,
+void dppd_pipeline_decide_counted(const struct dppd_forwarding_snapshot *snapshot,
     struct dppd_software_backend *software_backend, struct dppd_ipv4_router *router, uint16_t ingress_port,
-    int parse_status, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision)
+    int parse_status, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision,
+    struct dppd_software_count_batch *counts)
 {
     memset(decision, 0, sizeof(*decision));
 
@@ -31,7 +32,7 @@ void dppd_pipeline_decide_routed(const struct dppd_forwarding_snapshot *snapshot
          * 不会因后续路由查找失败而被重写为 NO_ROUTE；MARK 则随正常转发结果向下传递
          */
         /** COUNT 在规则命中时已累计，因此后续无路由或发送失败也不会撤销这次计数 */
-        dppd_software_backend_decide(software_backend, ingress_port, packet, &software_decision);
+        dppd_software_backend_decide_counted(software_backend, ingress_port, packet, &software_decision, counts);
         if (software_decision.drop) {
             decision->action = DPPD_PACKET_DROP;
             decision->drop_reason = DPPD_DROP_POLICY;
@@ -69,6 +70,14 @@ void dppd_pipeline_decide_routed(const struct dppd_forwarding_snapshot *snapshot
 
     decision->action = DPPD_PACKET_FORWARD;
     decision->drop_reason = DPPD_DROP_NONE;
+}
+
+void dppd_pipeline_decide_routed(const struct dppd_forwarding_snapshot *snapshot,
+    struct dppd_software_backend *software_backend, struct dppd_ipv4_router *router, uint16_t ingress_port,
+    int parse_status, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision)
+{
+    dppd_pipeline_decide_counted(snapshot, software_backend, router, ingress_port, parse_status, packet, decision,
+        NULL);
 }
 
 void dppd_pipeline_decide(const struct dppd_forwarding_snapshot *snapshot,

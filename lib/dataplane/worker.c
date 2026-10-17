@@ -68,10 +68,10 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
 
 /** 先执行原有 ACL 和静态查表，只有缺少静态邻居时才查询动态缓存 */
 static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int parsed, const struct dppd_packet *packet,
-    struct dppd_pipeline_decision *decision)
+    struct dppd_pipeline_decision *decision, struct dppd_software_count_batch *counts)
 {
-    dppd_pipeline_decide_routed(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,
-        packet, decision);
+    dppd_pipeline_decide_counted(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,
+        packet, decision, counts);
     if (runtime->nd6 == NULL || packet->l3_type != DPPD_L3_IPV6)
         return;
     if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR) {
@@ -117,7 +117,8 @@ static enum dppd_drop_reason stateful_error(int error)
 
 /** 反向 NAT 先恢复逻辑目的地址供 ACL 和路由使用，线缆字节只在最终放行后统一改写 */
 static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **mbuf,
-    int parsed, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision)
+    int parsed, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision,
+    struct dppd_software_count_batch *counts)
 {
     struct dppd_runtime *runtime = worker->runtime;
     struct dppd_connection_attempt attempt = {0};
@@ -142,13 +143,14 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
     if (parsed != DPPD_PARSE_MALFORMED && rc != 0) {
         /** INVALID 规则仍可记录拒绝计数，但允许动作不能把校验错误或无会话回包放行 */
         struct dppd_software_decision policy_result = {0};
-        dppd_software_backend_decide(runtime->software_backend, ingress->port_id, &policy, &policy_result);
+        dppd_software_backend_decide_counted(runtime->software_backend, ingress->port_id, &policy, &policy_result,
+            counts);
         memset(decision, 0, sizeof(*decision));
         decision->drop_reason = policy_result.drop ? DPPD_DROP_POLICY : stateful_error(rc);
         dppd_conntrack_finish(&attempt, 0, false);
         return;
     }
-    routed_decide(runtime, ingress->port_id, parsed, &policy, decision);
+    routed_decide(runtime, ingress->port_id, parsed, &policy, decision, counts);
     if (decision->action != DPPD_PACKET_FORWARD) {
         dppd_conntrack_finish(&attempt, 0, false);
         return;
@@ -184,6 +186,7 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
     uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];
     uint16_t counts[DPPD_MAX_PORTS] = {0};
     struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};
+    struct dppd_software_count_batch rule_counts = {0};
     if (dppd_devices_removal_requested(&runtime->devices))
         return;
     if (received == 0)
@@ -217,9 +220,9 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
         }
         /** 两种地址族都经过状态 ACL 和会话提交，失败候选不能占用 NAT 端口或刷新超时 */
         if (runtime->conntrack != NULL)
-            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision);
+            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);
         else
-            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision);
+            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);
         if (decision.drop_reason == DPPD_DROP_ND_PENDING) {
             struct dppd_nd6_pending pending = {.mbuf = rx[i],
                 .ingress = ingress->port_id,
@@ -327,6 +330,8 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
         tx_lengths[index][counts[index]] = length;
         tx[index][counts[index]++] = rx[i];
     }
+    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */
+    dppd_software_count_batch_flush(&rule_counts);
     for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)
         flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,
             &outputs[index]);
