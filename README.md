@@ -19,8 +19,9 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - ethdev/representor/switch-domain 拓扑发现、带证据的 mlx5 uplink/PF/VF/SF 角色识别，以及七种 transfer 场景的规划与安装，见 [M3 控制闭环](docs/m3_transfer.md)；
 - 统一 rule IR 到 `rte_flow` 的真实 validate/create/query/destroy/flush；
 - AGE 闲置超时、独立驱动查询、有限预算自动回收、精确删除及 v4 快照，见 [AGE 闭环](docs/m3_age.md)；
+- indirect 共享 COUNT、精确版本绑定、引用保护、独立汇总查询和 v5 单快照，见 [共享计数](docs/m3_shared_count.md)；
 - 带稳定 ID、generation、幂等更新和乐观并发控制的 rule repository；
-- versioned rule snapshot v2/v3/v4、install port、CRC32、原子替换、dirty 写路径、fail-closed 启动重放、v1 单端口离线迁移和进程内 recovery isolation；
+- versioned rule snapshot v2/v3/v4/v5、install port、CRC32、原子替换、dirty 写路径、fail-closed 启动重放、v1 单端口离线迁移和进程内 recovery isolation；
 - 可解释的软硬件 planner，以及 validate/prepare/commit/rollback transaction engine；
 - 连接 desired repository 与真实 `rte_flow` 对象仓库、支持 generation replacement 的进程内 control service；
 - 版本化 Unix `SOCK_SEQPACKET` 管理接口和 `dppctl`，支持端口能力查询、generation 稳定分页、完整规则详情、单规则 apply/delete 及硬件 COUNT 查询；
@@ -35,25 +36,32 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - 本机 `rule-status` 查询实际后端、安装端口、COUNT 配置和后端提交耗时，详见 [规则安装状态](docs/rule_status.md)；
 - 本机 `health/ready`、全部未就绪原因、工作线程实际状态和异常结束监控，详见 [健康与就绪](docs/health_readiness.md)。
 
-当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v25）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2/v3/v4 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency/rule-history` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。受控本地 TAP 跨进程恢复已接通；其他 PMD 的自动 reconciliation、degraded recovery 和 flow template 仍待实现，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
+当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v26）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2/v3/v4/v5 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency/rule-history` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。受控本地 TAP 跨进程恢复已接通；其他 PMD 的自动 reconciliation、degraded recovery 和 flow template 仍待实现，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
 
 常用 VXLAN、Geneve、GRE 隧道自动解析及中转限制见 [隧道说明](docs/tunnels.md)，
 M2 软件数据面已通过阶段验收，两套构建各 50/50 单测与完整 TAP 验收通过，
 交付范围、阶段限制和可重复执行的入口见 [M2 验收](docs/m2_acceptance.md)。
-M3 已交付角色发现、transfer 图、正式管理入口和 AGE 控制路径；当前环境可运行模拟与软件回归，
+M3 已交付角色发现、transfer 图、正式管理入口、AGE 和共享 COUNT 控制路径；当前环境可运行模拟与软件回归，
 实机设备、CPU 旁路及复位恢复的边界见 [M3 验收](docs/m3_acceptance.md)。
 不接实体网卡也可运行 `python3 scripts/simulate_m3.py demo --build-dir build`，
-用真实命令行演练正向转发、计数、AGE 闲置老化、失败回滚和重启，见 [M3 功能模拟](docs/m3_simulation.md)。
+用真实命令行演练正向转发、私有与共享计数、AGE 闲置老化、失败回滚和重启，见 [M3 功能模拟](docs/m3_simulation.md)。
 
 ## 快速开始
 
-管理协议 v25 增加 `age-status`、`rule-age` 和 transfer 的 `age:N`，保留端口角色与身份线索、`transfer-plan/transfer-apply`，保留隧道识别与错误统计、动态 ND 状态、分页、精确清空和 DAD 就绪检查，保留 IPv6 会话和 NAT66 地址/策略查询，保留 IPv6 ACL、双栈路由/邻居及 IPv6 丢弃原因，保留静态 DNAT 查询和会话映射信息，保留会话管理、NAT 状态、状态 ACL 和跟踪丢弃原因，保留 ACL、路由/邻居、规则历史、耗时、指标、能力画像和探测，
+管理协议 v26 增加 `shared-count-create/get/query/delete/list` 和 transfer 的
+`shared-count:ID:GEN`，保留 `age-status`、`rule-age` 和 `age:N`，保留端口角色与身份线索、`transfer-plan/transfer-apply`，保留隧道识别与错误统计、动态 ND 状态、分页、精确清空和 DAD 就绪检查，保留 IPv6 会话和 NAT66 地址/策略查询，保留 IPv6 ACL、双栈路由/邻居及 IPv6 丢弃原因，保留静态 DNAT 查询和会话映射信息，保留会话管理、NAT 状态、状态 ACL 和跟踪丢弃原因，保留 ACL、路由/邻居、规则历史、耗时、指标、能力画像和探测，
 保留 `rule-status` 的实际后端与提交耗时、`health/ready` 的线程状态和 `port-show` 的链路状态。
 daemon 持续检测链路，出口断开时释放
 需要转发的报文并记录 egress drops，恢复后沿用原规则、COUNT 和 snapshot 自动
 继续转发；链路查询异常或设备移除通知触发停止收发、等待线程与回调结束后失败退出，
 修复后可从快照重启。进程内重新枚举和热重配仍未实现，物理热拔插尚未验收。
 daemon 与 CLI 需要一起更新，旧版本客户端会被拒绝。
+
+共享 COUNT 要求规则与对象使用相同安装口和域，不能与私有 `count` 混用；
+只有 `shared-count-query` 返回汇总，引用规则的私有计数查询返回 `ENODATA`。
+共享定义与规则保存为 v5，重启先恢复对象再恢复规则，累计归零。native
+`--recovery-path` 安装日志尚不能记录 indirect，明确拒绝共享操作为 `ENOTSUP`；
+共享 RSS/METER/AGE 尚未实现，实机共享能力尚未验收，见 [共享 COUNT](docs/m3_shared_count.md)。
 
 通过 `dppctl rule-metrics` 可查询最近失败和本进程累计结果。Telemetry 提供
 `/dppd/rule_failures`、`/dppd/rules` 和 `/dppd/rule,ID`，按完整副本发布规则状态，

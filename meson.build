@@ -53,6 +53,7 @@ dppd_sources = files(
   'lib/dataplane/transport.c',
   'lib/dataplane/worker.c',
   'lib/offload/rte_flow.c',
+  'lib/offload/shared_count.c',
   'lib/offload/rte_flow_backend.c',
   'lib/offload/capability.c',
   'lib/observability/stats.c',

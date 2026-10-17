@@ -81,6 +81,8 @@ enum dppd_action_type {
     DPPD_ACTION_ALLOW,
     /** 超过指定秒数没有命中时报告老化，是否删除由控制面按精确版本决定 */
     DPPD_ACTION_AGE,
+    /** 引用共享计数对象的精确身份，禁止把进程内驱动指针放进规则或快照 */
+    DPPD_ACTION_SHARED_COUNT,
 };
 
 struct dppd_action {
@@ -90,6 +92,9 @@ struct dppd_action {
         uint32_t mark_id;
         uint16_t ethdev_port_id;
         uint32_t age_timeout_seconds;
+        struct {
+            uint64_t id, generation;
+        } shared_count;
     } conf;
 };
 

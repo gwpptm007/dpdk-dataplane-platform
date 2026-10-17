@@ -18,12 +18,14 @@ AGE 是附加动作，不决定报文去向。规则仍须保留唯一的末尾�
 represented-port 输出。transfer 模板按下面的顺序构造：
 
 ```text
-可选 COUNT → 可选 AGE → 明确的目的端点
+可选私有 COUNT 或共享 COUNT → 可选 AGE → 明确的目的端点
 ```
 
 COUNT 和 AGE 可以分别使用，也可以一起使用。COUNT 的包数和字节数不会代替 AGE
 结果，查询计数也不会让规则续期。没有 AGE 的规则不会因为 COUNT 长时间不变而被
 自动删除。双向图的两条规则分别命中、分别计时和回收，不承诺同时过期或原子删除。
+首期 [共享 COUNT](m3_shared_count.md) 也可与 AGE 共用；老化删除成功释放该规则的
+共享引用，不清对象累计，其他规则继续使用。共享 COUNT 与私有 COUNT 不能同时出现。
 
 带 AGE 的规则没有等价软件回退。PMD 拒绝完整规则或不提供 AGE 查询时，系统保留
 明确错误，不用 CPU 时间或计数变化猜测硬件是否闲置。模拟器中的时钟只存在于独立
@@ -62,14 +64,14 @@ COUNT 和 AGE 可以分别使用，也可以一起使用。COUNT 的包数和字
 
 ## 正式命令
 
-当前管理协议为 **v25**，daemon、模拟器和 `dppctl` 需要配套更新。旧客户端会被拒绝，
-不能把历史 v24 的结构体直接送给当前服务。
+当前管理协议为 **v26**，daemon、模拟器和 `dppctl` 需要配套更新。AGE 最初使用 v25，
+共享 COUNT 接入后扩展为 v26；不能把历史结构体直接送给当前服务。
 
 transfer 命令增加可选的 `age:SECONDS`：
 
 ```text
-transfer-plan ID INSTALL SRC DST TEMPLATE oneway|bidir [count] [priority:N] [age:SECONDS]
-transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED [count] [priority:N] [age:SECONDS]
+transfer-plan ID INSTALL SRC DST TEMPLATE oneway|bidir [count|shared-count:ID:GEN] [priority:N] [age:SECONDS]
+transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED [count|shared-count:ID:GEN] [priority:N] [age:SECONDS]
 age-status
 rule-age RULE_ID EXPECTED_GENERATION
 ```
@@ -94,9 +96,11 @@ rule-age RULE_ID EXPECTED_GENERATION
 
 ## 快照 v4 与重启
 
-包含 AGE 动作的规则快照写为 **v4**，保存超时配置、安装端口和规则版本，继续沿用
-CRC、私有文件权限和原子替换的保存流程。没有 AGE 的 IPv4 规则仍可保存为 v2，
-包含 IPv6 且没有 AGE 时仍可保存为 v3；当前加载器兼容 v2/v3/v4。不能把含 AGE 的
+没有共享对象或共享表历史时，包含 AGE 动作的规则快照写为 **v4**，保存超时配置、
+安装端口和规则版本，继续沿用 CRC、私有文件权限和原子替换的保存流程。存在共享
+对象、引用或非零共享表 revision 时统一写 v5，先恢复共享对象再恢复规则。
+没有 AGE 和共享历史的 IPv4 规则仍可保存为 v2，包含 IPv6 时仍可保存为 v3；
+当前加载器兼容 v2/v3/v4/v5。不能把含 AGE 的
 文件改一个版本号就伪装成旧格式，旧版本程序也不应读取新的 v4 文件。
 
 快照不保存驱动 handle、最近命中时间、当前 AGE 结果、COUNT 或模拟时钟偏移。
@@ -158,9 +162,9 @@ installed 和 desired 快照，方便看见一次失败保留对象的状态；�
 不改变系统时间，也不向真实网卡发包。超出原生 24 位范围的闲置秒数显示未知，
 到期判断仍使用完整闲置时长。
 
-## 本轮验收结果
+## AGE 轮次验收结果（历史）
 
-2026-10-18，AGE 本轮的三套最终构建完成同版本核心验收：
+2026-10-18，AGE 独立轮次（协议 v25）的三套最终构建完成同版本核心验收：
 
 | 构建 | 单测 | 核心软件回归 | 正向功能模拟 |
 | --- | --- | --- | --- |
@@ -187,7 +191,8 @@ worker 的 mbuf 归还由内存池记录另行核对。
 
 这些结果没有证明 mlx5/BlueField 或物理非 mlx5 PMD 的 AGE 支持、ASIC 定时精度、
 硬件报文续期、硬件资源回收、CPU 旁路或性能。当前也没有实现 AGE 事件通知、
-indirect/shared action 或设备复位后的完整 reconciliation；后续阶段分别实现并验收，
+共享 AGE 或设备复位后的完整 reconciliation；首期共享 COUNT 已另行接通，见
+[共享计数说明](m3_shared_count.md)。后续能力分别实现并验收，
 不能因为 DPDK 头文件中有相关接口就计为完成。
 
 主要实现见 [规则 IR](../include/dppd/rule.h)、[AGE 控制接口](../include/dppd/age.h)、

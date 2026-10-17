@@ -55,7 +55,7 @@ VXLAN/Geneve/GRE 自动观察、外层中转边界与 v23 隧道统计见 [隧�
 ./build/dppctl stats all 1    # 全部端口的队列 1
 ```
 
-管理协议为 v25，daemon 和 CLI 必须一起更新，旧客户端不会被当作当前协议接受。不存在的端口或
+管理协议为 v26，daemon 和 CLI 必须一起更新，旧客户端不会被当作当前协议接受。不存在的端口或
 队列返回 ENOENT。队列编号是运行配置中的 RX/TX queue id，不是物理 CPU/lcore id。
 这些计数记录本项目软件工作线程实际处理的报文，不是网卡硬件计数；硬件卸载后未进入
 CPU 的报文不会计入。运行时初始化后从零开始，不跨进程重启保存，不提供清零操作。
@@ -302,7 +302,7 @@ sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 ./build/dppctl update-drop-batch 0 20 prefer 200 3 201 4
 ```
 
-成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v25，daemon 和 CLI 必须一起更新。
+成功返回按输入顺序分配的连续新版本和同一个 transaction ID；即使内容相同也推进版本。旧规则和新计划全为软件时一次发布整批快照，满表也可更新，每个报文使用完整旧表或新表；发布前失败保留旧表和计数，新版本 COUNT 从零开始。每个 backend 的本地容量仍为 `--rule-capacity + 1`。硬件或混合更新仍需要额外空槽并使用失败补偿，只保证管理端 desired state 整批发布。`prefer` 保守检查硬件空间，允许整表软件替换的情况在 PMD 校验后若变成混合计划，还会复查软件临时空间，不足返回 `ENOSPC`。snapshot 落盘失败返回 `EUCLEAN` 时整批可能已经生效，应检查 `persistence-status`。详见 [批量更新](todo_batch_update.md)。管理协议为 v26，daemon 和 CLI 必须一起更新。
 
 `count RULE_ID EXPECTED_GENERATION` 查询已发布 generation 对应的 COUNT。它不会重置 counter；规则不存在、generation 已过期、规则没有 COUNT，以及当前 backend 不支持查询会分别返回错误。硬件规则的 hits/bytes 由目标 PMD 的 `rte_flow_query()` 决定；软件规则由 classifier 的原子计数器返回。
 
@@ -333,7 +333,7 @@ status 在 management socket 开放时已经是恢复完成的 clean generation�
 或被强制终止时，应使用目标 PMD/设备支持的复位或清理流程，不能直接使用全端口 flush。
 可选的 `--recovery-path` 为这种跨进程情况保存线索并阻止未确认的重放，详见上述离线流程。
 
-管理 socket 权限为 `0600`。v25 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
+管理 socket 权限为 `0600`。v26 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
 
 `health` 成功响应时退出码为 0，`live=yes` 证明管理线程能够响应；`ready` 只有
 `ready=yes` 才返回 0，否则打印全部未就绪原因并返回 1。两者都不修改规则或快照。
@@ -375,14 +375,24 @@ bash scripts/capture_pdump.sh 0 /tmp/dppd-port0.pcapng
 representor 的 EAL devargs 取决于 PMD。先使用厂商和 DPDK PMD 文档创建 PF/VF/SF representor，再查看 dppd 启动时输出的 `kind=representor`、switch domain 与 switch port。只有处于兼容 embedded-switch domain 的端点才可以规划 transfer rule。
 
 软件 worker 与硬件 transfer 是不同的执行路径。管理入口支持明确端点的 transfer 图、
-COUNT 和可选 `age:SECONDS`，具体 match/action/query 仍以目标 PMD 的
+私有 COUNT 或 `shared-count:ID:GEN`，以及可选 `age:SECONDS`，具体 match/action/query 仍以目标 PMD 的
 `rte_flow_validate()` 和 `rte_flow_query()` 结果为准。
 
 AGE 超时只接受 1 到 16777215 秒。`age-status` 读取轮询与回收状态，
 `rule-age ID EXPECTED` 查询该版本的驱动闲置结果；正式主循环按有限预算轮询，
-仅在明确到期后按精确版本删除并保存。包含 AGE 的快照写 v4，仍兼容读取 v2/v3；
+仅在明确到期后按精确版本删除并保存。不含共享历史时，包含 AGE 的快照写 v4；
+包含共享对象、共享引用或非零共享表 revision 时写 v5，仍兼容读取 v2/v3/v4；
 最近命中时间不持久化，未过期规则重启重新计时。详细错误重试和实机边界见
 [AGE 说明](m3_age.md)。
+
+`shared-count-create ID PORT ingress|egress|transfer` 创建最多 64 个共享 COUNT 对象，
+用 `shared-count-get/query ID EXPECTED` 读取定义或累计，版本允许 `any`；
+`shared-count-delete ID EXACT_GENERATION` 只接受精确版本且引用必须为零。
+`shared-count-list [AFTER_ID [EXPECTED_REVISION]]` 按 ID 分页，每页最多 4 个。
+引用规则必须同安装口、同域，不能同时使用私有 `count`；共享汇总只由对象 query
+返回。对象定义和规则保存为单个 v5 快照，重启先对象后规则，计数归零；native
+`--recovery-path` 安装日志暂不支持 indirect，会返回 `ENOTSUP`。
+精确版本、分页活引用及失败重试见 [共享 COUNT](m3_shared_count.md)。
 
 不用实体网卡时可运行 `python3 scripts/simulate_m3.py demo --build-dir build`，
 演练自然闲置、命中续期和过期重启。`advance --io-socket PATH SECONDS` 只推进模拟

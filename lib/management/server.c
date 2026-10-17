@@ -387,12 +387,37 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         request->operation != DPPD_MANAGEMENT_CONNTRACK_LIST && request->operation != DPPD_MANAGEMENT_NAT_STATUS &&
         request->operation != DPPD_MANAGEMENT_DNAT_LIST && request->operation != DPPD_MANAGEMENT_ND6_STATUS &&
         request->operation != DPPD_MANAGEMENT_ND6_LIST && request->operation != DPPD_MANAGEMENT_TRANSFER_PLAN &&
-        request->operation != DPPD_MANAGEMENT_AGE_STATUS) {
+        request->operation != DPPD_MANAGEMENT_AGE_STATUS && request->operation != DPPD_MANAGEMENT_SHARED_COUNT_GET &&
+        request->operation != DPPD_MANAGEMENT_SHARED_COUNT_LIST) {
         response->status = -EUCLEAN;
         return 0;
     }
 
     switch (request->operation) {
+    case DPPD_MANAGEMENT_SHARED_COUNT_CREATE:
+        rc = dppd_control_shared_count_create(control, &request->payload.shared_count_create,
+            &response->payload.shared_count);
+        break;
+    case DPPD_MANAGEMENT_SHARED_COUNT_GET:
+        rc = dppd_control_shared_count_get(control, request->payload.shared_count.id,
+            request->payload.shared_count.expected, &response->payload.shared_count);
+        break;
+    case DPPD_MANAGEMENT_SHARED_COUNT_QUERY:
+        rc = dppd_control_shared_count_query(control, request->payload.shared_count.id,
+            request->payload.shared_count.expected, &response->payload.shared_count_result);
+        break;
+    case DPPD_MANAGEMENT_SHARED_COUNT_DELETE:
+        rc = dppd_control_shared_count_delete(control, request->payload.shared_count.id,
+            request->payload.shared_count.expected, &response->payload.shared_count_deleted.revision);
+        if (rc == 0) {
+            response->payload.shared_count_deleted.id = request->payload.shared_count.id;
+            response->payload.shared_count_deleted.generation = request->payload.shared_count.expected;
+        }
+        break;
+    case DPPD_MANAGEMENT_SHARED_COUNT_LIST:
+        rc = dppd_control_shared_count_list(control, request->payload.shared_count_list.after_id,
+            request->payload.shared_count_list.expected_revision, &response->payload.shared_count_page);
+        break;
     case DPPD_MANAGEMENT_AGE_STATUS:
         rc = dppd_control_age_status(control, &response->payload.age_status);
         break;

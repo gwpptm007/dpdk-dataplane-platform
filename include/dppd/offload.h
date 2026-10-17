@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dppd/rule.h"
+#include "dppd/shared_count.h"
 #include "dppd/tap_owner.h"
 
 struct rte_flow;
@@ -32,6 +33,17 @@ struct dppd_flow_error {
 int dppd_flow_validate(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error);
 int dppd_flow_create(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
     struct dppd_flow_error *error);
+/** 共享规则只使用已经解析的动作句柄，失败时保留输出句柄，不创建临时共享对象 */
+int dppd_flow_validate_bound(uint16_t port_id, const struct dppd_rule *rule, const struct dppd_flow_binding *binding,
+    struct dppd_flow_error *error);
+int dppd_flow_create_bound(uint16_t port_id, const struct dppd_rule *rule, const struct dppd_flow_binding *binding,
+    struct dppd_flow_handle *handle, struct dppd_flow_error *error);
+/** 这些入口调用真实 indirect API，创建、查询和删除失败都保留调用方已有输出 */
+int dppd_flow_shared_count_create(const struct dppd_shared_count_spec *spec, struct dppd_shared_count_handle *handle,
+    struct dppd_flow_error *error);
+int dppd_flow_shared_count_query(const struct dppd_shared_count_handle *handle, uint64_t *hits, uint64_t *bytes,
+    struct dppd_flow_error *error);
+int dppd_flow_shared_count_destroy(struct dppd_shared_count_handle *handle, struct dppd_flow_error *error);
 /** 原生标识模式只允许适配后的本地 TAP DROP/QUEUE，校验失败不降级成普通创建 */
 int dppd_flow_validate_owned(uint16_t port_id, const struct dppd_rule *rule, const uint8_t cookie[DPPD_TAP_COOKIE_SIZE],
     struct dppd_flow_error *error);

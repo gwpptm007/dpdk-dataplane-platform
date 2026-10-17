@@ -32,7 +32,7 @@ void dppctl_transfer_usage(const char *program)
         " [count] [priority:N] [age:SECONDS]\n",
         program);
     fprintf(stderr,
-        "  TEMPLATE: pair|uplink-vf|uplink-sf|pf-vf|pf-sf|vf-vf|sf-sf; apply uses plan repository generation\n");
+        "  TEMPLATE: pair|uplink-vf|uplink-sf|pf-vf|pf-sf|vf-vf|sf-sf; count may be replaced with shared-count:ID:GEN\n");
 }
 
 int dppctl_transfer_build(int argc, char **argv, struct dppd_management_request *request,
@@ -73,9 +73,21 @@ int dppctl_transfer_build(int argc, char **argv, struct dppd_management_request 
         return -EINVAL;
     bool priority = false, age = false;
     for (int i = base; i < argc; ++i) {
-        if (strcmp(argv[i], "count") == 0 && !spec->with_count)
+        if (strcmp(argv[i], "count") == 0 && !spec->with_count && spec->shared_count_id == 0)
             spec->with_count = 1;
-        else if (strncmp(argv[i], "priority:", 9) == 0 && !priority && number(argv[i] + 9, UINT32_MAX, &value) == 0) {
+        else if (strncmp(argv[i], "shared-count:", 13) == 0 && !spec->with_count && spec->shared_count_id == 0) {
+            /** 不修改原始参数，拆开的两段都必须是完整十进制身份 */
+            const char *id = argv[i] + 13, *colon = strchr(id, ':');
+            char digits[21];
+            if (colon == NULL || colon == id || (size_t)(colon - id) >= sizeof(digits))
+                return -EINVAL;
+            memcpy(digits, id, (size_t)(colon - id));
+            digits[colon - id] = '\0';
+            if (number(digits, UINT64_MAX - 1U, &spec->shared_count_id) != 0 || spec->shared_count_id == 0 ||
+                number(colon + 1, UINT64_MAX - 1U, &spec->shared_count_generation) != 0 ||
+                spec->shared_count_generation == 0)
+                return -EINVAL;
+        } else if (strncmp(argv[i], "priority:", 9) == 0 && !priority && number(argv[i] + 9, UINT32_MAX, &value) == 0) {
             spec->priority = (uint32_t)value;
             priority = true;
         } else if (strncmp(argv[i], "age:", 4) == 0 && !age && number(argv[i] + 4, 0xffffffU, &value) == 0 &&
@@ -107,6 +119,10 @@ static bool graph_valid(const struct dppd_transfer_graph *graph)
         for (uint16_t item = 0; item + 1U < rule->nb_actions; ++item) {
             const struct dppd_action *action = &rule->actions[item];
             if (action->type == DPPD_ACTION_COUNT && !count && !age)
+                count = true;
+            else if (action->type == DPPD_ACTION_SHARED_COUNT && !count && !age && action->conf.shared_count.id != 0 &&
+                action->conf.shared_count.id != UINT64_MAX && action->conf.shared_count.generation != 0 &&
+                action->conf.shared_count.generation != UINT64_MAX)
                 count = true;
             else if (action->type == DPPD_ACTION_AGE && !age && action->conf.age_timeout_seconds != 0 &&
                 action->conf.age_timeout_seconds <= 0xffffffU)
@@ -140,9 +156,14 @@ int dppctl_transfer_print(const struct dppd_management_response *response)
                 timeout = rule->actions[item].conf.age_timeout_seconds;
         }
         printf("edge=%u id=%" PRIu64 " generation=%" PRIu64
-               " install=%u source=%u destination=%u priority=%u count=%s age-seconds=%u\n",
+               " install=%u source=%u destination=%u priority=%u count=%s age-seconds=%u",
             i, rule->id, rule->generation, rule->install_port_id, rule->matches[0].spec.ethdev_port_id,
             rule->actions[rule->nb_actions - 1].conf.ethdev_port_id, rule->priority, count ? "yes" : "no", timeout);
+        for (uint16_t item = 0; item < rule->nb_actions; ++item)
+            if (rule->actions[item].type == DPPD_ACTION_SHARED_COUNT)
+                printf(" shared-count=%" PRIu64 " shared-generation=%" PRIu64, rule->actions[item].conf.shared_count.id,
+                    rule->actions[item].conf.shared_count.generation);
+        printf("\n");
     }
     printf("%.*s\n", DPPD_TRANSFER_MESSAGE_SIZE, response->payload.transfer.message);
     return 1;

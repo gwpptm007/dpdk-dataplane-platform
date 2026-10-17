@@ -1,13 +1,13 @@
 # M3 端点角色与 transfer 规则图
 
 当前已实现有来源的端点角色发现、七种规则图模板、只读规划和正式整批安装入口，
-并接通 [AGE 闲置老化](m3_age.md) 的规则动作、驱动查询、精确版本回收和持久化。
+并接通 [AGE 闲置老化](m3_age.md) 与 [共享 COUNT](m3_shared_count.md) 的规则动作、驱动查询、生命周期和持久化。
 现有模拟与虚拟端口测试用于验证控制逻辑、拒绝路径和失败补偿，不能据此宣称真实 SmartNIC 卸载验收完成。
 环境事实见 [2026-10-18 盘点](m3_environment_20261018.md)，底层方向与计数约束见
 [驱动调用契约](m3_flow_contract.md)。
 
-当前管理协议为 **v25**，daemon 与 `dppctl` 必须由同一版本配套构建和更新。
-AGE 查询、状态与 transfer 超时字段使用当前布局，旧协议会被明确拒绝为 `EPROTO`，
+当前管理协议为 **v26**，daemon 与 `dppctl` 必须由同一版本配套构建和更新。
+共享对象管理、绑定、AGE 查询和 transfer 字段使用当前布局，旧协议会被明确拒绝为 `EPROTO`，
 当前没有版本协商或跨架构 ABI 兼容承诺。现有 net_ring 验收包含旧版本拒绝检查。
 
 ## 端点身份来自哪里
@@ -54,19 +54,19 @@ PF 父子模板要求双方都有相同的 PF 编号。此外，双方必须都�
 
 `oneway` 生成一条源到目的的规则；`bidir` 生成两条，第二条反向。
 双向规则 ID 为 `ID` 和 `ID+1`，单向只使用 `ID`；使用的 ID 必须事先不存在。
-图固定使用 group 0，可选 `count`、`priority:N` 和 `age:SECONDS`，不隐式添加 JUMP
+图固定使用 group 0，可选 `count` 或 `shared-count:ID:GEN`、`priority:N` 和 `age:SECONDS`，不隐式添加 JUMP
 或通配入口。相同交换域、group、优先级下与已有入口相交的
 transfer 规则会在驱动调用前拒绝，避免规则含义依赖不明确的匹配顺序。
 
 ## plan、apply 与版本约束
 
 ```text
-transfer-plan ID INSTALL SRC DST TEMPLATE oneway|bidir [count] [priority:N] [age:SECONDS]
-transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED [count] [priority:N] [age:SECONDS]
+transfer-plan ID INSTALL SRC DST TEMPLATE oneway|bidir [count|shared-count:ID:GEN] [priority:N] [age:SECONDS]
+transfer-apply ID INSTALL SRC DST TEMPLATE oneway|bidir EXPECTED [count|shared-count:ID:GEN] [priority:N] [age:SECONDS]
 ```
 
 `INSTALL` 是规则安装所在的 ethdev，`SRC/DST` 是明确的源、目的端点，三者不能混用。
-`transfer-plan` 只检查拓扑、角色、规则 ID、重叠和版本空间，返回当前
+`transfer-plan` 只检查拓扑、角色、规则 ID、重叠、共享对象身份与范围和版本空间，返回当前
 `repository-generation` 及完整图，不访问 PMD，不安装规则，也不修改 COUNT 或快照。
 
 `transfer-apply` 必须传入刚才 plan 返回的精确全局账本版本，并重新检查完整图。
@@ -111,6 +111,12 @@ COUNT 查询要求驱动同时提供有效包数和字节数，否则返回 `ENO
 到期删除会推进全局账本版本，因此可能使另一次尚未执行的 plan 过期。
 驱动不支持 AGE 时明确失败，不用软件计时或 COUNT 猜测来代替，见 [AGE 说明](m3_age.md)。
 
+`shared-count:ID:GEN` 引用已创建对象的精确版本，不能和 `count` 同用。对象与规则
+必须使用相同安装口和域；双向图的两条边引用同一对象。共享汇总只从
+`shared-count-query` 读取，单规则 `count` 返回 `ENODATA`。AGE 删除成功会释放该边
+引用而不清累计，快照 v5 先恢复对象再恢复规则；native `--recovery-path` 日志模式
+暂不支持 indirect，会明确返回 `ENOTSUP`。命令、版本及引用规则见 [共享 COUNT](m3_shared_count.md)。
+
 ## 整批执行和失败恢复
 
 apply 复用正式的整批创建事务：先校验全批，再创建对象，全部创建完成后发布 desired 账本并保存快照。
@@ -126,7 +132,7 @@ apply 复用正式的整批创建事务：先校验全批，再创建对象，�
 ## 现在可以复现什么
 
 可直接运行的正向功能演练已提供独立模拟服务，支持真实 dppctl、原始帧输入、
-七种模板、COUNT/AGE、可推进的闲置时钟、故障与重启，见 [操作说明](m3_simulation.md)。
+七种模板、私有及共享 COUNT、AGE、可推进的闲置时钟、故障与重启，见 [操作说明](m3_simulation.md)。
 
 现有平台已具备可用的模拟驱动入口、普通用户 net_ring 及独占临时 TAP 测试条件。
 可以安装需要的软件或补充仿真，但软件不能生成真实 NIC ASIC 或证明硬件交换旁路。
@@ -156,7 +162,8 @@ net_ring 集成脚本启动正式 daemon 与 CLI，检查重复 plan/apply、全
 ## 尚未完成或尚未验收
 
 AGE 的控制路径和功能模拟已接通，但真实 PMD 的计时、命中续期与资源回收尚未验收。
-indirect/shared action 尚未形成规则 IR、正式管理与完整资源生命周期，不能登记为已实现。
+首期 indirect/shared COUNT 已接通规则、正式管理和资源引用；共享 RSS/METER/AGE
+和动作更新尚未实现，真实 PMD 的共享对象能力尚未验收，详见 [共享 COUNT 边界](m3_shared_count.md)。
 现有通用失败恢复和模拟补偿不等于端点移除、真实 device reset 后已经完成硬件 reconciliation。
 这些变化还需要实际设备、端点身份重新发现、handle 失效和规则重建的端到端验证。
 

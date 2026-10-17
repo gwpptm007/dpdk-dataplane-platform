@@ -106,7 +106,7 @@ static int compile_match(const struct dppd_match *match, uint16_t index, struct 
 }
 
 static int compile_action(const struct dppd_action *source, uint16_t index, uint64_t rule_id,
-    struct compiled_flow *compiled)
+    const struct dppd_flow_binding *binding, struct compiled_flow *compiled)
 {
     struct rte_flow_action *action = &compiled->actions[index];
 
@@ -136,6 +136,13 @@ static int compile_action(const struct dppd_action *source, uint16_t index, uint
         action->type = RTE_FLOW_ACTION_TYPE_AGE;
         action->conf = &compiled->age[index];
         return 0;
+    case DPPD_ACTION_SHARED_COUNT:
+        if (binding == NULL || binding->actions[index] == NULL)
+            return -ENOTSUP;
+        /** INDIRECT 的 conf 就是动作句柄本身，不是保存该指针的临时变量地址 */
+        action->type = RTE_FLOW_ACTION_TYPE_INDIRECT;
+        action->conf = binding->actions[index];
+        return 0;
     case DPPD_ACTION_REPRESENTED_PORT:
         compiled->ethdev_action[index].port_id = source->conf.ethdev_port_id;
         action->type = RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT;
@@ -146,12 +153,18 @@ static int compile_action(const struct dppd_action *source, uint16_t index, uint
     }
 }
 
-static int compile_rule(const struct dppd_rule *rule, struct compiled_flow *compiled)
+static int compile_rule(const struct dppd_rule *rule, const struct dppd_flow_binding *binding,
+    struct compiled_flow *compiled)
 {
     uint16_t i;
     int rc;
 
     memset(compiled, 0, sizeof(*compiled));
+    if (binding != NULL)
+        for (i = 0; i < DPPD_RULE_MAX_ACTIONS; ++i)
+            if ((i >= rule->nb_actions || rule->actions[i].type != DPPD_ACTION_SHARED_COUNT) &&
+                binding->actions[i] != NULL)
+                return -EINVAL;
     compiled->attr.group = rule->group;
     compiled->attr.priority = rule->priority;
     if (rule->domain == DPPD_RULE_DOMAIN_INGRESS)
@@ -172,7 +185,7 @@ static int compile_rule(const struct dppd_rule *rule, struct compiled_flow *comp
     compiled->pattern[rule->nb_matches].type = RTE_FLOW_ITEM_TYPE_END;
 
     for (i = 0; i < rule->nb_actions; ++i) {
-        rc = compile_action(&rule->actions[i], i, rule->id, compiled);
+        rc = compile_action(&rule->actions[i], i, rule->id, binding, compiled);
         if (rc != 0)
             return rc;
     }
@@ -228,7 +241,7 @@ static int compile_owner(uint16_t port_id, const struct dppd_rule *rule, const u
 }
 
 static int flow_validate(uint16_t port_id, const struct dppd_rule *rule, const uint8_t *cookie,
-    struct dppd_flow_error *error)
+    const struct dppd_flow_binding *binding, struct dppd_flow_error *error)
 {
     struct compiled_flow compiled;
     struct rte_flow_error flow_error;
@@ -238,7 +251,7 @@ static int flow_validate(uint16_t port_id, const struct dppd_rule *rule, const u
     rc = validate_rule(rule, error, "validate");
     if (rc != 0)
         return rc;
-    rc = compile_rule(rule, &compiled);
+    rc = compile_rule(rule, binding, &compiled);
     if (rc == 0)
         rc = compile_owner(port_id, rule, cookie, &compiled);
     if (rc != 0)
@@ -252,7 +265,7 @@ static int flow_validate(uint16_t port_id, const struct dppd_rule *rule, const u
 }
 
 static int flow_create(uint16_t port_id, const struct dppd_rule *rule, const uint8_t *cookie,
-    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+    const struct dppd_flow_binding *binding, struct dppd_flow_handle *handle, struct dppd_flow_error *error)
 {
     struct compiled_flow compiled;
     struct rte_flow_error flow_error;
@@ -267,7 +280,7 @@ static int flow_create(uint16_t port_id, const struct dppd_rule *rule, const uin
     rc = validate_rule(rule, error, "create");
     if (rc != 0)
         return rc;
-    rc = compile_rule(rule, &compiled);
+    rc = compile_rule(rule, binding, &compiled);
     if (rc == 0)
         rc = compile_owner(port_id, rule, cookie, &compiled);
     if (rc != 0)
@@ -296,13 +309,32 @@ static int flow_create(uint16_t port_id, const struct dppd_rule *rule, const uin
 /** 普通入口明确不携带私有动作，兼容原来的驱动与业务规则 */
 int dppd_flow_validate(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
-    return flow_validate(port_id, rule, NULL, error);
+    return flow_validate(port_id, rule, NULL, NULL, error);
 }
 
 int dppd_flow_create(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
     struct dppd_flow_error *error)
 {
-    return flow_create(port_id, rule, NULL, handle, error);
+    return flow_create(port_id, rule, NULL, NULL, handle, error);
+}
+
+int dppd_flow_validate_bound(uint16_t port_id, const struct dppd_rule *rule, const struct dppd_flow_binding *binding,
+    struct dppd_flow_error *error)
+{
+    return flow_validate(port_id, rule, NULL, binding, error);
+}
+
+/** 老入口的输出约定不变，新绑定入口通过局部句柄避免失败污染调用方的旧值 */
+int dppd_flow_create_bound(uint16_t port_id, const struct dppd_rule *rule, const struct dppd_flow_binding *binding,
+    struct dppd_flow_handle *handle, struct dppd_flow_error *error)
+{
+    struct dppd_flow_handle next;
+    if (handle == NULL)
+        return report_error(error, -EINVAL, "create bound", NULL);
+    int rc = flow_create(port_id, rule, NULL, binding, &next, error);
+    if (rc == 0)
+        *handle = next;
+    return rc;
 }
 
 /** 校验不安装任何对象，可在写入尝试记录前确认驱动是否认识私有动作 */
@@ -311,7 +343,7 @@ int dppd_flow_validate_owned(uint16_t port_id, const struct dppd_rule *rule, con
 {
     if (cookie == NULL)
         return report_error(error, -EINVAL, "owner cookie", NULL);
-    return flow_validate(port_id, rule, cookie, error);
+    return flow_validate(port_id, rule, cookie, NULL, error);
 }
 
 /** 输出 handle 不用作输入，创建失败也不会读取调用方尚未初始化的字段 */
@@ -323,7 +355,7 @@ int dppd_flow_create_owned(uint16_t port_id, const struct dppd_rule *rule, const
             memset(handle, 0, sizeof(*handle));
         return report_error(error, -EINVAL, "owner cookie", NULL);
     }
-    return flow_create(port_id, rule, cookie, handle, error);
+    return flow_create(port_id, rule, cookie, NULL, handle, error);
 }
 
 int dppd_flow_install(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_handle *handle,

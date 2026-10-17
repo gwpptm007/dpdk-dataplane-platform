@@ -65,6 +65,9 @@ static bool action_equal(const struct dppd_action *left, const struct dppd_actio
         return left->conf.ethdev_port_id == right->conf.ethdev_port_id;
     case DPPD_ACTION_AGE:
         return left->conf.age_timeout_seconds == right->conf.age_timeout_seconds;
+    case DPPD_ACTION_SHARED_COUNT:
+        return left->conf.shared_count.id == right->conf.shared_count.id &&
+            left->conf.shared_count.generation == right->conf.shared_count.generation;
     }
     return false;
 }
@@ -164,7 +167,7 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
 
     for (i = 0; i < rule->nb_actions; ++i) {
         const enum dppd_action_type type = rule->actions[i].type;
-        if (type < DPPD_ACTION_DROP || type > DPPD_ACTION_AGE)
+        if (type < DPPD_ACTION_DROP || type > DPPD_ACTION_SHARED_COUNT)
             return rule_error(error, error_len, "unsupported action type");
         if (type != DPPD_ACTION_DROP && (seen_actions & (1U << type)) != 0)
             return rule_error(error, error_len, "duplicate action type");
@@ -173,6 +176,12 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
         if (type == DPPD_ACTION_AGE &&
             (rule->actions[i].conf.age_timeout_seconds == 0 || rule->actions[i].conf.age_timeout_seconds > 0xffffffU))
             return rule_error(error, error_len, "age timeout must be between 1 and 16777215 seconds");
+        /** 精确版本防止删除重建后把旧规则悄悄绑定到同名的新计数对象 */
+        if (type == DPPD_ACTION_SHARED_COUNT &&
+            (rule->actions[i].conf.shared_count.id == 0 || rule->actions[i].conf.shared_count.id == UINT64_MAX ||
+                rule->actions[i].conf.shared_count.generation == 0 ||
+                rule->actions[i].conf.shared_count.generation == UINT64_MAX))
+            return rule_error(error, error_len, "shared count requires a nonzero ID and exact generation");
         if (type == DPPD_ACTION_ALLOW && rule->domain != DPPD_RULE_DOMAIN_INGRESS)
             return rule_error(error, error_len, "allow action requires ingress domain");
         if (type == DPPD_ACTION_DROP || type == DPPD_ACTION_QUEUE || type == DPPD_ACTION_REPRESENTED_PORT ||
@@ -181,7 +190,7 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
             if (i + 1U != rule->nb_actions)
                 return rule_error(error, error_len, "fate action must be last");
         }
-        if (type == DPPD_ACTION_COUNT)
+        if (type == DPPD_ACTION_COUNT || type == DPPD_ACTION_SHARED_COUNT)
             count_actions++;
         if (type == DPPD_ACTION_REPRESENTED_PORT && rule->domain != DPPD_RULE_DOMAIN_TRANSFER)
             return rule_error(error, error_len, "represented-port actions require transfer domain");
@@ -192,7 +201,7 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
     if (fate_actions != 1)
         return rule_error(error, error_len, "rule must contain exactly one fate action");
     if (count_actions > 1)
-        return rule_error(error, error_len, "only one count action is supported");
+        return rule_error(error, error_len, "private and shared count actions are mutually exclusive");
     if (error != NULL && error_len != 0)
         error[0] = '\0';
     return 0;

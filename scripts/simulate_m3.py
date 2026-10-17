@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""不用实体网卡演练 M3 的规则、报文、计数、闲置老化和回滚，结果明确标记为功能模拟"""
+"""不用实体网卡演练 M3 的规则、报文、共享计数、闲置老化和回滚，结果明确标记为功能模拟"""
 
 import argparse
 from datetime import datetime, timezone
@@ -111,13 +111,20 @@ class Fixture:
         return fields(self.io_request("status"))
 
     def install(self, rule_id, source, destination, template="pair", bidirectional=False, priority=10, error=None,
-                age=0, count=True):
+                age=0, count=True, shared=None, install_port=0):
         direction = "bidir" if bidirectional else "oneway"
-        modifiers = (["count"] if count else []) + ([f"age:{age}"] if age else []) + [f"priority:{priority}"]
-        plan = self.ctl("transfer-plan", rule_id, 0, source, destination, template, direction,
+        # 共享计数和本规则私有 COUNT 分开表达，不能因为都能计数就同时添加两个动作
+        counter = [f"shared-count:{shared['id']}:{shared['generation']}"] if shared else (["count"] if count else [])
+        modifiers = counter + ([f"age:{age}"] if age else []) + [f"priority:{priority}"]
+        if shared is not None and error in (errno.ENOENT, errno.ESTALE, errno.EXDEV):
+            # 预览已经检查对象身份和范围，坏绑定应在调用驱动前失败
+            self.ctl("transfer-plan", rule_id, install_port, source, destination, template, direction,
+                     *modifiers, error=error)
+            return []
+        plan = self.ctl("transfer-plan", rule_id, install_port, source, destination, template, direction,
                         *modifiers)
         generation = fields(plan.splitlines()[0])["repository-generation"]
-        result = self.ctl("transfer-apply", rule_id, 0, source, destination, template, direction, generation,
+        result = self.ctl("transfer-apply", rule_id, install_port, source, destination, template, direction, generation,
                           *modifiers, error=error)
         return [fields(line) for line in result.splitlines() if line.startswith("edge=")]
 
@@ -135,6 +142,41 @@ class Fixture:
     def count(self, edge, packets, length):
         result = fields(self.ctl("count", edge["id"], edge["generation"]))
         check(result.get("hits") == str(packets) and result.get("bytes") == str(length), str(result))
+
+    def shared_create(self, counter_id, install_port=0, domain="transfer", error=None):
+        result = self.ctl("shared-count-create", counter_id, install_port, domain, error=error)
+        if error is not None:
+            return None
+        counter = fields(result)
+        check(counter.get("id") == str(counter_id) and int(counter.get("generation", "0")) > 0 and
+              counter.get("install") == str(install_port) and counter.get("domain") == domain and
+              counter.get("references") == "0", "共享计数创建回执不完整: " + result)
+        return counter
+
+    def shared_get(self, counter, references, error=None):
+        result = self.ctl("shared-count-get", counter["id"], counter["generation"], error=error)
+        if error is None:
+            value = fields(result)
+            check(value.get("id") == counter["id"] and value.get("generation") == counter["generation"] and
+                  value.get("references") == str(references), "共享引用数不符: " + result)
+            return value
+        return None
+
+    def shared_query(self, counter, packets, length, error=None):
+        result = self.ctl("shared-count-query", counter["id"], counter["generation"], error=error)
+        if error is None:
+            value = fields(result)
+            check(value.get("id") == counter["id"] and value.get("generation") == counter["generation"] and
+                  value.get("hits") == str(packets) and value.get("bytes") == str(length),
+                  "共享累计与注入报文不符: " + result)
+
+    def shared_delete(self, counter, error=None):
+        result = self.ctl("shared-count-delete", counter["id"], counter["generation"], error=error)
+        if error is None:
+            value = fields(result)
+            check(value.get("shared-count") == "deleted" and value.get("id") == counter["id"] and
+                  value.get("generation") == counter["generation"] and int(value.get("revision", "0")) > 0,
+                  "共享删除没有回显被删版本和新修订号: " + result)
 
     def wait_status(self, predicate, message, timeout=4):
         """等待真实控制循环完成有限轮询，超时则保留最后状态帮助定位问题"""
@@ -337,6 +379,148 @@ def exercise_age(simulator, passed):
     passed("AGE 查询故障独立于 COUNT，恢复后继续准确计数和命中续期")
 
 
+def exercise_shared(simulator, passed):
+    """同一对象汇总真实模拟命中，版本、引用和快照均经正式管理入口核对"""
+    counter = simulator.shared_create(7000)
+    edges = simulator.install(7100, 0, 2, bidirectional=True, shared=counter)
+    simulator.shared_get(counter, 2)
+    simulator.shared_delete(counter, error=errno.EBUSY)
+    simulator.inject(0, 2, 7100, frame())
+    simulator.inject(2, 0, 7101, frame(73))
+    simulator.shared_query(counter, 2, 137)
+    # 共享动作不能让单规则私有 COUNT 接口冒充共享对象的累计值
+    for edge in edges:
+        simulator.ctl("count", edge["id"], edge["generation"], error=errno.ENODATA)
+    simulator.delete(edges[:1])
+    simulator.shared_get(counter, 1)
+    simulator.inject(2, 0, 7101, frame(14))
+    simulator.shared_query(counter, 3, 151)
+    simulator.io_request("fault shared-query 1")
+    simulator.shared_query(counter, 0, 0, error=errno.EIO)
+    simulator.shared_query(counter, 3, 151)
+    simulator.delete(edges[1:])
+    simulator.shared_get(counter, 0)
+    simulator.shared_query(counter, 3, 151)
+    simulator.shared_delete(counter)
+    passed("双向规则共享汇总、删一条继续累计、在用删除拒绝和共享查询失败不清计数")
+
+    counter = simulator.shared_create(7200)
+    edges = simulator.install(7201, 0, 2, age=3, shared=counter)
+    simulator.inject(0, 2, 7201, frame(73))
+    simulator.shared_get(counter, 1)
+    simulator.io_request("advance 3")
+    simulator.wait_status(lambda state: state["installed"] == "0" and state["desired"] == "0" and
+                          state["shared_refs"] == "0", "AGE 删除没有释放共享对象借用")
+    simulator.ctl("get", edges[0]["id"], error=errno.ENOENT)
+    simulator.shared_get(counter, 0)
+    simulator.shared_query(counter, 1, 73)
+    simulator.shared_delete(counter)
+    passed("共享 COUNT 与 AGE 同时生效，老化删除释放引用且保留对象累计")
+
+    before = simulator.status()
+    simulator.io_request("fault shared-create 1")
+    simulator.shared_create(7300, error=errno.ENOSPC)
+    state = simulator.status()
+    check(state["shared_objects"] == before["shared_objects"] and state["shared_refs"] == "0" and
+          int(state["shared_creates"]) == int(before["shared_creates"]) + 1, str(state))
+    simulator.ctl("shared-count-get", 7300, "any", error=errno.ENOENT)
+    counter = simulator.shared_create(7300)
+    simulator.io_request("fault shared-destroy 1")
+    simulator.shared_delete(counter, error=errno.EBUSY)
+    simulator.shared_get(counter, 0)
+    simulator.shared_query(counter, 0, 0)
+    simulator.shared_delete(counter)
+    passed("共享对象创建失败不发布、销毁失败保留对象和精确版本后重试")
+
+    counter = simulator.shared_create(7400)
+    before = simulator.status()
+    simulator.install(7401, 1, 2, shared=counter, install_port=1, error=errno.EXDEV)
+    ingress = simulator.shared_create(7402, domain="ingress")
+    simulator.install(7403, 0, 2, shared=ingress, error=errno.EXDEV)
+    simulator.shared_get(counter, 0)
+    simulator.shared_get(ingress, 0)
+    state = simulator.status()
+    check(state["installed"] == "0" and state["desired"] == "0" and state["shared_refs"] == "0" and
+          state["creates"] == before["creates"], "范围不匹配的共享动作进入驱动创建: " + str(state))
+    simulator.shared_delete(counter)
+    simulator.shared_delete(ingress)
+    passed("共享对象不能跨安装端口或 ingress/transfer 域绑定，拒绝后无规则和引用残留")
+
+    counter = simulator.shared_create(7500)
+    simulator.shared_delete(counter)
+    replacement = simulator.shared_create(7500)
+    check(replacement["generation"] != counter["generation"], "删除重建复用了共享对象版本")
+    simulator.shared_get(counter, 0, error=errno.ESTALE)
+    simulator.shared_query(counter, 0, 0, error=errno.ESTALE)
+    simulator.shared_delete(counter, error=errno.ESTALE)
+    simulator.install(7501, 0, 2, shared=counter, error=errno.ESTALE)
+    simulator.shared_get(replacement, 0)
+    simulator.shared_delete(replacement)
+    passed("共享对象删除重建更换版本，旧版本查询、删除和规则绑定均拒绝 ABA")
+
+    # 列表用稳定排序和修订号续页，途中创建对象后不能把两代列表拼在一起
+    larger = simulator.shared_create(7552)
+    smaller = simulator.shared_create(7550)
+    result = simulator.ctl("shared-count-list")
+    listing = result.splitlines()
+    header = fields(listing[0])
+    check(header.get("total") == "2" and header.get("returned") == "2" and header.get("more") == "no" and
+          [fields(line).get("id") for line in listing[1:]] == ["7550", "7552"], result)
+    result = simulator.ctl("shared-count-list", 7550, header["revision"])
+    check(fields(result.splitlines()[0]).get("returned") == "1" and
+          fields(result.splitlines()[1]).get("id") == "7552", result)
+    added = simulator.shared_create(7551)
+    simulator.ctl("shared-count-list", 7550, header["revision"], error=errno.ESTALE)
+    for current in (smaller, added, larger):
+        simulator.shared_delete(current)
+    passed("共享列表按 ID 排序并按修订号续页，期间对象变化拒绝陈旧列表版本")
+
+    # 定义和精确版本会持久化，驱动指针、包数及字节数都不得写入快照
+    counter = simulator.shared_create(7600)
+    edges = simulator.install(7601, 0, 2, bidirectional=True, shared=counter)
+    simulator.inject(0, 2, 7601, frame())
+    simulator.inject(2, 0, 7602, frame(73))
+    simulator.shared_query(counter, 2, 137)
+    simulator.stop()
+    simulator.start()
+    simulator.shared_get(counter, 2)
+    simulator.shared_query(counter, 0, 0)
+    state = simulator.status()
+    check(state["shared_objects"] == "1" and state["shared_refs"] == "2" and state["installed"] == "2",
+          "重放没有先恢复共享对象再绑定规则: " + str(state))
+    simulator.inject(0, 2, 7601, frame(14))
+    simulator.inject(2, 0, 7602, frame(2048))
+    simulator.shared_query(counter, 2, 2062)
+    simulator.delete(edges)
+    simulator.shared_delete(counter)
+    simulator.stop()
+    simulator.start()
+    check(simulator.status()["shared_objects"] == "0" and simulator.status()["installed"] == "0",
+          "已删除共享对象或规则重启后复活")
+    passed("正式快照先重建共享对象再恢复双向规则，精确版本保留而累计归零，删除不复活")
+
+    counter = simulator.shared_create(7700)
+    simulator.io_request("fault create 2")
+    simulator.io_request("fault remove 1")
+    simulator.install(7701, 0, 2, bidirectional=True, shared=counter, error=errno.EUCLEAN)
+    state = simulator.status()
+    check(state["installed"] == "1" and state["desired"] == "0" and state["shared_refs"] == "1" and
+          state["shared_objects"] == "1" and state["recovery"] != "0",
+          "回滚残留没有继续保护共享对象: " + str(state))
+    simulator.io_request(f"inject 0 {frame().hex()}", error=errno.EUCLEAN)
+    simulator.shared_get(counter, 1)
+    simulator.shared_delete(counter, error=errno.EUCLEAN)
+    simulator.ctl("reconcile-retry")
+    check(simulator.status()["installed"] == "0" and simulator.status()["shared_refs"] == "0",
+          "恢复清理未释放残留规则借用")
+    simulator.stop()
+    simulator.start()
+    simulator.shared_get(counter, 0)
+    simulator.shared_query(counter, 0, 0)
+    simulator.shared_delete(counter)
+    passed("创建中途失败且补偿失败保留共享实际引用，隔离清理后重启恢复对象且无失败规则")
+
+
 def demo(args):
     root = Path(__file__).resolve().parents[1]
     build = args.build_dir.resolve()
@@ -365,6 +549,7 @@ def demo(args):
                 simulator.start()
                 exercise(simulator, passed)
                 exercise_age(simulator, passed)
+                exercise_shared(simulator, passed)
             finally:
                 simulator.stop()
         check(source_digest(root) == report["source_sha256"], "演练期间源码变化，不能报告同版本通过")
@@ -410,7 +595,7 @@ def serve(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    automatic = commands.add_parser("demo", help="自动演练七种模板、报文计数、闲置老化、回滚与重启")
+    automatic = commands.add_parser("demo", help="自动演练七种模板、独立和共享计数、闲置老化、回滚与重启")
     automatic.add_argument("--build-dir", type=Path, default=Path("build"))
     automatic.add_argument("--report-dir", type=Path)
     server = commands.add_parser("serve", help="启动可供真实 dppctl 操作的独立模拟服务")
@@ -423,7 +608,8 @@ def main():
             client.add_argument("--source", type=int, required=True)
             client.add_argument("--frame", required=True, help="完整以太网帧的十六进制文本")
         if name == "fault":
-            client.add_argument("operation", choices=("validate", "create", "remove", "query", "age-query"))
+            client.add_argument("operation", choices=("validate", "create", "remove", "query", "age-query",
+                                                      "shared-create", "shared-query", "shared-destroy"))
             client.add_argument("after", type=int, help="该操作第几次后续调用时失败一次")
             client.add_argument("--advance", type=int, help="同一条模拟消息内设置故障并推进秒数，避免后台轮询竞态")
         if name == "advance":

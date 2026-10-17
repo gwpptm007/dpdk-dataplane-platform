@@ -1,13 +1,13 @@
 # 不用实体网卡的 M3 功能演练
 
 现在可以用真实 `dppctl` 完成正向演练：规划和安装 transfer 图、输入报文字节、查看
-转发端点与 COUNT、AGE 闲置老化，再制造失败，观察回滚、恢复隔离和快照重放。演练不需要 root、
+转发端点、私有与共享 COUNT、AGE 闲置老化，再制造失败，观察回滚、恢复隔离和快照重放。演练不需要 root、
 hugepage 或 Mellanox 设备。开发工具与 134 的私有 DPDK 环境见
 [环境准备](m3_simulation_environment.md)。
 
 模拟器是 `tests=true` 才构建的独立程序 `tests/integration/dppd_transfer_sim`，
 它复用正式管理协议、控制事务、规则账本和持久化，只替换驱动入口与端点夹具。
-正式 `dppd` 不链接模拟代码。当前管理协议为 v25，模拟器和 `dppctl` 也必须配套构建。
+正式 `dppd` 不链接模拟代码。当前管理协议为 v26，模拟器和 `dppctl` 也必须配套构建。
 
 ## 一条命令运行完整演练
 
@@ -32,6 +32,10 @@ python3 scripts/simulate_m3.py demo --build-dir build
 禁止转发及快照重启恢复。新增 AGE 演练覆盖自然闲置回收、命中续期、COUNT 独立性、
 虚拟时钟、查询与删除失败重试，以及成功过期保存后重启不复活。任何一项失败都返回
 非零，不会继续报告全部通过；AGE 的完整语义见 [闲置老化说明](m3_age.md)。
+共享 COUNT 增加双向汇总、在用删除保护、AGE 引用释放、创建/查询/销毁故障、同安装口
+与域限制、旧版本拒绝、列表修订、重启归零和补偿残留引用，当前完整 demo 为 24 组。
+135 系统、ASan/UBSan 与 134 GCC 13 三套最终构建各 60/60 单测和 24 组演练通过，
+233 文件源码摘要一致，记录见 [共享 COUNT 验收](m3_shared_count.md#本轮验收结果)。
 
 结果与模拟器日志保存在 `build/m3-simulation/`。报告明确保留
 `simulation=true`、`hardware_acceptance=not_run`、`complete_m3_validation=false`，
@@ -76,7 +80,9 @@ python3 scripts/simulate_m3.py clear-faults --io-socket /tmp/dppd-my-m3-demo/io.
 ```
 
 `validate/create/remove/query` 分别注入 `ENOTSUP/ENOSPC/EBUSY/EIO`，`age-query` 单独
-注入 AGE 查询的 `EIO`，不会消费 COUNT 查询的故障计划。要观察失败，
+注入 AGE 查询的 `EIO`，不会消费 COUNT 查询的故障计划。
+`shared-create/shared-query/shared-destroy` 分别注入共享对象的 `ENOSPC/EIO/EBUSY`。
+要观察失败，
 在设置后执行相应操作；上面最后一条是独立的故障清除示例。
 补偿失败时 `status` 会区分 desired 账本与 installed 模拟句柄，不能把残留对象当作
 正常转发规则。`reconcile-retry` 后仍需重启，符合正式控制面的隔离约定。
@@ -120,6 +126,25 @@ python3 scripts/simulate_m3.py fault --io-socket /tmp/dppd-my-m3-demo/io.sock re
 不写入快照；未过期规则重启后重新获得完整的闲置窗口，不能用此演练证明跨重启保留
 原有计时。双向图的两条边独立命中、独立计时和回收，不承诺同时过期或原子删除。
 
+## 共享 COUNT
+
+先用 `shared-count-create ID PORT transfer` 创建对象，读回实际 generation；将
+`shared-count:ID:GEN` 放入同安装口的 transfer plan/apply，替代 `count`。双向图的
+两条规则会汇总到同一对象；使用 `shared-count-query ID any` 查看累计，单规则
+`count` 会返回 `ENODATA`。AGE 删除某条边只释放它的引用，剩余边继续累计。
+完整命令、独立版本和 v5 重启语义见 [共享 COUNT](m3_shared_count.md)。
+
+```sh
+./build/dppctl --socket /tmp/dppd-my-m3-demo/ctl.sock shared-count-create 900 0 transfer
+./build/dppctl --socket /tmp/dppd-my-m3-demo/ctl.sock shared-count-get 900 any
+python3 scripts/simulate_m3.py fault --io-socket /tmp/dppd-my-m3-demo/io.sock shared-query 1
+./build/dppctl --socket /tmp/dppd-my-m3-demo/ctl.sock shared-count-query 900 any
+```
+
+最后的查询应明确失败，再查仍保留原累计。status 的 `shared_objects/shared_refs`
+表示模拟驱动实际对象与借用，补偿失败也不提前释放；正式 get/list 的 references
+还包含 prepare 预留。共享定义和规则一起重放，对象先创建，累计从零开始。
+
 ## 固定端点夹具
 
 | 端点 | 角色 | 名称夹具 | 交换域 |
@@ -137,7 +162,7 @@ PCI 值只是合成夹具，没有执行真实设备发现。
 
 ## 支持范围与状态隔离
 
-报文演练只解释 group 0 的明确源端点、通配 Ethernet、可选 COUNT/AGE 和明确目的端点。
+报文演练只解释 group 0 的明确源端点、通配 Ethernet、可选私有或共享 COUNT、AGE 和明确目的端点。
 输入是 14 到 2048 字节的完整十六进制帧，按最低 priority 选择唯一规则，保留原始
 字节；无匹配时丢弃，同优先级歧义时拒绝。模拟器不会执行真实软件 worker、协议栈、
 ACL/NAT/ND 或其他硬件动作；出现软件规则、持久化 dirty 或恢复隔离时拒绝注入。
@@ -148,15 +173,16 @@ ACL/NAT/ND 或其他硬件动作；出现软件规则、持久化 dirty 或恢�
 用于正式 `dppd`，两者不提供双向状态导入承诺。
 
 该工具证明已实现控制逻辑在可控端点与报文字节上的行为。AGE 已接入规则、正式查询与
-轮询回收，并由虚拟时钟演练；indirect/shared action 和设备 reset 后 reconciliation
-尚未实现，不能由模拟器自动补齐。真实 PMD 的 AGE 支持、
+轮询回收，并由虚拟时钟演练；共享 COUNT 也复用正式对象与引用管理。其他共享动作、
+native indirect 恢复日志和设备 reset 后 reconciliation 尚未实现，不能由模拟器自动补齐。
+真实 PMD 的 AGE、indirect 支持、
 ASIC 卸载、CPU 旁路及硬件性能继续按 [M3 验收](m3_acceptance.md) 单独登记。
 
 ## AGE 接入前的功能模拟验收记录
 
 以下为 AGE 接入前、管理协议 v24 的历史结果。55/55 单测、224 文件源码摘要和十组
-演练只证明当时版本，不能直接用作当前 v25 和 AGE 代码的最终验收记录。当前 AGE
-轮次的三套结果和 228 文件源码摘要见 [AGE 验收记录](m3_age.md)。
+演练只证明当时版本，不能直接用作当前 v26 共享代码的最终验收记录。随后 AGE
+轮次的三套 57/57、16 组结果和 228 文件源码摘要见 [历史 AGE 验收记录](m3_age.md)。
 
 2026-10-18，三套构建全部通过 `tests=true`、`werror=true` 的统一核心验收：
 

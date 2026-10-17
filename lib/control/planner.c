@@ -66,10 +66,10 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
     plan->install_port_id = context->install_port_id;
     if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0)
         return reject(plan, DPPD_PLAN_REASON_INVALID_RULE, -EINVAL);
-    /** AGE 必须由驱动报告空闲状态，即使调用方误称等价，也不能选择软件执行 */
+    /** AGE 和共享计数依赖驱动对象，即使调用方误称等价，也不能选择软件执行 */
     bool software_equivalent = context->software_equivalent;
     for (uint16_t i = 0; i < rule->nb_actions; ++i)
-        if (rule->actions[i].type == DPPD_ACTION_AGE)
+        if (rule->actions[i].type == DPPD_ACTION_AGE || rule->actions[i].type == DPPD_ACTION_SHARED_COUNT)
             software_equivalent = false;
     if (context->ipv4_routing && rule->domain != DPPD_RULE_DOMAIN_INGRESS)
         return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);

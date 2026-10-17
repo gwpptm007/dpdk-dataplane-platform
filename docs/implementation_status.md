@@ -5,7 +5,13 @@
 以下日期条目保留各次交付当时的验收状态，当前能力以最新条目、模块表和
 [M2 整体验收](m2_acceptance.md) 为准，不能将历史待办当作当前仍缺失的功能。
 
-2026-10-18 已接通 [M3 AGE 闲置老化](m3_age.md)：超时 IR、独立驱动查询、生产轮询、
+2026-10-18 已接通 [M3 共享 COUNT](m3_shared_count.md)：indirect 对象创建/查询/销毁、
+精确版本绑定、同安装口和域限制、prepare 至释放引用保护、AGE 释放和 v5 单快照。
+管理协议 v26 增加五个共享对象命令和 `shared-count:ID:GEN`。三套同版本构建各
+60/60 单测、四步核心回归与 24 组功能模拟通过，233 文件源码摘要一致。native 恢复日志明确拒绝 indirect，
+其他共享动作、设备复位恢复及实机共享 COUNT/AGE/CPU 旁路仍未验收，M3 尚未完成。
+
+2026-10-18（共享 COUNT 接入前的历史记录）已接通 [M3 AGE 闲置老化](m3_age.md)：超时 IR、独立驱动查询、生产轮询、
 精确版本删除、v4 快照及失败重试，协议 v25 增加 `age-status`、`rule-age` 和 `age:N`。
 模拟支持真实闲置、命中续期、虚拟推进及原子故障演练；三套同版本各 57/57 单测、
 四步核心回归和 16 组模拟通过，对应同一 228 文件源码。未重复完整 TAP；未过期规则
@@ -235,19 +241,20 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | stats/telemetry | 已实现报文统计与规则诊断 | 工作线程、端口、队列统计及丢弃原因；规则汇总/分页、安装副本、失败指标、失败事件和耗时历史完整发布；规则 COUNT 独立查询 |
 | topology | 发现与有证据的 mlx5 角色解析已接通 | 当前命名空间 netlink、sysfs、PCI 身份交叉核对；支持 uplink/PF/VF/SF 严格名称，缺失或矛盾保留 unknown；实机尚未验收 |
 | transfer 场景 | 七种模板的图与管理入口已接通 | 同交换域、角色/父子证据、优先级冲突及版本检查；同批创建与补偿，永不软件降级；虚拟控制验证不等于硬件卸载 |
-| 独立功能模拟 | 可直接运行且明确标记模拟 | 真实管理 CLI、平坦 transfer 报文与 COUNT/AGE、虚拟推进、单次及原子故障、隔离和快照重放；仅测试构建提供，不接触真实网卡 |
+| 独立功能模拟 | 可直接运行且明确标记模拟 | 真实管理 CLI、平坦 transfer 报文与私有/共享 COUNT、AGE、虚拟推进、单次及原子故障、隔离和快照重放；仅测试构建提供，不接触真实网卡 |
 | AGE | 正式查询、轮询回收及功能模拟已接通 | 超时 1–16777215 秒；独立于 COUNT、精确版本删除、v4 快照、失败保留与节流重试；重启重新计时，真实 PMD 未验收 |
+| 共享 COUNT | indirect 生产接口和模拟已接通 | 独立身份与修订、同安装口/域绑定、prepare/残留引用保护、AGE 释放、v5 单快照先对象后规则；累计重启归零，native 恢复日志不支持，实机未验收 |
 | capability profile / probe cache | 已实现本机诊断闭环 | 设备/固件/DPDK 身份、描述符和既有 queue/RSS/offload；完整规则校验结果缓存五秒、64 槽、强制刷新与失效；成功观察集合不承诺任意组合；正式安装始终新校验 |
 | rule IR | 已实现第一版 | 有序 match/action、domain/fallback、持久化 install port 和语义校验 |
 | rule repository | 已实现内存版和可选写路径 | 稳定 ID、单调 generation、幂等 CRUD、乐观并发、按 ID 稳定分页；control 可在 mutation 后保存完整 snapshot |
-| snapshot persistence | 已实现 v2/v3/v4、v1 单端口迁移、进程内隔离、跨进程保护与受控 TAP 恢复 | 含 AGE 写 v4；保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；恢复记录 v6 与原生标识、预期内容、监护及匿名授权绑定；受控本地 TAP DROP/QUEUE 可精确清理、独立日志续接及快照重启，其他 PMD 仍需外部核对 |
+| snapshot persistence | 已实现 v2/v3/v4/v5、v1 单端口迁移、进程内隔离、跨进程保护与受控 TAP 恢复 | AGE 无共享历史写 v4；共享对象/引用/非零 revision 写 v5；保存 install port、CRC32、0600、fsync+rename、dirty fail-stop、全量重放、preserved generation、回滚失败 handle 重试；恢复记录 v6 与原生标识、预期内容、监护及匿名授权绑定；受控本地 TAP DROP/QUEUE 可精确清理、独立日志续接及快照重启，其他 PMD 仍需外部核对 |
 | planner | 已实现第一版 | 明确 software/rte_flow 选择、fallback reason 与 transfer domain 校验 |
 | rte_flow | 已实现事务 backend | validate 与 create 分离；对象仓库持有 handle；批量失败逆序 destroy |
 | 等价软件 fallback | 已实现最小集合 | ingress Ethernet/IPv4/UDP/TCP、DROP/MARK/COUNT；`prefer` 仅在 validate 失败时回退，QUEUE/transfer 拒绝降级；immutable snapshot + DPDK QSBR 非阻塞回收已接入 |
 | 虚拟 PMD flow 验证 | TAP 与 net_ring 已验证 | 双 TAP 已验证硬件 DROP/QUEUE；软件 TCP+MARK+COUNT+DROP 有真实报文与计数证据；net_ring 已验证 prefer 回退，见 [待办文档](todo_virtual_flow_backend.md) |
 | 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
 | control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
-| management API | 本机 v25 | 增加 AGE 查询、状态及 transfer 超时；保留角色身份与图规划/安装、隧道、动态 ND/DAD/NUD、IPv6 会话与 NAT66、IPv6 ACL、双栈路由与邻居及原规则诊断和健康；旧版本客户端被拒绝 |
+| management API | 本机 v26 | 增加共享 COUNT 对象五个命令与精确绑定；保留 AGE、角色身份与图规划/安装、隧道、动态 ND/DAD/NUD、IPv6 会话与 NAT66、IPv6 ACL、双栈路由与邻居及原规则诊断和健康；旧版本客户端被拒绝 |
 | 规则安装观测 | 已实现状态、失败分类、失败事件、耗时历史与规则 telemetry | 精确版本核对后端、端口与 COUNT 配置；三组耗时、整批不重复计数、分位数上界与未知/溢出标志；最近 64 条完整失败的版本分页、覆盖提示和编号耗尽冻结；不提供持久化审计日志 |
 | health/readiness | 已实现本机最小闭环 | 实际线程、端口与链路、移除、恢复隔离和持久化 dirty；未就绪原因与 CLI 退出码；未提供远程探针、心跳或主动网络探测 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |
@@ -342,7 +349,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 - 没有查询 `rte_flow` 资源容量或预留规则空间；
 - COUNT id 由 rule id 的低 32 位生成，控制面必须保证其作用域内不冲突。
 - 硬件规则更新采用“先创建新 generation，再删除旧 generation”；若 PMD 拒绝重叠规则，更新失败并保留旧规则，当前不承诺跨 PMD 的无损原子替换。
-- management v25 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
+- management v26 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
 - 批量更新保留 `rule_capacity + 1` 的 backend 容量。纯软件路径整批替换快照、复用旧槽位，满表可更新；每次分类使用完整旧表或新表，新版本 COUNT 归零，未更新规则保留计数。硬件及混合路径仍需要临时容量，只保证账本整批发布；PREFER 可能整表替换但最终成为混合计划时，会在安装前复查软件空间。
 - 普通 daemon 不自动删除启动前已存在的 socket；`dppd-scope` 只在自己确认旧业务退出后清除私有目录内属于服务账户的管理 socket。
 - snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready`、`capability-show`、`rule-metrics/rule-latency/rule-history` 与规则 telemetry 的进程内隔离模式。可选 `--recovery-path` 已提供异常退出后的重放阻断与外部清理确认；受控本地 TAP 的自动清理与快照重启已接通，其他 PMD 自动清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md) 与 [恢复保护](recovery_guard.md)。

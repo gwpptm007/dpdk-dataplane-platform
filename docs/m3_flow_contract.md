@@ -28,5 +28,9 @@ transfer 方向、源/目的端点、COUNT 和所有配置对象的存活时间�
 
 这是模拟驱动入口的契约测试，未证明 mlx5、BlueField 或非 mlx5 实机支持这些规则。
 后续已接通 [AGE 控制与模拟闭环](m3_age.md)，契约测试也覆盖 AGE 参数与独立查询。
-indirect/shared action 仍待实现；真实 PMD 的 AGE 和共享动作支持仍需单独验收，
+首期 [共享 COUNT](m3_shared_count.md) 已接通真实 indirect create/query/destroy 与规则
+INDIRECT 动作绑定。绑定下标对应规则动作下标，COUNT 私有查询不返回共享汇总，
+共享查询同样要求包数和字节数都有效。prepare 到最终释放持有引用，销毁失败保留
+handle；native `before_create` 恢复日志模式明确拒绝 indirect，不绕过日志或降级。
+共享 RSS/METER/AGE 和更新仍未实现；真实 PMD 的 AGE 和共享 COUNT 支持仍需单独验收，
 不会仅因 DPDK 头文件中存在 API，就登记为硬件已验证能力。

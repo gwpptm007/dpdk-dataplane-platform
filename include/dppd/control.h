@@ -53,6 +53,8 @@ struct dppd_control_service {
     /** AGE 由管理线程轮询，错误必须经过完整一轮成功核对才能清除 */
     struct dppd_age_status age;
     int age_cycle_error;
+    /** 共享对象使用独立修订号，删除后也保留，防止同 ID 重建后误认成旧对象 */
+    uint64_t shared_count_revision;
 };
 
 struct dppd_control_apply_result {
@@ -126,6 +128,34 @@ struct dppd_control_count_result {
     uint64_t hits;
     uint64_t bytes;
 };
+
+#define DPPD_SHARED_COUNT_PAGE_SIZE 4U
+
+/** 共享查询明确返回对象身份，不把多条规则的总数伪装成某一条规则的 COUNT */
+struct dppd_control_shared_count_result {
+    struct dppd_shared_count_info object;
+    uint64_t hits, bytes;
+};
+
+/** 小页只复制内存中的对象，翻页期间表改变就拒绝拼接旧结果 */
+struct dppd_shared_count_page {
+    uint64_t revision, next_id;
+    uint32_t total, count;
+    bool more;
+    struct dppd_shared_count_info objects[DPPD_SHARED_COUNT_PAGE_SIZE];
+};
+
+int dppd_control_shared_count_create(struct dppd_control_service *service, const struct dppd_shared_count_spec *spec,
+    struct dppd_shared_count_info *result);
+int dppd_control_shared_count_get(const struct dppd_control_service *service, uint64_t id, uint64_t expected,
+    struct dppd_shared_count_info *result);
+int dppd_control_shared_count_query(const struct dppd_control_service *service, uint64_t id, uint64_t expected,
+    struct dppd_control_shared_count_result *result);
+/** 删除只接受精确版本，任何准备项或残留规则仍在引用时都不能销毁对象 */
+int dppd_control_shared_count_delete(struct dppd_control_service *service, uint64_t id, uint64_t expected,
+    uint64_t *revision);
+int dppd_control_shared_count_list(const struct dppd_control_service *service, uint64_t after,
+    uint64_t expected_revision, struct dppd_shared_count_page *page);
 
 struct dppd_control_persistence_status {
     bool enabled;

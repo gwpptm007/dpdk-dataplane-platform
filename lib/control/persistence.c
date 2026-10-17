@@ -16,12 +16,19 @@
 #define DPPD_SNAPSHOT_V2_VERSION 2U
 #define DPPD_SNAPSHOT_V3_VERSION 3U
 #define DPPD_SNAPSHOT_V4_VERSION 4U
+#define DPPD_SNAPSHOT_V5_VERSION 5U
 #define DPPD_SNAPSHOT_V3_MATCH_SIZE 68U
 #define DPPD_SNAPSHOT_V3_RECORD_SIZE \
     (40U + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_V3_MATCH_SIZE + DPPD_RULE_MAX_ACTIONS * 8U)
 /** v4 保留 v3 的记录宽度，新增 AGE 的动作类型和完整秒数，不保存运行时计时状态 */
 #define DPPD_SNAPSHOT_V4_RECORD_SIZE DPPD_SNAPSHOT_V3_RECORD_SIZE
 #define DPPD_SNAPSHOT_HEADER_SIZE 48U
+/** v5 扩展头保存共享表修订号，动作同时保留完整的 64 位 ID 和代次 */
+#define DPPD_SNAPSHOT_V5_HEADER_SIZE 64U
+#define DPPD_SNAPSHOT_V5_ACTION_SIZE 24U
+#define DPPD_SNAPSHOT_V5_SHARED_SIZE 32U
+#define DPPD_SNAPSHOT_V5_RECORD_SIZE \
+    (40U + DPPD_RULE_MAX_ITEMS * DPPD_SNAPSHOT_V3_MATCH_SIZE + DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_V5_ACTION_SIZE)
 #define DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE 36U
 #define DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE 40U
 #define DPPD_SNAPSHOT_RULE_HEADER_SIZE DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE
@@ -35,6 +42,7 @@
         DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE)
 #define DPPD_SNAPSHOT_RECORD_SIZE DPPD_SNAPSHOT_V2_RECORD_SIZE
 #define DPPD_SNAPSHOT_MAX_RULES 1000000U
+#define DPPD_SNAPSHOT_MAX_SHARED_COUNTS DPPD_SHARED_COUNT_MAX
 #define DPPD_SNAPSHOT_CHECKSUM_OFFSET 40U
 
 static const uint8_t snapshot_magic[8] = {
@@ -108,7 +116,7 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t length)
     return crc;
 }
 
-static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t match_size)
+static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t match_size, uint32_t action_size)
 {
     char validation_error[128];
     uint16_t i;
@@ -117,8 +125,7 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t m
         rule->generation == 0)
         return -EINVAL;
     memset(output, 0,
-        DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * match_size +
-            DPPD_RULE_MAX_ACTIONS * DPPD_SNAPSHOT_ACTION_SIZE);
+        DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * match_size + DPPD_RULE_MAX_ACTIONS * action_size);
     put_u64_le(output, rule->id);
     put_u64_le(output + 8, rule->generation);
     put_u32_le(output + 16, (uint32_t)rule->domain);
@@ -184,8 +191,8 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t m
 
     for (i = 0; i < rule->nb_actions; ++i) {
         const struct dppd_action *action = &rule->actions[i];
-        uint8_t *encoded =
-            output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * match_size + i * DPPD_SNAPSHOT_ACTION_SIZE;
+        uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * match_size + i * action_size;
+        uint8_t *configuration = encoded + (action_size == DPPD_SNAPSHOT_V5_ACTION_SIZE ? 8U : 4U);
 
         put_u32_le(encoded, (uint32_t)action->type);
         switch (action->type) {
@@ -194,16 +201,22 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t m
         case DPPD_ACTION_ALLOW:
             break;
         case DPPD_ACTION_QUEUE:
-            put_u16_le(encoded + 4, action->conf.queue_id);
+            put_u16_le(configuration, action->conf.queue_id);
             break;
         case DPPD_ACTION_MARK:
-            put_u32_le(encoded + 4, action->conf.mark_id);
+            put_u32_le(configuration, action->conf.mark_id);
             break;
         case DPPD_ACTION_AGE:
-            put_u32_le(encoded + 4, action->conf.age_timeout_seconds);
+            put_u32_le(configuration, action->conf.age_timeout_seconds);
+            break;
+        case DPPD_ACTION_SHARED_COUNT:
+            if (action_size != DPPD_SNAPSHOT_V5_ACTION_SIZE)
+                return -EINVAL;
+            put_u64_le(configuration, action->conf.shared_count.id);
+            put_u64_le(configuration + 8, action->conf.shared_count.generation);
             break;
         case DPPD_ACTION_REPRESENTED_PORT:
-            put_u16_le(encoded + 4, action->conf.ethdev_port_id);
+            put_u16_le(configuration, action->conf.ethdev_port_id);
             break;
         default:
             return -EINVAL;
@@ -212,14 +225,47 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t m
     return 0;
 }
 
+/** v5 未使用的字节必须为零，避免损坏数据藏在保留位或被忽略的数组槽里 */
+static bool bytes_zero(const uint8_t *data, uint32_t length)
+{
+    for (uint32_t i = 0; i < length; ++i)
+        if (data[i] != 0)
+            return false;
+    return true;
+}
+
+static uint32_t encoded_match_size(enum dppd_match_type type)
+{
+    switch (type) {
+    case DPPD_MATCH_ETH:
+        return 4U;
+    case DPPD_MATCH_IPV4:
+        return 20U;
+    case DPPD_MATCH_IPV6:
+        return 68U;
+    case DPPD_MATCH_TCP:
+    case DPPD_MATCH_UDP:
+    case DPPD_MATCH_TCP_RANGE:
+    case DPPD_MATCH_UDP_RANGE:
+        return 12U;
+    case DPPD_MATCH_REPRESENTED_PORT:
+    case DPPD_MATCH_IP_PROTOCOL:
+        return 6U;
+    case DPPD_MATCH_CONNECTION_STATE:
+        return 8U;
+    }
+    return 0;
+}
+
 /*
  * v1 与 v2 的 match/action 编码完全相同，只是 v1 缺少 install_port_id 和
  * 两字节保留位；v3 另将匹配槽扩展为完整 IPv6 地址与掩码
  * v4 沿用 v3 布局但才允许 AGE，避免把伪造降版的动作当成旧格式已有能力
+ * v5 将动作槽扩展为 24 字节，保留位和未使用的字节必须保持为零
  * 将布局参数化可保证迁移读取与正常读取共享同一套 IR 校验
  */
 static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint32_t rule_header_size,
-    bool contains_install_port, uint32_t match_size, bool supports_age)
+    bool contains_install_port, uint32_t match_size, bool supports_age, uint32_t action_size)
 {
     char validation_error[128];
     uint16_t i;
@@ -285,12 +331,22 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint
         default:
             return -EBADMSG;
         }
+        if (action_size == DPPD_SNAPSHOT_V5_ACTION_SIZE) {
+            uint32_t used = encoded_match_size(match->type);
+            if (used == 0 || used > match_size || !bytes_zero(encoded + used, match_size - used))
+                return -EBADMSG;
+        }
     }
 
     for (i = 0; i < rule->nb_actions; ++i) {
         struct dppd_action *action = &rule->actions[i];
-        const uint8_t *encoded =
-            input + rule_header_size + DPPD_RULE_MAX_ITEMS * match_size + i * DPPD_SNAPSHOT_ACTION_SIZE;
+        const uint8_t *encoded = input + rule_header_size + DPPD_RULE_MAX_ITEMS * match_size + i * action_size;
+        bool extended = action_size == DPPD_SNAPSHOT_V5_ACTION_SIZE;
+        const uint8_t *configuration = encoded + (extended ? 8U : 4U);
+        uint32_t used = 0;
+
+        if (extended && get_u32_le(encoded + 4) != 0)
+            return -EBADMSG;
 
         action->type = (enum dppd_action_type)get_u32_le(encoded);
         switch (action->type) {
@@ -299,23 +355,42 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint
         case DPPD_ACTION_ALLOW:
             break;
         case DPPD_ACTION_QUEUE:
-            action->conf.queue_id = get_u16_le(encoded + 4);
+            action->conf.queue_id = get_u16_le(configuration);
+            used = 2U;
             break;
         case DPPD_ACTION_MARK:
-            action->conf.mark_id = get_u32_le(encoded + 4);
+            action->conf.mark_id = get_u32_le(configuration);
+            used = 4U;
             break;
         case DPPD_ACTION_AGE:
             if (!supports_age)
                 return -EBADMSG;
-            action->conf.age_timeout_seconds = get_u32_le(encoded + 4);
+            action->conf.age_timeout_seconds = get_u32_le(configuration);
+            used = 4U;
+            break;
+        case DPPD_ACTION_SHARED_COUNT:
+            if (!extended)
+                return -EBADMSG;
+            action->conf.shared_count.id = get_u64_le(configuration);
+            action->conf.shared_count.generation = get_u64_le(configuration + 8);
+            used = 16U;
             break;
         case DPPD_ACTION_REPRESENTED_PORT:
-            action->conf.ethdev_port_id = get_u16_le(encoded + 4);
+            action->conf.ethdev_port_id = get_u16_le(configuration);
+            used = 2U;
             break;
         default:
             return -EBADMSG;
         }
+        if (extended && !bytes_zero(configuration + used, 16U - used))
+            return -EBADMSG;
     }
+    if (action_size == DPPD_SNAPSHOT_V5_ACTION_SIZE &&
+        (!bytes_zero(input + rule_header_size + rule->nb_matches * match_size,
+             (DPPD_RULE_MAX_ITEMS - rule->nb_matches) * match_size) ||
+            !bytes_zero(input + rule_header_size + DPPD_RULE_MAX_ITEMS * match_size + rule->nb_actions * action_size,
+                (DPPD_RULE_MAX_ACTIONS - rule->nb_actions) * action_size)))
+        return -EBADMSG;
     if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0)
         return -EBADMSG;
     return 0;
@@ -386,20 +461,104 @@ static int fsync_parent_directory(const char *path)
     return rc;
 }
 
+static int compare_shared_ids(const void *left, const void *right)
+{
+    const struct dppd_shared_count_spec *a = left, *b = right;
+    return a->id < b->id ? -1 : a->id > b->id;
+}
+
+/** 全局修订号不会因对象删空而归零，旧对象的代次也不能超过这份表的修订号 */
+static bool shared_specs_valid(const struct dppd_shared_count_spec *specs, uint32_t count, uint64_t revision)
+{
+    if (revision == UINT64_MAX || (count != 0 && specs == NULL))
+        return false;
+    for (uint32_t i = 0; i < count; ++i)
+        if (specs[i].id == 0 || specs[i].id == UINT64_MAX || specs[i].generation == 0 ||
+            specs[i].generation == UINT64_MAX || specs[i].generation > revision ||
+            specs[i].install_port_id == UINT16_MAX || specs[i].domain < DPPD_RULE_DOMAIN_INGRESS ||
+            specs[i].domain > DPPD_RULE_DOMAIN_TRANSFER || (i != 0 && specs[i - 1U].id >= specs[i].id))
+            return false;
+    return true;
+}
+
+/** 按稳定 ID 二分查找，不能让大量规则与对象形成逐项笛卡尔扫描 */
+static const struct dppd_shared_count_spec *find_shared_spec(const struct dppd_shared_count_spec *specs, uint32_t count,
+    uint64_t id)
+{
+    uint32_t first = 0, last = count;
+    while (first < last) {
+        uint32_t middle = first + (last - first) / 2U;
+        if (specs[middle].id < id)
+            first = middle + 1U;
+        else
+            last = middle;
+    }
+    return first < count && specs[first].id == id ? &specs[first] : NULL;
+}
+
+/** 共享引用必须指向精确代次和相同作用域，不能把重建后的同 ID 对象认成原对象 */
+static bool shared_references_valid(const struct dppd_rule *rules, uint32_t count,
+    const struct dppd_shared_count_spec *specs, uint32_t shared_count)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        bool private_count = false, shared_count_seen = false;
+        if (rules[i].nb_actions > DPPD_RULE_MAX_ACTIONS)
+            return false;
+        for (uint16_t action = 0; action < rules[i].nb_actions; ++action) {
+            const struct dppd_action *item = &rules[i].actions[action];
+            private_count |= item->type == DPPD_ACTION_COUNT;
+            if (item->type != DPPD_ACTION_SHARED_COUNT)
+                continue;
+            const struct dppd_shared_count_spec *spec =
+                find_shared_spec(specs, shared_count, item->conf.shared_count.id);
+            if (shared_count_seen || spec == NULL || spec->generation != item->conf.shared_count.generation ||
+                spec->install_port_id != rules[i].install_port_id || spec->domain != rules[i].domain)
+                return false;
+            shared_count_seen = true;
+        }
+        if (private_count && shared_count_seen)
+            return false;
+    }
+    return true;
+}
+
+static void encode_shared_spec(const struct dppd_shared_count_spec *spec, uint8_t *output)
+{
+    memset(output, 0, DPPD_SNAPSHOT_V5_SHARED_SIZE);
+    put_u64_le(output, spec->id);
+    put_u64_le(output + 8, spec->generation);
+    put_u16_le(output + 16, spec->install_port_id);
+    put_u32_le(output + 20, (uint32_t)spec->domain);
+}
+
+static int decode_shared_spec(const uint8_t *input, struct dppd_shared_count_spec *spec)
+{
+    if (get_u16_le(input + 18) != 0 || get_u64_le(input + 24) != 0)
+        return -EBADMSG;
+    *spec = (struct dppd_shared_count_spec){.id = get_u64_le(input),
+        .generation = get_u64_le(input + 8),
+        .install_port_id = get_u16_le(input + 16),
+        .domain = (enum dppd_rule_domain)get_u32_le(input + 20)};
+    return 0;
+}
+
 /**
  * 先把完整快照写入同目录临时文件，再用重命名替换旧快照
  * 替换之前失败可以保留旧文件，替换之后同步失败仍要报告错误，不能宣称已经可靠保存
  */
-int dppd_persistence_save(const char *path, const struct dppd_rule_repository *repository)
+int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_repository *repository,
+    const struct dppd_shared_count_spec *specs, uint32_t shared_count, uint64_t shared_revision)
 {
     struct dppd_rule *rules = NULL;
-    uint8_t header[DPPD_SNAPSHOT_HEADER_SIZE];
+    struct dppd_shared_count_spec *shared = NULL;
+    uint8_t header[DPPD_SNAPSHOT_V5_HEADER_SIZE];
     uint8_t *payload = NULL;
     char temporary[PATH_MAX];
     uint64_t generation;
     uint64_t payload_size;
     uint32_t count;
     uint32_t match_size = DPPD_SNAPSHOT_MATCH_SIZE, record_size = DPPD_SNAPSHOT_RECORD_SIZE;
+    uint32_t action_size = DPPD_SNAPSHOT_ACTION_SIZE, header_size = DPPD_SNAPSHOT_HEADER_SIZE;
     uint32_t version = DPPD_SNAPSHOT_V2_VERSION;
     uint32_t listed = 0;
     uint32_t checksum;
@@ -408,15 +567,32 @@ int dppd_persistence_save(const char *path, const struct dppd_rule_repository *r
     int fd = -1;
     int rc;
 
-    if (path == NULL || path[0] == '\0' || repository == NULL || repository->records == NULL)
+    if (path == NULL || path[0] == '\0' || repository == NULL || repository->records == NULL ||
+        (shared_count != 0 && specs == NULL) || shared_revision == UINT64_MAX)
         return -EINVAL;
     count = dppd_rule_repository_count(repository);
     generation = dppd_rule_repository_generation(repository);
-    if (count > DPPD_SNAPSHOT_MAX_RULES)
+    if (count > DPPD_SNAPSHOT_MAX_RULES || shared_count > DPPD_SNAPSHOT_MAX_SHARED_COUNTS)
         return -E2BIG;
     payload_size = (uint64_t)count * DPPD_SNAPSHOT_RECORD_SIZE;
     if (payload_size > SIZE_MAX)
         return -EOVERFLOW;
+
+    if (shared_count != 0) {
+        shared = calloc(shared_count, sizeof(*shared));
+        if (shared == NULL) {
+            rc = -ENOMEM;
+            goto cleanup;
+        }
+        memcpy(shared, specs, shared_count * sizeof(*shared));
+        qsort(shared, shared_count, sizeof(*shared), compare_shared_ids);
+    }
+    if (!shared_specs_valid(shared, shared_count, shared_revision)) {
+        rc = -EINVAL;
+        goto cleanup;
+    }
+    if (shared_revision != 0 || shared_count != 0)
+        version = DPPD_SNAPSHOT_V5_VERSION;
 
     if (count != 0) {
         rules = calloc(count, sizeof(*rules));
@@ -431,45 +607,66 @@ int dppd_persistence_save(const char *path, const struct dppd_rule_repository *r
             rc = -EUCLEAN;
             goto cleanup;
         }
-        /** 普通 IPv4 和 IPv6 保留原版本，包含 AGE 才写 v4，重启后由新对象重新开始计时 */
+        /** 仅在需要 AGE 或共享身份时升级格式，普通 IPv4 和 IPv6 保留原版本 */
         for (i = 0; i < count; ++i) {
             for (uint16_t item = 0; item < rules[i].nb_matches; ++item)
-                if (rules[i].matches[item].type == DPPD_MATCH_IPV6 && version != DPPD_SNAPSHOT_V4_VERSION)
+                if (rules[i].matches[item].type == DPPD_MATCH_IPV6 && version < DPPD_SNAPSHOT_V3_VERSION)
                     version = DPPD_SNAPSHOT_V3_VERSION;
             for (uint16_t action = 0; action < rules[i].nb_actions; ++action)
-                if (rules[i].actions[action].type == DPPD_ACTION_AGE)
+                if (rules[i].actions[action].type == DPPD_ACTION_SHARED_COUNT)
+                    version = DPPD_SNAPSHOT_V5_VERSION;
+                else if (rules[i].actions[action].type == DPPD_ACTION_AGE && version < DPPD_SNAPSHOT_V4_VERSION)
                     version = DPPD_SNAPSHOT_V4_VERSION;
         }
-        if (version == DPPD_SNAPSHOT_V3_VERSION || version == DPPD_SNAPSHOT_V4_VERSION) {
-            match_size = DPPD_SNAPSHOT_V3_MATCH_SIZE;
-            record_size = DPPD_SNAPSHOT_V3_RECORD_SIZE;
-        }
-        payload_size = (uint64_t)count * record_size;
-        if (payload_size > SIZE_MAX) {
-            rc = -EOVERFLOW;
-            goto cleanup;
-        }
+    }
+    if (!shared_references_valid(rules, count, shared, shared_count)) {
+        rc = -EINVAL;
+        goto cleanup;
+    }
+    if (version >= DPPD_SNAPSHOT_V3_VERSION) {
+        match_size = DPPD_SNAPSHOT_V3_MATCH_SIZE;
+        record_size = DPPD_SNAPSHOT_V3_RECORD_SIZE;
+    }
+    if (version == DPPD_SNAPSHOT_V5_VERSION) {
+        header_size = DPPD_SNAPSHOT_V5_HEADER_SIZE;
+        action_size = DPPD_SNAPSHOT_V5_ACTION_SIZE;
+        record_size = DPPD_SNAPSHOT_V5_RECORD_SIZE;
+    }
+    payload_size = (uint64_t)count * record_size + (uint64_t)shared_count * DPPD_SNAPSHOT_V5_SHARED_SIZE;
+    if (payload_size > SIZE_MAX || payload_size > (uint64_t)INT64_MAX - header_size) {
+        rc = -EOVERFLOW;
+        goto cleanup;
+    }
+    if (payload_size != 0) {
         payload = calloc(1, (size_t)payload_size);
         if (payload == NULL) {
             rc = -ENOMEM;
             goto cleanup;
         }
         for (i = 0; i < count; ++i) {
-            rc = encode_rule(&rules[i], payload + i * record_size, match_size);
+            rc = encode_rule(&rules[i], payload + (size_t)i * record_size, match_size, action_size);
             if (rc != 0)
                 goto cleanup;
         }
+        for (i = 0; i < shared_count; ++i)
+            encode_shared_spec(&shared[i],
+                payload + (size_t)count * record_size + (size_t)i * DPPD_SNAPSHOT_V5_SHARED_SIZE);
     }
 
     memset(header, 0, sizeof(header));
     memcpy(header, snapshot_magic, sizeof(snapshot_magic));
     put_u32_le(header + 8, version);
-    put_u32_le(header + 12, DPPD_SNAPSHOT_HEADER_SIZE);
+    put_u32_le(header + 12, header_size);
     put_u32_le(header + 16, record_size);
     put_u32_le(header + 20, count);
     put_u64_le(header + 24, generation);
     put_u64_le(header + 32, payload_size);
-    checksum = crc32_update(UINT32_MAX, header, sizeof(header));
+    if (version == DPPD_SNAPSHOT_V5_VERSION) {
+        put_u64_le(header + 48, shared_revision);
+        put_u32_le(header + 56, shared_count);
+        put_u32_le(header + 60, DPPD_SNAPSHOT_V5_SHARED_SIZE);
+    }
+    checksum = crc32_update(UINT32_MAX, header, header_size);
     checksum = crc32_update(checksum, payload, (size_t)payload_size) ^ UINT32_MAX;
     put_u32_le(header + DPPD_SNAPSHOT_CHECKSUM_OFFSET, checksum);
 
@@ -486,7 +683,7 @@ int dppd_persistence_save(const char *path, const struct dppd_rule_repository *r
         rc = -errno;
         goto cleanup;
     }
-    rc = write_all(fd, header, sizeof(header));
+    rc = write_all(fd, header, header_size);
     if (rc == 0 && payload_size != 0)
         rc = write_all(fd, payload, (size_t)payload_size);
     if (rc == 0 && fsync(fd) != 0)
@@ -510,48 +707,68 @@ cleanup:
         close(fd);
     free(payload);
     free(rules);
+    free(shared);
     return rc;
+}
+
+/** 旧入口没有共享对象表，遇到共享引用时明确失败，不生成丢失引用的半份快照 */
+int dppd_persistence_save(const char *path, const struct dppd_rule_repository *repository)
+{
+    return dppd_persistence_save_with_shared(path, repository, NULL, 0, 0);
 }
 
 typedef int (*dppd_snapshot_rule_decoder)(const uint8_t *input, struct dppd_rule *rule);
 
 static int decode_rule_v2(const uint8_t *input, struct dppd_rule *rule)
 {
-    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_MATCH_SIZE, false);
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_MATCH_SIZE, false,
+        DPPD_SNAPSHOT_ACTION_SIZE);
 }
 
 static int decode_rule_v3(const uint8_t *input, struct dppd_rule *rule)
 {
-    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_V3_MATCH_SIZE, false);
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_V3_MATCH_SIZE, false,
+        DPPD_SNAPSHOT_ACTION_SIZE);
 }
 
 static int decode_rule_v4(const uint8_t *input, struct dppd_rule *rule)
 {
-    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_V3_MATCH_SIZE, true);
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_V3_MATCH_SIZE, true,
+        DPPD_SNAPSHOT_ACTION_SIZE);
+}
+
+static int decode_rule_v5(const uint8_t *input, struct dppd_rule *rule)
+{
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_V3_MATCH_SIZE, true,
+        DPPD_SNAPSHOT_V5_ACTION_SIZE);
 }
 
 static int decode_rule_v1(const uint8_t *input, struct dppd_rule *rule)
 {
-    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE, false, DPPD_SNAPSHOT_MATCH_SIZE, false);
+    return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V1_RULE_HEADER_SIZE, false, DPPD_SNAPSHOT_MATCH_SIZE, false,
+        DPPD_SNAPSHOT_ACTION_SIZE);
 }
 
 /*
- * 版本选择在这里集中完成：正常启动接受带安装端口的 v2/v3/v4，迁移工具才传入 v1。这样不会
+ * 版本选择在这里集中完成：正常启动接受带安装端口的 v2 到 v5，迁移工具才传入 v1。这样不会
  * 因为新增迁移能力而让守护进程误把缺少安装端口的旧快照当成可恢复状态
  */
 static int load_snapshot_version(const char *path, struct dppd_persisted_snapshot *snapshot, uint32_t expected_version,
     uint32_t expected_record_size, dppd_snapshot_rule_decoder decode_rule)
 {
-    uint8_t header[DPPD_SNAPSHOT_HEADER_SIZE];
-    uint8_t checksum_header[DPPD_SNAPSHOT_HEADER_SIZE];
+    uint8_t header[DPPD_SNAPSHOT_V5_HEADER_SIZE] = {0};
+    uint8_t checksum_header[DPPD_SNAPSHOT_V5_HEADER_SIZE];
     uint8_t *payload = NULL;
     struct stat metadata;
     uint64_t generation;
     uint64_t payload_size;
     uint64_t expected_size;
+    uint64_t shared_revision = 0;
     uint32_t stored_checksum;
     uint32_t calculated_checksum;
     uint32_t count;
+    uint32_t shared_count = 0;
+    uint32_t header_size = DPPD_SNAPSHOT_HEADER_SIZE;
     uint32_t i;
     int fd = -1;
     int rc;
@@ -566,11 +783,11 @@ static int load_snapshot_version(const char *path, struct dppd_persisted_snapsho
         rc = -errno;
         goto cleanup;
     }
-    if (!S_ISREG(metadata.st_mode) || metadata.st_size < (off_t)sizeof(header)) {
+    if (!S_ISREG(metadata.st_mode) || metadata.st_size < (off_t)DPPD_SNAPSHOT_HEADER_SIZE) {
         rc = -EBADMSG;
         goto cleanup;
     }
-    rc = read_all(fd, header, sizeof(header));
+    rc = read_all(fd, header, DPPD_SNAPSHOT_HEADER_SIZE);
     if (rc != 0)
         goto cleanup;
     if (memcmp(header, snapshot_magic, sizeof(snapshot_magic)) != 0) {
@@ -592,6 +809,9 @@ static int load_snapshot_version(const char *path, struct dppd_persisted_snapsho
         } else if (expected_version == DPPD_SNAPSHOT_V4_VERSION) {
             expected_record_size = DPPD_SNAPSHOT_V4_RECORD_SIZE;
             decode_rule = decode_rule_v4;
+        } else if (expected_version == DPPD_SNAPSHOT_V5_VERSION) {
+            expected_record_size = DPPD_SNAPSHOT_V5_RECORD_SIZE;
+            decode_rule = decode_rule_v5;
         } else {
             rc = -EPROTONOSUPPORT;
             goto cleanup;
@@ -601,7 +821,20 @@ static int load_snapshot_version(const char *path, struct dppd_persisted_snapsho
         rc = -EPROTONOSUPPORT;
         goto cleanup;
     }
-    if (get_u32_le(header + 12) != DPPD_SNAPSHOT_HEADER_SIZE || get_u32_le(header + 16) != expected_record_size ||
+    if (expected_version == DPPD_SNAPSHOT_V5_VERSION) {
+        header_size = DPPD_SNAPSHOT_V5_HEADER_SIZE;
+        rc = read_all(fd, header + DPPD_SNAPSHOT_HEADER_SIZE, header_size - DPPD_SNAPSHOT_HEADER_SIZE);
+        if (rc != 0)
+            goto cleanup;
+        shared_revision = get_u64_le(header + 48);
+        shared_count = get_u32_le(header + 56);
+        if (get_u32_le(header + 60) != DPPD_SNAPSHOT_V5_SHARED_SIZE || shared_count > DPPD_SNAPSHOT_MAX_SHARED_COUNTS ||
+            shared_revision == UINT64_MAX) {
+            rc = -EBADMSG;
+            goto cleanup;
+        }
+    }
+    if (get_u32_le(header + 12) != header_size || get_u32_le(header + 16) != expected_record_size ||
         get_u32_le(header + 44) != 0) {
         rc = -EBADMSG;
         goto cleanup;
@@ -609,19 +842,21 @@ static int load_snapshot_version(const char *path, struct dppd_persisted_snapsho
     count = get_u32_le(header + 20);
     generation = get_u64_le(header + 24);
     payload_size = get_u64_le(header + 32);
-    if (count > DPPD_SNAPSHOT_MAX_RULES || payload_size != (uint64_t)count * expected_record_size) {
+    if (count > DPPD_SNAPSHOT_MAX_RULES ||
+        payload_size !=
+            (uint64_t)count * expected_record_size + (uint64_t)shared_count * DPPD_SNAPSHOT_V5_SHARED_SIZE ||
+        payload_size > SIZE_MAX || payload_size > (uint64_t)INT64_MAX - header_size) {
         rc = -EBADMSG;
         goto cleanup;
     }
-    expected_size = DPPD_SNAPSHOT_HEADER_SIZE + payload_size;
-    if (expected_size > INT64_MAX || metadata.st_size != (off_t)expected_size) {
+    expected_size = header_size + payload_size;
+    if (metadata.st_size != (off_t)expected_size) {
         rc = -EBADMSG;
         goto cleanup;
     }
-    if (count != 0) {
+    if (payload_size != 0) {
         payload = malloc((size_t)payload_size);
-        snapshot->rules = calloc(count, sizeof(*snapshot->rules));
-        if (payload == NULL || snapshot->rules == NULL) {
+        if (payload == NULL) {
             rc = -ENOMEM;
             goto cleanup;
         }
@@ -630,17 +865,32 @@ static int load_snapshot_version(const char *path, struct dppd_persisted_snapsho
             goto cleanup;
     }
 
-    memcpy(checksum_header, header, sizeof(header));
+    if (count != 0) {
+        snapshot->rules = calloc(count, sizeof(*snapshot->rules));
+        if (snapshot->rules == NULL) {
+            rc = -ENOMEM;
+            goto cleanup;
+        }
+    }
+    if (shared_count != 0) {
+        snapshot->shared_counts = calloc(shared_count, sizeof(*snapshot->shared_counts));
+        if (snapshot->shared_counts == NULL) {
+            rc = -ENOMEM;
+            goto cleanup;
+        }
+    }
+
+    memcpy(checksum_header, header, header_size);
     stored_checksum = get_u32_le(checksum_header + DPPD_SNAPSHOT_CHECKSUM_OFFSET);
     put_u32_le(checksum_header + DPPD_SNAPSHOT_CHECKSUM_OFFSET, 0);
-    calculated_checksum = crc32_update(UINT32_MAX, checksum_header, sizeof(checksum_header));
+    calculated_checksum = crc32_update(UINT32_MAX, checksum_header, header_size);
     calculated_checksum = crc32_update(calculated_checksum, payload, (size_t)payload_size) ^ UINT32_MAX;
     if (stored_checksum != calculated_checksum) {
         rc = -EBADMSG;
         goto cleanup;
     }
     for (i = 0; i < count; ++i) {
-        rc = decode_rule(payload + i * expected_record_size, &snapshot->rules[i]);
+        rc = decode_rule(payload + (size_t)i * expected_record_size, &snapshot->rules[i]);
         if (rc != 0)
             goto cleanup;
         if (snapshot->rules[i].generation > generation ||
@@ -649,8 +899,22 @@ static int load_snapshot_version(const char *path, struct dppd_persisted_snapsho
             goto cleanup;
         }
     }
+    for (i = 0; i < shared_count; ++i) {
+        rc = decode_shared_spec(payload + (size_t)count * expected_record_size +
+                (size_t)i * DPPD_SNAPSHOT_V5_SHARED_SIZE,
+            &snapshot->shared_counts[i]);
+        if (rc != 0)
+            goto cleanup;
+    }
+    if (!shared_specs_valid(snapshot->shared_counts, shared_count, shared_revision) ||
+        !shared_references_valid(snapshot->rules, count, snapshot->shared_counts, shared_count)) {
+        rc = -EBADMSG;
+        goto cleanup;
+    }
     snapshot->count = count;
     snapshot->repository_generation = generation;
+    snapshot->shared_count = shared_count;
+    snapshot->shared_revision = shared_revision;
     rc = 0;
 
 cleanup:
@@ -678,5 +942,6 @@ void dppd_persisted_snapshot_destroy(struct dppd_persisted_snapshot *snapshot)
     if (snapshot == NULL)
         return;
     free(snapshot->rules);
+    free(snapshot->shared_counts);
     memset(snapshot, 0, sizeof(*snapshot));
 }

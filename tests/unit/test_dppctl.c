@@ -360,6 +360,56 @@ static void test_transfer_arguments(void)
     }
 }
 
+/** 共享身份必须完整且精确，读操作可选 any，删除和规则引用不能绕过版本检查 */
+static void test_shared_arguments(void)
+{
+    struct dppd_management_request request;
+    char *create[] = {"shared-count-create", "77", "0", "transfer", "extra"};
+    assert(build_request(4, create, &request) == 0 && request.operation == DPPD_MANAGEMENT_SHARED_COUNT_CREATE);
+    assert(request.payload.shared_count_create.id == 77 && request.payload.shared_count_create.generation == 0 &&
+        request.payload.shared_count_create.domain == DPPD_RULE_DOMAIN_TRANSFER);
+    assert(build_request(5, create, &request) == -EINVAL);
+    char *query[] = {"shared-count-query", "77", "any", "extra"};
+    assert(build_request(3, query, &request) == 0 && request.payload.shared_count.expected == UINT64_MAX);
+    query[0] = "shared-count-delete";
+    assert(build_request(3, query, &request) == -EINVAL);
+    query[2] = "8";
+    assert(build_request(3, query, &request) == 0 && request.operation == DPPD_MANAGEMENT_SHARED_COUNT_DELETE);
+    query[0] = "shared-count-get";
+    assert(build_request(3, query, &request) == 0 && request.operation == DPPD_MANAGEMENT_SHARED_COUNT_GET);
+    assert(build_request(4, query, &request) == -EINVAL);
+    const char *bad[] = {"", "0", "any", "-1", "+1", " 1", "1 ", "1x", "18446744073709551615", "18446744073709551616"};
+    for (unsigned int i = 0; i < sizeof(bad) / sizeof(*bad); ++i) {
+        create[1] = (char *)bad[i];
+        assert(build_request(4, create, &request) == -EINVAL);
+        query[2] = (char *)bad[i];
+        assert(build_request(3, query, &request) == (strcmp(bad[i], "any") == 0 ? 0 : -EINVAL));
+    }
+    char *list[] = {"shared-count-list", "0", "0", "extra"};
+    assert(build_request(1, list, &request) == 0 && request.payload.shared_count_list.expected_revision == UINT64_MAX);
+    assert(build_request(3, list, &request) == 0 && request.payload.shared_count_list.expected_revision == 0);
+    assert(build_request(4, list, &request) == -EINVAL);
+    char *plan[] = {"transfer-plan", "100", "0", "0", "2", "pair", "bidir", "shared-count:77:8", "age:5", "priority:1"};
+    assert(build_request(10, plan, &request) == 0 && !request.payload.transfer.with_count);
+    assert(request.payload.transfer.shared_count_id == 77 && request.payload.transfer.shared_count_generation == 8 &&
+        request.payload.transfer.age_timeout_seconds == 5);
+    const char *invalid[] = {"shared-count:", "shared-count:1", "shared-count:0:8", "shared-count:77:0",
+        "shared-count:77:any", "shared-count:77:8:9", "shared-count:+77:8", "shared-count:77:-1",
+        "shared-count:18446744073709551615:8", "shared-count:77:18446744073709551615"};
+    for (unsigned int i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        plan[7] = (char *)invalid[i];
+        assert(build_request(8, plan, &request) == -EINVAL);
+    }
+    plan[7] = "shared-count:77:8";
+    plan[8] = "count";
+    assert(build_request(9, plan, &request) == -EINVAL);
+    plan[7] = "count";
+    plan[8] = "shared-count:77:8";
+    assert(build_request(9, plan, &request) == -EINVAL);
+    plan[7] = "shared-count:77:8";
+    assert(build_request(9, plan, &request) == -EINVAL);
+}
+
 /** AGE 仅扩展 transfer 入口，秒数、组合选项和查询参数都必须完整校验 */
 static void test_age_arguments(void)
 {
@@ -570,6 +620,7 @@ int main(void)
     test_history_arguments();
     test_transfer_arguments();
     test_age_arguments();
+    test_shared_arguments();
     test_transfer_print();
 
     /** 健康与就绪命令都使用无参数的状态查询，额外参数必须明确拒绝 */

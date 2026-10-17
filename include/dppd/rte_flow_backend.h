@@ -30,13 +30,25 @@ struct dppd_flow_api {
     /** 可选的真实老化查询，没有接口时明确返回不支持，不用 COUNT 差值替代 */
     int (*query_age)(const struct dppd_flow_handle *handle, struct dppd_flow_age_result *result,
         struct dppd_flow_error *error);
+    int (*shared_count_create)(const struct dppd_shared_count_spec *spec, struct dppd_shared_count_handle *handle,
+        struct dppd_flow_error *error);
+    int (*shared_count_query)(const struct dppd_shared_count_handle *handle, uint64_t *hits, uint64_t *bytes,
+        struct dppd_flow_error *error);
+    int (*shared_count_destroy)(struct dppd_shared_count_handle *handle, struct dppd_flow_error *error);
+    int (*validate_bound)(uint16_t port_id, const struct dppd_rule *rule, const struct dppd_flow_binding *binding,
+        struct dppd_flow_error *error);
+    int (*create_bound)(uint16_t port_id, const struct dppd_rule *rule, const struct dppd_flow_binding *binding,
+        struct dppd_flow_handle *handle, struct dppd_flow_error *error);
 };
 
 struct dppd_rte_flow_object;
+struct dppd_shared_count_object;
 
 struct dppd_rte_flow_backend {
     /** 固定地址的对象数组，事务 token 会直接引用其中的槽位 */
     struct dppd_rte_flow_object *objects;
+    struct dppd_shared_count_object *shared_counts;
+    uint32_t shared_count_count;
     /** 本地仓库槽位上限，不代表网卡还能安装多少条规则 */
     uint32_t capacity;
     /** 已占用槽位数，包含准备阶段的预留项和已安装对象 */
@@ -104,5 +116,18 @@ int dppd_rte_flow_backend_query_count(const struct dppd_rte_flow_backend *backen
 /** 只查指定已安装版本，没有 AGE 返回 ENODATA，没有查询接口返回 ENOTSUP，失败保留输出 */
 int dppd_rte_flow_backend_query_age(const struct dppd_rte_flow_backend *backend, uint64_t rule_id, uint64_t generation,
     struct dppd_flow_age_result *result, struct dppd_flow_error *error);
+/** 后端只安装调用方分配好版本的定义，不改变控制面的共享对象修订号 */
+int dppd_rte_flow_backend_shared_count_create(struct dppd_rte_flow_backend *backend,
+    const struct dppd_shared_count_spec *spec, struct dppd_flow_error *error);
+/** 只读入口允许 ANY，删除必须给出精确非零版本，失败保留所有输出 */
+int dppd_rte_flow_backend_shared_count_get(const struct dppd_rte_flow_backend *backend, uint64_t id, uint64_t expected,
+    struct dppd_shared_count_info *info);
+int dppd_rte_flow_backend_shared_count_list(const struct dppd_rte_flow_backend *backend,
+    struct dppd_shared_count_spec *specs, uint32_t capacity, uint32_t *count);
+int dppd_rte_flow_backend_shared_count_query(const struct dppd_rte_flow_backend *backend, uint64_t id,
+    uint64_t expected, uint64_t *hits, uint64_t *bytes, struct dppd_flow_error *error);
+int dppd_rte_flow_backend_shared_count_destroy(struct dppd_rte_flow_backend *backend, uint64_t id, uint64_t expected,
+    struct dppd_flow_error *error);
+uint32_t dppd_rte_flow_backend_shared_count_count(const struct dppd_rte_flow_backend *backend);
 
 #endif

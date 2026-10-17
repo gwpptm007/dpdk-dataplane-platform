@@ -22,7 +22,8 @@
 /** v22 增加动态 ND、DAD 就绪状态和缓存管理，daemon 与 CLI 必须配套更新 */
 /** v24 增加有来源的端点角色与 transfer 图规划/整批安装，旧客户端必须配套更新 */
 /** v25 增加 AGE 策略和老化状态，客户端与 daemon 必须配套更新 */
-#define DPPD_MANAGEMENT_VERSION 25U
+/** v26 增加共享 COUNT 的逻辑身份、精确引用和生命周期管理 */
+#define DPPD_MANAGEMENT_VERSION 26U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -101,6 +102,11 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_TRANSFER_APPLY,
     DPPD_MANAGEMENT_AGE_STATUS,
     DPPD_MANAGEMENT_RULE_AGE_QUERY,
+    DPPD_MANAGEMENT_SHARED_COUNT_CREATE,
+    DPPD_MANAGEMENT_SHARED_COUNT_GET,
+    DPPD_MANAGEMENT_SHARED_COUNT_QUERY,
+    DPPD_MANAGEMENT_SHARED_COUNT_DELETE,
+    DPPD_MANAGEMENT_SHARED_COUNT_LIST,
 };
 
 /*
@@ -116,6 +122,13 @@ struct dppd_management_request {
     uint64_t request_id; /* 客户端生成；响应原样回显，用于请求/响应配对 */
     union {
         struct dppd_transfer_spec transfer;
+        struct dppd_shared_count_spec shared_count_create;
+        struct {
+            uint64_t id, expected;
+        } shared_count;
+        struct {
+            uint64_t after_id, expected_revision;
+        } shared_count_list;
         struct {
             uint64_t after_id, expected_revision;
         } conntrack;
@@ -440,6 +453,12 @@ struct dppd_management_response {
         struct dppd_rule_history_page rule_history;
         struct dppd_age_status age_status;
         struct dppd_control_age_result age_result;
+        struct dppd_shared_count_info shared_count;
+        struct dppd_control_shared_count_result shared_count_result;
+        struct dppd_shared_count_page shared_count_page;
+        struct {
+            uint64_t id, generation, revision;
+        } shared_count_deleted;
         struct {
             struct dppd_transfer_graph graph;
             struct dppd_control_apply_result results[DPPD_TRANSFER_MAX_EDGES];

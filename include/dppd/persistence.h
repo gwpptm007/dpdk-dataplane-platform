@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "dppd/rule_repository.h"
+#include "dppd/shared_count.h"
 
 /*
  * 从磁盘加载后的纯数据快照。它不代表规则已经重新安装到硬件：
@@ -13,6 +14,9 @@ struct dppd_persisted_snapshot {
     struct dppd_rule *rules;
     uint32_t count;
     uint64_t repository_generation;
+    struct dppd_shared_count_spec *shared_counts;
+    uint32_t shared_count;
+    uint64_t shared_revision;
 };
 
 /*
@@ -25,6 +29,14 @@ struct dppd_persisted_snapshot {
  * 无 AGE 的快照继续写原有 v2/v3，旧 v1 仍只允许通过显式迁移入口读取
  */
 int dppd_persistence_save(const char *path, const struct dppd_rule_repository *repository);
+
+/**
+ * 规则和共享计数策略写入同一份 v5 快照，空表仍保存非零修订号以阻止删除重建后的旧引用
+ * 对象只保存 ID、代次、安装端口和作用域，恢复时重建句柄且计数从零开始
+ * 未使用共享能力且修订号为零时仍采用 v2/v3/v4 格式
+ */
+int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_repository *repository,
+    const struct dppd_shared_count_spec *specs, uint32_t count, uint64_t shared_revision);
 
 /*
  * load 只负责格式、校验和及 rule IR 语义校验，不执行任何硬件操作

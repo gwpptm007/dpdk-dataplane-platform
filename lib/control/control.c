@@ -69,6 +69,18 @@ static int isolate_control(struct dppd_control_service *service, int code)
     return -EUCLEAN;
 }
 
+/** 共享定义和引用规则必须在同一个文件里保存，不能先保存一半再留下悬空引用 */
+static int save_current_snapshot(struct dppd_control_service *service)
+{
+    struct dppd_shared_count_spec shared[DPPD_SHARED_COUNT_MAX];
+    uint32_t count;
+    int rc = dppd_rte_flow_backend_shared_count_list(&service->rte_flow, shared, DPPD_SHARED_COUNT_MAX, &count);
+    if (rc != 0)
+        return rc;
+    return dppd_persistence_save_with_shared(service->persistence_path, &service->rules, shared, count,
+        service->shared_count_revision);
+}
+
 /**
  * 把当前完整规则账本写入快照，未配置保存路径时直接成功返回
  * 保存发生在规则生效之后，写磁盘失败不能被解释为已经回滚规则
@@ -84,7 +96,7 @@ static int persist_current_repository(struct dppd_control_service *service)
     observe_stage(service, DPPD_RULE_STAGE_PERSIST);
     if (service->observation.context.rule_count > 1)
         observe_batch(service, DPPD_RULE_STAGE_PERSIST);
-    rc = dppd_persistence_save(service->persistence_path, &service->rules);
+    rc = save_current_snapshot(service);
     if (rc != 0) {
         dppd_rule_observation_fault(&service->observation, rc);
         service->persistence_dirty = true;
@@ -116,6 +128,123 @@ static int recovery_write_preflight(const struct dppd_control_service *service)
      * 此时禁止继续更新、删除或覆盖快照，只允许专用恢复流程清理本进程仍持有的对象
      */
     return service->recovery_state == DPPD_CONTROL_RECOVERY_READY ? 0 : -EUCLEAN;
+}
+
+/** 创建只分配逻辑身份和真实共享对象，计数从零开始，不隐式创建任何引用规则 */
+int dppd_control_shared_count_create(struct dppd_control_service *service, const struct dppd_shared_count_spec *spec,
+    struct dppd_shared_count_info *result)
+{
+    if (service == NULL || spec == NULL || result == NULL || spec->id == 0 || spec->id == UINT64_MAX ||
+        spec->generation != 0 || spec->install_port_id == UINT16_MAX || spec->domain < DPPD_RULE_DOMAIN_INGRESS ||
+        spec->domain > DPPD_RULE_DOMAIN_TRANSFER)
+        return -EINVAL;
+    int rc = recovery_write_preflight(service);
+    if (rc != 0)
+        return rc;
+    rc = persistence_write_preflight(service);
+    if (rc != 0)
+        return rc;
+    if (service->shared_count_revision >= UINT64_MAX - 1U)
+        return -EOVERFLOW;
+    const struct dppd_endpoint *endpoint = dppd_topology_find(service->topology, spec->install_port_id);
+    if (endpoint == NULL)
+        return -ENOENT;
+    if (spec->domain == DPPD_RULE_DOMAIN_TRANSFER &&
+        (!endpoint->has_switch_domain || endpoint->switch_domain_id == UINT16_MAX))
+        return -ENOTSUP;
+    struct dppd_shared_count_spec candidate = *spec;
+    candidate.generation = service->shared_count_revision + 1U;
+    struct dppd_flow_error error;
+    rc = dppd_rte_flow_backend_shared_count_create(&service->rte_flow, &candidate, &error);
+    if (rc != 0)
+        return rc == -EUCLEAN ? isolate_control(service, rc) : rc;
+    service->shared_count_revision = candidate.generation;
+    rc = persist_current_repository(service);
+    if (rc != 0)
+        return rc;
+    return dppd_rte_flow_backend_shared_count_get(&service->rte_flow, candidate.id, candidate.generation, result);
+}
+
+/** 只读对象定义与引用数，隔离期间仍允许定位残留，但这不表示设备当前可以转发 */
+int dppd_control_shared_count_get(const struct dppd_control_service *service, uint64_t id, uint64_t expected,
+    struct dppd_shared_count_info *result)
+{
+    if (service == NULL || result == NULL || id == 0 || id == UINT64_MAX || expected == 0)
+        return -EINVAL;
+    return dppd_rte_flow_backend_shared_count_get(&service->rte_flow, id, expected, result);
+}
+
+int dppd_control_shared_count_query(const struct dppd_control_service *service, uint64_t id, uint64_t expected,
+    struct dppd_control_shared_count_result *result)
+{
+    if (service == NULL || result == NULL)
+        return -EINVAL;
+    if (recovery_write_preflight(service) != 0)
+        return -EUCLEAN;
+    struct dppd_control_shared_count_result next = {0};
+    int rc = dppd_control_shared_count_get(service, id, expected, &next.object);
+    if (rc != 0)
+        return rc;
+    struct dppd_flow_error error;
+    rc = dppd_rte_flow_backend_shared_count_query(&service->rte_flow, id, next.object.spec.generation, &next.hits,
+        &next.bytes, &error);
+    if (rc == 0)
+        *result = next;
+    return rc;
+}
+
+int dppd_control_shared_count_delete(struct dppd_control_service *service, uint64_t id, uint64_t expected,
+    uint64_t *revision)
+{
+    if (service == NULL || revision == NULL || id == 0 || id == UINT64_MAX || expected == 0 || expected == UINT64_MAX)
+        return -EINVAL;
+    int rc = recovery_write_preflight(service);
+    if (rc != 0)
+        return rc;
+    rc = persistence_write_preflight(service);
+    if (rc != 0)
+        return rc;
+    if (service->shared_count_revision >= UINT64_MAX - 1U)
+        return -EOVERFLOW;
+    struct dppd_flow_error error;
+    rc = dppd_rte_flow_backend_shared_count_destroy(&service->rte_flow, id, expected, &error);
+    if (rc != 0)
+        return rc;
+    ++service->shared_count_revision;
+    rc = persist_current_repository(service);
+    if (rc == 0)
+        *revision = service->shared_count_revision;
+    return rc;
+}
+
+int dppd_control_shared_count_list(const struct dppd_control_service *service, uint64_t after,
+    uint64_t expected_revision, struct dppd_shared_count_page *page)
+{
+    if (service == NULL || page == NULL)
+        return -EINVAL;
+    if (expected_revision != UINT64_MAX && expected_revision != service->shared_count_revision)
+        return -ESTALE;
+    struct dppd_shared_count_spec specs[DPPD_SHARED_COUNT_MAX];
+    struct dppd_shared_count_page next = {.revision = service->shared_count_revision};
+    int rc = dppd_rte_flow_backend_shared_count_list(&service->rte_flow, specs, DPPD_SHARED_COUNT_MAX, &next.total);
+    if (rc != 0)
+        return rc;
+    for (uint32_t i = 0; i < next.total; ++i) {
+        if (specs[i].id <= after)
+            continue;
+        if (next.count == DPPD_SHARED_COUNT_PAGE_SIZE) {
+            next.more = true;
+            break;
+        }
+        rc = dppd_rte_flow_backend_shared_count_get(&service->rte_flow, specs[i].id, specs[i].generation,
+            &next.objects[next.count]);
+        if (rc != 0)
+            return rc;
+        ++next.count;
+        next.next_id = specs[i].id;
+    }
+    *page = next;
+    return 0;
 }
 
 /**
@@ -335,7 +464,7 @@ int dppd_control_persistence_attach(struct dppd_control_service *service, const 
      * mutation 的 preflight 会重新保存一次当前完整状态，再允许新的变更继续
      */
     service->persisted_generation = 0;
-    service->persistence_dirty = current_generation != 0;
+    service->persistence_dirty = current_generation != 0 || service->shared_count_revision != 0;
     service->persistence_last_error = 0;
     return 0;
 }
@@ -350,6 +479,7 @@ static int control_restore_impl(struct dppd_control_service *service, const char
     uint32_t i;
     int rollback_rc;
     int rc;
+    bool shared_touched = false, published = false;
 
     if (service == NULL || service->topology == NULL || path == NULL || path[0] == '\0' ||
         service->rules.records == NULL)
@@ -358,7 +488,8 @@ static int control_restore_impl(struct dppd_control_service *service, const char
         return -EUCLEAN;
     if (service->persistence_path != NULL || dppd_rule_repository_count(&service->rules) != 0 ||
         dppd_rule_repository_generation(&service->rules) != 0 || dppd_rte_flow_backend_count(&service->rte_flow) != 0 ||
-        dppd_software_backend_count(&service->software) != 0)
+        dppd_software_backend_count(&service->software) != 0 || service->shared_count_revision != 0 ||
+        dppd_rte_flow_backend_shared_count_count(&service->rte_flow) != 0)
         return -EBUSY;
 
     observe_stage(service, DPPD_RULE_STAGE_LOAD);
@@ -398,6 +529,25 @@ static int control_restore_impl(struct dppd_control_service *service, const char
         }
     }
 
+    /** 先重建共享对象，后面的规则才能按精确身份解析引用，任一步失败都不能发布半张表 */
+    for (i = 0; i < snapshot.shared_count; ++i) {
+        struct dppd_flow_error error;
+        const struct dppd_endpoint *endpoint =
+            dppd_topology_find(service->topology, snapshot.shared_counts[i].install_port_id);
+        if (endpoint == NULL) {
+            rc = -ENOENT;
+            goto cleanup;
+        }
+        if (snapshot.shared_counts[i].domain == DPPD_RULE_DOMAIN_TRANSFER &&
+            (!endpoint->has_switch_domain || endpoint->switch_domain_id == UINT16_MAX)) {
+            rc = -ENOTSUP;
+            goto cleanup;
+        }
+        shared_touched = true;
+        rc = dppd_rte_flow_backend_shared_count_create(&service->rte_flow, &snapshot.shared_counts[i], &error);
+        if (rc != 0)
+            goto cleanup;
+    }
     for (i = 0; i < snapshot.count; ++i) {
         struct dppd_planner_context planner_context;
 
@@ -476,7 +626,10 @@ static int control_restore_impl(struct dppd_control_service *service, const char
         }
         goto cleanup;
     }
-    service->observation.applied = snapshot.count != 0 || snapshot.repository_generation != 0;
+    published = true;
+    service->shared_count_revision = snapshot.shared_revision;
+    service->observation.applied =
+        snapshot.count != 0 || snapshot.repository_generation != 0 || snapshot.shared_revision != 0;
     if (snapshot.count != 0) {
         rc = dppd_transaction_finalize(&transaction, &backends);
         if (rc != 0)
@@ -492,6 +645,15 @@ static int control_restore_impl(struct dppd_control_service *service, const char
     rc = 0;
 
 cleanup:
+    /** 规则回滚成功后才能撤销共享对象，残留引用或删除失败必须继续隔离并保留句柄 */
+    if (rc != 0 && shared_touched && !published && service->recovery_state == DPPD_CONTROL_RECOVERY_READY) {
+        uint32_t residual;
+        int cleanup_rc = dppd_rte_flow_backend_reconcile(&service->rte_flow, &residual);
+        if (cleanup_rc != 0 || residual != 0)
+            rc = isolate_control(service, cleanup_rc != 0 ? cleanup_rc : -EUCLEAN);
+    }
+    if (rc != 0 && published)
+        rc = isolate_control(service, rc);
     free(path_copy);
     free(items);
     dppd_persisted_snapshot_destroy(&snapshot);
@@ -507,7 +669,7 @@ static int control_flush_impl(struct dppd_control_service *service)
     if (recovery_write_preflight(service) != 0)
         return -EUCLEAN;
     observe_stage(service, DPPD_RULE_STAGE_PERSIST);
-    rc = dppd_persistence_save(service->persistence_path, &service->rules);
+    rc = save_current_snapshot(service);
     if (rc != 0) {
         dppd_rule_observation_fault(&service->observation, rc);
         service->persistence_dirty = true;
@@ -544,7 +706,8 @@ void dppd_control_recovery_status(const struct dppd_control_service *service,
     if (service == NULL)
         return;
     status->state = service->recovery_state;
-    status->residual_objects = dppd_rte_flow_backend_count(&service->rte_flow);
+    status->residual_objects =
+        dppd_rte_flow_backend_count(&service->rte_flow) + dppd_rte_flow_backend_shared_count_count(&service->rte_flow);
     status->last_error = service->recovery_last_error;
 }
 

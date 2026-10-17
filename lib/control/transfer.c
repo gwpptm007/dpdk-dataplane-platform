@@ -67,6 +67,10 @@ int dppd_transfer_graph_build(const struct dppd_planner_context *context, const 
         spec->bidirectional > 1 || spec->with_count > 1 || spec->age_timeout_seconds > 0xffffffU ||
         memcmp(spec->reserved, zero, sizeof(zero)) != 0)
         return fail(-EINVAL, "invalid transfer specification", message, message_size);
+    if ((spec->shared_count_id == 0) != (spec->shared_count_generation == 0) || spec->shared_count_id == UINT64_MAX ||
+        spec->shared_count_generation == UINT64_MAX || (spec->with_count && spec->shared_count_id != 0))
+        return fail(-EINVAL, "shared count requires an exact object and cannot be combined with count", message,
+            message_size);
     if (spec->source_port_id == spec->destination_port_id)
         return fail(-EINVAL, "source and destination must differ", message, message_size);
     const struct dppd_endpoint *source = dppd_topology_find(context->topology, spec->source_port_id);
@@ -106,6 +110,12 @@ int dppd_transfer_graph_build(const struct dppd_planner_context *context, const 
         uint16_t action = 0;
         if (spec->with_count) {
             rule->actions[action++].type = DPPD_ACTION_COUNT;
+            ++rule->nb_actions;
+        }
+        if (spec->shared_count_id != 0) {
+            rule->actions[action].type = DPPD_ACTION_SHARED_COUNT;
+            rule->actions[action].conf.shared_count.id = spec->shared_count_id;
+            rule->actions[action++].conf.shared_count.generation = spec->shared_count_generation;
             ++rule->nb_actions;
         }
         if (spec->age_timeout_seconds != 0) {
@@ -182,6 +192,15 @@ int dppd_control_transfer(struct dppd_control_service *control, const struct dpp
     int rc = dppd_transfer_graph_build(&context, spec, &next, message, message_size);
     if (rc != 0)
         return rc;
+    /** 规划只核对内存中的对象身份，不向设备创建、查询或增加引用 */
+    if (spec->shared_count_id != 0) {
+        struct dppd_shared_count_info shared;
+        rc = dppd_control_shared_count_get(control, spec->shared_count_id, spec->shared_count_generation, &shared);
+        if (rc != 0)
+            return fail(rc, "shared count is missing or has a different generation", message, message_size);
+        if (shared.spec.install_port_id != spec->install_port_id || shared.spec.domain != DPPD_RULE_DOMAIN_TRANSFER)
+            return fail(-EXDEV, "shared count belongs to a different install port or domain", message, message_size);
+    }
     if (generation >= UINT64_MAX - next.count)
         return fail(-EOVERFLOW, "repository generation space exhausted", message, message_size);
     next.repository_generation = generation;

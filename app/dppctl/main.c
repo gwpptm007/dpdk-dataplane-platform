@@ -40,6 +40,10 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] persistence-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] age-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] rule-age RULE_ID EXPECTED_GENERATION\n", program);
+    fprintf(stderr, "  %s [--socket PATH] shared-count-create ID PORT ingress|egress|transfer\n", program);
+    fprintf(stderr, "  %s [--socket PATH] shared-count-get|shared-count-query ID EXPECTED_GENERATION\n", program);
+    fprintf(stderr, "  %s [--socket PATH] shared-count-delete ID EXACT_GENERATION\n", program);
+    fprintf(stderr, "  %s [--socket PATH] shared-count-list [AFTER_ID [REVISION]]\n", program);
     fprintf(stderr, "  %s [--socket PATH] persistence-flush\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-status\n", program);
     fprintf(stderr, "  %s [--socket PATH] reconcile-retry\n", program);
@@ -121,6 +125,69 @@ static int parse_expected(const char *text, uint64_t *generation)
         return 0;
     }
     return parse_u64(text, 0, UINT64_MAX - 1U, generation);
+}
+
+/** 共享对象的身份只接受十进制数字，符号、空白和内部哨兵不能混成一个合法版本 */
+static int shared_number(const char *text, uint64_t minimum, uint64_t maximum, uint64_t *value)
+{
+    if (text == NULL || *text == '\0')
+        return -EINVAL;
+    for (const char *p = text; *p != '\0'; ++p)
+        if (*p < '0' || *p > '9')
+            return -EINVAL;
+    return parse_u64(text, minimum, maximum, value);
+}
+
+static void initialize_request(struct dppd_management_request *request, enum dppd_management_operation operation);
+
+static int build_shared_request(int argc, char **argv, struct dppd_management_request *request)
+{
+    if (argc == 0 || strncmp(argv[0], "shared-count-", 13) != 0)
+        return -ENOSYS;
+    if (argc == 4 && strcmp(argv[0], "shared-count-create") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_SHARED_COUNT_CREATE);
+        struct dppd_shared_count_spec *spec = &request->payload.shared_count_create;
+        uint64_t port;
+        if (shared_number(argv[1], 1, UINT64_MAX - 1U, &spec->id) != 0 ||
+            shared_number(argv[2], 0, UINT16_MAX - 1U, &port) != 0)
+            return -EINVAL;
+        spec->install_port_id = (uint16_t)port;
+        if (strcmp(argv[3], "ingress") == 0)
+            spec->domain = DPPD_RULE_DOMAIN_INGRESS;
+        else if (strcmp(argv[3], "egress") == 0)
+            spec->domain = DPPD_RULE_DOMAIN_EGRESS;
+        else if (strcmp(argv[3], "transfer") == 0)
+            spec->domain = DPPD_RULE_DOMAIN_TRANSFER;
+        else
+            return -EINVAL;
+        return 0;
+    }
+    if (argc >= 1 && argc <= 3 && strcmp(argv[0], "shared-count-list") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_SHARED_COUNT_LIST);
+        request->payload.shared_count_list.expected_revision = UINT64_MAX;
+        if (argc >= 2 && shared_number(argv[1], 0, UINT64_MAX - 1U, &request->payload.shared_count_list.after_id) != 0)
+            return -EINVAL;
+        if (argc == 3 &&
+            shared_number(argv[2], 0, UINT64_MAX - 1U, &request->payload.shared_count_list.expected_revision) != 0)
+            return -EINVAL;
+        return 0;
+    }
+    bool get = strcmp(argv[0], "shared-count-get") == 0;
+    bool query = strcmp(argv[0], "shared-count-query") == 0;
+    bool remove = strcmp(argv[0], "shared-count-delete") == 0;
+    if (argc != 3 || (!get && !query && !remove))
+        return -EINVAL;
+    initialize_request(request,
+        get         ? DPPD_MANAGEMENT_SHARED_COUNT_GET
+            : query ? DPPD_MANAGEMENT_SHARED_COUNT_QUERY
+                    : DPPD_MANAGEMENT_SHARED_COUNT_DELETE);
+    if (shared_number(argv[1], 1, UINT64_MAX - 1U, &request->payload.shared_count.id) != 0)
+        return -EINVAL;
+    if (!remove && strcmp(argv[2], "any") == 0) {
+        request->payload.shared_count.expected = UINT64_MAX;
+        return 0;
+    }
+    return shared_number(argv[2], 1, UINT64_MAX - 1U, &request->payload.shared_count.expected);
 }
 
 /*
@@ -615,6 +682,9 @@ static int build_acl_batch(const char *path, struct dppd_management_request *req
 
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
+    int shared_result = build_shared_request(argc, argv, request);
+    if (shared_result != -ENOSYS)
+        return shared_result;
     int transfer_result = dppctl_transfer_build(argc, argv, request, initialize_request);
     if (transfer_result != -ENOSYS)
         return transfer_result;
@@ -1152,6 +1222,10 @@ static void print_rule_detail(const struct dppd_rule *rule)
         case DPPD_ACTION_AGE:
             printf("age timeout-seconds=%u", action->conf.age_timeout_seconds);
             break;
+        case DPPD_ACTION_SHARED_COUNT:
+            printf("shared-count id=%" PRIu64 " generation=%" PRIu64, action->conf.shared_count.id,
+                action->conf.shared_count.generation);
+            break;
         case DPPD_ACTION_REPRESENTED_PORT:
             printf("represented-port port=%u", action->conf.ethdev_port_id);
             break;
@@ -1212,6 +1286,13 @@ static void print_capability(const struct dppd_management_capability_profile *pr
         probes->observed_actions);
 }
 
+static void print_shared_count(const struct dppd_shared_count_info *object)
+{
+    printf("shared-count id=%" PRIu64 " generation=%" PRIu64 " install=%u domain=%s references=%u", object->spec.id,
+        object->spec.generation, object->spec.install_port_id, domain_name((uint8_t)object->spec.domain),
+        object->references);
+}
+
 static int print_response(const struct dppd_management_response *response)
 {
     int transfer = dppctl_transfer_print(response);
@@ -1221,6 +1302,34 @@ static int print_response(const struct dppd_management_response *response)
         return 0;
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_SHARED_COUNT_CREATE:
+    case DPPD_MANAGEMENT_SHARED_COUNT_GET:
+        print_shared_count(&response->payload.shared_count);
+        printf("\n");
+        break;
+    case DPPD_MANAGEMENT_SHARED_COUNT_QUERY:
+        print_shared_count(&response->payload.shared_count_result.object);
+        printf(" hits=%" PRIu64 " bytes=%" PRIu64 "\n", response->payload.shared_count_result.hits,
+            response->payload.shared_count_result.bytes);
+        break;
+    case DPPD_MANAGEMENT_SHARED_COUNT_DELETE:
+        printf("shared-count=deleted id=%" PRIu64 " generation=%" PRIu64 " revision=%" PRIu64 "\n",
+            response->payload.shared_count_deleted.id, response->payload.shared_count_deleted.generation,
+            response->payload.shared_count_deleted.revision);
+        break;
+    case DPPD_MANAGEMENT_SHARED_COUNT_LIST: {
+        const struct dppd_shared_count_page *page = &response->payload.shared_count_page;
+        if (page->count > DPPD_SHARED_COUNT_PAGE_SIZE || page->total > DPPD_SHARED_COUNT_MAX ||
+            page->count > page->total)
+            return -EPROTO;
+        printf("shared-counts revision=%" PRIu64 " total=%u returned=%u more=%s next=%" PRIu64 "\n", page->revision,
+            page->total, page->count, page->more ? "yes" : "no", page->next_id);
+        for (uint32_t i = 0; i < page->count; ++i) {
+            print_shared_count(&page->objects[i]);
+            printf("\n");
+        }
+        break;
+    }
     case DPPD_MANAGEMENT_AGE_STATUS: {
         const struct dppd_age_status *age = &response->payload.age_status;
         printf("age-status tracked=%u polls=%" PRIu64 " queries=%" PRIu64 " expired=%" PRIu64 " query-errors=%" PRIu64

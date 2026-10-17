@@ -14,6 +14,10 @@
 #define SNAPSHOT_V1_RECORD_SIZE 260U
 #define SNAPSHOT_V2_RECORD_SIZE 264U
 #define SNAPSHOT_V3_RECORD_SIZE 648U
+#define SNAPSHOT_V5_HEADER_SIZE 64U
+#define SNAPSHOT_V5_RECORD_SIZE 776U
+#define SNAPSHOT_V5_SHARED_SIZE 32U
+#define SNAPSHOT_V5_ACTION_OFFSET (40U + 8U * 68U)
 #define SNAPSHOT_CHECKSUM_OFFSET 40U
 
 static void put_u32_le(uint8_t *output, uint32_t value)
@@ -273,6 +277,285 @@ static void age_snapshot_compatibility(void)
     assert(unlink(path) == 0);
 }
 
+static size_t read_snapshot_bytes(const char *path, uint8_t *data, size_t capacity)
+{
+    struct stat metadata;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0 && fstat(fd, &metadata) == 0 && metadata.st_size > 0);
+    assert((uint64_t)metadata.st_size <= capacity);
+    size_t length = (size_t)metadata.st_size, offset = 0;
+    while (offset < length) {
+        ssize_t received = read(fd, data + offset, length - offset);
+        assert(received > 0);
+        offset += (size_t)received;
+    }
+    assert(close(fd) == 0);
+    return length;
+}
+
+/** 损坏样本重新计算正确校验和，确保失败来自语义检查而不是只被 CRC 挡住 */
+static void write_checked_v5(const char *path, uint8_t *data, size_t length)
+{
+    assert(length >= SNAPSHOT_V5_HEADER_SIZE);
+    put_u32_le(data + SNAPSHOT_CHECKSUM_OFFSET, 0);
+    uint32_t checksum = crc32_update(UINT32_MAX, data, length) ^ UINT32_MAX;
+    put_u32_le(data + SNAPSHOT_CHECKSUM_OFFSET, checksum);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    assert(fd >= 0);
+    write_all_or_die(fd, data, length);
+    assert(close(fd) == 0);
+}
+
+static void assert_bad_v5(const char *path, uint8_t *data, size_t length)
+{
+    struct dppd_persisted_snapshot snapshot;
+    write_checked_v5(path, data, length);
+    assert(dppd_persistence_load(path, &snapshot) == -EBADMSG);
+    assert(snapshot.rules == NULL && snapshot.count == 0 && snapshot.shared_counts == NULL &&
+        snapshot.shared_count == 0 && snapshot.shared_revision == 0);
+}
+
+static struct dppd_rule make_shared_rule(uint64_t rule_id, const struct dppd_shared_count_spec *spec)
+{
+    struct dppd_rule rule = make_rule(rule_id, 77);
+    rule.install_port_id = spec->install_port_id;
+    rule.domain = spec->domain;
+    rule.actions[1].type = DPPD_ACTION_SHARED_COUNT;
+    rule.actions[1].conf.shared_count.id = spec->id;
+    rule.actions[1].conf.shared_count.generation = spec->generation;
+    return rule;
+}
+
+/** 共享引用和对象表一起往返，高 32 位不能截断，AGE 仍只保存配置的超时秒数 */
+static void shared_snapshot_round_trip(void)
+{
+    const uint64_t revision = UINT64_C(0x200000007);
+    struct dppd_shared_count_spec specs[2] = {
+        {.id = UINT64_C(0x100000009), .generation = revision, .install_port_id = 5, .domain = DPPD_RULE_DOMAIN_INGRESS},
+        {.id = 7, .generation = UINT64_C(0x100000003), .install_port_id = 7, .domain = DPPD_RULE_DOMAIN_TRANSFER}};
+    struct dppd_rule_repository repository;
+    struct dppd_rule_apply_result applied;
+    struct dppd_persisted_snapshot snapshot;
+    struct dppd_rule expected[3];
+    char path[128];
+    uint8_t data[4096];
+    snprintf(path, sizeof(path), "/tmp/dppd-shared-persistence-%ld.bin", (long)getpid());
+    assert(DPPD_ACTION_SHARED_COUNT == 7);
+    assert(dppd_rule_repository_init(&repository, 4) == 0);
+    for (uint32_t i = 0; i < 3; ++i) {
+        struct dppd_rule rule = make_shared_rule(10U + i, &specs[i == 2 ? 1 : 0]);
+        if (i == 0) {
+            rule.nb_actions = 4;
+            rule.actions[2].type = DPPD_ACTION_AGE;
+            rule.actions[2].conf.age_timeout_seconds = 0xffffffU;
+            rule.actions[3].type = DPPD_ACTION_DROP;
+        }
+        assert(dppd_rule_repository_apply(&repository, &rule, 0, &applied) == 0);
+        assert(dppd_rule_repository_get(&repository, rule.id, &expected[i]) == 0);
+    }
+    assert(dppd_persistence_save_with_shared(path, &repository, specs, 2, revision) == 0);
+    size_t length = read_snapshot_bytes(path, data, sizeof(data));
+    assert(length == SNAPSHOT_V5_HEADER_SIZE + 3U * SNAPSHOT_V5_RECORD_SIZE + 2U * SNAPSHOT_V5_SHARED_SIZE);
+    assert(data[8] == 5 && data[12] == SNAPSHOT_V5_HEADER_SIZE);
+    assert(dppd_persistence_load(path, &snapshot) == 0);
+    assert(snapshot.count == 3 && snapshot.shared_count == 2 && snapshot.shared_revision == revision);
+    assert(snapshot.shared_counts[0].id == 7 && snapshot.shared_counts[1].id == specs[0].id);
+    assert(snapshot.shared_counts[0].generation == specs[1].generation);
+    for (uint32_t i = 0; i < 3; ++i)
+        assert(dppd_rule_equal(&snapshot.rules[i], &expected[i]));
+    assert(snapshot.rules[0].actions[1].conf.shared_count.generation == revision);
+    assert(snapshot.rules[0].actions[2].conf.age_timeout_seconds == 0xffffffU);
+    dppd_persisted_snapshot_destroy(&snapshot);
+
+    /* 旧保存入口缺少共享表，拒绝后原快照仍然完整可读 */
+    assert(dppd_persistence_save(path, &repository) == -EINVAL);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.shared_revision == revision);
+    dppd_persisted_snapshot_destroy(&snapshot);
+    struct dppd_shared_count_spec changed[2] = {specs[0], specs[1]};
+    changed[0].generation++;
+    assert(dppd_persistence_save_with_shared(path, &repository, changed, 2, revision + 1U) == -EINVAL);
+    changed[0] = specs[0];
+    changed[0].install_port_id++;
+    assert(dppd_persistence_save_with_shared(path, &repository, changed, 2, revision) == -EINVAL);
+    changed[0] = specs[0];
+    changed[0].domain = DPPD_RULE_DOMAIN_EGRESS;
+    assert(dppd_persistence_save_with_shared(path, &repository, changed, 2, revision) == -EINVAL);
+    assert(dppd_persistence_save_with_shared(path, &repository, specs + 1, 1, revision) == -EINVAL);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.count == 3);
+    dppd_persisted_snapshot_destroy(&snapshot);
+    dppd_rule_repository_destroy(&repository);
+
+    /* 未被规则引用的对象也保留，删到空表后修订号不会丢失 */
+    assert(dppd_rule_repository_init(&repository, 4) == 0);
+    assert(dppd_persistence_save_with_shared(path, &repository, specs, 2, revision) == 0);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.count == 0 && snapshot.shared_count == 2);
+    dppd_persisted_snapshot_destroy(&snapshot);
+    assert(dppd_persistence_save_with_shared(path, &repository, NULL, 0, revision + 1U) == 0);
+    assert(read_snapshot_bytes(path, data, sizeof(data)) == SNAPSHOT_V5_HEADER_SIZE && data[8] == 5);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.shared_count == 0 &&
+        snapshot.shared_counts == NULL && snapshot.shared_revision == revision + 1U);
+    dppd_persisted_snapshot_destroy(&snapshot);
+    /* 同 ID 删除重建后使用新代次，旧引用必须失败，更新后的引用才能保存 */
+    struct dppd_shared_count_spec recreated = specs[0];
+    recreated.generation = revision + 2U;
+    struct dppd_rule stale = make_shared_rule(10, &specs[0]);
+    assert(dppd_rule_repository_apply(&repository, &stale, 0, &applied) == 0);
+    assert(dppd_persistence_save_with_shared(path, &repository, &recreated, 1, recreated.generation) == -EINVAL);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.count == 0 &&
+        snapshot.shared_revision == revision + 1U);
+    dppd_persisted_snapshot_destroy(&snapshot);
+    assert(dppd_rule_repository_get(&repository, stale.id, &stale) == 0);
+    stale.actions[1].conf.shared_count.generation = recreated.generation;
+    assert(dppd_rule_repository_apply(&repository, &stale, stale.generation, &applied) == 0);
+    assert(dppd_persistence_save_with_shared(path, &repository, &recreated, 1, recreated.generation) == 0);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.shared_revision == recreated.generation);
+    assert(snapshot.rules[0].actions[1].conf.shared_count.generation == recreated.generation);
+    dppd_persisted_snapshot_destroy(&snapshot);
+    dppd_rule_repository_destroy(&repository);
+    assert(dppd_rule_repository_init(&repository, 4) == 0);
+    assert(dppd_persistence_save_with_shared(path, &repository, NULL, 0, 0) == 0);
+    assert(read_snapshot_bytes(path, data, sizeof(data)) == SNAPSHOT_HEADER_SIZE && data[8] == 2);
+
+    /* 新入口没有共享表时，普通 IPv6 仍按原有 v3 格式保存 */
+    struct dppd_rule ipv6 = make_rule(10, 77);
+    ipv6.nb_matches = 2;
+    ipv6.matches[1].type = DPPD_MATCH_IPV6;
+    memset(&ipv6.matches[1].spec, 0, sizeof(ipv6.matches[1].spec));
+    ipv6.matches[1].spec.ipv6.src[0] = 0x20;
+    ipv6.matches[1].spec.ipv6.src[15] = 1;
+    assert(dppd_rule_repository_apply(&repository, &ipv6, 0, &applied) == 0);
+    assert(dppd_persistence_save_with_shared(path, &repository, NULL, 0, 0) == 0);
+    assert(read_snapshot_bytes(path, data, sizeof(data)) == SNAPSHOT_HEADER_SIZE + SNAPSHOT_V3_RECORD_SIZE &&
+        data[8] == 3);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.shared_count == 0 && snapshot.shared_revision == 0);
+    dppd_persisted_snapshot_destroy(&snapshot);
+    dppd_rule_repository_destroy(&repository);
+    assert(unlink(path) == 0);
+}
+
+/** 无效对象在落盘前失败，不能消耗掉已有的合法快照 */
+static void shared_snapshot_invalid_specs(void)
+{
+    struct dppd_rule_repository repository;
+    struct dppd_shared_count_spec valid = {.id = 17,
+        .generation = 3,
+        .install_port_id = 5,
+        .domain = DPPD_RULE_DOMAIN_INGRESS};
+    struct dppd_shared_count_spec invalid[] = {
+        {.id = 0, .generation = 3, .install_port_id = 5, .domain = DPPD_RULE_DOMAIN_INGRESS},
+        {.id = UINT64_MAX, .generation = 3, .install_port_id = 5, .domain = DPPD_RULE_DOMAIN_INGRESS},
+        {.id = 17, .generation = 0, .install_port_id = 5, .domain = DPPD_RULE_DOMAIN_INGRESS},
+        {.id = 17, .generation = UINT64_MAX, .install_port_id = 5, .domain = DPPD_RULE_DOMAIN_INGRESS},
+        {.id = 17, .generation = 4, .install_port_id = 5, .domain = DPPD_RULE_DOMAIN_INGRESS},
+        {.id = 17, .generation = 3, .install_port_id = UINT16_MAX, .domain = DPPD_RULE_DOMAIN_INGRESS},
+        {.id = 17, .generation = 3, .install_port_id = 5, .domain = (enum dppd_rule_domain)255}};
+    struct dppd_persisted_snapshot snapshot;
+    char path[128];
+    snprintf(path, sizeof(path), "/tmp/dppd-shared-invalid-%ld.bin", (long)getpid());
+    assert(dppd_rule_repository_init(&repository, 1) == 0);
+    assert(dppd_persistence_save_with_shared(path, &repository, &valid, 1, 3) == 0);
+    for (uint32_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
+        assert(dppd_persistence_save_with_shared(path, &repository, &invalid[i], 1, 3) == -EINVAL);
+    struct dppd_shared_count_spec duplicates[2] = {valid, valid};
+    assert(dppd_persistence_save_with_shared(path, &repository, duplicates, 2, 3) == -EINVAL);
+    assert(dppd_persistence_save_with_shared(path, &repository, &valid, 1, 0) == -EINVAL);
+    assert(dppd_persistence_save_with_shared(path, &repository, NULL, 1, 3) == -EINVAL);
+    assert(dppd_persistence_save_with_shared(path, &repository, NULL, 0, UINT64_MAX) == -EINVAL);
+    assert(dppd_persistence_save_with_shared(path, &repository, &valid, DPPD_SHARED_COUNT_MAX + 1U, 3) == -E2BIG);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.shared_count == 1 && snapshot.shared_revision == 3);
+    assert(snapshot.shared_counts[0].id == 17 && snapshot.shared_counts[0].generation == 3);
+    dppd_persisted_snapshot_destroy(&snapshot);
+
+    /* 表容量和 64 位有效上界均可保存，只有保留值 UINT64_MAX 被拒绝 */
+    struct dppd_shared_count_spec full[DPPD_SHARED_COUNT_MAX];
+    for (uint32_t i = 0; i < DPPD_SHARED_COUNT_MAX; ++i) {
+        full[i] = valid;
+        full[i].id = i + 1U;
+    }
+    full[DPPD_SHARED_COUNT_MAX - 1U].id = UINT64_MAX - 1U;
+    full[DPPD_SHARED_COUNT_MAX - 1U].generation = UINT64_MAX - 1U;
+    assert(dppd_persistence_save_with_shared(path, &repository, full, DPPD_SHARED_COUNT_MAX, UINT64_MAX - 1U) == 0);
+    assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.shared_count == DPPD_SHARED_COUNT_MAX &&
+        snapshot.shared_revision == UINT64_MAX - 1U);
+    assert(snapshot.shared_counts[DPPD_SHARED_COUNT_MAX - 1U].id == UINT64_MAX - 1U &&
+        snapshot.shared_counts[DPPD_SHARED_COUNT_MAX - 1U].generation == UINT64_MAX - 1U);
+    dppd_persisted_snapshot_destroy(&snapshot);
+    dppd_rule_repository_destroy(&repository);
+    assert(unlink(path) == 0);
+}
+
+/** 正确 CRC 下仍拒绝旧代次、跨端口引用、表乱序和保留位，损坏时整份快照都不返回 */
+static void shared_snapshot_corruption(void)
+{
+    struct dppd_rule_repository repository;
+    struct dppd_rule_apply_result applied;
+    struct dppd_shared_count_spec specs[2] = {
+        {.id = 17, .generation = 3, .install_port_id = 5, .domain = DPPD_RULE_DOMAIN_INGRESS},
+        {.id = 29, .generation = 4, .install_port_id = 7, .domain = DPPD_RULE_DOMAIN_EGRESS}};
+    char path[128];
+    uint8_t original[2048], data[2048];
+    const size_t rule = SNAPSHOT_V5_HEADER_SIZE;
+    const size_t action = rule + SNAPSHOT_V5_ACTION_OFFSET;
+    const size_t shared = rule + SNAPSHOT_V5_RECORD_SIZE;
+    snprintf(path, sizeof(path), "/tmp/dppd-shared-corrupt-%ld.bin", (long)getpid());
+    assert(dppd_rule_repository_init(&repository, 1) == 0);
+    struct dppd_rule wanted = make_shared_rule(10, &specs[0]);
+    assert(dppd_rule_repository_apply(&repository, &wanted, 0, &applied) == 0);
+    assert(dppd_persistence_save_with_shared(path, &repository, specs, 2, 4) == 0);
+    size_t length = read_snapshot_bytes(path, original, sizeof(original));
+    const struct {
+        size_t offset;
+        uint64_t value;
+        uint8_t width;
+    } corruptions[] = {{12, 48, 4}, {16, SNAPSHOT_V3_RECORD_SIZE, 4}, {44, 1, 4}, {48, 0, 8}, {48, 2, 8},
+        {48, UINT64_MAX, 8}, {56, DPPD_SHARED_COUNT_MAX + 1U, 4}, {60, 24, 4}, {rule + 38, 1, 1}, {rule + 40 + 4, 1, 1},
+        {rule + 40 + 3U * 68U, 1, 1}, {action + 4, 1, 4}, {action + 8 + 4, 1, 1}, {action + 24 + 4, 1, 4},
+        {action + 24 + 8, 0, 8}, {action + 24 + 8, 19, 8}, {action + 24 + 16, 4, 8}, {action + 48 + 8, 1, 1},
+        {action + 72, 1, 1}, {action, 255, 4}, {shared, 0, 8}, {shared, UINT64_MAX, 8}, {shared, 29, 8},
+        {shared + 8, 0, 8}, {shared + 8, UINT64_MAX, 8}, {shared + 8, 5, 8}, {shared + 16, 6, 1},
+        {shared + 16, UINT16_MAX, 4}, {shared + 18, 1, 1}, {shared + 20, DPPD_RULE_DOMAIN_EGRESS, 4},
+        {shared + 20, 255, 4}, {shared + 24, 1, 8}, {shared + SNAPSHOT_V5_SHARED_SIZE, 16, 8}};
+    for (uint32_t i = 0; i < sizeof(corruptions) / sizeof(corruptions[0]); ++i) {
+        memcpy(data, original, length);
+        if (corruptions[i].width == 8)
+            put_u64_le(data + corruptions[i].offset, corruptions[i].value);
+        else if (corruptions[i].width == 4)
+            put_u32_le(data + corruptions[i].offset, (uint32_t)corruptions[i].value);
+        else
+            data[corruptions[i].offset] = (uint8_t)corruptions[i].value;
+        assert_bad_v5(path, data, length);
+    }
+
+    /* 把 MARK 改成私有 COUNT，并清空原配置，确认拒绝双重计数而非拒绝脏配置 */
+    memcpy(data, original, length);
+    put_u32_le(data + action, DPPD_ACTION_COUNT);
+    memset(data + action + 8, 0, 16);
+    assert_bad_v5(path, data, length);
+    memcpy(data, original, length);
+    memcpy(data + shared, original + shared + SNAPSHOT_V5_SHARED_SIZE, SNAPSHOT_V5_SHARED_SIZE);
+    memcpy(data + shared + SNAPSHOT_V5_SHARED_SIZE, original + shared, SNAPSHOT_V5_SHARED_SIZE);
+    assert_bad_v5(path, data, length);
+    memcpy(data, original, length);
+    put_u64_le(data + 32, length - SNAPSHOT_V5_HEADER_SIZE - 1U);
+    assert_bad_v5(path, data, length);
+    memcpy(data, original, length);
+    assert_bad_v5(path, data, length - 1U);
+    write_checked_v5(path, original, length);
+    assert(truncate(path, 55) == 0);
+    struct dppd_persisted_snapshot snapshot;
+    assert(dppd_persistence_load(path, &snapshot) == -EBADMSG && snapshot.shared_counts == NULL);
+
+    /* v1 到 v4 的动作槽装不下共享身份，不能只接受新枚举后猜测丢失的代次 */
+    for (uint32_t version = 1; version <= 4; ++version) {
+        write_action_snapshot(path, version, DPPD_ACTION_SHARED_COUNT, 17);
+        int rc = version == 1 ? dppd_persistence_load_v1_for_migration(path, &snapshot)
+                              : dppd_persistence_load(path, &snapshot);
+        assert(rc == -EBADMSG && snapshot.rules == NULL && snapshot.shared_counts == NULL);
+    }
+    dppd_rule_repository_destroy(&repository);
+    assert(unlink(path) == 0);
+}
+
 int main(void)
 {
     struct dppd_rule_repository repository;
@@ -392,5 +675,8 @@ int main(void)
     unlink(migrated_path);
     dppd_rule_repository_destroy(&repository);
     age_snapshot_compatibility();
+    shared_snapshot_round_trip();
+    shared_snapshot_invalid_specs();
+    shared_snapshot_corruption();
     return 0;
 }

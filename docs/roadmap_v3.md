@@ -202,7 +202,10 @@ QUEUE 是否存在软件等价语义必须先完成设计，不能静默模拟�
 COUNT、故障与重启，134 的私有工具和 DPDK 环境也已完成严格构建与核心验证。
 已接通 [AGE 控制与模拟闭环](m3_age.md)：独立 AGE 查询、有限预算轮询、精确删除、
 v4 快照和故障重试，协议 v25；三套同版本核心验收通过，未过期规则重启重新计时。
-indirect/shared、真实 PMD 的 AGE、mlx5 与非 mlx5 卸载、CPU 旁路、端点移除/设备复位恢复仍需推进，
+首期 [indirect 共享 COUNT](m3_shared_count.md) 已接通生产接口、独立版本与引用管理、
+v5 单快照和协议 v26；三套各 60/60 单测、四步核心回归及 24 组功能模拟通过，源码摘要一致。
+native 恢复日志暂不支持 indirect，明确拒绝；共享 RSS/METER/AGE 及更新仍未实现。
+真实 PMD 的 AGE/共享 COUNT、mlx5 与非 mlx5 卸载、CPU 旁路、端点移除/设备复位恢复仍需推进，
 整个 M3 尚未完成。
 
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。

@@ -6,6 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+struct dppd_shared_count_object {
+    bool used, installed;
+    struct dppd_shared_count_spec spec;
+    struct dppd_shared_count_handle handle;
+    uint32_t references;
+};
+
 /**
  * 硬件对象仓库中的一个槽位，既可以表示准备阶段的预留，也可以表示已安装规则
  * occupied 与 installed 分开记录，才能分清“只占了位置”和“已经需要调用驱动删除”
@@ -25,7 +32,123 @@ struct dppd_rte_flow_object {
     struct dppd_flow_handle handle;
     /** 在 prepare 时保留安装意图，查询时据此核对驱动返回的 handle */
     struct dppd_rule_install_info installation;
+    /** 准备时借用，直到这个规则槽位真正释放才归还，回滚失败也继续保留 */
+    struct dppd_shared_count_object *shared_refs[DPPD_RULE_MAX_ACTIONS];
+    struct dppd_flow_binding binding;
 };
+
+static int shared_error(struct dppd_flow_error *error, int rc, const char *message)
+{
+    if (error != NULL) {
+        error->code = rc;
+        snprintf(error->message, sizeof(error->message), "shared count: %s", message);
+    }
+    return rc;
+}
+
+static bool shared_spec_equal(const struct dppd_shared_count_spec *left, const struct dppd_shared_count_spec *right)
+{
+    return left->id == right->id && left->generation == right->generation &&
+        left->install_port_id == right->install_port_id && left->domain == right->domain;
+}
+
+static struct dppd_shared_count_object *find_shared(const struct dppd_rte_flow_backend *backend, uint64_t id)
+{
+    if (backend == NULL || backend->shared_counts == NULL)
+        return NULL;
+    for (uint32_t i = 0; i < DPPD_SHARED_COUNT_MAX; ++i)
+        if (backend->shared_counts[i].used && backend->shared_counts[i].spec.id == id)
+            return &backend->shared_counts[i];
+    return NULL;
+}
+
+static int lookup_shared(const struct dppd_rte_flow_backend *backend, uint64_t id, uint64_t expected,
+    struct dppd_shared_count_object **object)
+{
+    if (backend == NULL || backend->shared_counts == NULL || id == 0 || id == UINT64_MAX || expected == 0)
+        return -EINVAL;
+    struct dppd_shared_count_object *found = find_shared(backend, id);
+    if (found == NULL)
+        return -ENOENT;
+    if (expected != UINT64_MAX && expected != found->spec.generation)
+        return -ESTALE;
+    *object = found;
+    return 0;
+}
+
+/** 删除失败仍保存原句柄，驱动即使在报错前改写参数也不能破坏后续清理线索 */
+static int destroy_shared(struct dppd_rte_flow_backend *backend, struct dppd_shared_count_object *object,
+    struct dppd_flow_error *error)
+{
+    if (object->references != 0)
+        return shared_error(error, -EBUSY, "object is still referenced by prepared or installed rules");
+    if (object->handle.opaque == NULL)
+        return shared_error(error, -EUCLEAN, "uncertain object has no handle for cleanup");
+    if (backend->api.shared_count_destroy == NULL)
+        return shared_error(error, -ENOTSUP, "driver does not provide indirect destroy");
+    struct dppd_shared_count_handle next = object->handle;
+    dppd_flow_probe_cache_invalidate_all(backend->probes);
+    int rc = backend->api.shared_count_destroy(&next, error);
+    if (rc == 0) {
+        memset(object, 0, sizeof(*object));
+        --backend->shared_count_count;
+    }
+    return rc;
+}
+
+/** 规则引用先释放，共享计数器后删除，某个对象失败也继续清理其他无依赖对象 */
+static int cleanup_shared(struct dppd_rte_flow_backend *backend)
+{
+    int first_error = 0;
+    for (uint32_t i = 0; i < DPPD_SHARED_COUNT_MAX; ++i) {
+        if (!backend->shared_counts[i].used)
+            continue;
+        int rc = destroy_shared(backend, &backend->shared_counts[i], NULL);
+        if (first_error == 0)
+            first_error = rc;
+    }
+    return first_error;
+}
+
+static bool has_shared(const struct dppd_rule *rule)
+{
+    for (uint16_t i = 0; i < rule->nb_actions; ++i)
+        if (rule->actions[i].type == DPPD_ACTION_SHARED_COUNT)
+            return true;
+    return false;
+}
+
+/** 只解析精确身份，不增加引用，不为了校验规则临时创建共享对象 */
+static int resolve_shared(const struct dppd_rte_flow_backend *backend, uint16_t port_id, const struct dppd_rule *rule,
+    struct dppd_flow_binding *binding, struct dppd_shared_count_object **references, struct dppd_flow_error *error)
+{
+    memset(binding, 0, sizeof(*binding));
+    if (rule->nb_actions > DPPD_RULE_MAX_ACTIONS)
+        return shared_error(error, -EINVAL, "invalid action count");
+    for (uint16_t i = 0; i < rule->nb_actions; ++i) {
+        if (references != NULL)
+            references[i] = NULL;
+        const struct dppd_action *action = &rule->actions[i];
+        if (action->type != DPPD_ACTION_SHARED_COUNT)
+            continue;
+        if (backend->before_create != NULL)
+            return shared_error(error, -ENOTSUP, "native recovery journal cannot track indirect objects");
+        struct dppd_shared_count_object *shared = find_shared(backend, action->conf.shared_count.id);
+        if (shared == NULL)
+            return shared_error(error, -ENOENT, "referenced object does not exist");
+        if (shared->spec.generation != action->conf.shared_count.generation)
+            return shared_error(error, -ESTALE, "referenced generation changed");
+        if (!shared->installed || shared->handle.opaque == NULL ||
+            !shared_spec_equal(&shared->spec, &shared->handle.spec))
+            return shared_error(error, -EUCLEAN, "referenced handle is uncertain");
+        if (shared->spec.install_port_id != port_id || shared->spec.domain != rule->domain)
+            return shared_error(error, -EXDEV, "object port or direction does not match the rule");
+        binding->actions[i] = shared->handle.opaque;
+        if (references != NULL)
+            references[i] = shared;
+    }
+    return 0;
+}
 
 /** 按规则 ID 和精确版本查找已占用槽位，允许找到尚未安装的 prepare 预留项 */
 static struct dppd_rte_flow_object *find_object(struct dppd_rte_flow_backend *backend, uint64_t rule_id,
@@ -123,6 +246,9 @@ static struct dppd_rte_flow_object *reserve_object(struct dppd_rte_flow_backend 
  */
 static void release_object(struct dppd_rte_flow_backend *backend, struct dppd_rte_flow_object *object)
 {
+    for (uint16_t i = 0; i < DPPD_RULE_MAX_ACTIONS; ++i)
+        if (object->shared_refs[i] != NULL && object->shared_refs[i]->references != 0)
+            --object->shared_refs[i]->references;
     memset(object, 0, sizeof(*object));
     backend->count--;
 }
@@ -150,7 +276,17 @@ int dppd_rte_flow_backend_validate_rule(struct dppd_rte_flow_backend *backend, u
     if (backend == NULL || backend->objects == NULL || backend->api.validate == NULL || rule == NULL)
         return -EINVAL;
     (void)dppd_flow_probe_cache_clear(backend->probes, port_id);
-    rc = backend->api.validate(port_id, rule, error);
+    if (rule->nb_actions > DPPD_RULE_MAX_ACTIONS)
+        return -EINVAL;
+    if (has_shared(rule)) {
+        struct dppd_flow_binding binding;
+        rc = resolve_shared(backend, port_id, rule, &binding, NULL, error);
+        if (rc == 0)
+            rc = backend->api.validate_bound == NULL || backend->api.create_bound == NULL
+                ? shared_error(error, -ENOTSUP, "driver does not provide bound rule operations")
+                : backend->api.validate_bound(port_id, rule, &binding, error);
+    } else
+        rc = backend->api.validate(port_id, rule, error);
     dppd_flow_probe_cache_observe(backend->probes, port_id, rule, rc);
     return rc;
 }
@@ -182,9 +318,23 @@ static int transaction_prepare(void *context, const struct dppd_transaction_item
         return -EINVAL;
     if (find_object(backend, item->rule.id, item->rule.generation) != NULL)
         return -EEXIST;
+    struct dppd_flow_binding binding;
+    struct dppd_shared_count_object *references[DPPD_RULE_MAX_ACTIONS] = {0};
+    int rc = resolve_shared(backend, item->plan.install_port_id, &item->rule, &binding, references, NULL);
+    if (rc != 0)
+        return rc;
+    for (action = 0; action < item->rule.nb_actions; ++action)
+        if (references[action] != NULL && references[action]->references == UINT32_MAX)
+            return -EOVERFLOW;
     object = reserve_object(backend, item->rule.id, item->rule.generation);
     if (object == NULL)
         return -ENOSPC;
+    object->binding = binding;
+    for (action = 0; action < item->rule.nb_actions; ++action)
+        if (references[action] != NULL) {
+            object->shared_refs[action] = references[action];
+            ++references[action]->references;
+        }
     object->installation.rule_id = item->rule.id;
     object->installation.generation = item->rule.generation;
     object->installation.install_port_id = item->plan.install_port_id;
@@ -224,7 +374,11 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
     dppd_flow_probe_cache_invalidate_all(backend->probes);
     /** 只测量驱动创建调用，校验、事务准备和之后的规则账本保存不算在内 */
     dppd_install_timer_start(&timer);
-    if (dppd_tap_cookie_present(object->owner_cookie))
+    if (has_shared(&item->rule))
+        rc = backend->api.create_bound == NULL ? -ENOTSUP
+                                               : backend->api.create_bound(item->plan.install_port_id, &item->rule,
+                                                     &object->binding, &object->handle, &error);
+    else if (dppd_tap_cookie_present(object->owner_cookie))
         rc = backend->api.create_owned == NULL ? -ENOTSUP
                                                : backend->api.create_owned(item->plan.install_port_id, &item->rule,
                                                      object->owner_cookie, &object->handle, &error);
@@ -285,6 +439,11 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend, uint32_t c
         .remove = dppd_flow_remove,
         .query_count = dppd_flow_query_count,
         .query_age = dppd_flow_query_age,
+        .shared_count_create = dppd_flow_shared_count_create,
+        .shared_count_query = dppd_flow_shared_count_query,
+        .shared_count_destroy = dppd_flow_shared_count_destroy,
+        .validate_bound = dppd_flow_validate_bound,
+        .create_bound = dppd_flow_create_bound,
     };
     int rc;
 
@@ -295,14 +454,22 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend, uint32_t c
     if (backend->objects == NULL)
         return -ENOMEM;
     backend->capacity = capacity;
+    backend->shared_counts = calloc(DPPD_SHARED_COUNT_MAX, sizeof(*backend->shared_counts));
+    if (backend->shared_counts == NULL) {
+        free(backend->objects);
+        memset(backend, 0, sizeof(*backend));
+        return -ENOMEM;
+    }
     backend->api = api == NULL ? default_api : *api;
     if (backend->api.validate == NULL || backend->api.create == NULL || backend->api.remove == NULL) {
+        free(backend->shared_counts);
         free(backend->objects);
         memset(backend, 0, sizeof(*backend));
         return -EINVAL;
     }
     rc = dppd_flow_probe_cache_init(&backend->probes);
     if (rc != 0) {
+        free(backend->shared_counts);
         free(backend->objects);
         memset(backend, 0, sizeof(*backend));
         return rc;
@@ -327,16 +494,22 @@ int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
         struct dppd_rte_flow_object *object = &backend->objects[i];
         int rc;
 
-        if (!object->occupied || (!object->installed && object->handle.flow == NULL))
+        if (!object->occupied)
             continue;
-        rc = remove_object(backend, object, &error);
+        rc = object->installed || object->handle.flow != NULL ? remove_object(backend, object, &error) : 0;
         if (rc == 0)
             release_object(backend, object);
         else if (result == 0)
             result = rc;
     }
+    if (backend->shared_counts != NULL) {
+        int rc = cleanup_shared(backend);
+        if (result == 0)
+            result = rc;
+    }
     if (result != 0)
         return result;
+    free(backend->shared_counts);
     free(backend->objects);
     dppd_flow_probe_cache_destroy(backend->probes);
     memset(backend, 0, sizeof(*backend));
@@ -488,7 +661,10 @@ int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend, uint3
         else if (first_error == 0)
             first_error = rc;
     }
-    *residual_objects = backend->count;
+    int rc = cleanup_shared(backend);
+    if (first_error == 0)
+        first_error = rc;
+    *residual_objects = backend->count + backend->shared_count_count;
     return first_error;
 }
 
@@ -555,4 +731,135 @@ int dppd_rte_flow_backend_query_age(const struct dppd_rte_flow_backend *backend,
         *result = next;
     }
     return rc;
+}
+
+/** 共享对象由独立 ID 和版本标识，驱动指针只留在后端，不进入规则定义或快照 */
+int dppd_rte_flow_backend_shared_count_create(struct dppd_rte_flow_backend *backend,
+    const struct dppd_shared_count_spec *spec, struct dppd_flow_error *error)
+{
+    if (error != NULL)
+        memset(error, 0, sizeof(*error));
+    if (backend == NULL || backend->shared_counts == NULL || spec == NULL || spec->id == 0 || spec->id == UINT64_MAX ||
+        spec->generation == 0 || spec->generation == UINT64_MAX || spec->install_port_id == UINT16_MAX ||
+        spec->domain < DPPD_RULE_DOMAIN_INGRESS || spec->domain > DPPD_RULE_DOMAIN_TRANSFER)
+        return shared_error(error, -EINVAL, "invalid backend or object identity");
+    if (backend->before_create != NULL)
+        return shared_error(error, -ENOTSUP, "native recovery journal cannot track indirect objects");
+    if (find_shared(backend, spec->id) != NULL)
+        return shared_error(error, -EEXIST, "object ID already exists");
+    if (backend->shared_count_count == DPPD_SHARED_COUNT_MAX)
+        return shared_error(error, -ENOSPC, "object registry is full");
+    /** 创建之前必须确认还有删除入口，查询可以缺失，但不能留下根本无法释放的对象 */
+    if (backend->api.shared_count_create == NULL || backend->api.shared_count_destroy == NULL)
+        return shared_error(error, -ENOTSUP, "driver does not provide indirect create and destroy");
+    struct dppd_shared_count_object *slot = NULL;
+    for (uint32_t i = 0; i < DPPD_SHARED_COUNT_MAX; ++i)
+        if (!backend->shared_counts[i].used) {
+            slot = &backend->shared_counts[i];
+            break;
+        }
+    if (slot == NULL)
+        return shared_error(error, -EUCLEAN, "registry occupancy is inconsistent");
+    struct dppd_shared_count_handle next = {.spec = *spec};
+    dppd_flow_probe_cache_invalidate_all(backend->probes);
+    int rc = backend->api.shared_count_create(spec, &next, error);
+    if (rc != 0 && next.opaque == NULL)
+        return rc;
+    /** 失败却留下句柄时保留清理线索，不能把这类部分成功对象当成可引用的正常对象 */
+    bool installed = rc == 0 && next.opaque != NULL && shared_spec_equal(spec, &next.spec);
+    next.spec = *spec;
+    *slot = (struct dppd_shared_count_object){.used = true, .installed = installed, .spec = *spec, .handle = next};
+    ++backend->shared_count_count;
+    if (!installed)
+        return shared_error(error, -EUCLEAN, "create left an uncertain indirect object");
+    return 0;
+}
+
+int dppd_rte_flow_backend_shared_count_get(const struct dppd_rte_flow_backend *backend, uint64_t id, uint64_t expected,
+    struct dppd_shared_count_info *info)
+{
+    if (info == NULL)
+        return -EINVAL;
+    struct dppd_shared_count_object *object;
+    int rc = lookup_shared(backend, id, expected, &object);
+    if (rc != 0)
+        return rc;
+    if (!object->installed || object->handle.opaque == NULL || !shared_spec_equal(&object->spec, &object->handle.spec))
+        return -EUCLEAN;
+    *info = (struct dppd_shared_count_info){.spec = object->spec, .references = object->references};
+    return 0;
+}
+
+/** 用局部有序副本发布列表，空间不足或对象异常时不把半份结果交给快照 */
+int dppd_rte_flow_backend_shared_count_list(const struct dppd_rte_flow_backend *backend,
+    struct dppd_shared_count_spec *specs, uint32_t capacity, uint32_t *count)
+{
+    if (backend == NULL || backend->shared_counts == NULL || count == NULL || (capacity != 0 && specs == NULL))
+        return -EINVAL;
+    if (capacity < backend->shared_count_count)
+        return -ENOSPC;
+    struct dppd_shared_count_spec sorted[DPPD_SHARED_COUNT_MAX];
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < DPPD_SHARED_COUNT_MAX; ++i) {
+        const struct dppd_shared_count_object *object = &backend->shared_counts[i];
+        if (!object->used)
+            continue;
+        if (!object->installed || object->handle.opaque == NULL ||
+            !shared_spec_equal(&object->spec, &object->handle.spec))
+            return -EUCLEAN;
+        uint32_t at = used;
+        while (at != 0 && sorted[at - 1].id > object->spec.id) {
+            sorted[at] = sorted[at - 1];
+            --at;
+        }
+        sorted[at] = object->spec;
+        ++used;
+    }
+    if (used != 0)
+        memcpy(specs, sorted, used * sizeof(*specs));
+    *count = used;
+    return 0;
+}
+
+int dppd_rte_flow_backend_shared_count_query(const struct dppd_rte_flow_backend *backend, uint64_t id,
+    uint64_t expected, uint64_t *hits, uint64_t *bytes, struct dppd_flow_error *error)
+{
+    if (error != NULL)
+        memset(error, 0, sizeof(*error));
+    if (hits == NULL || bytes == NULL)
+        return shared_error(error, -EINVAL, "missing query output");
+    struct dppd_shared_count_object *object;
+    int rc = lookup_shared(backend, id, expected, &object);
+    if (rc != 0)
+        return shared_error(error, rc, "requested identity was not found");
+    if (!object->installed || object->handle.opaque == NULL || !shared_spec_equal(&object->spec, &object->handle.spec))
+        return shared_error(error, -EUCLEAN, "queried handle is uncertain");
+    if (backend->api.shared_count_query == NULL)
+        return shared_error(error, -ENOTSUP, "driver does not provide indirect query");
+    uint64_t next_hits = 0, next_bytes = 0;
+    rc = backend->api.shared_count_query(&object->handle, &next_hits, &next_bytes, error);
+    if (rc == 0) {
+        *hits = next_hits;
+        *bytes = next_bytes;
+    }
+    return rc;
+}
+
+int dppd_rte_flow_backend_shared_count_destroy(struct dppd_rte_flow_backend *backend, uint64_t id, uint64_t expected,
+    struct dppd_flow_error *error)
+{
+    if (error != NULL)
+        memset(error, 0, sizeof(*error));
+    if (expected == UINT64_MAX)
+        return shared_error(error, -EINVAL, "destroy requires an exact generation");
+    struct dppd_shared_count_object *object;
+    int rc = lookup_shared(backend, id, expected, &object);
+    if (rc != 0)
+        return shared_error(error, rc, "requested identity was not found");
+    return destroy_shared(backend, object, error);
+}
+
+uint32_t dppd_rte_flow_backend_shared_count_count(const struct dppd_rte_flow_backend *backend)
+{
+    return backend == NULL ? 0 : backend->shared_count_count;
 }

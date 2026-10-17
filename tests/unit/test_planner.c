@@ -146,10 +146,43 @@ static void test_age_semantics(void)
     assert(plan.reason == DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK);
 }
 
+/** 共享对象不能由软件私有计数冒充，即使外部错误声明等价也要坚持驱动路径 */
+static void test_shared_semantics(void)
+{
+    struct dppd_topology discovered = topology();
+    for (unsigned int feature = 0; feature < 4; ++feature)
+        for (unsigned int hardware = 0; hardware < 2; ++hardware)
+            for (enum dppd_fallback_policy policy = DPPD_FALLBACK_REQUIRE_HARDWARE;
+                 policy <= DPPD_FALLBACK_SOFTWARE_ONLY; ++policy) {
+                struct dppd_rule rule = ingress_rule(policy);
+                rule.nb_actions = 2;
+                rule.actions[1] = rule.actions[0];
+                rule.actions[0].type = DPPD_ACTION_SHARED_COUNT;
+                rule.actions[0].conf.shared_count.id = 90;
+                rule.actions[0].conf.shared_count.generation = 7;
+                struct dppd_planner_context context = {.topology = &discovered,
+                    .install_port_id = 10,
+                    .hardware_available = hardware != 0,
+                    .software_equivalent = true,
+                    .connection_tracking = feature == 1,
+                    .neighbor_discovery = feature == 2};
+                if (feature == 3)
+                    rule.matches[0].type = DPPD_MATCH_IPV6;
+                assert(!dppd_software_backend_rule_supported(&rule));
+                struct dppd_execution_plan plan;
+                int rc = dppd_plan_rule(&context, &rule, &plan);
+                if (feature == 0 && hardware && policy != DPPD_FALLBACK_SOFTWARE_ONLY)
+                    assert(rc == 0 && plan.backend == DPPD_PLAN_BACKEND_RTE_FLOW && plan.requires_validation);
+                else
+                    assert(rc == -ENOTSUP && !plan.fallback_used);
+            }
+}
+
 int main(void)
 {
     test_queue_semantics();
     test_age_semantics();
+    test_shared_semantics();
     struct dppd_topology discovered = topology();
     struct dppd_planner_context context = {
         .topology = &discovered,
