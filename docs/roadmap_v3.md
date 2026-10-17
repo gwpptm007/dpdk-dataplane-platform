@@ -194,6 +194,13 @@ QUEUE 是否存在软件等价语义必须先完成设计，不能静默模拟�
 
 ## M3：SmartNIC/DPU transfer
 
+2026-10-18 已完成 [环境盘点](m3_environment_20261018.md) 和可在当前环境交付的
+[transfer 控制基础](m3_transfer.md)：带证据的角色解析、同域图、七种模板、正式规划/
+安装、硬件 COUNT 有效性及驱动方向修复。虚拟环境覆盖控制逻辑和明确拒绝，
+不登记为实机硬件验收。可重复运行入口、验证记录和未完成项见 [M3 验收](m3_acceptance.md)。
+AGE/indirect、真实 mlx5 与非 mlx5 卸载、CPU 旁路、端点移除/设备复位恢复仍需推进，
+整个 M3 尚未完成。
+
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。
 
 验收：至少在 NVIDIA mlx5/BlueField 和一个非 mlx5 PMD 上形成可复现实机报告；证明 offloaded packets 不经过 CPU worker；端点移除和 device reset 后可 reconciliation。

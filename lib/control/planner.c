@@ -19,7 +19,7 @@ static int validate_transfer_domain(const struct dppd_planner_context *context, 
     install_endpoint = dppd_topology_find(context->topology, context->install_port_id);
     if (install_endpoint == NULL)
         return reject(plan, DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND, -ENOENT);
-    if (!install_endpoint->has_switch_domain)
+    if (!install_endpoint->has_switch_domain || install_endpoint->switch_domain_id == UINT16_MAX)
         return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISSING, -ENOTSUP);
     domain_id = install_endpoint->switch_domain_id;
 
@@ -31,7 +31,7 @@ static int validate_transfer_domain(const struct dppd_planner_context *context, 
         endpoint = dppd_topology_find(context->topology, rule->matches[i].spec.ethdev_port_id);
         if (endpoint == NULL)
             return reject(plan, DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND, -ENOENT);
-        if (!endpoint->has_switch_domain)
+        if (!endpoint->has_switch_domain || endpoint->switch_domain_id == UINT16_MAX)
             return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISSING, -ENOTSUP);
         if (endpoint->switch_domain_id != domain_id)
             return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISMATCH, -EXDEV);
@@ -44,7 +44,7 @@ static int validate_transfer_domain(const struct dppd_planner_context *context, 
         endpoint = dppd_topology_find(context->topology, rule->actions[i].conf.ethdev_port_id);
         if (endpoint == NULL)
             return reject(plan, DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND, -ENOENT);
-        if (!endpoint->has_switch_domain)
+        if (!endpoint->has_switch_domain || endpoint->switch_domain_id == UINT16_MAX)
             return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISSING, -ENOTSUP);
         if (endpoint->switch_domain_id != domain_id)
             return reject(plan, DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISMATCH, -EXDEV);

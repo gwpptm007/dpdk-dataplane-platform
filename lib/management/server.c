@@ -72,6 +72,21 @@ static int build_port_info(const struct dppd_device_set *devices, uint16_t port_
     output->link_state = (uint8_t)atomic_load_explicit(&port->link_state, memory_order_acquire);
     memcpy(output->switch_name, endpoint->switch_name, sizeof(output->switch_name));
     memcpy(output->driver_name, endpoint->driver_name, sizeof(output->driver_name));
+    output->role = (uint8_t)endpoint->role;
+    output->role_source = (uint8_t)endpoint->role_source;
+    output->role_error = endpoint->role_error;
+    output->if_index = endpoint->if_index;
+    output->has_controller = endpoint->has_controller;
+    output->has_pf = endpoint->has_pf;
+    output->has_function = endpoint->has_function;
+    output->has_physical_port = endpoint->has_physical_port;
+    output->controller_id = endpoint->controller_id;
+    output->pf_id = endpoint->pf_id;
+    output->function_id = endpoint->function_id;
+    output->physical_port_id = endpoint->physical_port_id;
+    memcpy(output->interface_name, endpoint->interface_name, sizeof(output->interface_name));
+    memcpy(output->device_name, endpoint->device_name, sizeof(output->device_name));
+    memcpy(output->phys_port_name, endpoint->phys_port_name, sizeof(output->phys_port_name));
     return 0;
 }
 
@@ -371,12 +386,19 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         request->operation != DPPD_MANAGEMENT_ROUTING_GET && request->operation != DPPD_MANAGEMENT_CONNTRACK_STATUS &&
         request->operation != DPPD_MANAGEMENT_CONNTRACK_LIST && request->operation != DPPD_MANAGEMENT_NAT_STATUS &&
         request->operation != DPPD_MANAGEMENT_DNAT_LIST && request->operation != DPPD_MANAGEMENT_ND6_STATUS &&
-        request->operation != DPPD_MANAGEMENT_ND6_LIST) {
+        request->operation != DPPD_MANAGEMENT_ND6_LIST && request->operation != DPPD_MANAGEMENT_TRANSFER_PLAN) {
         response->status = -EUCLEAN;
         return 0;
     }
 
     switch (request->operation) {
+    case DPPD_MANAGEMENT_TRANSFER_PLAN:
+    case DPPD_MANAGEMENT_TRANSFER_APPLY:
+        rc = dppd_control_transfer(control, &request->payload.transfer,
+            request->operation == DPPD_MANAGEMENT_TRANSFER_APPLY, &response->payload.transfer.graph,
+            response->payload.transfer.results, response->payload.transfer.message,
+            sizeof(response->payload.transfer.message));
+        break;
     case DPPD_MANAGEMENT_RULE_HISTORY:
         /** 协议查询只复制完成态记录，错误参数或过期版本不产生新的失败事件 */
         rc = dppd_control_rule_history(control, request->payload.rule_history.after_event_id,

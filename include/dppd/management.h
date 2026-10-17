@@ -8,6 +8,7 @@
 #include "dppd/stats_values.h"
 #include "dppd/conntrack.h"
 #include "dppd/nd6.h"
+#include "dppd/transfer.h"
 
 /*
  * 管理协议版本在请求和响应中显式传递。当前实现不做版本协商：版本不一致时
@@ -19,7 +20,8 @@
  */
 /** v16 扩展三层转发统计，后续路由配置命令使用同一版 ABI，旧版客户端必须拒绝 */
 /** v22 增加动态 ND、DAD 就绪状态和缓存管理，daemon 与 CLI 必须配套更新 */
-#define DPPD_MANAGEMENT_VERSION 23U
+/** v24 增加有来源的端点角色与 transfer 图规划/整批安装，旧客户端必须配套更新 */
+#define DPPD_MANAGEMENT_VERSION 24U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -94,6 +96,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_ND6_STATUS,
     DPPD_MANAGEMENT_ND6_LIST,
     DPPD_MANAGEMENT_ND6_FLUSH,
+    DPPD_MANAGEMENT_TRANSFER_PLAN,
+    DPPD_MANAGEMENT_TRANSFER_APPLY,
 };
 
 /*
@@ -108,6 +112,7 @@ struct dppd_management_request {
     uint32_t size;       /* 必须等于发送方 sizeof(*request) */
     uint64_t request_id; /* 客户端生成；响应原样回显，用于请求/响应配对 */
     union {
+        struct dppd_transfer_spec transfer;
         struct {
             uint64_t after_id, expected_revision;
         } conntrack;
@@ -261,6 +266,12 @@ struct dppd_management_port_info {
     uint8_t link_state;
     char switch_name[64];
     char driver_name[64];
+    uint8_t role, role_source;
+    int32_t role_error;
+    uint32_t if_index;
+    bool has_controller, has_pf, has_function, has_physical_port;
+    uint32_t controller_id, pf_id, function_id, physical_port_id;
+    char interface_name[16], device_name[64], phys_port_name[64];
 };
 
 /* list 只返回运维摘要；完整 match/action 使用 get 获取，避免列表报文过大 */
@@ -424,6 +435,11 @@ struct dppd_management_response {
         struct dppd_rule_metrics rule_metrics;
         struct dppd_rule_latency_report rule_latency;
         struct dppd_rule_history_page rule_history;
+        struct {
+            struct dppd_transfer_graph graph;
+            struct dppd_control_apply_result results[DPPD_TRANSFER_MAX_EDGES];
+            char message[DPPD_TRANSFER_MESSAGE_SIZE];
+        } transfer;
     } payload;
 };
 

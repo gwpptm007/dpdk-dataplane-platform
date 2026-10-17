@@ -740,17 +740,15 @@ static int control_create_batch_impl(struct dppd_control_service *service,
         return rc;
     if (request_count > service->rules.capacity - dppd_rule_repository_count(&service->rules))
         return -ENOSPC;
+    /** 在探测或创建驱动对象前预留连续版本，不能分配 ANY 保留值或发生回绕 */
+    base_generation = dppd_rule_repository_generation(&service->rules);
+    if (base_generation >= UINT64_MAX - request_count)
+        return -EOVERFLOW;
 
     observe_stage(service, DPPD_RULE_STAGE_PREPARE);
     items = calloc(request_count, sizeof(*items));
     if (items == NULL)
         return -ENOMEM;
-    /**
-     * 先记下当前全局版本，后续按输入顺序为实际对象预分配连续的新版本
-     * 写入账本时必须保持相同顺序，才能让账本版本与已经安装对象的版本一一对应
-     */
-    base_generation = dppd_rule_repository_generation(&service->rules);
-
     /**
      * 逐条检查 ID、创建条件和规划结果，暂不安装对象或预留资源
      * PREFER 条目可能在本循环调用驱动 validate，这只是能力探测，不是安装

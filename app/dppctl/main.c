@@ -15,6 +15,7 @@
 #include "dppd/management.h"
 #include "routing_cli.h"
 #include "conntrack_cli.h"
+#include "transfer_cli.h"
 
 static void print_usage(const char *program)
 {
@@ -32,6 +33,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] nd6-status|nd6-list [AFTER_ID [REVISION]]|nd6-flush REVISION\n", program);
     fprintf(stderr, "  ACL modifiers also accept state:new,established,invalid,untracked\n");
     dppctl_routing_usage(program);
+    dppctl_transfer_usage(program);
     fprintf(stderr, "  %s [--socket PATH] ping\n", program);
     fprintf(stderr, "  %s [--socket PATH] health\n", program);
     fprintf(stderr, "  %s [--socket PATH] ready\n", program);
@@ -611,6 +613,9 @@ static int build_acl_batch(const char *path, struct dppd_management_request *req
 
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
+    int transfer_result = dppctl_transfer_build(argc, argv, request, initialize_request);
+    if (transfer_result != -ENOSYS)
+        return transfer_result;
     int conntrack_result = dppctl_conntrack_build(argc, argv, request, initialize_request);
     if (conntrack_result != -ENOSYS)
         return conntrack_result;
@@ -1197,10 +1202,13 @@ static void print_capability(const struct dppd_management_capability_profile *pr
         probes->observed_actions);
 }
 
-static void print_response(const struct dppd_management_response *response)
+static int print_response(const struct dppd_management_response *response)
 {
+    int transfer = dppctl_transfer_print(response);
+    if (transfer != 0)
+        return transfer < 0 ? transfer : 0;
     if (dppctl_conntrack_print(response) || dppctl_routing_print(response))
-        return;
+        return 0;
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释 */
     switch (response->operation) {
     case DPPD_MANAGEMENT_RULE_HISTORY: {
@@ -1341,6 +1349,20 @@ static void print_response(const struct dppd_management_response *response)
                 response->payload.port.switch_port_id, response->payload.port.switch_name);
         else
             printf("switch-domain=none\n");
+        printf("role=%s role-source=%s role-error=%d ifindex=%u interface=%s device=%s phys-port-name=%s\n",
+            dppd_endpoint_role_name(response->payload.port.role),
+            dppd_endpoint_role_source_name(response->payload.port.role_source), response->payload.port.role_error,
+            response->payload.port.if_index, response->payload.port.interface_name, response->payload.port.device_name,
+            response->payload.port.phys_port_name);
+        if (response->payload.port.has_controller)
+            printf("controller=%u ", response->payload.port.controller_id);
+        if (response->payload.port.has_pf)
+            printf("pf=%u ", response->payload.port.pf_id);
+        if (response->payload.port.has_function)
+            printf("function=%u ", response->payload.port.function_id);
+        if (response->payload.port.has_physical_port)
+            printf("physical-port=%u ", response->payload.port.physical_port_id);
+        printf("\n");
         break;
     case DPPD_MANAGEMENT_RULE_GET:
         print_rule_detail(&response->payload.rule);
@@ -1462,6 +1484,7 @@ static void print_response(const struct dppd_management_response *response)
     default:
         break;
     }
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -1496,6 +1519,8 @@ int main(int argc, char **argv)
 
         fprintf(stderr, "dppctl: request failed: %s (%d)\n",
             status < 0 && status >= -4095 ? strerror(-status) : "unknown error", status);
+        if (response.operation == DPPD_MANAGEMENT_TRANSFER_PLAN || response.operation == DPPD_MANAGEMENT_TRANSFER_APPLY)
+            fprintf(stderr, "dppctl: transfer: %.*s\n", DPPD_TRANSFER_MESSAGE_SIZE, response.payload.transfer.message);
         if (status == -EUCLEAN && response.operation >= DPPD_MANAGEMENT_ROUTING_STATUS &&
             response.operation <= DPPD_MANAGEMENT_ROUTING_FLUSH) {
             dppctl_routing_print(&response);
@@ -1511,6 +1536,7 @@ int main(int argc, char **argv)
         if (status == -EUCLEAN &&
             (response.operation == DPPD_MANAGEMENT_RULE_APPLY ||
                 response.operation == DPPD_MANAGEMENT_RULE_CREATE_BATCH ||
+                response.operation == DPPD_MANAGEMENT_TRANSFER_APPLY ||
                 response.operation == DPPD_MANAGEMENT_RULE_DELETE)) {
             fprintf(stderr,
                 "dppctl: operation may already be active, but the snapshot "
@@ -1525,7 +1551,9 @@ int main(int argc, char **argv)
         }
         return EXIT_FAILURE;
     }
-    print_response(&response);
+    /** 损坏的图响应必须让命令失败，不能只打印错误后仍返回成功 */
+    if (print_response(&response) != 0)
+        return EXIT_FAILURE;
     /** 先打印明确原因，再给就绪探针返回非零，避免脚本只能得到一个没有解释的失败码 */
     if (require_ready && !response.payload.health.ready)
         return EXIT_FAILURE;

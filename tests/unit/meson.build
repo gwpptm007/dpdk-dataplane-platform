@@ -5,10 +5,26 @@ packet_test = executable(
 )
 test('packet parser', packet_test)
 
+topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
+              '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',
+              '-Wl,--wrap=open', '-Wl,--wrap=open64', '-Wl,--wrap=read', '-Wl,--wrap=realpath',
+              '-Wl,--wrap=if_nametoindex'])
+test('verified endpoint roles and bounded topology discovery', topology_test)
+
 flow_contract_test = executable('test_flow_contract', 'test_flow_contract.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_flow_validate', '-Wl,--wrap=rte_flow_create', '-Wl,--wrap=rte_flow_destroy',
               '-Wl,--wrap=rte_flow_query', '-Wl,--wrap=rte_flow_flush'])
 test('transfer compilation and hardware counter validity', flow_contract_test)
+
+transfer_test = executable('test_transfer', 'test_transfer.c', dependencies: dppd_core_dep)
+test('simulated transfer templates and control lifecycle', transfer_test)
+
+transfer_management_test = executable('test_transfer_management', 'test_transfer_management.c', dependencies: dppd_core_dep)
+test('transfer management protocol and role evidence', transfer_management_test)
+
+python_test = find_program('python3')
+test('M3 read-only inventory semantics', python_test, args: [meson.current_source_dir() / 'test_m3_inventory.py'])
 
 acl_test = executable('test_acl', 'test_acl.c', dependencies: dppd_core_dep)
 test('compiled ACL and independent reference', acl_test)
@@ -265,6 +281,7 @@ dppctl_test = executable(
   'test_dppctl.c',
   '../../app/dppctl/routing_cli.c',
   '../../app/dppctl/conntrack_cli.c',
+  '../../app/dppctl/transfer_cli.c',
   include_directories: dppd_inc,
 )
 test('dppctl batch update arguments', dppctl_test)

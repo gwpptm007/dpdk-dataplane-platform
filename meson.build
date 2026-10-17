@@ -32,6 +32,7 @@ dppd_sources = files(
   'lib/control/monitor_channel.c',
   'lib/control/tap_content.c',
   'lib/control/planner.c',
+  'lib/control/transfer.c',
   'lib/control/transaction.c',
   'lib/control/control.c',
   'lib/management/server.c',
@@ -85,6 +86,7 @@ executable(
   'app/dppctl/main.c',
   'app/dppctl/routing_cli.c',
   'app/dppctl/conntrack_cli.c',
+  'app/dppctl/transfer_cli.c',
   include_directories: dppd_inc,
   install: false,
 )

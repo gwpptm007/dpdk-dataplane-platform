@@ -1,5 +1,20 @@
 # 集成验收
 
+## M3 虚拟环境与软件回归
+
+```sh
+python3 scripts/verify_m3.py --build-dir build
+sudo python3 scripts/verify_m3.py --build-dir build --tap
+python3 tests/integration/m3_transfer.py --build-dir build
+```
+
+统一入口先只读盘点，再运行开启 `tests/werror` 的全部单测和 M2 软件回归，最后使用
+正式 daemon/CLI 验证 net_ring 的角色未知、七种模板拒绝、无副作用和旧协议拒绝。
+`--tap` 增加八组私有命名空间内的 TAP 软件验收，需要 root。
+报告保存到构建目录 `m3-acceptance/`，始终标记硬件验收未执行、M3 整体验收未完成。
+模拟驱动的正向图安装、COUNT 和故障补偿由单测覆盖，不能把 ring/TAP 当成交换芯片，
+具体边界见 [M3 控制闭环](../../docs/m3_transfer.md) 与 [M3 验收](../../docs/m3_acceptance.md)。
+
 ## M2 整体验收
 
 ```sh

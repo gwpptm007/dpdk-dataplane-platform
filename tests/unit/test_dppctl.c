@@ -275,6 +275,185 @@ static void test_probe_arguments(void)
     assert(build_request(13, filter, &request) == -EINVAL);
 }
 
+/** transfer 规划始终只读，安装必须携带精确账本版本，不能把缺失参数或重复选项默默补全 */
+static void test_transfer_arguments(void)
+{
+    struct dppd_management_request request;
+    char *plan[] = {"transfer-plan", "100", "5", "6", "7", "pair", "oneway", "count", "priority:23", "extra"};
+    for (unsigned int scenario = 0; scenario < DPPD_TRANSFER_TEMPLATE_COUNT; ++scenario) {
+        plan[5] = (char *)dppd_transfer_template_name(scenario);
+        assert(build_request(7, plan, &request) == 0);
+        assert(request.version == DPPD_MANAGEMENT_VERSION && request.size == sizeof(request));
+        assert(request.operation == DPPD_MANAGEMENT_TRANSFER_PLAN);
+        assert(request.payload.transfer.first_rule_id == 100 && request.payload.transfer.install_port_id == 5);
+        assert(request.payload.transfer.source_port_id == 6 && request.payload.transfer.destination_port_id == 7);
+        assert(request.payload.transfer.scenario == scenario && !request.payload.transfer.bidirectional);
+        assert(request.payload.transfer.expected_repository_generation == DPPD_RULE_GENERATION_ANY);
+        assert(!request.payload.transfer.with_count && request.payload.transfer.priority == 0);
+        for (unsigned int i = 0; i < sizeof(request.payload.transfer.reserved); ++i)
+            assert(request.payload.transfer.reserved[i] == 0);
+    }
+    plan[5] = "pair";
+    plan[6] = "bidir";
+    assert(build_request(9, plan, &request) == 0);
+    assert(request.payload.transfer.bidirectional && request.payload.transfer.with_count);
+    assert(request.payload.transfer.priority == 23);
+    assert(build_request(6, plan, &request) == -EINVAL);
+    assert(build_request(10, plan, &request) == -EINVAL);
+    plan[7] = "priority:4294967295";
+    plan[8] = "count";
+    assert(build_request(9, plan, &request) == 0 && request.payload.transfer.priority == UINT32_MAX);
+    plan[7] = "count";
+    assert(build_request(9, plan, &request) == -EINVAL);
+    plan[7] = "priority:1";
+    plan[8] = "priority:2";
+    assert(build_request(9, plan, &request) == -EINVAL);
+    const char *bad_options[] = {"priority:", "priority:-1", "priority:4294967296", "priority:1x", "COUNT", "refresh"};
+    for (unsigned int i = 0; i < sizeof(bad_options) / sizeof(*bad_options); ++i) {
+        plan[7] = (char *)bad_options[i];
+        assert(build_request(8, plan, &request) == -EINVAL);
+    }
+    plan[7] = "count";
+    const char *bad_numbers[] = {"-1", "+1", " 1", "", "1x", "18446744073709551616"};
+    for (unsigned int i = 0; i < sizeof(bad_numbers) / sizeof(*bad_numbers); ++i)
+        for (unsigned int field = 1; field <= 4; ++field) {
+            char *saved = plan[field];
+            plan[field] = (char *)bad_numbers[i];
+            assert(build_request(7, plan, &request) == -EINVAL);
+            plan[field] = saved;
+        }
+    plan[1] = "0";
+    assert(build_request(7, plan, &request) == -EINVAL);
+    plan[1] = "18446744073709551614";
+    assert(build_request(7, plan, &request) == -EINVAL);
+    plan[6] = "oneway";
+    assert(build_request(7, plan, &request) == 0);
+    plan[1] = "18446744073709551615";
+    assert(build_request(7, plan, &request) == -EINVAL);
+    plan[1] = "100";
+    for (unsigned int field = 2; field <= 4; ++field) {
+        char *saved = plan[field];
+        plan[field] = "65535";
+        assert(build_request(7, plan, &request) == -EINVAL);
+        plan[field] = saved;
+    }
+    plan[4] = "6";
+    assert(build_request(7, plan, &request) == -EINVAL);
+    plan[4] = "7";
+    plan[5] = "unknown";
+    assert(build_request(7, plan, &request) == -EINVAL);
+    plan[5] = "pair";
+    plan[6] = "both";
+    assert(build_request(7, plan, &request) == -EINVAL);
+    char *apply[] = {"transfer-apply", "100", "5", "6", "7", "uplink-vf", "bidir", "0", "count", "priority:17"};
+    assert(build_request(10, apply, &request) == 0 && request.operation == DPPD_MANAGEMENT_TRANSFER_APPLY);
+    assert(request.payload.transfer.expected_repository_generation == 0 && request.payload.transfer.with_count);
+    assert(request.payload.transfer.scenario == DPPD_TRANSFER_UPLINK_VF && request.payload.transfer.priority == 17);
+    assert(build_request(7, apply, &request) == -EINVAL);
+    apply[7] = "18446744073709551614";
+    assert(build_request(8, apply, &request) == 0);
+    assert(request.payload.transfer.expected_repository_generation == UINT64_MAX - 1U);
+    const char *bad_versions[] = {"any", "18446744073709551615", "18446744073709551616", "-1", "+1", " 1", ""};
+    for (unsigned int i = 0; i < sizeof(bad_versions) / sizeof(*bad_versions); ++i) {
+        apply[7] = (char *)bad_versions[i];
+        assert(build_request(8, apply, &request) == -EINVAL);
+    }
+}
+
+/** 捕获两个输出流，既检查明确报错，也防止坏响应先打印一半成功图再停止 */
+static void check_transfer_print(const struct dppd_management_response *response, bool recognized, bool valid)
+{
+    FILE *output = tmpfile(), *errors = tmpfile();
+    char text[2048], error[256];
+    assert(output != NULL && errors != NULL);
+    assert(fflush(stdout) == 0 && fflush(stderr) == 0);
+    int saved_output = dup(STDOUT_FILENO), saved_errors = dup(STDERR_FILENO);
+    assert(saved_output >= 0 && saved_errors >= 0);
+    assert(dup2(fileno(output), STDOUT_FILENO) >= 0 && dup2(fileno(errors), STDERR_FILENO) >= 0);
+    int handled = dppctl_transfer_print(response);
+    assert(fflush(stdout) == 0 && fflush(stderr) == 0);
+    assert(dup2(saved_output, STDOUT_FILENO) >= 0 && dup2(saved_errors, STDERR_FILENO) >= 0);
+    assert(close(saved_output) == 0 && close(saved_errors) == 0);
+    assert(fseek(output, 0, SEEK_SET) == 0 && fseek(errors, 0, SEEK_SET) == 0);
+    size_t text_size = fread(text, 1, sizeof(text) - 1U, output);
+    size_t error_size = fread(error, 1, sizeof(error) - 1U, errors);
+    assert(!ferror(output) && !ferror(errors));
+    text[text_size] = error[error_size] = '\0';
+    assert(fclose(output) == 0 && fclose(errors) == 0);
+    assert(handled == (recognized ? valid ? 1 : -EPROTO : 0));
+    if (!recognized)
+        assert(text_size == 0 && error_size == 0);
+    else if (valid) {
+        assert(strstr(text, "transfer=") != NULL && strstr(text, "edge=0 id=100") != NULL);
+        assert(strstr(text, "source=5 destination=6") != NULL && error_size == 0);
+    } else
+        assert(text_size == 0 && strstr(error, "malformed transfer response") != NULL);
+}
+
+/** 数组长度和动作类型来自服务端响应，必须在使用末动作下标之前完成完整检查 */
+static void test_transfer_print(void)
+{
+    struct dppd_management_response response = {.operation = DPPD_MANAGEMENT_TRANSFER_PLAN};
+    struct dppd_transfer_graph *graph = &response.payload.transfer.graph;
+    graph->count = 1;
+    graph->switch_domain_id = 42;
+    graph->rules[0] = (struct dppd_rule){.id = 100,
+        .nb_matches = 2,
+        .nb_actions = 1,
+        .matches = {{.type = DPPD_MATCH_REPRESENTED_PORT, .spec.ethdev_port_id = 5}, {.type = DPPD_MATCH_ETH}},
+        .actions = {{.type = DPPD_ACTION_REPRESENTED_PORT, .conf.ethdev_port_id = 6}}};
+    struct dppd_management_response valid = response;
+    check_transfer_print(&response, true, true);
+    response.operation = DPPD_MANAGEMENT_TRANSFER_APPLY;
+    graph->count = 2;
+    graph->rules[1] = graph->rules[0];
+    graph->rules[1].id = 101;
+    graph->rules[1].nb_actions = 2;
+    graph->rules[1].actions[1] = graph->rules[1].actions[0];
+    graph->rules[1].actions[0].type = DPPD_ACTION_COUNT;
+    memset(response.payload.transfer.message, 'x', sizeof(response.payload.transfer.message));
+    check_transfer_print(&response, true, true);
+    const uint16_t invalid_counts[] = {0, DPPD_TRANSFER_MAX_EDGES + 1U, UINT16_MAX};
+    for (unsigned int i = 0; i < sizeof(invalid_counts) / sizeof(*invalid_counts); ++i) {
+        response = valid;
+        graph->count = invalid_counts[i];
+        check_transfer_print(&response, true, false);
+    }
+    const uint16_t invalid_actions[] = {0, 3, DPPD_RULE_MAX_ACTIONS, DPPD_RULE_MAX_ACTIONS + 1U, UINT16_MAX};
+    for (unsigned int i = 0; i < sizeof(invalid_actions) / sizeof(*invalid_actions); ++i) {
+        response = valid;
+        graph->rules[0].nb_actions = invalid_actions[i];
+        check_transfer_print(&response, true, false);
+    }
+    const uint16_t invalid_matches[] = {0, 1, 3, DPPD_RULE_MAX_ITEMS, DPPD_RULE_MAX_ITEMS + 1U, UINT16_MAX};
+    for (unsigned int i = 0; i < sizeof(invalid_matches) / sizeof(*invalid_matches); ++i) {
+        response = valid;
+        graph->rules[0].nb_matches = invalid_matches[i];
+        check_transfer_print(&response, true, false);
+    }
+    response = valid;
+    graph->rules[0].matches[0].type = DPPD_MATCH_ETH;
+    check_transfer_print(&response, true, false);
+    response = valid;
+    graph->rules[0].matches[1].type = DPPD_MATCH_IPV4;
+    check_transfer_print(&response, true, false);
+    response = valid;
+    graph->rules[0].actions[0].type = DPPD_ACTION_DROP;
+    check_transfer_print(&response, true, false);
+    response = valid;
+    graph->rules[0].nb_actions = 2;
+    graph->rules[0].actions[1] = graph->rules[0].actions[0];
+    graph->rules[0].actions[0].type = DPPD_ACTION_MARK;
+    check_transfer_print(&response, true, false);
+    response = valid;
+    graph->count = 2;
+    graph->rules[1] = graph->rules[0];
+    graph->rules[1].nb_actions = UINT16_MAX;
+    check_transfer_print(&response, true, false);
+    response.operation = DPPD_MANAGEMENT_PING;
+    check_transfer_print(&response, false, false);
+}
+
 /**
  * 前半部分确认两到四条规则都能正确映射到请求字段
  * 后半部分逐项替换参数，确认不完整分组、无效旧版本、重复 ID 和越界数值都被拒绝
@@ -304,6 +483,8 @@ int main(void)
     test_ipv6_arguments();
     test_probe_arguments();
     test_history_arguments();
+    test_transfer_arguments();
+    test_transfer_print();
 
     /** 健康与就绪命令都使用无参数的状态查询，额外参数必须明确拒绝 */
     assert(build_request(1, probe, &request) == 0);
