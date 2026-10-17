@@ -516,6 +516,39 @@ int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
     return result;
 }
 
+static int simulated_reset_error(struct dppd_flow_error *error, int rc, const char *message)
+{
+    if (error != NULL) {
+        error->code = rc;
+        snprintf(error->message, sizeof(error->message), "simulated reset: %s", message);
+    }
+    return rc;
+}
+
+/** 模拟复位是一次原子失效，真实硬件复位的部分成功语义不在这个接口的承诺内 */
+int dppd_rte_flow_backend_simulate_reset(struct dppd_rte_flow_backend *backend, struct dppd_flow_error *error)
+{
+    if (error != NULL)
+        memset(error, 0, sizeof(*error));
+    if (backend == NULL || backend->objects == NULL || backend->shared_counts == NULL || backend->probes == NULL ||
+        backend->capacity == 0)
+        return simulated_reset_error(error, -EINVAL, "invalid backend");
+    if (backend->before_create != NULL)
+        return simulated_reset_error(error, -ENOTSUP, "native recovery journal cannot track simulated reset");
+    if (backend->api.simulate_reset == NULL)
+        return simulated_reset_error(error, -ENOTSUP, "driver does not provide simulation-only reset");
+    int rc = backend->api.simulate_reset(error);
+    if (rc != 0)
+        return rc;
+    /** 成功后旧句柄已经失效，不能再调用删除接口，也不逐条归还已失效的引用 */
+    memset(backend->objects, 0, backend->capacity * sizeof(*backend->objects));
+    memset(backend->shared_counts, 0, DPPD_SHARED_COUNT_MAX * sizeof(*backend->shared_counts));
+    backend->count = 0;
+    backend->shared_count_count = 0;
+    dppd_flow_probe_cache_invalidate_all(backend->probes);
+    return 0;
+}
+
 /**
  * 把硬件仓库包装成通用事务接口，让控制层使用统一的四阶段操作
  * token 就是仓库槽位地址，没有另外分配的临时对象，所以无需独立 finalize 回调

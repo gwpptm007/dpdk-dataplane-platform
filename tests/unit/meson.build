@@ -30,6 +30,8 @@ shared_contract_test = executable('test_shared_contract', 'test_shared_contract.
 test('shared COUNT indirect driver contract', shared_contract_test)
 shared_backend_test = executable('test_shared_backend', 'test_shared_backend.c', dependencies: dppd_core_dep)
 test('shared COUNT prepared and installed references', shared_backend_test)
+reset_test = executable('test_reset', 'test_reset.c', dependencies: dppd_core_dep)
+test('simulated reset isolation and exact desired rebuild', reset_test)
 
 transfer_test = executable('test_transfer', 'test_transfer.c', dependencies: dppd_core_dep)
 test('simulated transfer templates and control lifecycle', transfer_test)

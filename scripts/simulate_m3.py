@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""不用实体网卡演练 M3 的规则、报文、共享计数、闲置老化和回滚，结果明确标记为功能模拟"""
+"""不用实体网卡演练 M3 的规则、报文、共享计数、闲置老化、复位和回滚，结果明确标记为功能模拟"""
 
 import argparse
 from datetime import datetime, timezone
@@ -109,6 +109,14 @@ class Fixture:
 
     def status(self):
         return fields(self.io_request("status"))
+
+    def reset_status(self):
+        return fields(self.io_request("reset-status"))
+
+    def snapshot(self):
+        """直接核对文件字节，复位恢复不能以重新保存相同规则掩盖版本或格式变化"""
+        check(self.persistent, "这个模拟实例没有启用持久化")
+        return (self.directory / "simulation-state.bin").read_bytes()
 
     def install(self, rule_id, source, destination, template="pair", bidirectional=False, priority=10, error=None,
                 age=0, count=True, shared=None, install_port=0):
@@ -521,6 +529,180 @@ def exercise_shared(simulator, passed):
     passed("创建中途失败且补偿失败保留共享实际引用，隔离清理后重启恢复对象且无失败规则")
 
 
+def exercise_reset(simulator, passed):
+    """驱动复位只让对象失效，显式恢复必须重新核对身份并使用新的不重复句柄"""
+    counter = simulator.shared_create(8000)
+    edges = simulator.install(8001, 0, 2, bidirectional=True, shared=counter)
+    simulator.inject(0, 2, 8001, frame())
+    simulator.inject(2, 0, 8002, frame(73))
+    simulator.shared_query(counter, 2, 137)
+    snapshot = simulator.snapshot()
+    before = simulator.status()
+    simulator.io_request("fault reset 1")
+    simulator.io_request("reset", error=errno.EIO)
+    state = simulator.status()
+    check(state["reset_pending"] == "no" and state["installed"] == "2" and state["shared_objects"] == "1" and
+          state["shared_refs"] == "2" and state["token_serial"] == before["token_serial"], str(state))
+    simulator.shared_query(counter, 2, 137)
+    simulator.inject(0, 2, 8001, frame(14))
+    simulator.shared_query(counter, 3, 151)
+    check(simulator.snapshot() == snapshot, "失败复位改变了磁盘快照")
+    passed("复位驱动故障没有丢对象、引用、计数或快照，原规则继续转发")
+
+    for cycle in range(2):
+        before = simulator.status()
+        reset = fields(simulator.io_request("reset"))
+        state = simulator.status()
+        check(reset.get("pending") == "yes" and reset.get("desired_rules") == "2" and
+              reset.get("desired_shared") == "1" and state["installed"] == "0" and
+              state["shared_objects"] == "0" and state["shared_refs"] == "0" and
+              state["removes"] == before["removes"] and state["shared_destroys"] == before["shared_destroys"],
+              "复位继续使用旧句柄清理: " + str(state))
+        simulator.io_request(f"inject 0 {frame().hex()}", error=errno.EUCLEAN)
+        simulator.ctl("reconcile-retry", error=errno.EBUSY)
+        simulator.io_request("reset", error=errno.EALREADY)
+        check(simulator.snapshot() == snapshot, "复位隔离改写了快照")
+        recovered = fields(simulator.io_request("recover"))
+        state = simulator.status()
+        check(recovered.get("pending") == "no" and state["installed"] == "2" and state["shared_refs"] == "2" and
+              int(state["token_serial"]) > int(before["token_serial"]) and state["stale_handles"] == "0",
+              "同 ID 和版本恢复未更新句柄或碰到了过期句柄: " + str(state))
+        simulator.shared_get(counter, 2)
+        simulator.shared_query(counter, 0, 0)
+        for edge in edges:
+            rule_header = simulator.ctl("get", edge["id"]).splitlines()[0]
+            check(fields(rule_header).get("generation") == edge["generation"],
+                  "恢复改变了规则精确版本")
+        simulator.inject(0, 2, 8001, frame(14 + cycle))
+        simulator.shared_query(counter, 1, 14 + cycle)
+        check(simulator.snapshot() == snapshot, "成功恢复改写了快照")
+    simulator.delete(edges)
+    simulator.shared_delete(counter)
+    passed("多轮复位隔离、旧句柄失效、先对象后规则恢复，同版本计数归零且快照逐字节不变")
+
+    aged = simulator.install(8100, 0, 2, age=5)
+    simulator.inject(0, 2, 8100, frame())
+    simulator.io_request("advance 4")
+    snapshot = simulator.snapshot()
+    simulator.io_request("reset")
+    simulator.io_request("advance 30")
+    check(simulator.status()["desired"] == "1", "复位隔离期间自动老化删除了期望计划")
+    simulator.io_request("recover")
+    idle = fields(simulator.ctl("rule-age", aged[0]["id"], aged[0]["generation"]))
+    check(idle.get("aged") == "no" and idle.get("idle-seconds") == "0", str(idle))
+    simulator.count(aged[0], 0, 0)
+    check(simulator.snapshot() == snapshot, "AGE 重建改写了快照")
+    simulator.io_request("advance 4")
+    check(simulator.status()["installed"] == "1", "复位前的闲置时间污染了新规则")
+    simulator.io_request("advance 1")
+    simulator.wait_status(lambda state: state["installed"] == "0" and state["desired"] == "0",
+                          "重建后的 AGE 没有在新的闲置边界回收")
+    passed("复位隔离暂停 AGE 删除，重建私有 COUNT 归零且 AGE 从新命中起点计时")
+
+    counter = simulator.shared_create(8200)
+    edges = simulator.install(8201, 0, 2, bidirectional=True, shared=counter)
+    simulator.io_request("topology 2 missing", error=errno.EBUSY)
+    simulator.io_request("reset")
+    snapshot = simulator.snapshot()
+    before = simulator.status()
+    invalid = ("reset extra", "recover extra", "reset-status extra", "topology -1 missing", "topology 8 present",
+               "topology 2 domain:65535", "topology 2 domain:-1", "topology 2 domain:", "topology 2 identity:0",
+               "topology 2 identity:4294967296", "topology 2 restore extra", "topology 2 absent",
+               b"topology 2 missing\x00suffix")
+    for request in invalid:
+        check(exchange(simulator.io, request).startswith("error "), "坏复位请求没有拒绝")
+        check(simulator.status() == before, "坏复位请求改变了夹具、对象或故障计划")
+    for operation, expected in (("missing", errno.ENOENT), ("domain:88", errno.EXDEV),
+                                ("identity:1", errno.EXDEV)):
+        simulator.io_request(f"topology 2 {operation}")
+        simulator.io_request("recover", error=expected)
+        state = simulator.status()
+        check(state["reset_pending"] == "yes" and state["installed"] == "0" and state["shared_objects"] == "0" and
+              state["creates"] == before["creates"] and state["shared_creates"] == before["shared_creates"],
+              "身份核对失败后仍创建了驱动对象: " + str(state))
+        simulator.io_request("topology 2 restore")
+        check(simulator.snapshot() == snapshot, "身份拒绝改写了快照")
+    simulator.io_request("topology 2 missing")
+    simulator.io_request("topology 2 present")
+    simulator.io_request("recover")
+    simulator.delete(edges)
+    simulator.shared_delete(counter)
+    passed("复位输入完整校验无副作用，端点缺失、跨域和身份变化在任何创建前拒绝并可恢复夹具")
+
+    counter = simulator.shared_create(8300)
+    edges = simulator.install(8301, 0, 2, bidirectional=True, shared=counter)
+    snapshot = simulator.snapshot()
+    simulator.io_request("reset")
+    before = simulator.status()
+    simulator.io_request("fault shared-create 1")
+    simulator.io_request("recover", error=errno.ENOSPC)
+    state = simulator.status()
+    check(state["reset_pending"] == "yes" and state["installed"] == "0" and state["shared_objects"] == "0" and
+          state["creates"] == before["creates"], str(state))
+    simulator.io_request("recover")
+    simulator.shared_get(counter, 2)
+    simulator.shared_query(counter, 0, 0)
+    check(simulator.snapshot() == snapshot, "共享重建失败或重试改写了快照")
+    simulator.delete(edges)
+    simulator.shared_delete(counter)
+    passed("共享对象重建失败不创建引用规则，保留完整内存计划并可重试成功")
+
+    for rollback_failure in (False, True):
+        counter = simulator.shared_create(8400)
+        edges = simulator.install(8401, 0, 2, bidirectional=True, shared=counter)
+        snapshot = simulator.snapshot()
+        simulator.io_request("reset")
+        simulator.io_request("fault create 2")
+        if rollback_failure:
+            simulator.io_request("fault remove 1")
+        simulator.io_request("recover", error=errno.EUCLEAN if rollback_failure else errno.ENOSPC)
+        reset = simulator.reset_status()
+        state = simulator.status()
+        check(reset["pending"] == "yes" and reset["last_error"] == str(-errno.ENOSPC) and
+              reset["desired_rules"] == "2" and reset["desired_shared"] == "1", str(reset))
+        if rollback_failure:
+            check(state["installed"] == "1" and state["shared_refs"] == "1" and
+                  reset["cleanup_error"] == str(-errno.EBUSY), str(state) + str(reset))
+        else:
+            check(state["installed"] == "0" and state["shared_refs"] == "0" and
+                  state["shared_objects"] == "0" and reset["cleanup_error"] == "0", str(state) + str(reset))
+        simulator.io_request(f"inject 0 {frame().hex()}", error=errno.EUCLEAN)
+        check(simulator.snapshot() == snapshot, "恢复失败改写了快照")
+        simulator.io_request("recover")
+        simulator.shared_get(counter, 2)
+        simulator.shared_query(counter, 0, 0)
+        simulator.inject(0, 2, 8401, frame())
+        simulator.shared_query(counter, 1, 64)
+        check(simulator.status()["stale_handles"] == "0" and simulator.snapshot() == snapshot,
+              "恢复重试使用旧句柄或改写快照")
+        simulator.delete(edges)
+        simulator.shared_delete(counter)
+    passed("规则重建中途失败按引用顺序补偿，补偿残留保持隔离并由下次 recover 清理重建")
+
+    # 无文件时仍使用复位前的内存计划，不能把恢复能力偷偷依赖到 snapshot 路径
+    with tempfile.TemporaryDirectory(prefix="dppd-reset-memory-") as temporary:
+        memory = Fixture(simulator.build, Path(temporary), simulator.log.parent / "reset-memory.log")
+        try:
+            memory.start()
+            counter = memory.shared_create(8500)
+            edges = memory.install(8501, 0, 2, bidirectional=True, shared=counter)
+            memory.inject(0, 2, 8501, frame())
+            memory.io_request("reset")
+            memory.io_request("recover")
+            memory.shared_get(counter, 2)
+            memory.shared_query(counter, 0, 0)
+            memory.inject(2, 0, 8502, frame(73))
+            memory.shared_query(counter, 1, 73)
+            check(not (memory.directory / "simulation-state.bin").exists() and
+                  memory.status()["stale_handles"] == "0", "无持久化演练创建了快照或使用旧句柄")
+            memory.delete(edges)
+            memory.shared_delete(counter)
+        finally:
+            memory.stop()
+    check(simulator.status()["stale_handles"] == "0", "复位闭环调用了过期句柄")
+    passed("未启用持久化也可从期望内存计划恢复共享与规则，不生成快照且无过期句柄调用")
+
+
 def demo(args):
     root = Path(__file__).resolve().parents[1]
     build = args.build_dir.resolve()
@@ -550,6 +732,7 @@ def demo(args):
                 exercise(simulator, passed)
                 exercise_age(simulator, passed)
                 exercise_shared(simulator, passed)
+                exercise_reset(simulator, passed)
             finally:
                 simulator.stop()
         check(source_digest(root) == report["source_sha256"], "演练期间源码变化，不能报告同版本通过")
@@ -595,13 +778,14 @@ def serve(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    automatic = commands.add_parser("demo", help="自动演练七种模板、独立和共享计数、闲置老化、回滚与重启")
+    automatic = commands.add_parser("demo", help="自动演练七种模板、计数、闲置老化、回滚、复位恢复与重启")
     automatic.add_argument("--build-dir", type=Path, default=Path("build"))
     automatic.add_argument("--report-dir", type=Path)
     server = commands.add_parser("serve", help="启动可供真实 dppctl 操作的独立模拟服务")
     server.add_argument("--build-dir", type=Path, default=Path("build"))
     server.add_argument("--directory", type=Path, required=True)
-    for name in ("inject", "status", "fault", "clear-faults", "advance"):
+    for name in ("inject", "status", "fault", "clear-faults", "advance", "reset", "recover", "reset-status",
+                 "topology"):
         client = commands.add_parser(name)
         client.add_argument("--io-socket", type=Path, required=True)
         if name == "inject":
@@ -609,11 +793,14 @@ def main():
             client.add_argument("--frame", required=True, help="完整以太网帧的十六进制文本")
         if name == "fault":
             client.add_argument("operation", choices=("validate", "create", "remove", "query", "age-query",
-                                                      "shared-create", "shared-query", "shared-destroy"))
+                                                      "shared-create", "shared-query", "shared-destroy", "reset"))
             client.add_argument("after", type=int, help="该操作第几次后续调用时失败一次")
             client.add_argument("--advance", type=int, help="同一条模拟消息内设置故障并推进秒数，避免后台轮询竞态")
         if name == "advance":
             client.add_argument("seconds", type=int, help="为模拟单调时钟增加的秒数，不改变系统时钟")
+        if name == "topology":
+            client.add_argument("port", type=int, help="复位隔离期间要调整的模拟端口")
+            client.add_argument("change", help="present、missing、domain:N、identity:N 或 restore")
     args = parser.parse_args()
     if args.command == "demo":
         return demo(args)
@@ -629,6 +816,8 @@ def main():
                 request += f" advance {args.advance}"
         elif request == "advance":
             request += f" {args.seconds}"
+        elif request == "topology":
+            request += f" {args.port} {args.change}"
         response = exchange(args.io_socket, request)
         print(response)
         return 1 if response.startswith("error ") else 0

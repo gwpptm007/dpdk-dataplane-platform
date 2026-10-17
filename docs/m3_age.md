@@ -191,8 +191,8 @@ worker 的 mbuf 归还由内存池记录另行核对。
 
 这些结果没有证明 mlx5/BlueField 或物理非 mlx5 PMD 的 AGE 支持、ASIC 定时精度、
 硬件报文续期、硬件资源回收、CPU 旁路或性能。当前也没有实现 AGE 事件通知、
-共享 AGE 或设备复位后的完整 reconciliation；首期共享 COUNT 已另行接通，见
-[共享计数说明](m3_shared_count.md)。后续能力分别实现并验收，
+共享 AGE 或真实设备复位后的完整 reconciliation；首期共享 COUNT 和复位模拟已另行接通，见
+[共享计数说明](m3_shared_count.md) 与 [复位恢复模拟](m3_reset_simulation.md)。后续能力分别实现并验收，
 不能因为 DPDK 头文件中有相关接口就计为完成。
 
 主要实现见 [规则 IR](../include/dppd/rule.h)、[AGE 控制接口](../include/dppd/age.h)、

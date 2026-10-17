@@ -42,7 +42,8 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 M2 软件数据面已通过阶段验收，两套构建各 50/50 单测与完整 TAP 验收通过，
 交付范围、阶段限制和可重复执行的入口见 [M2 验收](docs/m2_acceptance.md)。
 M3 已交付角色发现、transfer 图、正式管理入口、AGE 和共享 COUNT 控制路径；当前环境可运行模拟与软件回归，
-实机设备、CPU 旁路及复位恢复的边界见 [M3 验收](docs/m3_acceptance.md)。
+已接通 [复位恢复模拟](docs/m3_reset_simulation.md)，覆盖旧句柄失效、端点身份核对和重建失败重试；
+实机设备、CPU 旁路及真实复位恢复的边界见 [M3 验收](docs/m3_acceptance.md)。
 不接实体网卡也可运行 `python3 scripts/simulate_m3.py demo --build-dir build`，
 用真实命令行演练正向转发、私有与共享计数、AGE 闲置老化、失败回滚和重启，见 [M3 功能模拟](docs/m3_simulation.md)。
 

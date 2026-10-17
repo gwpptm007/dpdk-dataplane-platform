@@ -33,9 +33,11 @@ python3 scripts/simulate_m3.py demo --build-dir build
 虚拟时钟、查询与删除失败重试，以及成功过期保存后重启不复活。任何一项失败都返回
 非零，不会继续报告全部通过；AGE 的完整语义见 [闲置老化说明](m3_age.md)。
 共享 COUNT 增加双向汇总、在用删除保护、AGE 引用释放、创建/查询/销毁故障、同安装口
-与域限制、旧版本拒绝、列表修订、重启归零和补偿残留引用，当前完整 demo 为 24 组。
-135 系统、ASan/UBSan 与 134 GCC 13 三套最终构建各 60/60 单测和 24 组演练通过，
-233 文件源码摘要一致，记录见 [共享 COUNT 验收](m3_shared_count.md#本轮验收结果)。
+与域限制、旧版本拒绝、列表修订、重启归零和补偿残留引用。后续新增七组复位恢复，
+当前完整 demo 为 31 组，包含端点身份拒绝、重建故障和内存配置恢复。
+135 系统、ASan/UBSan 与 134 GCC 13 三套最终构建各 61/61 单测和 31 组演练通过，
+237 文件源码摘要一致，记录见 [复位恢复验收](m3_reset_simulation.md#本轮验收结果)。
+共享 COUNT 交付时的 60/60、24 组与 233 文件摘要保留在 [该阶段记录](m3_shared_count.md#本轮验收结果)。
 
 结果与模拟器日志保存在 `build/m3-simulation/`。报告明确保留
 `simulation=true`、`hardware_acceptance=not_run`、`complete_m3_validation=false`，
@@ -173,8 +175,9 @@ ACL/NAT/ND 或其他硬件动作；出现软件规则、持久化 dirty 或恢�
 用于正式 `dppd`，两者不提供双向状态导入承诺。
 
 该工具证明已实现控制逻辑在可控端点与报文字节上的行为。AGE 已接入规则、正式查询与
-轮询回收，并由虚拟时钟演练；共享 COUNT 也复用正式对象与引用管理。其他共享动作、
-native indirect 恢复日志和设备 reset 后 reconciliation 尚未实现，不能由模拟器自动补齐。
+轮询回收，并由虚拟时钟演练；共享 COUNT 也复用正式对象与引用管理。
+已提供 [复位后重建模拟](m3_reset_simulation.md)，其他共享动作、native indirect 恢复日志和真实设备 reset
+后的 reconciliation 仍待实现，不能将模拟器的显式回调作为真实设备复位证据。
 真实 PMD 的 AGE、indirect 支持、
 ASIC 卸载、CPU 旁路及硬件性能继续按 [M3 验收](m3_acceptance.md) 单独登记。
 

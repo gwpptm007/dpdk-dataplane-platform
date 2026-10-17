@@ -14,7 +14,7 @@
 | counter | transfer 方向契约、COUNT 64 位值及有效位检查 | 实机线缆报文与计数、CPU worker 对照 |
 | AGE | 超时 IR、驱动独立查询、正式轮询与精确删除、v4/v5 快照和故障重试 | 真实 PMD 的闲置、命中续期及资源回收验收；事件通知未实现 |
 | indirect/shared COUNT | 精确身份与同安装口/域绑定、引用保护、独立查询和 v5 单快照；三套各 60/60 单测及 24 组模拟通过 | 实机及 native 恢复日志未支持，其他共享动作未实现 |
-| 移除/复位 | 沿用原有设备异常停止和失败退出机制 | 真实硬件 reset/端点移除后的 reconciliation |
+| 移除/复位 | 独立模拟支持完整期望计划、端点身份核对、共享对象先行重建、补偿与显式重试 | 真实硬件 reset/端点移除后的 reconciliation；软件与三层联合恢复 |
 
 角色与图的使用方法见 [M3 控制闭环](m3_transfer.md)，适配器修复见
 [驱动契约](m3_flow_contract.md)，实际设备观察见 [环境记录](m3_environment_20261018.md)。
@@ -25,6 +25,7 @@
 - 单测用可控驱动接口覆盖七种模板的正向安装、COUNT、验证/创建失败、补偿失败及隔离
 - AGE 覆盖独立查询、闲置轮询、精确版本删除、失败重试、v4 快照和模拟命中续期
 - 共享 COUNT 覆盖双向汇总、prepare/残留引用、AGE 释放、范围/版本拒绝及 v5 对象先行重放
+- 复位模拟覆盖旧句柄失效、内存计划与快照不变、身份拒绝、共享及规则重建、补偿失败和显式恢复重试
 - 拓扑单测覆盖严格名称、权限/缺失、命名空间不一致、接口变化和文件描述符回收
 - 正式 daemon/CLI 在 net_ring 上覆盖未知角色和交换域的明确拒绝、无副作用、版本与重启
 - M2 回归覆盖现有软件 worker、双栈 ACL/NAT/ND/隧道及真实内核 TAP 的收发
@@ -46,8 +47,8 @@ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   python3 scripts/verify_m3.py --build-dir build-asan
 ```
 
-统一入口只读盘点、调用 M2 回归入口执行全量单测与软件验收，最后运行 M3 正式进程
-拒绝场景。`--tap` 只在脚本新建的私有网络命名空间使用自己的 TAP，不修改实体设备。
+统一入口只读盘点、调用 M2 回归入口执行全量单测与软件验收，再运行 M3 正式进程
+拒绝场景和独立功能模拟。`--tap` 只在脚本新建的私有网络命名空间使用自己的 TAP，不修改实体设备。
 没有 `--tap` 只执行核心软件回归，报告不会标记完整 M2 TAP 验收通过。
 
 构建目录的 `m3-acceptance/` 保存日志和 JSON；`success=true` 只表示所列虚拟范围通过。
@@ -57,12 +58,24 @@ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 杀掉负责清理的父进程而留下内层测试或 daemon。其他 M3 步骤仍有各自的超时保护。
 ASan/UBSan 本轮关闭 LeakSanitizer，实际 mbuf 归还由 worker 的内存池记录另行核对。
 
-## 当前共享 COUNT 轮次
+## 当前复位模拟轮次
+
+[复位与恢复模拟](m3_reset_simulation.md) 已接通正式控制与后端的可选模拟入口。
+真实适配器默认回调为空，native 恢复日志、dirty、软件规则和三层组合均提前拒绝。
+成功复位只使旧对象失效并保持隔离，显式恢复核对涉及端点的精确身份，先共享对象、
+后规则；失败保留内存计划和有效残留，继续通过 `recover` 重试，不使用普通 `reconcile-retry`。
+规则和对象版本、原快照保持不变，COUNT 归零，AGE 重新计时，模拟 opaque 不复用。
+
+三套最终同版本构建各 61/61 单测、四步核心回归与 31 组功能演练通过，237 项源码
+摘要一致。另通过真实命令前端和正常退出清理，完整记录见 [复位验收](m3_reset_simulation.md#本轮验收结果)。
+真实设备复位、热重枚举和 CPU 旁路仍未验收，整个 M3 保持未完成。
+
+## 共享 COUNT 轮次结果（历史）
 
 [共享 COUNT](m3_shared_count.md) 已接通 IR、生产 indirect 适配、管理协议 v26、引用与
 v5 单快照。三套最终同版本构建各 60/60 单测、四步核心回归和 24 组模拟通过，
 233 文件源码摘要一致，完整记录见共享 COUNT 文档。实机共享对象、
-CPU 旁路及设备复位恢复未验收，native `--recovery-path` 日志模式明确返回 `ENOTSUP`。
+CPU 旁路及真实设备复位恢复未验收，native `--recovery-path` 日志模式明确返回 `ENOTSUP`。
 
 ## AGE 轮次结果（历史）
 
@@ -114,7 +127,7 @@ AGE 接入前已补充 [可直接运行的功能模拟](m3_simulation.md) 和 [1
 
 需要至少一套可使用的 NVIDIA mlx5/BlueField 和一套物理非 mlx5 PMD 环境，明确哪些
 端口是管理口、哪些属于同一 embedded switch，再由实际 PMD 验证规则能力。
-AGE 和首期共享 COUNT 的控制与模拟路径已接通；后续补齐其他共享动作及设备事件恢复，
+AGE、首期共享 COUNT 和独立复位恢复模拟路径已接通；后续补齐其他共享动作及真实设备事件恢复，
 并在真实 PMD 上验收 AGE、共享 COUNT、线缆流量和 CPU 旁路。
 驱动、rdma-core、DPDK mlx5 PMD 可以安装，但不会凭软件产生 PCI 网卡或交换芯片；
 可继续使用当前虚拟环境开发和回归，实机报告保持单独待验收。

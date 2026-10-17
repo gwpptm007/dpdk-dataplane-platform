@@ -164,7 +164,8 @@ net_ring 集成脚本启动正式 daemon 与 CLI，检查重复 plan/apply、全
 AGE 的控制路径和功能模拟已接通，但真实 PMD 的计时、命中续期与资源回收尚未验收。
 首期 indirect/shared COUNT 已接通规则、正式管理和资源引用；共享 RSS/METER/AGE
 和动作更新尚未实现，真实 PMD 的共享对象能力尚未验收，详见 [共享 COUNT 边界](m3_shared_count.md)。
-现有通用失败恢复和模拟补偿不等于端点移除、真实 device reset 后已经完成硬件 reconciliation。
+已增加 [复位恢复模拟](m3_reset_simulation.md)，保留期望配置，核对端点身份后重建共享对象和规则。
+模拟补偿与重建不等于端点移除、真实 device reset 后已经完成硬件 reconciliation。
 这些变化还需要实际设备、端点身份重新发现、handle 失效和规则重建的端到端验证。
 
 当前未完成 mlx5/BlueField 与物理非 mlx5 PMD 的可复现实机 transfer 报告，

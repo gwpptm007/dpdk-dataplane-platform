@@ -39,6 +39,11 @@ struct dppd_flow_api {
         struct dppd_flow_error *error);
     int (*create_bound)(uint16_t port_id, const struct dppd_rule *rule, const struct dppd_flow_binding *binding,
         struct dppd_flow_handle *handle, struct dppd_flow_error *error);
+    /**
+     * 只供独立模拟驱动使用，真实适配器不提供此回调
+     * 成功使全部旧 flow 和共享动作句柄失效，失败必须保持全部实际对象不变
+     */
+    int (*simulate_reset)(struct dppd_flow_error *error);
 };
 
 struct dppd_rte_flow_object;
@@ -81,6 +86,11 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend, uint32_t c
     const struct dppd_flow_api *api);
 /** 删除已安装或失败后仍有 handle 的对象，删除失败时保留剩余清理线索 */
 int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend);
+/**
+ * 只由串行控制线程在没有进行中的事务时调用，默认真实驱动返回 ENOTSUP
+ * 模拟回调成功后才遗忘失效句柄，不调用 remove/destroy，失败保留全部对象和引用
+ */
+int dppd_rte_flow_backend_simulate_reset(struct dppd_rte_flow_backend *backend, struct dppd_flow_error *error);
 /** 正式安装始终重新校验，不用探测缓存跳过驱动，也不把探测成功当成安装成功 */
 int dppd_rte_flow_backend_validate_rule(struct dppd_rte_flow_backend *backend, uint16_t port_id,
     const struct dppd_rule *rule, struct dppd_flow_error *error);

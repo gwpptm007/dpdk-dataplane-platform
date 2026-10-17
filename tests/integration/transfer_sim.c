@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "dppd/device.h"
 #include "dppd/management.h"
+#include "dppd/reset.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +27,7 @@
 #define SIM_LOCK ".dppd-transfer-simulation.lock"
 #define SIM_SECOND_NS UINT64_C(1000000000)
 #define SIM_AGE_SECONDS_LIMIT UINT32_C(0xffffff)
+#define SIM_ENDPOINT_COUNT 8U
 
 /** 此程序只演练控制逻辑和报文字节，不创建真实 ethdev，也不向任何网卡发送报文 */
 struct simulated_shared_count {
@@ -33,6 +35,7 @@ struct simulated_shared_count {
     struct dppd_shared_count_spec spec;
     uint64_t hits, bytes;
     uint32_t references;
+    uintptr_t token;
 };
 
 struct simulated_flow {
@@ -40,6 +43,7 @@ struct simulated_flow {
     struct dppd_rule rule;
     uint64_t hits, bytes, last_hit_ns;
     struct simulated_shared_count *shared_count;
+    uintptr_t token;
 };
 
 struct simulator {
@@ -49,9 +53,14 @@ struct simulator {
     struct simulated_flow flows[SIM_RULE_CAPACITY + 1U];
     struct simulated_shared_count shared_counts[DPPD_SHARED_COUNT_MAX];
     uint64_t validates, creates, removes, queries, forwarded, dropped;
-    uint64_t faults[8];
+    uint64_t faults[9];
     uint64_t clock_offset_ns, age_queries;
     uint64_t shared_creates, shared_queries, shared_destroys;
+    uint64_t reset_calls, stale_handles;
+    uintptr_t last_token;
+    struct dppd_topology original_topology;
+    struct dppd_endpoint fixture_endpoints[SIM_ENDPOINT_COUNT];
+    bool fixture_present[SIM_ENDPOINT_COUNT];
     int clock_error;
 };
 
@@ -134,6 +143,15 @@ static void increment(uint64_t *value)
         ++*value;
 }
 
+/** 句柄只携带不重复的编号，复位或槽位复用后也不会让旧句柄碰巧命中新对象 */
+static int new_token(uintptr_t *token)
+{
+    if (simulation.last_token == UINTPTR_MAX)
+        return -EOVERFLOW;
+    *token = ++simulation.last_token;
+    return 0;
+}
+
 /** COUNT 和 AGE 各自按类型查找，是否有计数不能用动作个数来代替判断 */
 static const struct dppd_action *find_action(const struct dppd_rule *rule, enum dppd_action_type type)
 {
@@ -174,19 +192,21 @@ static int supported_rule(uint16_t port_id, const struct dppd_rule *rule)
     return 0;
 }
 
-/** 只对照本进程固定对象地址，不读取外来 opaque 指针，身份还要核对精确版本和安装范围 */
+/** 只对照不复用的句柄编号，不读取外来 opaque 指针，身份还要核对精确版本和安装范围 */
 static struct simulated_shared_count *find_shared_count(const struct dppd_shared_count_handle *handle)
 {
     if (handle == NULL)
         return NULL;
     for (unsigned int i = 0; i < DPPD_SHARED_COUNT_MAX; ++i) {
         struct simulated_shared_count *counter = &simulation.shared_counts[i];
-        if ((const void *)handle->opaque == (const void *)counter && counter->used &&
-            counter->spec.id == handle->spec.id && counter->spec.generation == handle->spec.generation &&
+        if ((uintptr_t)handle->opaque == counter->token && counter->used && counter->spec.id == handle->spec.id &&
+            counter->spec.generation == handle->spec.generation &&
             counter->spec.install_port_id == handle->spec.install_port_id &&
             counter->spec.domain == handle->spec.domain)
             return counter;
     }
+    if (handle->opaque != NULL)
+        increment(&simulation.stale_handles);
     return NULL;
 }
 
@@ -257,17 +277,22 @@ static int simulated_create_bound(uint16_t port_id, const struct dppd_rule *rule
         struct simulated_flow *flow = &simulation.flows[i];
         if (flow->used)
             continue;
+        uintptr_t token;
+        rc = new_token(&token);
+        if (rc != 0)
+            return flow_error(error, rc, "simulated handle identifiers exhausted");
         memset(flow, 0, sizeof(*flow));
         flow->used = true;
         flow->rule = *rule;
         flow->last_hit_ns = now_ns;
         flow->shared_count = counter;
+        flow->token = token;
         if (counter != NULL)
             ++counter->references;
         *handle = (struct dppd_flow_handle){.rule_id = rule->id,
             .rule_generation = rule->generation,
             .port_id = port_id,
-            .flow = (struct rte_flow *)flow,
+            .flow = (struct rte_flow *)token,
             .has_count = find_action(rule, DPPD_ACTION_COUNT) != NULL,
             .has_age = find_action(rule, DPPD_ACTION_AGE) != NULL};
         return flow_error(error, 0, NULL);
@@ -281,30 +306,32 @@ static int simulated_create(uint16_t port_id, const struct dppd_rule *rule, stru
     return simulated_create_bound(port_id, rule, NULL, handle, error);
 }
 
-/** 只比较固定槽位的地址，不解引用外来的 opaque 指针，失败时保留完整清理线索 */
+/** 旧编号不会因同一槽位重建相同规则而复活，失败时保留完整清理线索 */
 static struct simulated_flow *find_flow(const struct dppd_flow_handle *handle)
 {
     if (handle == NULL)
         return NULL;
     for (unsigned int i = 0; i < SIM_RULE_CAPACITY + 1U; ++i) {
         struct simulated_flow *flow = &simulation.flows[i];
-        if ((const void *)handle->flow == (const void *)flow && flow->used && flow->rule.id == handle->rule_id &&
+        if ((uintptr_t)handle->flow == flow->token && flow->used && flow->rule.id == handle->rule_id &&
             flow->rule.generation == handle->rule_generation && flow->rule.install_port_id == handle->port_id &&
             handle->has_count == (find_action(&flow->rule, DPPD_ACTION_COUNT) != NULL) &&
             handle->has_age == (find_action(&flow->rule, DPPD_ACTION_AGE) != NULL))
             return flow;
     }
+    if (handle->flow != NULL)
+        increment(&simulation.stale_handles);
     return NULL;
 }
 
 static int simulated_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *error)
 {
     increment(&simulation.removes);
-    if (should_fail(2))
-        return flow_error(error, -EBUSY, "injected remove failure");
     struct simulated_flow *flow = find_flow(handle);
     if (flow == NULL)
         return flow_error(error, -ENOENT, "simulated handle is absent");
+    if (should_fail(2))
+        return flow_error(error, -EBUSY, "injected remove failure");
     if (flow->shared_count != NULL) {
         if (!flow->shared_count->used || flow->shared_count->references == 0)
             return flow_error(error, -EUCLEAN, "simulated shared COUNT reference is inconsistent");
@@ -319,11 +346,11 @@ static int simulated_query(const struct dppd_flow_handle *handle, uint64_t *hits
     struct dppd_flow_error *error)
 {
     increment(&simulation.queries);
-    if (should_fail(3))
-        return flow_error(error, -EIO, "injected query failure");
     struct simulated_flow *flow = find_flow(handle);
     if (flow == NULL || hits == NULL || bytes == NULL)
         return flow_error(error, -EINVAL, "invalid simulated query");
+    if (should_fail(3))
+        return flow_error(error, -EIO, "injected query failure");
     if (!handle->has_count)
         return flow_error(error, -ENODATA, "rule has no COUNT");
     *hits = flow->hits;
@@ -336,11 +363,11 @@ static int simulated_query_age(const struct dppd_flow_handle *handle, struct dpp
     struct dppd_flow_error *error)
 {
     increment(&simulation.age_queries);
-    if (should_fail(4))
-        return flow_error(error, -EIO, "injected AGE query failure");
     struct simulated_flow *flow = find_flow(handle);
     if (flow == NULL || result == NULL)
         return flow_error(error, -EINVAL, "invalid simulated AGE query");
+    if (should_fail(4))
+        return flow_error(error, -EIO, "injected AGE query failure");
     const struct dppd_action *age = find_action(&flow->rule, DPPD_ACTION_AGE);
     if (age == NULL)
         return flow_error(error, -ENODATA, "rule has no AGE");
@@ -379,8 +406,12 @@ static int simulated_shared_create(const struct dppd_shared_count_spec *spec, st
     }
     if (available == NULL)
         return flow_error(error, -ENOSPC, "shared COUNT capacity exhausted");
-    *available = (struct simulated_shared_count){.used = true, .spec = *spec};
-    *handle = (struct dppd_shared_count_handle){.spec = *spec, .opaque = (struct rte_flow_action_handle *)available};
+    uintptr_t token;
+    int rc = new_token(&token);
+    if (rc != 0)
+        return flow_error(error, rc, "shared COUNT identifiers exhausted");
+    *available = (struct simulated_shared_count){.used = true, .spec = *spec, .token = token};
+    *handle = (struct dppd_shared_count_handle){.spec = *spec, .opaque = (struct rte_flow_action_handle *)token};
     return flow_error(error, 0, NULL);
 }
 
@@ -388,11 +419,11 @@ static int simulated_shared_query(const struct dppd_shared_count_handle *handle,
     struct dppd_flow_error *error)
 {
     increment(&simulation.shared_queries);
-    if (should_fail(6))
-        return flow_error(error, -EIO, "injected shared COUNT query failure");
     struct simulated_shared_count *counter = find_shared_count(handle);
     if (counter == NULL || hits == NULL || bytes == NULL)
         return flow_error(error, -EINVAL, "invalid shared COUNT query");
+    if (should_fail(6))
+        return flow_error(error, -EIO, "injected shared COUNT query failure");
     *hits = counter->hits;
     *bytes = counter->bytes;
     return flow_error(error, 0, NULL);
@@ -402,15 +433,26 @@ static int simulated_shared_query(const struct dppd_shared_count_handle *handle,
 static int simulated_shared_destroy(struct dppd_shared_count_handle *handle, struct dppd_flow_error *error)
 {
     increment(&simulation.shared_destroys);
-    if (should_fail(7))
-        return flow_error(error, -EBUSY, "injected shared COUNT destroy failure");
     struct simulated_shared_count *counter = find_shared_count(handle);
     if (counter == NULL)
         return flow_error(error, -ENOENT, "shared COUNT handle is absent");
+    if (should_fail(7))
+        return flow_error(error, -EBUSY, "injected shared COUNT destroy failure");
     if (counter->references != 0)
         return flow_error(error, -EBUSY, "shared COUNT still has installed references");
     memset(counter, 0, sizeof(*counter));
     memset(handle, 0, sizeof(*handle));
+    return flow_error(error, 0, NULL);
+}
+
+/** 复位成功代表驱动对象已全部失效，不能再对旧句柄调用 remove 或 destroy */
+static int simulated_reset(struct dppd_flow_error *error)
+{
+    increment(&simulation.reset_calls);
+    if (should_fail(8))
+        return flow_error(error, -EIO, "injected reset failure");
+    memset(simulation.flows, 0, sizeof(simulation.flows));
+    memset(simulation.shared_counts, 0, sizeof(simulation.shared_counts));
     return flow_error(error, 0, NULL);
 }
 
@@ -423,7 +465,8 @@ static const struct dppd_flow_api simulated_api = {.validate = simulated_validat
     .shared_count_query = simulated_shared_query,
     .shared_count_destroy = simulated_shared_destroy,
     .validate_bound = simulated_validate_bound,
-    .create_bound = simulated_create_bound};
+    .create_bound = simulated_create_bound,
+    .simulate_reset = simulated_reset};
 
 /** 端点名称只是公开夹具，driver 明确标为 simulation，不能把解析来源当作真实硬件证据 */
 static int make_devices(struct dppd_device_set *devices)
@@ -492,6 +535,68 @@ static int hex_digit(char value)
     if (value >= 'A' && value <= 'F')
         return value - 'A' + 10;
     return -1;
+}
+
+/** 全部参数验证完成后才调整模拟证据，正常运行时不能偷偷改变端点身份 */
+static int change_topology(const char *port_text, const char *operation)
+{
+    uint64_t port, value = 0;
+    if (parse_number(port_text, SIM_ENDPOINT_COUNT - 1U, &port) != 0)
+        return -EINVAL;
+    enum { PRESENT, MISSING, DOMAIN, IDENTITY, RESTORE } change;
+    if (strcmp(operation, "present") == 0)
+        change = PRESENT;
+    else if (strcmp(operation, "missing") == 0)
+        change = MISSING;
+    else if (strcmp(operation, "restore") == 0)
+        change = RESTORE;
+    else if (strncmp(operation, "domain:", 7) == 0) {
+        if (parse_number(operation + 7, UINT16_MAX - 1U, &value) != 0)
+            return -EINVAL;
+        change = DOMAIN;
+    } else if (strncmp(operation, "identity:", 9) == 0) {
+        if (parse_number(operation + 9, UINT32_MAX, &value) != 0 || value == 0)
+            return -EINVAL;
+        change = IDENTITY;
+    } else
+        return -EINVAL;
+    struct dppd_reset_status status;
+    dppd_control_reset_status(&simulation.control, &status);
+    if (!status.pending)
+        return -EBUSY;
+    struct dppd_endpoint *endpoint = &simulation.fixture_endpoints[port];
+    if (change == PRESENT)
+        simulation.fixture_present[port] = true;
+    else if (change == MISSING)
+        simulation.fixture_present[port] = false;
+    else if (change == DOMAIN) {
+        endpoint->has_switch_domain = true;
+        endpoint->switch_domain_id = (uint16_t)value;
+    } else if (change == IDENTITY)
+        snprintf(endpoint->device_name, sizeof(endpoint->device_name), "simulation-identity-%" PRIu64, value);
+    else {
+        *endpoint = simulation.original_topology.endpoints[port];
+        simulation.fixture_present[port] = true;
+    }
+    /** 每次按原来的端点顺序重建，删除和恢复不会因为数组换位而伪造身份变化 */
+    struct dppd_topology current = {0};
+    for (unsigned int i = 0; i < SIM_ENDPOINT_COUNT; ++i)
+        if (simulation.fixture_present[i])
+            current.endpoints[current.nb_endpoints++] = simulation.fixture_endpoints[i];
+    simulation.devices.topology = current;
+    return 0;
+}
+
+static void reset_status_reply(const char *prefix, char *reply, size_t capacity)
+{
+    struct dppd_reset_status status;
+    dppd_control_reset_status(&simulation.control, &status);
+    snprintf(reply, capacity,
+        "%s pending=%s resets=%" PRIu64 " attempts=%" PRIu64 " recoveries=%" PRIu64
+        " desired_rules=%u desired_shared=%u actual_rules=%u actual_shared=%u last_error=%d cleanup_error=%d"
+        " simulation=yes hardware-acceptance=not-run",
+        prefix, status.pending ? "yes" : "no", status.resets, status.attempts, status.recoveries, status.desired_rules,
+        status.desired_shared, status.actual_rules, status.actual_shared, status.last_error, status.cleanup_error);
 }
 
 static unsigned int installed_count(void)
@@ -629,18 +734,41 @@ static int io_request(char *request, char *reply, size_t capacity)
     if (count == 1 && strcmp(tokens[0], "status") == 0) {
         uint32_t shared_references;
         unsigned int shared_objects = shared_object_count(&shared_references);
+        struct dppd_reset_status reset;
+        dppd_control_reset_status(&simulation.control, &reset);
         snprintf(reply, capacity,
             "status installed=%u validates=%" PRIu64 " creates=%" PRIu64 " removes=%" PRIu64 " queries=%" PRIu64
             " forwarded=%" PRIu64 " dropped=%" PRIu64 " desired=%u recovery=%u software=%u age_queries=%" PRIu64
             " age_error=%d advanced_seconds=%" PRIu64 " shared_objects=%u shared_refs=%u shared_creates=%" PRIu64
-            " shared_queries=%" PRIu64 " shared_destroys=%" PRIu64 " simulation=yes hardware-acceptance=not-run",
+            " shared_queries=%" PRIu64 " shared_destroys=%" PRIu64 " reset_pending=%s reset_calls=%" PRIu64
+            " stale_handles=%" PRIu64 " token_serial=%" PRIuPTR " simulation=yes hardware-acceptance=not-run",
             installed_count(), simulation.validates, simulation.creates, simulation.removes, simulation.queries,
             simulation.forwarded, simulation.dropped, dppd_rule_repository_count(&simulation.control.rules),
             (unsigned int)simulation.control.recovery_state, dppd_software_backend_count(&simulation.control.software),
             simulation.age_queries,
             simulation.clock_error != 0 ? simulation.clock_error : simulation.control.age.last_error,
             simulation.clock_offset_ns / SIM_SECOND_NS, shared_objects, shared_references, simulation.shared_creates,
-            simulation.shared_queries, simulation.shared_destroys);
+            simulation.shared_queries, simulation.shared_destroys, reset.pending ? "yes" : "no", simulation.reset_calls,
+            simulation.stale_handles, simulation.last_token);
+        return 0;
+    }
+    if (count == 1 && strcmp(tokens[0], "reset-status") == 0) {
+        reset_status_reply("reset-status", reply, capacity);
+        return 0;
+    }
+    if (count == 1 && (strcmp(tokens[0], "reset") == 0 || strcmp(tokens[0], "recover") == 0)) {
+        int rc = strcmp(tokens[0], "reset") == 0 ? dppd_control_simulate_reset(&simulation.control)
+                                                 : dppd_control_reset_recover(&simulation.control);
+        if (rc != 0)
+            return rc;
+        reset_status_reply("ok", reply, capacity);
+        return 0;
+    }
+    if (count == 3 && strcmp(tokens[0], "topology") == 0) {
+        int rc = change_topology(tokens[1], tokens[2]);
+        if (rc != 0)
+            return rc;
+        snprintf(reply, capacity, "ok simulation=yes");
         return 0;
     }
     if (count == 1 && strcmp(tokens[0], "clear-faults") == 0) {
@@ -659,7 +787,7 @@ static int io_request(char *request, char *reply, size_t capacity)
     }
     if ((count == 3 || (count == 5 && strcmp(tokens[3], "advance") == 0)) && strcmp(tokens[0], "fault") == 0) {
         static const char *const operations[] = {"validate", "create", "remove", "query", "age-query", "shared-create",
-            "shared-query", "shared-destroy"};
+            "shared-query", "shared-destroy", "reset"};
         uint64_t remaining, delta = 0;
         if (parse_number(tokens[2], UINT64_MAX, &remaining) != 0 || remaining == 0)
             return -EINVAL;
@@ -951,6 +1079,11 @@ int main(int argc, char **argv)
     rc = make_devices(&simulation.devices);
     if (rc != 0)
         goto cleanup;
+    simulation.original_topology = simulation.devices.topology;
+    for (unsigned int i = 0; i < SIM_ENDPOINT_COUNT; ++i) {
+        simulation.fixture_endpoints[i] = simulation.original_topology.endpoints[i];
+        simulation.fixture_present[i] = true;
+    }
     rc = dppd_control_init(&simulation.control, &simulation.devices.topology, SIM_RULE_CAPACITY, &simulated_api);
     if (rc != 0)
         goto cleanup;

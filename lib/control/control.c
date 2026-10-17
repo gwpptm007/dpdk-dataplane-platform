@@ -1,5 +1,6 @@
 #include "dppd/control.h"
 #include "dppd/persistence.h"
+#include "reset_internal.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -436,6 +437,7 @@ int dppd_control_fini(struct dppd_control_service *service)
     if (rc != 0)
         return rc;
     dppd_software_backend_fini(&service->software);
+    dppd_control_reset_plan_destroy(service);
     dppd_rule_repository_destroy(&service->rules);
     free(service->persistence_path);
     memset(service, 0, sizeof(*service));
@@ -718,6 +720,9 @@ static int control_reconcile_impl(struct dppd_control_service *service)
 
     if (service == NULL)
         return -EINVAL;
+    /** 模拟复位保留的是完整恢复计划，不能用普通清理入口把它变成等待进程重启 */
+    if (service->reset_plan != NULL)
+        return -EBUSY;
     if (service->recovery_state == DPPD_CONTROL_RECOVERY_READY ||
         service->recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED)
         return -EALREADY;

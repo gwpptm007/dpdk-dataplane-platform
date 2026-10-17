@@ -36,6 +36,7 @@ dppd_sources = files(
   'lib/control/transaction.c',
   'lib/control/control.c',
   'lib/control/age.c',
+  'lib/control/reset.c',
   'lib/management/server.c',
   'lib/dataplane/packet.c',
   'lib/dataplane/ipv6.c',

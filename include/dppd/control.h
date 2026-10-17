@@ -9,6 +9,7 @@
 #include "dppd/software_backend.h"
 #include "dppd/routing.h"
 #include "dppd/age.h"
+#include "dppd/reset.h"
 
 /** 每批最多处理四条已有规则，限制临时资源需求，也让请求和结果保持固定的小规模 */
 #define DPPD_CONTROL_BATCH_UPDATE_MAX 4U
@@ -55,6 +56,9 @@ struct dppd_control_service {
     int age_cycle_error;
     /** 共享对象使用独立修订号，删除后也保留，防止同 ID 重建后误认成旧对象 */
     uint64_t shared_count_revision;
+    /** 模拟复位期间保留完整期望配置，实际句柄作废也不能丢掉恢复依据 */
+    struct dppd_reset_plan *reset_plan;
+    struct dppd_reset_status reset;
 };
 
 struct dppd_control_apply_result {
