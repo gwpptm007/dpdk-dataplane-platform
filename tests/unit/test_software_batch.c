@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -10,6 +11,8 @@
 #include "dppd/control.h"
 
 static _Thread_local unsigned int fail_allocation;
+/** 原有测试结束后再启用 ACL 变体，线程运行期间不修改这个测试选项 */
+static bool acl_mode;
 
 void *__real_calloc(size_t count, size_t size);
 void *__wrap_calloc(size_t count, size_t size);
@@ -54,7 +57,7 @@ static void *read_packets(void *arg)
         struct dppd_software_decision decision;
 
         dppd_software_backend_decide(reader->backend, (uint16_t)(5 + reader->id), &parsed, &decision);
-        assert(decision.matched && decision.drop && decision.has_mark);
+        assert(decision.matched && decision.drop == !acl_mode && decision.has_mark);
         assert(decision.mark_id == 7);
         dppd_software_backend_worker_quiescent(reader->backend, reader->id);
         atomic_fetch_add_explicit(&reader->samples, 1, memory_order_release);
@@ -83,11 +86,21 @@ static void setup(struct dppd_control_service *service, struct dppd_control_batc
         rule.priority = i % 2 == 0 ? 10 : 20;
         rule.nb_matches = 1;
         rule.matches[0].type = DPPD_MATCH_ETH;
+        if (acl_mode) {
+            rule.nb_matches = 4;
+            rule.matches[1].type = DPPD_MATCH_IPV4;
+            rule.matches[2].type = DPPD_MATCH_IP_PROTOCOL;
+            rule.matches[2].spec.protocol.value = 17;
+            rule.matches[2].spec.protocol.mask = UINT8_MAX;
+            rule.matches[3].type = DPPD_MATCH_UDP_RANGE;
+            rule.matches[3].spec.range.src_last_be = htons(100);
+            rule.matches[3].spec.range.dst_last_be = htons(100);
+        }
         rule.nb_actions = 3;
         rule.actions[0].type = DPPD_ACTION_MARK;
         rule.actions[0].conf.mark_id = i % 2 == 0 ? 7 : 9;
         rule.actions[1].type = DPPD_ACTION_COUNT;
-        rule.actions[2].type = DPPD_ACTION_DROP;
+        rule.actions[2].type = acl_mode && i % 2 == 0 ? DPPD_ACTION_ALLOW : DPPD_ACTION_DROP;
         assert(dppd_control_apply(service, i == count ? 7 : (uint16_t)(5 + i / 2), &rule, 0, &result) == 0);
         if (i < count) {
             requests[i].rule = rule;
@@ -104,6 +117,8 @@ static void toggle(struct dppd_control_batch_update_request requests[4], uint32_
     for (i = 0; i < count; ++i) {
         requests[i].rule.priority = requests[i].rule.priority == 10 ? 20 : 10;
         requests[i].rule.actions[0].conf.mark_id = requests[i].rule.priority == 10 ? 7 : 9;
+        if (acl_mode)
+            requests[i].rule.actions[2].type = requests[i].rule.priority == 10 ? DPPD_ACTION_ALLOW : DPPD_ACTION_DROP;
     }
 }
 
@@ -171,7 +186,7 @@ static void test_failures(uint32_t count)
     assert(hits == 1 && bytes == parsed.packet_len);
     assert(dppd_software_backend_query_count(&service.software, 100, 1, &hits, &bytes) == -ENOENT);
     dppd_software_backend_decide(&service.software, 5, &parsed, &decision);
-    assert(decision.drop && decision.mark_id == 7);
+    assert(decision.drop == !acl_mode && decision.mark_id == 7);
     assert(dppd_software_backend_query_count(&service.software, 101, results[1].generation, &hits, &bytes) == 0);
     assert(hits == 1 && bytes == parsed.packet_len);
     dppd_software_backend_worker_unregister(&service.software, 0);
@@ -287,6 +302,14 @@ static void test_replay(uint32_t count)
 
 int main(void)
 {
+    test_failures(2);
+    test_failures(4);
+    test_concurrent(2);
+    test_concurrent(4);
+    test_replay(2);
+    test_replay(4);
+    /** 允许与拒绝的优先级同时交换，任何半次更新都会让读者看到不应出现的 DROP */
+    acl_mode = true;
     test_failures(2);
     test_failures(4);
     test_concurrent(2);

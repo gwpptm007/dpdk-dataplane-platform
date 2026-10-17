@@ -150,6 +150,17 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
         case DPPD_MATCH_REPRESENTED_PORT:
             put_u16_le(encoded + 4, match->spec.ethdev_port_id);
             break;
+        case DPPD_MATCH_UDP_RANGE:
+        case DPPD_MATCH_TCP_RANGE:
+            memcpy(encoded + 4, &match->spec.range.src_first_be, 2);
+            memcpy(encoded + 6, &match->spec.range.src_last_be, 2);
+            memcpy(encoded + 8, &match->spec.range.dst_first_be, 2);
+            memcpy(encoded + 10, &match->spec.range.dst_last_be, 2);
+            break;
+        case DPPD_MATCH_IP_PROTOCOL:
+            encoded[4] = match->spec.protocol.value;
+            encoded[5] = match->spec.protocol.mask;
+            break;
         default:
             return -EINVAL;
         }
@@ -164,6 +175,7 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output)
         switch (action->type) {
         case DPPD_ACTION_DROP:
         case DPPD_ACTION_COUNT:
+        case DPPD_ACTION_ALLOW:
             break;
         case DPPD_ACTION_QUEUE:
             put_u16_le(encoded + 4, action->conf.queue_id);
@@ -230,6 +242,17 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint
         case DPPD_MATCH_REPRESENTED_PORT:
             match->spec.ethdev_port_id = get_u16_le(encoded + 4);
             break;
+        case DPPD_MATCH_UDP_RANGE:
+        case DPPD_MATCH_TCP_RANGE:
+            memcpy(&match->spec.range.src_first_be, encoded + 4, 2);
+            memcpy(&match->spec.range.src_last_be, encoded + 6, 2);
+            memcpy(&match->spec.range.dst_first_be, encoded + 8, 2);
+            memcpy(&match->spec.range.dst_last_be, encoded + 10, 2);
+            break;
+        case DPPD_MATCH_IP_PROTOCOL:
+            match->spec.protocol.value = encoded[4];
+            match->spec.protocol.mask = encoded[5];
+            break;
         default:
             return -EBADMSG;
         }
@@ -244,6 +267,7 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint
         switch (action->type) {
         case DPPD_ACTION_DROP:
         case DPPD_ACTION_COUNT:
+        case DPPD_ACTION_ALLOW:
             break;
         case DPPD_ACTION_QUEUE:
             action->conf.queue_id = get_u16_le(encoded + 4);

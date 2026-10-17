@@ -1,12 +1,14 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -16,6 +18,11 @@
 static void print_usage(const char *program)
 {
     fprintf(stderr, "usage:\n");
+    fprintf(stderr,
+        "  %s [--socket PATH] acl-set ID PORT EXPECTED PRIORITY ipv4|udp|tcp|ip:N"
+        " SRC_CIDR DST_CIDR SRC_RANGE DST_RANGE allow|drop [count] [mark:N]\n",
+        program);
+    fprintf(stderr, "  %s [--socket PATH] acl-update-batch FILE\n", program);
     dppctl_routing_usage(program);
     fprintf(stderr, "  %s [--socket PATH] ping\n", program);
     fprintf(stderr, "  %s [--socket PATH] health\n", program);
@@ -253,6 +260,8 @@ static int build_filter_actions(int argc, char **argv, int first, struct dppd_ru
         return -EINVAL;
     if (strcmp(argv[first], "drop") == 0) {
         fate_type = DPPD_ACTION_DROP;
+    } else if (strcmp(argv[first], "allow") == 0) {
+        fate_type = DPPD_ACTION_ALLOW;
     } else if (parse_prefixed_u64(argv[first], "queue:", UINT16_MAX, &value) == 0) {
         fate_type = DPPD_ACTION_QUEUE;
         queue_id = (uint16_t)value;
@@ -371,8 +380,167 @@ static int exchange(const char *socket_path, const struct dppd_management_reques
     return 0;
 }
 
+/** 范围包含上下界，any 覆盖零到 65535，单个端口等同于上下界相同 */
+static int parse_acl_range(const char *text, uint16_t *first, uint16_t *last)
+{
+    if (strcmp(text, "any") == 0) {
+        *first = 0;
+        *last = UINT16_MAX;
+        return 0;
+    }
+    char copy[16];
+    if (strlen(text) >= sizeof(copy))
+        return -EINVAL;
+    strcpy(copy, text);
+    char *end = strchr(copy, '-');
+    if (end != NULL)
+        *end++ = '\0';
+    uint64_t low, high;
+    if (parse_u64(copy, 0, UINT16_MAX, &low) != 0 || parse_u64(end == NULL ? copy : end, 0, UINT16_MAX, &high) != 0 ||
+        low > high)
+        return -EINVAL;
+    *first = htons((uint16_t)low);
+    *last = htons((uint16_t)high);
+    return 0;
+}
+
+/** 复用正式规则请求和版本保护，ACL 固定使用软件执行，允许后继续原有二层或三层转发 */
+static int build_acl_request(int argc, char **argv, struct dppd_management_request *request)
+{
+    if (argc < 11 || argc > 13)
+        return -EINVAL;
+    initialize_request(request, DPPD_MANAGEMENT_RULE_APPLY);
+    struct dppd_rule *rule = &request->payload.apply.rule;
+    uint64_t port, priority, protocol;
+    if (parse_u64(argv[1], 1, UINT64_MAX, &rule->id) != 0 || parse_u64(argv[2], 0, UINT16_MAX - 1U, &port) != 0 ||
+        parse_u64(argv[3], 0, UINT64_MAX - 1U, &request->payload.apply.expected_generation) != 0 ||
+        parse_u64(argv[4], 0, UINT32_MAX, &priority) != 0)
+        return -EINVAL;
+    request->payload.apply.install_port_id = (uint16_t)port;
+    rule->domain = DPPD_RULE_DOMAIN_INGRESS;
+    rule->fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
+    rule->priority = (uint32_t)priority;
+    rule->nb_matches = 2;
+    rule->matches[0].type = DPPD_MATCH_ETH;
+    struct dppd_match *ip = &rule->matches[1], *transport = &rule->matches[2];
+    ip->type = DPPD_MATCH_IPV4;
+    if (parse_ipv4_cidr(argv[6], &ip->spec.ipv4.src_be, &ip->spec.ipv4.src_mask_be) != 0 ||
+        parse_ipv4_cidr(argv[7], &ip->spec.ipv4.dst_be, &ip->spec.ipv4.dst_mask_be) != 0)
+        return -EINVAL;
+    if (strcmp(argv[5], "udp") == 0 || strcmp(argv[5], "tcp") == 0) {
+        transport->type = strcmp(argv[5], "udp") == 0 ? DPPD_MATCH_UDP_RANGE : DPPD_MATCH_TCP_RANGE;
+        if (parse_acl_range(argv[8], &transport->spec.range.src_first_be, &transport->spec.range.src_last_be) != 0 ||
+            parse_acl_range(argv[9], &transport->spec.range.dst_first_be, &transport->spec.range.dst_last_be) != 0)
+            return -EINVAL;
+        rule->nb_matches++;
+    } else {
+        if (strcmp(argv[8], "any") != 0 || strcmp(argv[9], "any") != 0)
+            return -EINVAL;
+        if (parse_prefixed_u64(argv[5], "ip:", UINT8_MAX, &protocol) == 0) {
+            transport->type = DPPD_MATCH_IP_PROTOCOL;
+            transport->spec.protocol.value = (uint8_t)protocol;
+            transport->spec.protocol.mask = UINT8_MAX;
+            rule->nb_matches++;
+        } else if (strcmp(argv[5], "ipv4") != 0)
+            return -EINVAL;
+    }
+    if (strcmp(argv[10], "allow") != 0 && strcmp(argv[10], "drop") != 0)
+        return -EINVAL;
+    for (int i = 11; i < argc; ++i)
+        if (strcmp(argv[i], "count") != 0 && strncmp(argv[i], "mark:", 5) != 0)
+            return -EINVAL;
+    return build_filter_actions(argc, argv, 10, rule);
+}
+
+/** 文件中的两到四条规则全部解析成功才发送，服务端再核对全部旧版本并原子更新 */
+static int build_acl_batch(const char *path, struct dppd_management_request *request)
+{
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return -errno;
+    struct stat metadata;
+    if (fstat(fd, &metadata) != 0) {
+        int rc = -errno;
+        close(fd);
+        return rc;
+    }
+    if (!S_ISREG(metadata.st_mode) || metadata.st_size > 65536) {
+        close(fd);
+        return -EINVAL;
+    }
+    char text[65537];
+    size_t total = 0;
+    for (;;) {
+        ssize_t size = read(fd, text + total, sizeof(text) - total);
+        if (size < 0 && errno == EINTR)
+            continue;
+        if (size < 0) {
+            int rc = -errno;
+            close(fd);
+            return rc;
+        }
+        if (size == 0)
+            break;
+        total += (size_t)size;
+        if (total == sizeof(text)) {
+            close(fd);
+            return -E2BIG;
+        }
+    }
+    close(fd);
+    if (memchr(text, '\0', total) != NULL)
+        return -EINVAL;
+    text[total] = '\0';
+    initialize_request(request, DPPD_MANAGEMENT_RULE_UPDATE_BATCH);
+    int rc = 0;
+    char *lines = NULL;
+    for (char *line = strtok_r(text, "\n", &lines); line != NULL; line = strtok_r(NULL, "\n", &lines)) {
+        if (strlen(line) > 511) {
+            rc = -E2BIG;
+            break;
+        }
+        char *comment = strchr(line, '#');
+        if (comment != NULL)
+            *comment = '\0';
+        char *args[15] = {"acl-set"}, *save = NULL;
+        int count = 1;
+        for (char *word = strtok_r(line, " \r\n\t", &save); word != NULL; word = strtok_r(NULL, " \r\n\t", &save)) {
+            if (count == 15) {
+                rc = -EINVAL;
+                break;
+            }
+            args[count++] = word;
+        }
+        if (rc != 0)
+            break;
+        if (count == 1)
+            continue;
+        struct dppd_management_request single;
+        if (request->payload.update_batch.count == DPPD_MANAGEMENT_BATCH_UPDATE_MAX ||
+            build_acl_request(count, args, &single) != 0 || single.payload.apply.expected_generation == 0) {
+            rc = -EINVAL;
+            break;
+        }
+        for (uint16_t i = 0; i < request->payload.update_batch.count; ++i)
+            if (request->payload.update_batch.rules[i].rule.id == single.payload.apply.rule.id)
+                rc = -EINVAL;
+        if (rc != 0)
+            break;
+        struct dppd_control_batch_update_request *entry =
+            &request->payload.update_batch.rules[request->payload.update_batch.count++];
+        entry->rule = single.payload.apply.rule;
+        entry->install_port_id = single.payload.apply.install_port_id;
+        entry->expected_generation = single.payload.apply.expected_generation;
+    }
+    return rc != 0 ? rc : request->payload.update_batch.count >= 2 ? 0 : -EINVAL;
+}
+
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
+    if (argc >= 1 && strcmp(argv[0], "acl-set") == 0)
+        return build_acl_request(argc, argv, request);
+    if (argc == 2 && strcmp(argv[0], "acl-update-batch") == 0)
+        return build_acl_batch(argv[1], request);
     uint64_t value;
     int routing_result = dppctl_routing_build(argc, argv, request, initialize_request);
     if (routing_result != -ENOSYS)
@@ -843,6 +1011,15 @@ static void print_rule_detail(const struct dppd_rule *rule)
         case DPPD_MATCH_REPRESENTED_PORT:
             printf("represented-port port=%u", match->spec.ethdev_port_id);
             break;
+        case DPPD_MATCH_UDP_RANGE:
+        case DPPD_MATCH_TCP_RANGE:
+            printf("%s-range src=%u-%u dst=%u-%u", match->type == DPPD_MATCH_UDP_RANGE ? "udp" : "tcp",
+                ntohs(match->spec.range.src_first_be), ntohs(match->spec.range.src_last_be),
+                ntohs(match->spec.range.dst_first_be), ntohs(match->spec.range.dst_last_be));
+            break;
+        case DPPD_MATCH_IP_PROTOCOL:
+            printf("ip-protocol value=%u mask=%u", match->spec.protocol.value, match->spec.protocol.mask);
+            break;
         default:
             printf("unknown type=%d", match->type);
             break;
@@ -856,6 +1033,9 @@ static void print_rule_detail(const struct dppd_rule *rule)
         switch (action->type) {
         case DPPD_ACTION_DROP:
             printf("drop");
+            break;
+        case DPPD_ACTION_ALLOW:
+            printf("allow");
             break;
         case DPPD_ACTION_QUEUE:
             printf("queue index=%u", action->conf.queue_id);

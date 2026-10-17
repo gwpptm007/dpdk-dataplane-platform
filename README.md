@@ -12,6 +12,7 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - Ethernet、双 VLAN、ARP、IPv4、UDP/TCP 的边界安全解析；
 - immutable forwarding snapshot 和 per-worker/port/queue 原子统计；
 - 可选 IPv4 最长前缀路由、静态邻居、MAC/TTL/校验和改写、CLI 原子整表替换与持久重启恢复，见 [三层转发](docs/ipv4_routing.md)；
+- IPv4 软件 ACL 的允许/拒绝、TCP/UDP 端口范围、协议号、MARK/COUNT、原子批量更新和持久重启恢复，见 [ACL 闭环](docs/acl.md)；
 - ethdev/representor/switch-domain 拓扑发现；
 - 统一 rule IR 到 `rte_flow` 的真实 validate/create/query/destroy/flush；
 - 带稳定 ID、generation、幂等更新和乐观并发控制的 rule repository；
@@ -30,17 +31,17 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - 本机 `rule-status` 查询实际后端、安装端口、COUNT 配置和后端提交耗时，详见 [规则安装状态](docs/rule_status.md)；
 - 本机 `health/ready`、全部未就绪原因、工作线程实际状态和异常结束监控，详见 [健康与就绪](docs/health_readiness.md)。
 
-当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v15）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency/rule-history` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。受控本地 TAP 跨进程恢复已接通；其他 PMD 的自动 reconciliation、degraded recovery 和 flow template 仍待实现，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
+当前软件路径在 port-pair 基线上已支持 Ethernet/IPv4/UDP/TCP 的 DROP、MARK、COUNT：`prefer` 仅在硬件 validate 失败且语义等价时回退，`software` 可显式强制软件 backend；QUEUE 与 transfer 不会被错误降级。软件 classifier 以不可变 snapshot 原子发布，worker 每轮完整收包扫描后报告 DPDK QSBR 静默点，旧规则集在宽限期后异步回收，不阻塞逐包分类。管理 CLI 可构造 DROP/QUEUE/MARK/COUNT 规则，并提供 `apply-drop-batch`（2–4 条同端口 Ethernet DROP 新规则的原子创建）、`delete-batch`（2–4 条精确 generation 规则的原子删除）和 `update-drop-batch`（2–4 条精确旧 generation 规则完整替换为 Ethernet DROP，管理协议 v17）；旧规则和新计划全在软件后端时，批量更新通过一次快照发布完成，每个报文使用完整旧表或新表，满表也可更新；硬件及混合路径仍只保证规则账本整批发布。可用 `dppctl stats [PORT|all [QUEUE|all]]` 查询软件收发及丢弃原因，接收归入口、发送归出口。具体硬件规则仍以 PMD 的 `rte_flow_validate()` 为准。`--state-path` 可启用 snapshot v2 自动保存与 fail-closed 启动重放；确认所有旧规则来自同一 ethdev 时，可用 `dppd-snapshot-migrate --install-port` 离线转换 v1 文件。回滚删除失败时 daemon 开放 `reconcile-status/reconcile-retry` 和只读的 `health/ready/capability-show/rule-metrics/rule-latency/rule-history` 与规则 telemetry，清除已知 handle 后退出重启。默认不指定路径时保持禁用。受控本地 TAP 跨进程恢复已接通；其他 PMD 的自动 reconciliation、degraded recovery 和 flow template 仍待实现，详见 [实现状态](docs/implementation_status.md) 与 [路线图](docs/roadmap_v3.md)。
 
 ## 快速开始
 
-管理协议 v16 增加路由/邻居管理、持久化状态和三层丢弃统计，保留 v15 的 `rule-history`，以及 `rule-latency`、`rule-metrics`、`capability-show`、`probe-drop/probe-filter` 和 `probe-cache-clear`，
+管理协议 v17 增加 ACL 范围、协议和允许动作，保留 v16 的路由/邻居管理，以及规则历史、耗时、指标、能力画像和探测，
 保留 `rule-status` 的实际后端与提交耗时、`health/ready` 的线程状态和 `port-show` 的链路状态。
 daemon 持续检测链路，出口断开时释放
 需要转发的报文并记录 egress drops，恢复后沿用原规则、COUNT 和 snapshot 自动
 继续转发；链路查询异常或设备移除通知触发停止收发、等待线程与回调结束后失败退出，
 修复后可从快照重启。进程内重新枚举和热重配仍未实现，物理热拔插尚未验收。
-daemon 与 CLI 需要一起更新，旧版本客户端返回 EPROTO。
+daemon 与 CLI 需要一起更新，旧版本客户端会被拒绝。
 
 通过 `dppctl rule-metrics` 可查询最近失败和本进程累计结果。Telemetry 提供
 `/dppd/rule_failures`、`/dppd/rules` 和 `/dppd/rule,ID`，按完整副本发布规则状态，
@@ -87,6 +88,10 @@ sudo ./build/dppd -l 0-2 -n 4 -- --ports 0,1 --queues 2 --burst 64 --promisc
 `route-set/route-delete`、`neighbor-set/neighbor-delete` 修改，`routing-replace` 同时替换两表。
 所有修改要求精确旧版本。存储失败保持旧活跃配置、报告 `routing-dirty`，修复后显式执行
 `routing-flush`。命令格式、静态邻居限制和崩溃提交语义见 [IPv4 三层转发闭环](docs/ipv4_routing.md)。
+
+`dppctl acl-set` 可配置软件 IPv4 白名单和兜底拒绝，`acl-update-batch FILE` 原子替换
+两到四条已存在的 ACL 规则。匹配支持地址、TCP/UDP 端口范围、IP 协议和优先级；命中
+允许后继续原有转发。查询、COUNT、删除和持久化复用已有规则接口，详见 [ACL 使用与验收](docs/acl.md)。
 
 完整环境准备、运行、telemetry 与抓包方式见 [构建与运行](docs/build_and_run.md)。架构语义和扩展边界见 [V3 架构](docs/architecture_v3.md)。
 代码排版、中文注释和格式检查命令见 [代码风格约定](docs/code_style.md)。

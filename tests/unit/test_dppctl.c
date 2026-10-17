@@ -8,6 +8,57 @@
 #undef main
 #include <assert.h>
 
+/** ACL 命令明确区分端口范围、协议号和旧版本，整批文件任一错误都不能生成部分请求 */
+static void test_acl_arguments(void)
+{
+    struct dppd_management_request request;
+    char *args[] = {"acl-set", "10", "3", "0", "20", "udp", "198.18.0.0/24", "10.2.0.0/16", "1000-2000", "80-90",
+        "allow", "count", "mark:7"};
+    assert(build_request(13, args, &request) == 0);
+    assert(request.payload.apply.rule.fallback == DPPD_FALLBACK_SOFTWARE_ONLY);
+    assert(request.payload.apply.rule.actions[2].type == DPPD_ACTION_ALLOW);
+    assert(request.payload.apply.rule.matches[2].spec.range.src_first_be == htons(1000));
+    assert(request.payload.apply.rule.matches[2].spec.range.dst_last_be == htons(90));
+    const char *bad[] = {"2000-1000", "-1", "0-65536", "1-", "1-2-3", "any-extra"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); ++i) {
+        args[8] = (char *)bad[i];
+        assert(build_request(13, args, &request) == -EINVAL);
+    }
+    args[8] = "0-65535";
+    args[9] = "0";
+    assert(build_request(13, args, &request) == 0);
+    args[3] = "any";
+    assert(build_request(13, args, &request) == -EINVAL);
+    args[3] = "0";
+    args[5] = "ip:17";
+    assert(build_request(13, args, &request) == -EINVAL);
+    args[8] = args[9] = "any";
+    assert(build_request(13, args, &request) == 0);
+    assert(request.payload.apply.rule.matches[2].type == DPPD_MATCH_IP_PROTOCOL);
+    assert(request.payload.apply.rule.matches[2].spec.protocol.value == 17);
+    char path[] = "/tmp/dppctl-acl-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    const char text[] = "10 3 1 20 udp any any 1000-2000 80-90 allow count\n"
+                        "11 3 2 30 ip:17 any any any any drop\n";
+    assert(write(fd, text, sizeof(text) - 1) == sizeof(text) - 1);
+    char *batch[] = {"acl-update-batch", path};
+    assert(build_request(2, batch, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_RULE_UPDATE_BATCH && request.payload.update_batch.count == 2);
+    assert(request.payload.update_batch.rules[0].expected_generation == 1);
+    assert(request.payload.update_batch.rules[1].rule.matches[2].spec.protocol.value == 17);
+    assert(write(fd, "\0", 1) == 1);
+    assert(build_request(2, batch, &request) == -EINVAL);
+    assert(ftruncate(fd, 0) == 0 && lseek(fd, 0, SEEK_SET) == 0);
+    assert(write(fd, text, sizeof(text) - 1) == sizeof(text) - 1);
+    const char duplicate[] = "10 3 1 20 ipv4 any any any any drop\n";
+    assert(write(fd, duplicate, sizeof(duplicate) - 1) == sizeof(duplicate) - 1);
+    assert(build_request(2, batch, &request) == -EINVAL);
+    close(fd);
+    assert(unlink(path) == 0);
+    assert(build_request(2, batch, &request) == -ENOENT);
+}
+
 /** 路由命令先完整解析再连接服务，错误文件不能被当成空配置发送 */
 static void test_routing_arguments(void)
 {
@@ -195,6 +246,7 @@ int main(void)
     char *stats[] = {"stats", "all", "2"};
 
     test_status_arguments();
+    test_acl_arguments();
     test_routing_arguments();
     test_probe_arguments();
     test_history_arguments();

@@ -1,4 +1,5 @@
 #include "dppd/software_backend.h"
+#include "dppd/acl.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -41,7 +42,7 @@ struct dppd_software_rule_object {
 
 /**
  * 一次发布对应一个完整规则视图。objects 是按 backend capacity 固定分配的柔性数组；
- * count 仅用于容量判断，报文匹配仍遍历槽位并以 metrics != NULL 判定有效性
+ * 数组后面紧接同容量的编译 ACL，匹配项和动作、计数器随同一指针一次发布
  */
 struct dppd_software_classifier_snapshot {
     uint32_t count;
@@ -62,73 +63,16 @@ struct dppd_software_pending_rule {
     bool published;
 };
 
-/** IPv4 地址和 L4 端口均保持网络字节序；掩码比较不做字节序转换，避免双重转换 */
-static bool masked_equal_u32(uint32_t value, uint32_t expected, uint32_t mask)
-{
-    return (value & mask) == (expected & mask);
-}
-
-static bool masked_equal_u16(uint16_t value, uint16_t expected, uint16_t mask)
-{
-    return (value & mask) == (expected & mask);
-}
-
-/** 同时满足安装端口和全部匹配条件才算命中，任一条件不符即可提前返回 */
-static bool rule_matches_packet(const struct dppd_rule *rule, uint16_t ingress_port, const struct dppd_packet *packet)
-{
-    uint16_t i;
-
-    /** 安装端口属于匹配域的一部分，不能因多个 port 复用规则 ID 而跨端口命中 */
-    if (rule->install_port_id != ingress_port)
-        return false;
-    for (i = 0; i < rule->nb_matches; ++i) {
-        const struct dppd_match *match = &rule->matches[i];
-
-        switch (match->type) {
-        case DPPD_MATCH_ETH:
-            /** 当前 IR 中 ETH 用来声明报文层次；没有 MAC 字段，因此无需额外比较 */
-            break;
-        case DPPD_MATCH_IPV4:
-            if (packet->l3_type != DPPD_L3_IPV4 ||
-                !masked_equal_u32(packet->ipv4_src_be, match->spec.ipv4.src_be, match->spec.ipv4.src_mask_be) ||
-                !masked_equal_u32(packet->ipv4_dst_be, match->spec.ipv4.dst_be, match->spec.ipv4.dst_mask_be))
-                return false;
-            break;
-        case DPPD_MATCH_UDP:
-        case DPPD_MATCH_TCP:
-            if ((match->type == DPPD_MATCH_UDP && packet->l4_type != DPPD_L4_UDP) ||
-                (match->type == DPPD_MATCH_TCP && packet->l4_type != DPPD_L4_TCP) ||
-                !masked_equal_u16(packet->l4_src_port_be, match->spec.l4.src_be, match->spec.l4.src_mask_be) ||
-                !masked_equal_u16(packet->l4_dst_port_be, match->spec.l4.dst_be, match->spec.l4.dst_mask_be))
-                return false;
-            break;
-        case DPPD_MATCH_REPRESENTED_PORT:
-        default:
-            return false;
-        }
-    }
-    return true;
-}
-
-static int rule_order(const struct dppd_rule *left, const struct dppd_rule *right)
-{
-    /**
-     * 本软件分类器按 group、priority、ID 依次比较，数值较小的规则先执行
-     * 这里只选出一条规则，不模拟硬件的多组跳转；generation 不参与排序
-     */
-    if (left->group != right->group)
-        return left->group < right->group ? -1 : 1;
-    if (left->priority != right->priority)
-        return left->priority < right->priority ? -1 : 1;
-    if (left->id == right->id)
-        return 0;
-    return left->id < right->id ? -1 : 1;
-}
-
 static size_t snapshot_size(uint32_t capacity)
 {
     return sizeof(struct dppd_software_classifier_snapshot) +
-        (size_t)capacity * sizeof(struct dppd_software_rule_object);
+        (size_t)capacity * sizeof(struct dppd_software_rule_object) + dppd_acl_size(capacity);
+}
+
+/** 规则对象按八字节对齐，尾部 ACL 随整张快照分配和回收，不持有另一份活跃指针 */
+static struct dppd_acl *snapshot_acl(struct dppd_software_classifier_snapshot *snapshot, uint32_t capacity)
+{
+    return (struct dppd_acl *)(snapshot->objects + capacity);
 }
 
 static void metrics_put(struct dppd_software_rule_metrics *metrics)
@@ -167,6 +111,7 @@ static struct dppd_software_classifier_snapshot *snapshot_clone(const struct dpp
     copy = calloc(1, snapshot_size(capacity));
     if (copy == NULL)
         return NULL;
+    dppd_acl_init(snapshot_acl(copy, capacity), capacity);
     if (source == NULL)
         return copy;
     copy->count = source->count;
@@ -227,6 +172,15 @@ static int publish_locked(struct dppd_software_backend *backend, struct dppd_sof
     struct dppd_software_classifier_snapshot *previous;
     struct dppd_software_retired_snapshot *retired;
 
+    /** 发布前完成匹配编译，失败时旧 ACL、动作和 COUNT 全部保持原样 */
+    struct dppd_acl *acl = dppd_acl_init(snapshot_acl(next, backend->capacity), backend->capacity);
+    for (uint32_t i = 0; i < backend->capacity; ++i) {
+        if (next->objects[i].metrics == NULL)
+            continue;
+        int rc = dppd_acl_add(acl, &next->objects[i].rule, i + 1);
+        if (rc != 0)
+            return rc;
+    }
     retired = calloc(1, sizeof(*retired));
     if (retired == NULL) {
         /** 在发布前保证能够记录旧 snapshot，避免内存紧张时丢失回收所有权 */
@@ -256,7 +210,8 @@ bool dppd_software_backend_rule_supported(const struct dppd_rule *rule)
     if (rule == NULL || rule->domain != DPPD_RULE_DOMAIN_INGRESS)
         return false;
     for (i = 0; i < rule->nb_matches; ++i) {
-        if (rule->matches[i].type == DPPD_MATCH_REPRESENTED_PORT)
+        if (rule->matches[i].type < DPPD_MATCH_ETH || rule->matches[i].type > DPPD_MATCH_IP_PROTOCOL ||
+            rule->matches[i].type == DPPD_MATCH_REPRESENTED_PORT)
             return false;
     }
     for (i = 0; i < rule->nb_actions; ++i) {
@@ -264,6 +219,7 @@ bool dppd_software_backend_rule_supported(const struct dppd_rule *rule)
         case DPPD_ACTION_DROP:
         case DPPD_ACTION_MARK:
         case DPPD_ACTION_COUNT:
+        case DPPD_ACTION_ALLOW:
             break;
         case DPPD_ACTION_QUEUE:
         case DPPD_ACTION_REPRESENTED_PORT:
@@ -433,10 +389,11 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
             break;
         }
     }
-    if (publish_locked(backend, next) != 0) {
+    int publish_error = publish_locked(backend, next);
+    if (publish_error != 0) {
         snapshot_destroy(next, backend->capacity);
         (void)pthread_mutex_unlock(&backend->writer_lock);
-        return -ENOMEM;
+        return publish_error;
     }
     /**
      * 成功发布后完成计时，耗时包括副本分配、指针发布和当次可完成的退役回收
@@ -638,10 +595,11 @@ int dppd_software_backend_remove_version(struct dppd_software_backend *backend, 
     metrics_put(next->objects[index].metrics);
     memset(&next->objects[index], 0, sizeof(next->objects[index]));
     next->count--;
-    if (publish_locked(backend, next) != 0) {
+    int publish_error = publish_locked(backend, next);
+    if (publish_error != 0) {
         snapshot_destroy(next, backend->capacity);
         (void)pthread_mutex_unlock(&backend->writer_lock);
-        return -ENOMEM;
+        return publish_error;
     }
     (void)pthread_mutex_unlock(&backend->writer_lock);
     return 0;
@@ -796,8 +754,6 @@ void dppd_software_backend_decide(struct dppd_software_backend *backend, uint16_
 {
     struct dppd_software_classifier_snapshot *active;
     struct dppd_software_rule_object *selected = NULL;
-    uint32_t i;
-
     memset(decision, 0, sizeof(*decision));
     if (backend == NULL || packet == NULL)
         return;
@@ -807,14 +763,9 @@ void dppd_software_backend_decide(struct dppd_software_backend *backend, uint16_
      * acquire 与发布端的 release 配合，保证读到新指针时也能读到完整规则内容
      */
     active = atomic_load_explicit(&backend->active, memory_order_acquire);
-    for (i = 0; i < backend->capacity; ++i) {
-        struct dppd_software_rule_object *object = &active->objects[i];
-
-        if (object->metrics == NULL || !rule_matches_packet(&object->rule, ingress_port, packet))
-            continue;
-        if (selected == NULL || rule_order(&object->rule, &selected->rule) < 0)
-            selected = object;
-    }
+    uint32_t tag = dppd_acl_classify(snapshot_acl(active, backend->capacity), ingress_port, packet);
+    if (tag != 0)
+        selected = &active->objects[tag - 1];
     if (selected != NULL) {
         uint16_t action;
 

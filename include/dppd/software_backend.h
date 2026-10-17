@@ -71,7 +71,8 @@ void dppd_software_backend_fini(struct dppd_software_backend *backend);
 
 /**
  * 对已经通过通用校验的规则检查软件能力，支持入口域的 ETH、IPv4、UDP、TCP 匹配
- * 动作限于 DROP、MARK 和 COUNT；QUEUE、transfer 或 represented port 不支持
+ * 另支持 TCP/UDP 端口范围和 IP 协议号，动作包括 ALLOW、DROP、MARK 和 COUNT
+ * ALLOW 终止本次 ACL 匹配并继续后续转发，QUEUE、transfer 或 represented port 不支持
  * 该检查用于判断能否降级到软件执行，不代替规则结构和字段合法性的通用校验
  */
 bool dppd_software_backend_rule_supported(const struct dppd_rule *rule);
@@ -114,6 +115,7 @@ void dppd_software_backend_worker_unregister(struct dppd_software_backend *backe
 
 /**
  * 使用已解析的有效字段选择一条匹配规则，调用方必须先排除畸形报文并注册读者
+ * 编译 ACL 先按入口定位，再取排序后的首个匹配，ALLOW 不再继续尝试较低优先级拒绝项
  * COUNT 在该规则版本的共享计数器上累加，MARK 和 DROP 只记录到输出结果
  * decision 必须指向有效内存；本函数不发送、不释放报文，也不报告 QSBR 安全点
  * 调用方在不再持有旧快照指针时报告安全点，本项目统一放在一轮端口扫描结束后

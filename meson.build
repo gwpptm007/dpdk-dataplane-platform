@@ -41,6 +41,7 @@ dppd_sources = files(
   'lib/dataplane/ipv4_router.c',
   'lib/dataplane/ipv4_rewrite.c',
   'lib/dataplane/software_backend.c',
+  'lib/dataplane/acl.c',
   'lib/dataplane/worker.c',
   'lib/offload/rte_flow.c',
   'lib/offload/rte_flow_backend.c',

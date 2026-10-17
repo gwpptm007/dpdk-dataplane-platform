@@ -21,15 +21,23 @@ int __wrap_fsync(int fd)
         return __real_fsync(fd);
     path[length] = '\0';
     bool directory = S_ISDIR(info.st_mode);
+    const char *marker_name = "route-store-fault";
     if (!directory) {
         char *base = strrchr(path, '/');
-        if (base == NULL || strncmp(base + 1, "routing.bin.", 12) != 0)
+        if (base == NULL)
+            return __real_fsync(fd);
+        if (strncmp(base + 1, "rules.tmp.", 10) == 0)
+            marker_name = "acl-store-fault";
+        else if (strncmp(base + 1, "routing.bin.", 12) != 0)
             return __real_fsync(fd);
         *base = '\0';
     }
-    if (snprintf(marker, sizeof(marker), "%s/route-store-fault", path) >= (int)sizeof(marker))
+    if (snprintf(marker, sizeof(marker), "%s/%s", path, marker_name) >= (int)sizeof(marker))
         return __real_fsync(fd);
     int fault = open(marker, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /** 两套验收的标记各自独立，目录同步时只消费实际存在且模式匹配的那个标记 */
+    if (fault < 0 && directory && snprintf(marker, sizeof(marker), "%s/acl-store-fault", path) < (int)sizeof(marker))
+        fault = open(marker, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fault < 0)
         return __real_fsync(fd);
     ssize_t size = read(fault, mode, sizeof(mode) - 1);

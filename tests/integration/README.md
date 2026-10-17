@@ -1,5 +1,19 @@
 # 集成验收
 
+## IPv4 软件 ACL
+
+```sh
+sudo python3 tests/integration/acl_traffic.py --build-dir build
+sudo python3 tests/integration/acl_traffic.py --build-dir build-native
+```
+
+2026-10-17，两套构建各 41/41 单测、五项相关 sanitizer 通过。测试在自建三 TAP 的空
+网络命名空间中核对允许/拒绝、范围边界、TCP/UDP、协议号、分片、VLAN 完整输出、
+COUNT、精确版本、原子批量更新、SIGKILL 重放、删除和损坏快照拒绝。文件与目录同步
+失败分别核对已生效版本、磁盘、dirty 就绪状态、持续故障阻断及 flush 修复。
+正式 net_ring worker 另检查单双队列 MARK 和共享原包不变，保留原二层/三层回归。
+全部只使用自有虚拟接口，详见 [ACL 使用与语义](../../docs/acl.md)。
+
 ## IPv4 静态三层转发
 
 ```sh

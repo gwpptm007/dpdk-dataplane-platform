@@ -5,6 +5,9 @@ packet_test = executable(
 )
 test('packet parser', packet_test)
 
+acl_test = executable('test_acl', 'test_acl.c', dependencies: dppd_core_dep)
+test('compiled ACL and independent reference', acl_test)
+
 config_test = executable(
   'test_config',
   'test_config.c',

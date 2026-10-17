@@ -339,6 +339,79 @@ static void failure_paths(struct fixture *fixture)
     }
 }
 
+/** 允许规则优先于兜底拒绝，真实出口保留 MARK，共享原包不能被改写或写入新标记 */
+static void acl_allow_path(struct fixture *fixture)
+{
+    struct dppd_rule allow = {.id = 951,
+        .fallback = DPPD_FALLBACK_SOFTWARE_ONLY,
+        .priority = 10,
+        .nb_matches = 3,
+        .nb_actions = 3};
+    allow.matches[0].type = DPPD_MATCH_ETH;
+    allow.matches[1].type = DPPD_MATCH_IPV4;
+    allow.matches[2].type = DPPD_MATCH_UDP_RANGE;
+    allow.matches[2].spec.range = (struct dppd_match_l4_range){.src_first_be = htons(1000),
+        .src_last_be = htons(2000),
+        .dst_first_be = htons(5000),
+        .dst_last_be = htons(6000)};
+    allow.actions[0].type = DPPD_ACTION_MARK;
+    allow.actions[0].conf.mark_id = 0xfeed;
+    allow.actions[1].type = DPPD_ACTION_COUNT;
+    allow.actions[2].type = DPPD_ACTION_ALLOW;
+    struct dppd_rule deny = allow;
+    deny.id = 950;
+    deny.priority = 100;
+    deny.nb_matches = 1;
+    deny.actions[2].type = DPPD_ACTION_DROP;
+    struct dppd_control_apply_result allowed, denied;
+    assert(dppd_control_apply(&fixture->control, 0, &deny, 0, &denied) == 0);
+    assert(dppd_control_apply(&fixture->control, 0, &allow, 0, &allowed) == 0);
+    const unsigned int kinds[] = {0, 13};
+    for (uint16_t queue = 0; queue < fixture->queues; ++queue)
+        for (unsigned int i = 0; i < 2; ++i) {
+            struct rte_mbuf *mbuf = make_packet(fixture, kinds[i], queue, kinds[i]);
+            assert(rte_ring_enqueue(fixture->rx[0][queue], mbuf) == 0);
+            fixture->sent++;
+        }
+    uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
+    for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
+        for (unsigned int i = 0; i < 2; ++i) {
+            void *object;
+            while (rte_ring_dequeue(fixture->tx[1][queue], &object) != 0) {
+                assert(rte_get_timer_cycles() < deadline);
+                rte_pause();
+            }
+            struct rte_mbuf *mbuf = object;
+            verify_output(fixture, mbuf, 1, kinds[i], kinds[i], false);
+            assert((mbuf->ol_flags & RTE_MBUF_F_RX_FDIR_ID) != 0 && mbuf->hash.fdir.hi == 0xfeed);
+            rte_pktmbuf_free(mbuf);
+            fixture->forwarded++;
+        }
+        struct rte_mbuf *original = fixture->retained[queue][13];
+        assert(original != NULL && (original->ol_flags & RTE_MBUF_F_RX_FDIR_ID) == 0);
+        uint8_t expected[FRAME_SIZE], buffer[FRAME_SIZE];
+        fill_frame(expected, 13, 13);
+        assert(memcmp(rte_pktmbuf_read(original, 0, FRAME_SIZE, buffer), expected, FRAME_SIZE) == 0);
+        rte_pktmbuf_free(original);
+        fixture->retained[queue][13] = NULL;
+    }
+    uint64_t hits, bytes, generation;
+    assert(dppd_software_backend_query_count(&fixture->control.software, 951, allowed.generation, &hits, &bytes) == 0);
+    assert(hits == 2U * fixture->queues && bytes == hits * FRAME_SIZE);
+    assert(dppd_software_backend_query_count(&fixture->control.software, 950, denied.generation, &hits, &bytes) == 0);
+    assert(hits == 0 && bytes == 0);
+    bool removed;
+    assert(dppd_control_remove(&fixture->control, 951, allowed.generation, &removed, &generation) == 0 && removed);
+    assert(dppd_control_remove(&fixture->control, 950, denied.generation, &removed, &generation) == 0 && removed);
+    struct dppd_stats_values stats;
+    do {
+        dppd_runtime_stats_read(&fixture->runtime, &stats);
+        assert(rte_get_timer_cycles() < deadline);
+    } while (stats.rx_packets != fixture->sent || stats.tx_packets != fixture->forwarded ||
+        stats.tx_bytes != fixture->forwarded * FRAME_SIZE);
+    printf("PASS ACL worker queues=%u allow+range+mark+count COW=unchanged\n", fixture->queues);
+}
+
 /** net_ring 没有 RSS，测试明确配置两队列后复用生产 worker，不放宽正式设备能力检查 */
 static void configure_queues(struct fixture *fixture)
 {
@@ -436,6 +509,7 @@ static void run_case(uint16_t queues)
     matrix(fixture, 0);
     matrix(fixture, 3);
     hot_updates(fixture);
+    acl_allow_path(fixture);
     failure_paths(fixture);
     dppd_runtime_request_stop(&fixture->runtime);
     assert(dppd_runtime_wait(&fixture->runtime) == 0);

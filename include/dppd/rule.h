@@ -25,6 +25,9 @@ enum dppd_match_type {
     DPPD_MATCH_UDP,
     DPPD_MATCH_TCP,
     DPPD_MATCH_REPRESENTED_PORT,
+    DPPD_MATCH_UDP_RANGE,
+    DPPD_MATCH_TCP_RANGE,
+    DPPD_MATCH_IP_PROTOCOL,
 };
 
 struct dppd_match_ipv4 {
@@ -41,11 +44,20 @@ struct dppd_match_l4 {
     uint16_t dst_mask_be;
 };
 
+/** 范围包含两个端点，四个端口数值都保存为网络字节序，不能把上界当作掩码 */
+struct dppd_match_l4_range {
+    uint16_t src_first_be, src_last_be, dst_first_be, dst_last_be;
+};
+
 struct dppd_match {
     enum dppd_match_type type;
     union {
         struct dppd_match_ipv4 ipv4;
         struct dppd_match_l4 l4;
+        struct dppd_match_l4_range range;
+        struct {
+            uint8_t value, mask;
+        } protocol;
         uint16_t ethdev_port_id;
     } spec;
 };
@@ -56,6 +68,8 @@ enum dppd_action_type {
     DPPD_ACTION_MARK,
     DPPD_ACTION_COUNT,
     DPPD_ACTION_REPRESENTED_PORT,
+    /** 结束本次软件 ACL 匹配并继续后续转发，不承诺绕过路由或允许无效报文 */
+    DPPD_ACTION_ALLOW,
 };
 
 struct dppd_action {

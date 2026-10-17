@@ -1,6 +1,7 @@
 #include "dppd/rule.h"
 
 #include <stdbool.h>
+#include <arpa/inet.h>
 #include <stdio.h>
 
 static int rule_error(char *error, uint32_t error_len, const char *message)
@@ -29,6 +30,15 @@ static bool match_equal(const struct dppd_match *left, const struct dppd_match *
             left->spec.l4.dst_mask_be == right->spec.l4.dst_mask_be;
     case DPPD_MATCH_REPRESENTED_PORT:
         return left->spec.ethdev_port_id == right->spec.ethdev_port_id;
+    case DPPD_MATCH_UDP_RANGE:
+    case DPPD_MATCH_TCP_RANGE:
+        return left->spec.range.src_first_be == right->spec.range.src_first_be &&
+            left->spec.range.src_last_be == right->spec.range.src_last_be &&
+            left->spec.range.dst_first_be == right->spec.range.dst_first_be &&
+            left->spec.range.dst_last_be == right->spec.range.dst_last_be;
+    case DPPD_MATCH_IP_PROTOCOL:
+        return left->spec.protocol.value == right->spec.protocol.value &&
+            left->spec.protocol.mask == right->spec.protocol.mask;
     }
     return false;
 }
@@ -40,6 +50,7 @@ static bool action_equal(const struct dppd_action *left, const struct dppd_actio
     switch (left->type) {
     case DPPD_ACTION_DROP:
     case DPPD_ACTION_COUNT:
+    case DPPD_ACTION_ALLOW:
         return true;
     case DPPD_ACTION_QUEUE:
         return left->conf.queue_id == right->conf.queue_id;
@@ -95,13 +106,16 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
 
     for (i = 0; i < rule->nb_matches; ++i) {
         const enum dppd_match_type type = rule->matches[i].type;
-        if (type < DPPD_MATCH_ETH || type > DPPD_MATCH_REPRESENTED_PORT)
+        if (type < DPPD_MATCH_ETH || type > DPPD_MATCH_IP_PROTOCOL)
             return rule_error(error, error_len, "unsupported match type");
         if ((seen_matches & (1U << type)) != 0)
             return rule_error(error, error_len, "duplicate match type");
         seen_matches |= 1U << type;
         if (type != DPPD_MATCH_REPRESENTED_PORT) {
-            const uint8_t rank = type == DPPD_MATCH_ETH ? 1U : type == DPPD_MATCH_IPV4 ? 2U : 3U;
+            const uint8_t rank = type == DPPD_MATCH_ETH ? 1U
+                : type == DPPD_MATCH_IPV4               ? 2U
+                : type == DPPD_MATCH_IP_PROTOCOL        ? 3U
+                                                        : 4U;
             if (rank < last_protocol_rank)
                 return rule_error(error, error_len, "protocol matches are out of order");
             last_protocol_rank = rank;
@@ -113,7 +127,16 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
                 return rule_error(error, error_len, "IPv4 must precede L4 matches");
             seen_ipv4 = true;
         }
-        if (type == DPPD_MATCH_UDP || type == DPPD_MATCH_TCP) {
+        if (type == DPPD_MATCH_IP_PROTOCOL && !seen_ipv4)
+            return rule_error(error, error_len, "IP protocol requires a preceding IPv4 match");
+        if (type == DPPD_MATCH_UDP_RANGE || type == DPPD_MATCH_TCP_RANGE) {
+            const struct dppd_match_l4_range *range = &rule->matches[i].spec.range;
+            if (ntohs(range->src_first_be) > ntohs(range->src_last_be) ||
+                ntohs(range->dst_first_be) > ntohs(range->dst_last_be))
+                return rule_error(error, error_len, "port range lower bound exceeds upper bound");
+        }
+        if (type == DPPD_MATCH_UDP || type == DPPD_MATCH_TCP || type == DPPD_MATCH_UDP_RANGE ||
+            type == DPPD_MATCH_TCP_RANGE) {
             if (!seen_ipv4)
                 return rule_error(error, error_len, "UDP/TCP requires a preceding IPv4 match");
             if (seen_l4)
@@ -124,12 +147,15 @@ int dppd_rule_validate(const struct dppd_rule *rule, char *error, uint32_t error
 
     for (i = 0; i < rule->nb_actions; ++i) {
         const enum dppd_action_type type = rule->actions[i].type;
-        if (type < DPPD_ACTION_DROP || type > DPPD_ACTION_REPRESENTED_PORT)
+        if (type < DPPD_ACTION_DROP || type > DPPD_ACTION_ALLOW)
             return rule_error(error, error_len, "unsupported action type");
         if (type != DPPD_ACTION_DROP && (seen_actions & (1U << type)) != 0)
             return rule_error(error, error_len, "duplicate action type");
         seen_actions |= 1U << type;
-        if (type == DPPD_ACTION_DROP || type == DPPD_ACTION_QUEUE || type == DPPD_ACTION_REPRESENTED_PORT) {
+        if (type == DPPD_ACTION_ALLOW && rule->domain != DPPD_RULE_DOMAIN_INGRESS)
+            return rule_error(error, error_len, "allow action requires ingress domain");
+        if (type == DPPD_ACTION_DROP || type == DPPD_ACTION_QUEUE || type == DPPD_ACTION_REPRESENTED_PORT ||
+            type == DPPD_ACTION_ALLOW) {
             fate_actions++;
             if (i + 1U != rule->nb_actions)
                 return rule_error(error, error_len, "fate action must be last");

@@ -56,6 +56,8 @@ static void install(struct dppd_software_backend *backend, const struct dppd_rul
     backends.software = dppd_software_transaction_backend(backend);
     assert(dppd_transaction_init(&transaction, rule->id, &item, 1) == 0);
     assert(dppd_transaction_run(&transaction, &backends) == 0);
+    /** 成功事务也要释放 prepare 记录，不能让测试辅助函数漏掉正式控制面的收尾步骤 */
+    assert(dppd_transaction_finalize(&transaction, &backends) == 0);
 }
 
 int main(void)
