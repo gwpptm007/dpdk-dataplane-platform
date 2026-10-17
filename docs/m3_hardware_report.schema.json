@@ -1,0 +1,493 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "M3 physical hardware evidence report v1",
+  "description": "Optional production v27 planned reset has independent evidence; physical removal and multiple hardware families remain incomplete",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "scope",
+    "status",
+    "success",
+    "complete_m3_validation",
+    "hardware_acceptance",
+    "started_utc",
+    "finished_utc",
+    "capability_matrix",
+    "blockers",
+    "limitations",
+    "cleanup"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "scope": {
+      "const": "physical_m3_hardware"
+    },
+    "status": {
+      "enum": [
+        "blocked",
+        "failed",
+        "partial"
+      ]
+    },
+    "success": {
+      "const": false
+    },
+    "complete_m3_validation": {
+      "const": false
+    },
+    "hardware_acceptance": {
+      "enum": [
+        "not_run",
+        "partial"
+      ]
+    },
+    "started_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_utc": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "in_progress": {
+      "type": "boolean"
+    },
+    "error": {
+      "type": "string"
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "config_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "physical_links_declared": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_directory": {
+      "type": "string"
+    },
+    "artifact_sha256": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/sha256"
+      }
+    },
+    "tool_sha256": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/sha256"
+      }
+    },
+    "protected_management_pci": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "binding": {
+      "type": "object",
+      "required": [
+        "source_root",
+        "build_root",
+        "options",
+        "source_sha256",
+        "binary_sha256"
+      ],
+      "properties": {
+        "source_root": {
+          "type": "string"
+        },
+        "build_root": {
+          "type": "string"
+        },
+        "options": {
+          "type": "object",
+          "required": [
+            "tests",
+            "werror"
+          ],
+          "properties": {
+            "tests": {
+              "const": true
+            },
+            "werror": {
+              "const": true
+            }
+          }
+        },
+        "source_sha256": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "binary_sha256": {
+          "type": "object",
+          "required": [
+            "dppd",
+            "dppctl"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "capability_matrix": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 17,
+      "items": {
+        "$ref": "#/$defs/capability"
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "properties": {
+        "daemon_resumed": {
+          "type": "boolean"
+        },
+        "rule_deleted": {
+          "type": "boolean"
+        },
+        "health_ready": {
+          "type": "boolean"
+        },
+        "scene_preserved": {
+          "type": "boolean"
+        }
+      }
+    },
+    "packet_evidence": {
+      "type": "object",
+      "required": [
+        "packets",
+        "bytes",
+        "byte_exact"
+      ],
+      "properties": {
+        "packets": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 14
+        },
+        "byte_exact": {
+          "const": true
+        }
+      }
+    },
+    "daemon": {
+      "type": "object"
+    },
+    "peer_inventory": {
+      "type": "object"
+    },
+    "planned_reset": {
+      "type": "object",
+      "properties": {
+        "group_port_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65534
+          }
+        },
+        "preserve_scene": {
+          "type": "boolean"
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reset_attempt"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "partial"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "binding",
+          "packet_evidence",
+          "daemon",
+          "peer_inventory"
+        ],
+        "properties": {
+          "hardware_acceptance": {
+            "const": "partial"
+          },
+          "cleanup": {
+            "required": [
+              "daemon_resumed",
+              "rule_deleted",
+              "health_ready"
+            ],
+            "properties": {
+              "daemon_resumed": {
+                "const": true
+              },
+              "rule_deleted": {
+                "const": true
+              },
+              "health_ready": {
+                "const": true
+              },
+              "scene_preserved": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capability_matrix": {
+            "contains": {
+              "properties": {
+                "stage": {
+                  "const": "physical_reset_recovery"
+                },
+                "status": {
+                  "const": "passed"
+                }
+              },
+              "required": [
+                "stage",
+                "status"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "planned_reset"
+        ],
+        "properties": {
+          "planned_reset": {
+            "required": [
+              "group_port_ids",
+              "preserve_scene",
+              "attempts"
+            ],
+            "properties": {
+              "preserve_scene": {
+                "const": false
+              },
+              "attempts": {
+                "minItems": 1,
+                "maxItems": 3,
+                "contains": {
+                  "properties": {
+                    "mode": {
+                      "const": "count"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                },
+                "items": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/reset_attempt"
+                    },
+                    {
+                      "required": [
+                        "before",
+                        "after",
+                        "versions",
+                        "snapshot_sha256",
+                        "packet_evidence",
+                        "cleanup_errors"
+                      ],
+                      "properties": {
+                        "status": {
+                          "const": "passed"
+                        },
+                        "reset_requested": {
+                          "const": true
+                        },
+                        "cleanup_errors": {
+                          "maxItems": 0
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "capability": {
+      "type": "object",
+      "required": [
+        "stage",
+        "status",
+        "capability",
+        "reason",
+        "evidence"
+      ],
+      "properties": {
+        "stage": {
+          "enum": [
+            "discovery",
+            "transfer_pair",
+            "transfer_uplink-vf",
+            "transfer_uplink-sf",
+            "transfer_pf-vf",
+            "transfer_pf-sf",
+            "transfer_vf-vf",
+            "transfer_sf-sf",
+            "count",
+            "age",
+            "shared_count",
+            "cpu_bypass",
+            "physical_removal",
+            "physical_reset_recovery",
+            "mlx5_hardware",
+            "non_mlx5_hardware",
+            "performance"
+          ]
+        },
+        "status": {
+          "enum": [
+            "blocked",
+            "passed",
+            "rejected",
+            "out_of_scope"
+          ]
+        },
+        "capability": {
+          "enum": [
+            "unknown",
+            "supported",
+            "rejected",
+            "not_required"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "reset_attempt": {
+      "type": "object",
+      "required": [
+        "mode",
+        "status",
+        "reset_requested"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "count",
+            "age",
+            "shared_count"
+          ]
+        },
+        "status": {
+          "enum": [
+            "blocked",
+            "failed",
+            "rejected",
+            "passed"
+          ]
+        },
+        "reset_requested": {
+          "type": "boolean"
+        },
+        "before": {
+          "type": "object"
+        },
+        "after": {
+          "type": "object"
+        },
+        "versions": {
+          "type": "object"
+        },
+        "snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "packet_evidence": {
+          "type": "object"
+        },
+        "reverse_packet_evidence": {
+          "type": "object"
+        },
+        "age_before": {
+          "type": "object"
+        },
+        "age_after": {
+          "type": "object"
+        },
+        "cleanup_errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cleanup": {
+          "const": "preserved_unknown_handles_no_delete_or_acknowledge"
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

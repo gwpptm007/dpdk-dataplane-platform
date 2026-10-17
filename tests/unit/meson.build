@@ -83,6 +83,9 @@ test('transfer management protocol and role evidence', transfer_management_test)
 python_test = find_program('python3')
 test('M3 read-only inventory semantics', python_test, args: [meson.current_source_dir() / 'test_m3_inventory.py'])
 
+# 实际管理协议、独立管理接口和物理报文证据的反例只验证门禁，不算实机通过
+test('M3 physical hardware acceptance gates', python_test, args: [meson.current_source_dir() / 'test_m3_hardware.py'])
+
 acl_test = executable('test_acl', 'test_acl.c', dependencies: dppd_core_dep)
 test('compiled ACL and independent reference', acl_test)
 

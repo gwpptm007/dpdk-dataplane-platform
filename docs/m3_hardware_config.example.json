@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "daemon_pid": 12345,
+  "socket": "/absolute/path/FILL-dedicated-test-daemon.sock",
+  "template": "pair",
+  "stages": [
+    "basic",
+    "age",
+    "shared_count"
+  ],
+  "rule_id": 50000,
+  "priority": 10,
+  "eal_devargs": [
+    "0000:03:00.0,FILL-actual-representor-devargs"
+  ],
+  "ports": {
+    "install": {
+      "port_id": 10,
+      "pci_address": "0000:03:00.0",
+      "interface": "FILL-install",
+      "pmd": "FILL-actual-pmd",
+      "device_name": "0000:03:00.0",
+      "firmware": "FILL-actual-firmware",
+      "role": "unknown",
+      "switch_domain": 3
+    },
+    "source": {
+      "port_id": 10,
+      "pci_address": "0000:03:00.0",
+      "interface": "FILL-source",
+      "pmd": "FILL-actual-pmd",
+      "device_name": "0000:03:00.0",
+      "firmware": "FILL-actual-firmware",
+      "role": "unknown",
+      "switch_domain": 3
+    },
+    "destination": {
+      "port_id": 12,
+      "pci_address": "0000:03:00.0",
+      "interface": "FILL-destination",
+      "pmd": "FILL-actual-pmd",
+      "device_name": "0000:03:00.0",
+      "firmware": "FILL-actual-firmware",
+      "role": "unknown",
+      "switch_domain": 3
+    }
+  },
+  "peer": {
+    "ssh_argv": [
+      "ssh",
+      "-o",
+      "BatchMode=yes",
+      "FILL-user@FILL-peer"
+    ],
+    "tx_interface": "FILL-tx",
+    "rx_interface": "FILL-rx"
+  },
+  "physical_links": [
+    "FILL-source endpoint -> real physical/function data path -> peer tx interface and cable identifier",
+    "FILL-destination endpoint -> real physical/function data path -> peer rx interface and cable identifier"
+  ],
+  "planned_reset": {
+    "allow_full_group_reset": false,
+    "snapshot_path": "/absolute/path/FILL-actual-daemon-state.bin",
+    "modes": [
+      "count",
+      "shared_count",
+      "age"
+    ],
+    "device_ports": [
+      {
+        "port_id": 10,
+        "pci_address": "0000:03:00.0",
+        "interface": "FILL-source",
+        "pmd": "FILL-actual-pmd",
+        "device_name": "0000:03:00.0",
+        "firmware": "FILL-actual-firmware",
+        "role": "unknown",
+        "switch_domain": 3
+      },
+      {
+        "port_id": 12,
+        "pci_address": "0000:03:00.0",
+        "interface": "FILL-destination",
+        "pmd": "FILL-actual-pmd",
+        "device_name": "0000:03:00.0",
+        "firmware": "FILL-actual-firmware",
+        "role": "unknown",
+        "switch_domain": 3
+      }
+    ]
+  },
+  "manual_physical_removal": {
+    "automated": false,
+    "operator": "FILL-responsible-operator",
+    "target_pci_address": "0000:03:00.0",
+    "target_port_id": 12,
+    "out_of_band_management": "FILL-independent-management-link-and-controller",
+    "physical_operation": "FILL-approved-real-device-or-power-operation",
+    "evidence_directory": "/absolute/path/FILL-manual-evidence"
+  }
+}

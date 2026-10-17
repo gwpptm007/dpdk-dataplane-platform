@@ -228,6 +228,11 @@ v5 单快照和协议 v26；三套各 60/60 单测、四步核心回归及 24 �
 非 mlx5 除缺少实机证据外，当前还缺生产接口身份采集和可信角色适配；pair 控制层允许
 未知角色不代表其他命名模板或现成硬件 runner 已支持，不能把该软件缺口只登记为等待硬件。
 
+新增 [独立实机验收工具](m3_hardware_acceptance.md)：只读预检、外部报文、COUNT、AGE、
+共享 COUNT 与可选完整组主动复位 runner、能力矩阵和报告 schema。三套各 70/70 单测、
+58 项门禁、六步 M3 和 31 组模拟通过，255 项源码一致。两机实际预检仍为 blocked，
+报告通过 schema 核对，未执行物理 reset；真实移除和双类设备实机证据继续保留缺口。
+
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。
 
 验收：至少在 NVIDIA mlx5/BlueField 和一个非 mlx5 PMD 上形成可复现实机报告；证明 offloaded packets 不经过 CPU worker；端点移除和 device reset 后可 reconciliation。

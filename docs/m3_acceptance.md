@@ -61,7 +61,19 @@ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 杀掉负责清理的父进程而留下内层测试或 daemon。其他 M3 步骤仍有各自的超时保护。
 ASan/UBSan 本轮关闭 LeakSanitizer，实际 mbuf 归还由 worker 的内存池记录另行核对。
 
-## 当前正式设备事件与主动复位轮次
+## 最新硬件验收工具轮次
+
+[独立硬件入口](m3_hardware_acceptance.md) 已提供只读预检、外部报文 helper、COUNT/AGE/
+共享 COUNT 生命周期、可选完整组主动复位、能力矩阵及报告 schema。正式管理 socket 身份、
+pidfd、CPU 暂停窗口、外部 PCAP、精确版本和管理 PCI parent 共同约束操作与证据。
+部分复位失败保留现场，真实移除仍需人工准备，单机阶段成功最多记为 partial。
+
+三套同版本构建各 70/70 单测，其中各含 58 项硬件门禁测试；六步 M3、四步核心软件回归、
+四组正式事件和 31 组模拟通过，255 项源码摘要一致。135/134 真实只读预检均为 blocked，
+两份报告通过 schema 验证，工具摘要与已测源码一致；未进行任何真实 reset 或线缆正向验收。
+本轮只新增工具与测试，没有改动上一轮通过两套完整 TAP 的 C 数据面。
+
+## 正式设备事件与主动复位轮次
 
 [正式协调器](m3_device_recovery.md) 已接通 v27 设备状态、完整端口组主动复位、临时拓扑
 身份核对、共享先行重建、失败补偿和 worker 实际就绪后发布 READY。
