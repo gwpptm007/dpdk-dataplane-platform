@@ -7,6 +7,7 @@
 #include "dppd/rte_flow_backend.h"
 #include "dppd/rule_repository.h"
 #include "dppd/software_backend.h"
+#include "dppd/routing.h"
 
 /** 每批最多处理四条已有规则，限制临时资源需求，也让请求和结果保持固定的小规模 */
 #define DPPD_CONTROL_BATCH_UPDATE_MAX 4U
@@ -31,6 +32,8 @@ struct dppd_control_service {
     /* 硬件 rte_flow 与等价软件 classifier 分别保存 actual state，同一版本只能存在其一 */
     struct dppd_rte_flow_backend rte_flow;
     struct dppd_software_backend software;
+    /** 可选三层配置由控制面拥有，runtime 只借用其中的路由器 */
+    struct dppd_routing_service *routing;
     uint64_t next_transaction_id;
     /* persistence path 由 service 动态持有；NULL 表示未启用自动 snapshot */
     char *persistence_path;

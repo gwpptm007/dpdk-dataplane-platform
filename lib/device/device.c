@@ -236,7 +236,8 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
         port->port_id = cfg->ports[i];
         atomic_init(&port->removed, false);
         atomic_init(&port->link_state, DPPD_LINK_UNKNOWN);
-        port->peer_port_id = cfg->ports[pair_base + (i % 2U == 0 ? 1U : 0U)];
+        port->peer_port_id =
+            cfg->routing_path[0] == '\0' ? cfg->ports[pair_base + (i % 2U == 0 ? 1U : 0U)] : UINT16_MAX;
         port->socket_id = port_socket(port->port_id);
     }
 

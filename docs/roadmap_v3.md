@@ -132,6 +132,11 @@ TAP 命名空间验证无 `CAP_NET_ADMIN` 的进程可以读取和订阅链路�
 
 ## M2：可组合软件 pipeline
 
+2026-10-17 完成 [IPv4 三层转发闭环](ipv4_routing.md)：路由与静态邻居原子快照、
+最长前缀、改写、显式 daemon 模式、CLI 管理和持久重启恢复均已接通。两套构建各
+40/40 单测，三 TAP 真实收发和存储故障、四端口在线更新及旧二层回归通过。
+本阶段只覆盖 IPv4 LPM/rewrite/static-neighbor，后续 ACL、NAT 和其他 stage 未计为完成。
+
 交付：exact match、ACL、LPM、rewrite、neighbor、conntrack/NAT 独立 stage；批量计数；IPv6 和常用 tunnel parser。
 
 其中 software backend 需优先覆盖 Ethernet/IPv4/UDP/TCP、DROP/MARK/COUNT；

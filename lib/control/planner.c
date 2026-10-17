@@ -66,6 +66,8 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
     plan->install_port_id = context->install_port_id;
     if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0)
         return reject(plan, DPPD_PLAN_REASON_INVALID_RULE, -EINVAL);
+    if (context->ipv4_routing && rule->domain != DPPD_RULE_DOMAIN_INGRESS)
+        return reject(plan, DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK, -ENOTSUP);
 
     if (dppd_topology_find(context->topology, context->install_port_id) == NULL)
         return reject(plan, DPPD_PLAN_REASON_ENDPOINT_NOT_FOUND, -ENOENT);

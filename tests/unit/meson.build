@@ -92,6 +92,21 @@ pipeline_test = executable(
 )
 test('pipeline snapshot', pipeline_test)
 
+# 最长前缀与线性参考对照，验证路由和邻居联合发布及慢读者的有界回收
+ipv4_router_test = executable('test_ipv4_router', 'test_ipv4_router.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=calloc'])
+test('IPv4 routing configuration and lookup', ipv4_router_test, timeout: 30)
+
+# 每个头部拆分点都核对真实 mbuf 改写，并检查 TTL、坏校验和及复制失败保留原包
+ipv4_rewrite_test = executable('test_ipv4_rewrite', 'test_ipv4_rewrite.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=rte_pktmbuf_copy'])
+test('IPv4 routed packet rewrite', ipv4_rewrite_test)
+
+# 完整配置先落盘后发布，验证单实例锁、损坏拒绝和替换后同步失败的显式修复
+routing_test = executable('test_routing', 'test_routing.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=pwrite64', '-Wl,--wrap=fsync', '-Wl,--wrap=rename', '-Wl,--wrap=renameat2'])
+test('durable IPv4 routing service', routing_test)
+
 software_backend_test = executable(
   'test_software_backend',
   'test_software_backend.c',
@@ -208,6 +223,7 @@ test('rule failure history and pagination', rule_history_test)
 dppctl_test = executable(
   'test_dppctl',
   'test_dppctl.c',
+  '../../app/dppctl/routing_cli.c',
   include_directories: dppd_inc,
 )
 test('dppctl batch update arguments', dppctl_test)

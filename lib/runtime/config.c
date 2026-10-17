@@ -89,6 +89,7 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"recovery-path", required_argument, NULL, 1005},
         {"tap-owner-cookie", no_argument, NULL, 1006},
         {"recovery-monitor", required_argument, NULL, 1007},
+        {"ipv4-routing", required_argument, NULL, 1008},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -175,6 +176,11 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
                 return DPPD_CONFIG_ERROR;
             strcpy(cfg->recovery_monitor, optarg);
             break;
+        case 1008:
+            if (optarg == NULL || *optarg == '\0' || strlen(optarg) >= sizeof(cfg->routing_path))
+                return DPPD_CONFIG_ERROR;
+            strcpy(cfg->routing_path, optarg);
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -215,8 +221,12 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
         return -1;
     }
 
-    if (cfg->nb_ports < 2 || cfg->nb_ports > DPPD_MAX_PORTS || (cfg->nb_ports & 1U) != 0) {
-        snprintf(error, error_len, "ports must contain an even number of entries between 2 and %u", DPPD_MAX_PORTS);
+    if (cfg->nb_ports == 0 || cfg->nb_ports > DPPD_MAX_PORTS ||
+        (cfg->routing_path[0] == '\0' && (cfg->nb_ports < 2 || (cfg->nb_ports & 1U) != 0))) {
+        if (cfg->routing_path[0] != '\0')
+            snprintf(error, error_len, "IPv4 routing requires between 1 and %u ports", DPPD_MAX_PORTS);
+        else
+            snprintf(error, error_len, "ports must contain an even number of entries between 2 and %u", DPPD_MAX_PORTS);
         return -1;
     }
     if (cfg->nb_queues == 0 || cfg->nb_queues > DPPD_MAX_WORKERS) {
@@ -270,6 +280,7 @@ void dppd_config_print_usage(const char *program)
     printf("  --control-socket P  management socket path (default %s)\n", DPPD_MANAGEMENT_DEFAULT_SOCKET);
     printf("  --rule-capacity N   maximum number of desired rules (default %u)\n", DPPD_DEFAULT_RULE_CAPACITY);
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");
+    printf("  --ipv4-routing P    enable IPv4 routing with a durable route and static-neighbor snapshot\n");
     printf("  --recovery-path P   guard hardware replay after an unclean exit (requires state-path)\n");
     printf("  --tap-owner-cookie require native TAP owner cookie (patched driver and recovery-path)\n");
     printf("  --recovery-monitor P require a live monitor session before hardware installation\n");
@@ -289,4 +300,6 @@ void dppd_config_dump(const struct dppd_config *cfg)
         cfg->recovery_path[0] == '\0' ? "disabled" : cfg->recovery_path,
         cfg->recovery_monitor[0] == '\0' ? "disabled" : cfg->recovery_monitor, cfg->tap_owner_cookie ? "on" : "off",
         cfg->promiscuous ? "on" : "off", cfg->enable_pdump ? "on" : "off");
+    if (cfg->routing_path[0] != '\0')
+        printf("[dppd] forwarding=ipv4-routing routing-path=%s\n", cfg->routing_path);
 }

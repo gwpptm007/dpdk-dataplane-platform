@@ -30,6 +30,7 @@ int main(void)
     assert(config.recovery_path[0] == '\0');
     assert(!config.tap_owner_cookie);
     assert(config.recovery_monitor[0] == '\0');
+    assert(config.routing_path[0] == '\0');
     assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
 
     assert(dppd_config_parse(5, with_state, &config) == DPPD_CONFIG_OK);
@@ -66,5 +67,12 @@ int main(void)
     assert(config.tap_owner_cookie && dppd_config_validate(&config, error, sizeof(error)) == 0);
     with_recovery[4] = "";
     assert(dppd_config_parse(5, with_recovery, &config) == DPPD_CONFIG_ERROR);
+    char *routing[] = {"dppd", "--ipv4-routing", "/tmp/routes", "--ports", "0,2,7"};
+    assert(dppd_config_parse(5, routing, &config) == DPPD_CONFIG_OK);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0 && config.nb_ports == 3);
+    config.routing_path[0] = '\0';
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    routing[2] = "";
+    assert(dppd_config_parse(5, routing, &config) == DPPD_CONFIG_ERROR);
     return 0;
 }

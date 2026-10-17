@@ -1,5 +1,20 @@
 # 集成验收
 
+## IPv4 静态三层转发
+
+```sh
+python3 tests/integration/ipv4_traffic.py --build-dir build
+sudo python3 tests/integration/ipv4_routing.py --build-dir build
+sudo python3 tests/integration/ipv4_routing.py --build-dir build-native
+```
+
+2026-10-17，两套 DPDK 21.11.9 构建各 40/40 单测通过。四端口正式 worker 一队列、
+两队列检查 17 类报文、1000 次在线更新、共享/间接/外部缓冲复制和零泄漏。daemon
+测试在自建网络命名空间的三个 TAP 上验证完整报文、路由/邻居 CLI、原子替换、软件
+规则优先级、SIGKILL 重启、坏文件/映射错配拒绝、文件/目录同步故障及 flush 修复。
+目录同步失败后的崩溃恢复按实际完整磁盘版本验收，不假定错误响应表示磁盘回滚。
+故障包装只链接测试入口，测试不操作实体网卡，详见 [三层转发](../../docs/ipv4_routing.md)。
+
 ## 写入者登记与只读恢复交接
 
 ```sh

@@ -15,7 +15,8 @@
  * v15 增加失败事件历史分页；v14 增加历史安装耗时分布；v13 增加请求指标与失败分类
  * 因此结构体布局变化必须提升版本，旧客户端会被明确拒绝，而不是错位解释 payload
  */
-#define DPPD_MANAGEMENT_VERSION 15U
+/** v16 扩展三层转发统计，后续路由配置命令使用同一版 ABI，旧版客户端必须拒绝 */
+#define DPPD_MANAGEMENT_VERSION 16U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -70,6 +71,14 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_RULE_LATENCY,
     /** 只读最近失败历史，完整分页在恢复隔离期间仍可使用 */
     DPPD_MANAGEMENT_RULE_HISTORY,
+    DPPD_MANAGEMENT_ROUTING_STATUS,
+    DPPD_MANAGEMENT_ROUTING_GET,
+    DPPD_MANAGEMENT_ROUTING_REPLACE,
+    DPPD_MANAGEMENT_ROUTE_SET,
+    DPPD_MANAGEMENT_ROUTE_DELETE,
+    DPPD_MANAGEMENT_NEIGHBOR_SET,
+    DPPD_MANAGEMENT_NEIGHBOR_DELETE,
+    DPPD_MANAGEMENT_ROUTING_FLUSH,
 };
 
 /*
@@ -84,6 +93,18 @@ struct dppd_management_request {
     uint32_t size;       /* 必须等于发送方 sizeof(*request) */
     uint64_t request_id; /* 客户端生成；响应原样回显，用于请求/响应配对 */
     union {
+        struct {
+            uint64_t expected_generation;
+            struct dppd_ipv4_configuration configuration;
+        } routing_replace;
+        struct {
+            uint64_t expected_generation;
+            struct dppd_ipv4_route entry;
+        } route;
+        struct {
+            uint64_t expected_generation;
+            struct dppd_ipv4_neighbor entry;
+        } neighbor;
         struct {
             uint16_t port_id;
             uint16_t queue_id;
@@ -259,6 +280,7 @@ enum dppd_management_health_blocker {
     DPPD_HEALTH_RECOVERY_REQUIRED = 1U << 7,
     DPPD_HEALTH_PERSISTENCE_DIRTY = 1U << 8,
     DPPD_HEALTH_WORKER_FAILED = 1U << 9,
+    DPPD_HEALTH_ROUTING_DIRTY = 1U << 10,
 };
 
 /**
@@ -288,6 +310,7 @@ struct dppd_management_health {
     uint64_t persisted_generation;
     int32_t persistence_last_error;
     int32_t recovery_last_error;
+    struct dppd_routing_status routing;
 };
 
 /** 将启动快照与本进程的规则校验记录一起呈现，未知能力不能伪装成驱动已经支持 */
@@ -307,6 +330,8 @@ struct dppd_management_response {
     int32_t status;
     uint32_t reserved;
     union {
+        struct dppd_routing_status routing_status;
+        struct dppd_ipv4_configuration routing;
         struct {
             /* repository 的全局单调 generation，可用于快速判断 desired state 是否变化 */
             uint64_t repository_generation;

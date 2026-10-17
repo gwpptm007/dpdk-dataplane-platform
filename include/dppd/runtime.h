@@ -48,6 +48,8 @@ struct dppd_runtime {
      * 启动前设置，并在所有 worker 停止、注销 QSBR 后才允许 control 销毁其对象
      */
     struct dppd_software_backend *software_backend;
+    /** 可选路由器由控制面持有，只在工作线程启动前绑定，退出并注销读者后才能释放 */
+    struct dppd_ipv4_router *ipv4_router;
     struct dppd_worker workers[DPPD_MAX_WORKERS];
     uint16_t nb_workers;
     /** 停止请求只通知线程结束循环，不表示线程已经退出；释放共享资源前仍需等待 */
@@ -59,6 +61,7 @@ struct dppd_runtime {
 int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cfg);
 /** 设置报文路径借用的软件 backend；不转移所有权，也不允许 worker 运行中热替换 */
 void dppd_runtime_set_software_backend(struct dppd_runtime *runtime, struct dppd_software_backend *software_backend);
+void dppd_runtime_set_ipv4_router(struct dppd_runtime *runtime, struct dppd_ipv4_router *router);
 int dppd_runtime_start(struct dppd_runtime *runtime);
 /** 检查已启动的线程是否异常结束；正常停止和设备移除由各自的退出流程处理 */
 int dppd_runtime_check_workers(const struct dppd_runtime *runtime);

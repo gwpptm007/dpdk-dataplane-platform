@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <net/if.h>
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -224,6 +225,37 @@ static int bind_monitor(const struct dppd_config *config, struct dppd_recovery_g
     return dppd_monitor_client_open(client, config->recovery_monitor, guard, &ports);
 }
 
+/** 启动时绑定稳定端口映射，恢复配置不能按可复用的 DPDK 编号猜测设备或 TAP */
+static int setup_ipv4_routing(struct dppd_runtime *runtime, struct dppd_control_service *control)
+{
+    if (runtime->config.routing_path[0] == '\0')
+        return 0;
+    struct dppd_routing_binding bindings[DPPD_MAX_PORTS] = {0};
+    for (uint16_t i = 0; i < runtime->devices.nb_ports; ++i) {
+        const struct dppd_port *port = &runtime->devices.ports[i];
+        const struct dppd_endpoint *endpoint = dppd_topology_find(&runtime->devices.topology, port->port_id);
+        if (endpoint == NULL || !port->identity.device_name_known || !rte_is_valid_assigned_ether_addr(&port->mac))
+            return -ENODEV;
+        bindings[i].port_id = port->port_id;
+        strcpy(bindings[i].device, port->identity.device_name);
+        strcpy(bindings[i].driver, endpoint->driver_name);
+        if (strcmp(endpoint->driver_name, "net_tap") == 0) {
+            struct rte_eth_dev_info information;
+            int rc = rte_eth_dev_info_get(port->port_id, &information);
+            if (rc != 0)
+                return rc;
+            if (if_indextoname(information.if_index, bindings[i].ifname) == NULL)
+                return -errno;
+        }
+    }
+    int rc = dppd_routing_open(&control->routing, runtime->config.routing_path, bindings, runtime->devices.nb_ports);
+    if (rc == 0) {
+        dppd_runtime_set_ipv4_router(runtime, dppd_routing_router(control->routing));
+        printf("[dppd] IPv4 routing ready: path=%s\n", runtime->config.routing_path);
+    }
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     /* 受控入口必须先封住进程派生和权限变化，再让 EAL 创建线程或访问 TAP */
@@ -271,6 +303,14 @@ int main(int argc, char **argv)
         goto cleanup_eal;
     }
 
+    const char *other_storage[] = {config.state_path, config.recovery_path, config.recovery_monitor,
+        config.control_socket};
+    int routing_paths_error =
+        dppd_routing_check_paths(config.routing_path, other_storage, sizeof(other_storage) / sizeof(other_storage[0]));
+    if (routing_paths_error != 0) {
+        fprintf(stderr, "[dppd] IPv4 storage paths refused: %d\n", routing_paths_error);
+        goto cleanup_eal;
+    }
     dppd_config_dump(&config);
     /**
      * EAL 已完成参数和设备探测，但本项目尚未配置队列、启动 worker 或重放规则
@@ -318,6 +358,11 @@ int main(int argc, char **argv)
      * 绑定临时对象，也不能在 runtime_start 后替换该地址
      */
     dppd_runtime_set_software_backend(&runtime, &control.software);
+    int routing_error = setup_ipv4_routing(&runtime, &control);
+    if (routing_error != 0) {
+        fprintf(stderr, "[dppd] IPv4 routing restore refused: %d\n", routing_error);
+        goto cleanup_control;
+    }
     /** 启动重放也会安装硬件规则，所以必须在读取并重放快照之前绑定保护 */
     if (recovery_guard.fd >= 0) {
         recovery_context.native_owner = config.tap_owner_cookie;

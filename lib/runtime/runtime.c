@@ -52,7 +52,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     }
     runtime->nb_workers = worker_index;
 
-    rc = dppd_snapshot_build_port_pairs(cfg, &runtime->snapshot);
+    rc = cfg->routing_path[0] == '\0' ? dppd_snapshot_build_port_pairs(cfg, &runtime->snapshot) : 0;
     if (rc != 0)
         return rc;
     rc = dppd_devices_init(&runtime->devices, cfg);
@@ -76,6 +76,12 @@ void dppd_runtime_set_software_backend(struct dppd_runtime *runtime, struct dppd
     /* 不加锁是刻意的：调用契约要求只在 runtime_start 前绑定，运行期禁止热替换 */
     if (runtime != NULL)
         runtime->software_backend = software_backend;
+}
+
+void dppd_runtime_set_ipv4_router(struct dppd_runtime *runtime, struct dppd_ipv4_router *router)
+{
+    if (runtime != NULL && !runtime->workers_started)
+        runtime->ipv4_router = router;
 }
 
 int dppd_runtime_start(struct dppd_runtime *runtime)

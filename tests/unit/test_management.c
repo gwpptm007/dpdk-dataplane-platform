@@ -1,8 +1,10 @@
 #define _GNU_SOURCE
 #include <assert.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -134,6 +136,77 @@ static void test_socket_round_trip(struct dppd_management_server *server, struct
     assert(access(path, F_OK) != 0 && errno == ENOENT);
 }
 
+/** 通过实际管理分发验证单项修改、整表替换、旧版本保护和隔离状态的只读边界 */
+static void test_routing_management(struct dppd_control_service *control, const struct dppd_device_set *devices)
+{
+    struct dppd_management_request request;
+    struct dppd_management_response response;
+    char directory[] = "/tmp/dppd-routing-management-XXXXXX", path[160], lock[168];
+    assert(mkdtemp(directory) != NULL);
+    snprintf(path, sizeof(path), "%s/routes", directory);
+    snprintf(lock, sizeof(lock), "%s.lock", path);
+    initialize_request(&request, DPPD_MANAGEMENT_ROUTING_STATUS);
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && !response.payload.routing_status.enabled);
+    const struct dppd_routing_binding binding = {.port_id = 5, .device = "test5", .driver = "net_ring"};
+    assert(dppd_routing_open(&control->routing, path, &binding, 1) == 0);
+    initialize_request(&request, DPPD_MANAGEMENT_HEALTH_GET);
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.health.routing.enabled);
+    assert(response.payload.health.routing.generation == 1 && !response.payload.health.ready);
+    initialize_request(&request, DPPD_MANAGEMENT_NEIGHBOR_SET);
+    request.payload.neighbor.expected_generation = 1;
+    request.payload.neighbor.entry.port_id = 5;
+    request.payload.neighbor.entry.address_be = htonl(0xc0000201);
+    request.payload.neighbor.entry.mac[0] = 2;
+    request.payload.neighbor.entry.mac[5] = 1;
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.routing_status.generation == 2);
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == -ESTALE && response.payload.routing_status.generation == 2);
+    initialize_request(&request, DPPD_MANAGEMENT_ROUTE_SET);
+    request.payload.route.expected_generation = 2;
+    request.payload.route.entry.port_id = 5;
+    request.payload.route.entry.gateway_be = htonl(0xc0000201);
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.routing_status.generation == 3);
+    request.payload.route.expected_generation = 3;
+    request.payload.route.entry.port_id = 6;
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status != 0 && response.payload.routing_status.generation == 3);
+    initialize_request(&request, DPPD_MANAGEMENT_ROUTING_GET);
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.routing.route_count == 1);
+    assert(response.payload.routing.neighbor_count == 1 && response.payload.routing.routes[0].port_id == 5);
+    initialize_request(&request, DPPD_MANAGEMENT_ROUTE_DELETE);
+    request.payload.route.expected_generation = 3;
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.routing_status.generation == 4);
+    request.payload.route.expected_generation = 4;
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == -ENOENT);
+    initialize_request(&request, DPPD_MANAGEMENT_NEIGHBOR_DELETE);
+    request.payload.neighbor.expected_generation = 4;
+    request.payload.neighbor.entry.port_id = 5;
+    request.payload.neighbor.entry.address_be = htonl(0xc0000201);
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.routing_status.generation == 5);
+    initialize_request(&request, DPPD_MANAGEMENT_ROUTING_REPLACE);
+    request.payload.routing_replace.expected_generation = 5;
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.routing_status.generation == 6);
+    control->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == -EUCLEAN);
+    initialize_request(&request, DPPD_MANAGEMENT_ROUTING_GET);
+    assert(dppd_management_handle(control, devices, NULL, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.routing.generation == 6);
+    control->recovery_state = DPPD_CONTROL_RECOVERY_READY;
+    assert(dppd_routing_close(control->routing) == 0);
+    control->routing = NULL;
+    assert(unlink(path) == 0 && unlink(lock) == 0 && rmdir(directory) == 0);
+}
+
 int main(void)
 {
     const struct dppd_flow_api api = {
@@ -175,6 +248,7 @@ int main(void)
     devices.ports[0].capabilities.rss_offloads = 0x11;
     devices.ports[0].configured_rss_hf = 0x1;
     assert(dppd_control_init(&control, &topology, 4, &api) == 0);
+    test_routing_management(&control, &devices);
 
     /* 先覆盖真实 socket framing/权限/清理，再直接测试各 operation 的业务映射 */
     test_socket_round_trip(&server, &control, &devices);

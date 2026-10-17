@@ -19,6 +19,7 @@ dppd_sources = files(
   'lib/control/rule.c',
   'lib/control/rule_repository.c',
   'lib/control/persistence.c',
+  'lib/control/routing.c',
   'lib/control/recovery_guard.c',
   'lib/control/recovery_inspect.c',
   'lib/control/recovery_plan.c',
@@ -37,6 +38,8 @@ dppd_sources = files(
   'lib/dataplane/packet.c',
   'lib/dataplane/packet_mbuf.c',
   'lib/dataplane/pipeline.c',
+  'lib/dataplane/ipv4_router.c',
+  'lib/dataplane/ipv4_rewrite.c',
   'lib/dataplane/software_backend.c',
   'lib/dataplane/worker.c',
   'lib/offload/rte_flow.c',
@@ -72,6 +75,7 @@ executable(
 executable(
   'dppctl',
   'app/dppctl/main.c',
+  'app/dppctl/routing_cli.c',
   include_directories: dppd_inc,
   install: false,
 )

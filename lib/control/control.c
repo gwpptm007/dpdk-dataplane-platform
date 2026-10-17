@@ -266,6 +266,7 @@ int dppd_control_probe_rule(struct dppd_control_service *service, uint16_t insta
     candidate.generation = 0;
     candidate.fallback = DPPD_FALLBACK_REQUIRE_HARDWARE;
     context.topology = service->topology;
+    context.ipv4_routing = service->routing != NULL;
     context.install_port_id = install_port_id;
     context.hardware_available = true;
     rc = dppd_plan_rule(&context, &candidate, &plan);
@@ -285,8 +286,21 @@ int dppd_control_fini(struct dppd_control_service *service)
 
     if (service == NULL)
         return -EINVAL;
-    if (service->recovery_state == DPPD_CONTROL_RECOVERY_READY && service->persistence_dirty)
-        persistence_rc = control_flush_impl(service);
+    if (service->routing != NULL) {
+        struct dppd_routing_status status;
+        dppd_routing_status(service->routing, &status);
+        rc = dppd_routing_close(service->routing);
+        if (rc != 0)
+            return rc;
+        service->routing = NULL;
+        if (status.dirty)
+            persistence_rc = -EUCLEAN;
+    }
+    if (service->recovery_state == DPPD_CONTROL_RECOVERY_READY && service->persistence_dirty) {
+        int flush_error = control_flush_impl(service);
+        if (persistence_rc == 0)
+            persistence_rc = flush_error;
+    }
     rc = dppd_rte_flow_backend_fini(&service->rte_flow);
     if (rc != 0)
         return rc;
@@ -387,6 +401,7 @@ static int control_restore_impl(struct dppd_control_service *service, const char
 
         memset(&planner_context, 0, sizeof(planner_context));
         planner_context.topology = service->topology;
+        planner_context.ipv4_routing = service->routing != NULL;
         planner_context.install_port_id = snapshot.rules[i].install_port_id;
         planner_context.hardware_available = true;
         planner_context.software_equivalent = dppd_software_backend_rule_supported(&snapshot.rules[i]);
@@ -604,6 +619,7 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
 
     candidate.generation = dppd_rule_repository_generation(&service->rules) + 1U;
     planner_context.topology = service->topology;
+    planner_context.ipv4_routing = service->routing != NULL;
     planner_context.install_port_id = install_port_id;
     planner_context.hardware_available = true;
     planner_context.software_equivalent = dppd_software_backend_rule_supported(&candidate);
@@ -768,6 +784,7 @@ static int control_create_batch_impl(struct dppd_control_service *service,
         items[i].rule.generation = base_generation + i + 1U;
         memset(&planner_context, 0, sizeof(planner_context));
         planner_context.topology = service->topology;
+        planner_context.ipv4_routing = service->routing != NULL;
         planner_context.install_port_id = requests[i].install_port_id;
         planner_context.hardware_available = true;
         planner_context.software_equivalent = dppd_software_backend_rule_supported(&items[i].rule);
@@ -1102,6 +1119,7 @@ static int control_update_batch_impl(struct dppd_control_service *service,
         if (dppd_rule_validate(&candidates[i], validation_error, sizeof(validation_error)) != 0)
             return -EINVAL;
         context.topology = service->topology;
+        context.ipv4_routing = service->routing != NULL;
         context.install_port_id = requests[i].install_port_id;
         context.hardware_available = true;
         context.software_equivalent = dppd_software_backend_rule_supported(&candidates[i]);
@@ -1150,6 +1168,7 @@ static int control_update_batch_impl(struct dppd_control_service *service,
                 struct dppd_planner_context context = {0};
 
                 context.topology = service->topology;
+                context.ipv4_routing = service->routing != NULL;
                 context.install_port_id = requests[i].install_port_id;
                 context.software_equivalent = true;
                 rc = dppd_plan_rule(&context, &items[i].rule, &items[i].plan);

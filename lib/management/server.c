@@ -115,6 +115,9 @@ static void build_health(const struct dppd_control_service *control, const struc
         output->blockers |= DPPD_HEALTH_RECOVERY_REQUIRED;
     if (persistence.enabled && persistence.dirty)
         output->blockers |= DPPD_HEALTH_PERSISTENCE_DIRTY;
+    dppd_routing_status(control->routing, &output->routing);
+    if (output->routing.dirty)
+        output->blockers |= DPPD_HEALTH_ROUTING_DIRTY;
     if (runtime == NULL) {
         output->blockers |= DPPD_HEALTH_NO_RUNTIME;
         return;
@@ -171,6 +174,76 @@ static void build_health(const struct dppd_control_service *control, const struc
     output->ready = output->blockers == 0;
 }
 
+/** 单条管理修改也在完整副本上执行，路由和邻居的读取与提交共用精确全局版本 */
+static int routing_change(struct dppd_routing_service *service, const struct dppd_management_request *request)
+{
+    struct dppd_routing_status status;
+    dppd_routing_status(service, &status);
+    if (!status.enabled)
+        return -ENODEV;
+    if (status.dirty)
+        return -EUCLEAN;
+    bool route = request->operation == DPPD_MANAGEMENT_ROUTE_SET || request->operation == DPPD_MANAGEMENT_ROUTE_DELETE;
+    bool remove =
+        request->operation == DPPD_MANAGEMENT_ROUTE_DELETE || request->operation == DPPD_MANAGEMENT_NEIGHBOR_DELETE;
+    uint64_t expected =
+        route ? request->payload.route.expected_generation : request->payload.neighbor.expected_generation;
+    if (expected == 0)
+        return -EINVAL;
+    if (expected != status.generation)
+        return -ESTALE;
+    struct dppd_ipv4_configuration configuration;
+    int rc = dppd_routing_get(service, &configuration);
+    if (rc != 0)
+        return rc;
+    if (route) {
+        const struct dppd_ipv4_route *entry = &request->payload.route.entry;
+        if (entry->reserved != 0 || entry->depth > 32 || (remove && (entry->gateway_be != 0 || entry->port_id != 0)))
+            return -EINVAL;
+        uint32_t i;
+        for (i = 0; i < configuration.route_count; ++i)
+            if (configuration.routes[i].prefix_be == entry->prefix_be && configuration.routes[i].depth == entry->depth)
+                break;
+        if (remove) {
+            if (i == configuration.route_count)
+                return -ENOENT;
+            memmove(configuration.routes + i, configuration.routes + i + 1,
+                (configuration.route_count - i - 1) * sizeof(*entry));
+            configuration.route_count--;
+        } else {
+            if (i == DPPD_IPV4_ROUTE_LIMIT)
+                return -ENOSPC;
+            configuration.routes[i] = *entry;
+            if (i == configuration.route_count)
+                configuration.route_count++;
+        }
+    } else {
+        const struct dppd_ipv4_neighbor *entry = &request->payload.neighbor.entry;
+        const uint8_t zero[6] = {0};
+        if (remove && memcmp(entry->mac, zero, sizeof(zero)) != 0)
+            return -EINVAL;
+        uint32_t i;
+        for (i = 0; i < configuration.neighbor_count; ++i)
+            if (configuration.neighbors[i].port_id == entry->port_id &&
+                configuration.neighbors[i].address_be == entry->address_be)
+                break;
+        if (remove) {
+            if (i == configuration.neighbor_count)
+                return -ENOENT;
+            memmove(configuration.neighbors + i, configuration.neighbors + i + 1,
+                (configuration.neighbor_count - i - 1) * sizeof(*entry));
+            configuration.neighbor_count--;
+        } else {
+            if (i == DPPD_IPV4_NEIGHBOR_LIMIT)
+                return -ENOSPC;
+            configuration.neighbors[i] = *entry;
+            if (i == configuration.neighbor_count)
+                configuration.neighbor_count++;
+        }
+    }
+    return dppd_routing_replace(service, expected, &configuration);
+}
+
 static void build_rule_summary(const struct dppd_rule *rule, struct dppd_management_rule_summary *summary)
 {
     uint16_t i;
@@ -219,7 +292,8 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS && request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY &&
         request->operation != DPPD_MANAGEMENT_HEALTH_GET && request->operation != DPPD_MANAGEMENT_CAPABILITY_GET &&
         request->operation != DPPD_MANAGEMENT_RULE_METRICS && request->operation != DPPD_MANAGEMENT_RULE_LATENCY &&
-        request->operation != DPPD_MANAGEMENT_RULE_HISTORY) {
+        request->operation != DPPD_MANAGEMENT_RULE_HISTORY && request->operation != DPPD_MANAGEMENT_ROUTING_STATUS &&
+        request->operation != DPPD_MANAGEMENT_ROUTING_GET) {
         response->status = -EUCLEAN;
         return 0;
     }
@@ -446,6 +520,29 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
          */
         rc = dppd_control_reconciliation_retry(control);
         dppd_control_recovery_status(control, &response->payload.recovery);
+        break;
+    case DPPD_MANAGEMENT_ROUTING_GET:
+        rc = dppd_routing_get(control->routing, &response->payload.routing);
+        break;
+    case DPPD_MANAGEMENT_ROUTING_STATUS:
+        dppd_routing_status(control->routing, &response->payload.routing_status);
+        rc = 0;
+        break;
+    case DPPD_MANAGEMENT_ROUTING_REPLACE:
+        rc = dppd_routing_replace(control->routing, request->payload.routing_replace.expected_generation,
+            &request->payload.routing_replace.configuration);
+        dppd_routing_status(control->routing, &response->payload.routing_status);
+        break;
+    case DPPD_MANAGEMENT_ROUTE_SET:
+    case DPPD_MANAGEMENT_ROUTE_DELETE:
+    case DPPD_MANAGEMENT_NEIGHBOR_SET:
+    case DPPD_MANAGEMENT_NEIGHBOR_DELETE:
+        rc = routing_change(control->routing, request);
+        dppd_routing_status(control->routing, &response->payload.routing_status);
+        break;
+    case DPPD_MANAGEMENT_ROUTING_FLUSH:
+        rc = dppd_routing_flush(control->routing);
+        dppd_routing_status(control->routing, &response->payload.routing_status);
         break;
     default:
         rc = -ENOTSUP;

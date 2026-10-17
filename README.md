@@ -11,6 +11,7 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 - RSS、多 NUMA socket mbuf pool、burst RX/TX 与多段 mbuf 能力处理；
 - Ethernet、双 VLAN、ARP、IPv4、UDP/TCP 的边界安全解析；
 - immutable forwarding snapshot 和 per-worker/port/queue 原子统计；
+- 可选 IPv4 最长前缀路由、静态邻居、MAC/TTL/校验和改写、CLI 原子整表替换与持久重启恢复，见 [三层转发](docs/ipv4_routing.md)；
 - ethdev/representor/switch-domain 拓扑发现；
 - 统一 rule IR 到 `rte_flow` 的真实 validate/create/query/destroy/flush；
 - 带稳定 ID、generation、幂等更新和乐观并发控制的 rule repository；
@@ -33,7 +34,7 @@ V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软
 
 ## 快速开始
 
-管理协议 v15 增加 `rule-history`，保留 `rule-latency`、`rule-metrics`、`capability-show`、`probe-drop/probe-filter` 和 `probe-cache-clear`，
+管理协议 v16 增加路由/邻居管理、持久化状态和三层丢弃统计，保留 v15 的 `rule-history`，以及 `rule-latency`、`rule-metrics`、`capability-show`、`probe-drop/probe-filter` 和 `probe-cache-clear`，
 保留 `rule-status` 的实际后端与提交耗时、`health/ready` 的线程状态和 `port-show` 的链路状态。
 daemon 持续检测链路，出口断开时释放
 需要转发的报文并记录 egress drops，恢复后沿用原规则、COUNT 和 snapshot 自动
@@ -80,6 +81,12 @@ sudo ./build/dppd -l 0-2 -n 4 -- --ports 0,1 --queues 2 --burst 64 --promisc
 ```
 
 `-l/-n/-a` 等参数属于 EAL；`--` 后属于 dppd。`--ports 0,1,2,3` 表示建立 `0↔1`、`2↔3` 两组双向端口对。每个 queue 需要一个 EAL worker lcore，主 lcore 不参与轮询。
+
+加入 `--ipv4-routing /private/routes.bin` 后改为 IPv4 路由模式，支持 1–16 个端口及奇数端口集合。
+首次创建为空路由和邻居表，不回退端口对；使用 `dppctl routing-status/routing-show` 查询，
+`route-set/route-delete`、`neighbor-set/neighbor-delete` 修改，`routing-replace` 同时替换两表。
+所有修改要求精确旧版本。存储失败保持旧活跃配置、报告 `routing-dirty`，修复后显式执行
+`routing-flush`。命令格式、静态邻居限制和崩溃提交语义见 [IPv4 三层转发闭环](docs/ipv4_routing.md)。
 
 完整环境准备、运行、telemetry 与抓包方式见 [构建与运行](docs/build_and_run.md)。架构语义和扩展边界见 [V3 架构](docs/architecture_v3.md)。
 代码排版、中文注释和格式检查命令见 [代码风格约定](docs/code_style.md)。

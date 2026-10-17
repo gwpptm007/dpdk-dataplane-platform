@@ -2,6 +2,15 @@
 
 状态只表示代码是否真实存在，不以目录或占位接口计入完成度。
 
+2026-10-17 完成 M2 [IPv4 三层转发闭环](ipv4_routing.md)：最长前缀与静态邻居联合
+快照、MAC/TTL/校验和改写、按实际出口发送、三层丢弃统计、显式三层入口、management
+v16 的 CLI 增删改查及整表替换、独立持久文件和重启恢复全部接通。存储错误保持旧活跃
+表并阻断更新，显式 flush 修复；替换后目录同步失败明确保留磁盘不确定语义。
+两套 DPDK 构建各 40/40 单测、真实三 TAP 收发/崩溃/坏文件/映射错配/两类同步故障、
+四端口 1000 次在线更新与旧二层多队列回归通过，五项相关 sanitizer 通过。
+这只完成 M2 的 IPv4 LPM/rewrite/static-neighbor，ACL、conntrack/NAT、IPv6、tunnel 和
+物理网卡性能验收仍待后续实现，不按整个 M2 完成计算。
+
 2026-10-17 已接通[受控本地 TAP 跨进程恢复闭环](recovery_managed_scope.md)：正式
 `dppd-scope` 在自己的私有网络命名空间内管理监护、唯一业务和单个清理进程，业务退出
 后按原生标识、内容、范围与持续监护精确删除，独立日志逐条落盘并支持同作用域续接，
@@ -138,7 +147,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | ethdev | 已实现 baseline、链路恢复与移除保护 | capability 交集、RSS、per-socket pool、queue setup、start/stop；链路轮询、down 丢弃、up 恢复；移除通知/状态停止 worker，等待回调后退出重启；重新枚举、热重配与物理热拔插验收未完成 |
 | 软件 worker | 已实现 | 每 queue 一个 lcore，所有端口 burst RX/TX，mbuf ownership 完整；实际运行状态发布与异常结束监控 |
 | parser | 已实现 baseline | 双 VLAN、ARP、IPv4、fragment、UDP/TCP；IPv6/tunnel 未实现 |
-| 软件策略 | 已实现最小闭环 | malformed drop，其余受支持/未知协议按静态端口对转发 |
+| 软件策略 | 已实现二层基线和 IPv4 静态三层闭环 | malformed drop；默认端口对转发；显式三层模式执行 LPM/neighbor/rewrite，不能回退端口对 |
 | stats/telemetry | 已实现报文统计与规则诊断 | 工作线程、端口、队列统计及丢弃原因；规则汇总/分页、安装副本、失败指标、失败事件和耗时历史完整发布；规则 COUNT 独立查询 |
 | topology | 已实现发现 | ethdev/representor、driver、switch domain/port；尚无角色解析 |
 | capability profile / probe cache | 已实现本机诊断闭环 | 设备/固件/DPDK 身份、描述符和既有 queue/RSS/offload；完整规则校验结果缓存五秒、64 槽、强制刷新与失效；成功观察集合不承诺任意组合；正式安装始终新校验 |
@@ -151,11 +160,11 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | 虚拟 PMD flow 验证 | TAP 与 net_ring 已验证 | 双 TAP 已验证硬件 DROP/QUEUE；软件 TCP+MARK+COUNT+DROP 有真实报文与计数证据；net_ring 已验证 prefer 回退，见 [待办文档](todo_virtual_flow_backend.md) |
 | 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
 | control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
-| management API | 本机 v15 已验证 | rule-history、rule-latency、rule-metrics、能力画像、探测与清缓存；rule-status 核对实际后端与耗时；health/ready、画像、指标和历史在隔离仍可查询；旧版本客户端被拒绝 |
+| management API | 本机 v16 已验证 | 路由/邻居 CRUD、整表替换、持久状态与 flush；rule-history、rule-latency、rule-metrics、能力画像、探测、规则状态及健康；旧版本客户端被拒绝 |
 | 规则安装观测 | 已实现状态、失败分类、失败事件、耗时历史与规则 telemetry | 精确版本核对后端、端口与 COUNT 配置；三组耗时、整批不重复计数、分位数上界与未知/溢出标志；最近 64 条完整失败的版本分页、覆盖提示和编号耗尽冻结；不提供持久化审计日志 |
 | health/readiness | 已实现本机最小闭环 | 实际线程、端口与链路、移除、恢复隔离和持久化 dirty；未就绪原因与 CLI 退出码；未提供远程探针、心跳或主动网络探测 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |
-| ACL/LPM/NAT/conntrack | 未实现 | 旧占位实现已删除，需按 stage/snapshot 模型重建 |
+| ACL/LPM/NAT/conntrack | IPv4 LPM/rewrite/static-neighbor 闭环已完成 | 正式管理、原子联合快照、持久化、重启及故障恢复已有真实收发验证；ACL/NAT/conntrack 未实现 |
 | DPU/SmartNIC 实机 | 未验证 | 需在具体 PMD、固件、representor devargs 上建立能力矩阵 |
 
 2026-10-01 新增端口/队列统计、丢弃原因与 management v8，16/16 单测通过；实际收发核对入口 RX、出口 TX 及端口/队列汇总，并覆盖畸形、无路由、出口异常与 TX 队列满。详见验证记录中的统计验证。 双队列实际收发验证已补齐：两个正式 worker 分别处理 24/48 包的每轮负载，满容量批量更新、逐队列统计、报文序号、恢复和资源回收通过普通及 AddressSanitizer/UBSan 构建。net_ring 无 RSS，双队列仅由测试夹具显式配置，生产 daemon 的 RSS 要求保持不变。
@@ -246,7 +255,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 - 没有查询 `rte_flow` 资源容量或预留规则空间；
 - COUNT id 由 rule id 的低 32 位生成，控制面必须保证其作用域内不冲突。
 - 硬件规则更新采用“先创建新 generation，再删除旧 generation”；若 PMD 拒绝重叠规则，更新失败并保留旧规则，当前不承诺跨 PMD 的无损原子替换。
-- management v15 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
+- management v16 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
 - 批量更新保留 `rule_capacity + 1` 的 backend 容量。纯软件路径整批替换快照、复用旧槽位，满表可更新；每次分类使用完整旧表或新表，新版本 COUNT 归零，未更新规则保留计数。硬件及混合路径仍需要临时容量，只保证账本整批发布；PREFER 可能整表替换但最终成为混合计划时，会在安装前复查软件空间。
 - 普通 daemon 不自动删除启动前已存在的 socket；`dppd-scope` 只在自己确认旧业务退出后清除私有目录内属于服务账户的管理 socket。
 - snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready`、`capability-show`、`rule-metrics/rule-latency/rule-history` 与规则 telemetry 的进程内隔离模式。可选 `--recovery-path` 已提供异常退出后的重放阻断与外部清理确认；受控本地 TAP 的自动清理与快照重启已接通，其他 PMD 自动清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md) 与 [恢复保护](recovery_guard.md)。

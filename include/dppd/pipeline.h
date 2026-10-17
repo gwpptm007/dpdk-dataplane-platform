@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "dppd/config.h"
 #include "dppd/packet.h"
+#include "dppd/ipv4_router.h"
 
 struct dppd_software_backend;
 
@@ -30,6 +31,8 @@ enum dppd_drop_reason {
     DPPD_DROP_MALFORMED,
     DPPD_DROP_NO_ROUTE,
     DPPD_DROP_POLICY,
+    DPPD_DROP_NO_NEIGHBOR,
+    DPPD_DROP_IPV4_UNSUPPORTED,
 };
 
 /** 单个报文的处理结果；只有转发决定中的出口端口和标记才会被工作线程用于发送 */
@@ -43,6 +46,9 @@ struct dppd_pipeline_decision {
      */
     bool has_mark;
     uint32_t mark_id;
+    /** 三层决定携带同一配置版本查出的出口和 MAC，工作线程不再二次读取邻居表 */
+    bool routed;
+    struct dppd_ipv4_forward ipv4;
 };
 
 int dppd_snapshot_build_port_pairs(const struct dppd_config *cfg, struct dppd_forwarding_snapshot *snapshot);
@@ -56,5 +62,9 @@ int dppd_snapshot_lookup_peer(const struct dppd_forwarding_snapshot *snapshot, u
 void dppd_pipeline_decide(const struct dppd_forwarding_snapshot *snapshot,
     struct dppd_software_backend *software_backend, uint16_t ingress_port, int parse_status,
     const struct dppd_packet *packet, struct dppd_pipeline_decision *decision);
+/** 路由器非空时走 IPv4 单播路由，未命中不回退固定端口对，软件策略仍先执行 */
+void dppd_pipeline_decide_routed(const struct dppd_forwarding_snapshot *snapshot,
+    struct dppd_software_backend *software_backend, struct dppd_ipv4_router *router, uint16_t ingress_port,
+    int parse_status, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision);
 
 #endif

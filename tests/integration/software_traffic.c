@@ -117,8 +117,10 @@ static void drain_round(struct fixture *fixture)
             }
         }
         dppd_runtime_stats_read(&fixture->runtime, &stats);
+        /** 统计是独立原子字段，字节数也必须到齐，不能用包数推断同次采样的字节数已更新 */
         if (fixture->forwarded == expected_forwarded && stats.rx_packets == fixture->sent &&
-            stats.tx_packets == expected_forwarded && stats.policy_drops == fixture->sent - expected_forwarded)
+            stats.tx_packets == expected_forwarded && stats.policy_drops == fixture->sent - expected_forwarded &&
+            stats.rx_bytes == fixture->sent * 64 && stats.tx_bytes == fixture->forwarded * 64)
             break;
         assert(fixture->forwarded <= expected_forwarded);
         assert(rte_get_timer_cycles() < deadline);

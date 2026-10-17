@@ -11,10 +11,12 @@
 #include <time.h>
 #include <unistd.h>
 #include "dppd/management.h"
+#include "routing_cli.h"
 
 static void print_usage(const char *program)
 {
     fprintf(stderr, "usage:\n");
+    dppctl_routing_usage(program);
     fprintf(stderr, "  %s [--socket PATH] ping\n", program);
     fprintf(stderr, "  %s [--socket PATH] health\n", program);
     fprintf(stderr, "  %s [--socket PATH] ready\n", program);
@@ -372,6 +374,9 @@ static int exchange(const char *socket_path, const struct dppd_management_reques
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
     uint64_t value;
+    int routing_result = dppctl_routing_build(argc, argv, request, initialize_request);
+    if (routing_result != -ENOSYS)
+        return routing_result;
 
     /** 从零开始读取最近窗口，后续页可携带同一个历史版本，不能误用规则 generation */
     if (argc >= 1 && argc <= 3 && strcmp(argv[0], "rule-history") == 0) {
@@ -749,6 +754,7 @@ static void print_health(const struct dppd_management_health *health)
         {DPPD_HEALTH_RECOVERY_REQUIRED, "recovery-required"},
         {DPPD_HEALTH_PERSISTENCE_DIRTY, "persistence-dirty"},
         {DPPD_HEALTH_WORKER_FAILED, "worker-failed"},
+        {DPPD_HEALTH_ROUTING_DIRTY, "routing-dirty"},
     };
     bool first = true;
 
@@ -772,6 +778,11 @@ static void print_health(const struct dppd_management_health *health)
         health->persistence_enabled ? "yes" : "no", health->persistence_dirty ? "yes" : "no",
         health->persisted_generation, health->repository_generation, health->rule_count, health->persistence_last_error,
         health->recovery_last_error);
+    if (health->routing.enabled)
+        printf("routing enabled=yes dirty=%s generation=%" PRIu64 " persisted-generation=%" PRIu64
+               " routes=%u neighbors=%u last-error=%d\n",
+            health->routing.dirty ? "yes" : "no", health->routing.generation, health->routing.persisted_generation,
+            health->routing.route_count, health->routing.neighbor_count, health->routing.last_error);
 }
 
 static void print_ipv4_value(const char *label, uint32_t address_be, uint32_t mask_be)
@@ -917,6 +928,8 @@ static void print_capability(const struct dppd_management_capability_profile *pr
 
 static void print_response(const struct dppd_management_response *response)
 {
+    if (dppctl_routing_print(response))
+        return;
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释 */
     switch (response->operation) {
     case DPPD_MANAGEMENT_RULE_HISTORY: {
@@ -1212,6 +1225,13 @@ int main(int argc, char **argv)
 
         fprintf(stderr, "dppctl: request failed: %s (%d)\n",
             status < 0 && status >= -4095 ? strerror(-status) : "unknown error", status);
+        if (status == -EUCLEAN && response.operation >= DPPD_MANAGEMENT_ROUTING_STATUS &&
+            response.operation <= DPPD_MANAGEMENT_ROUTING_FLUSH) {
+            dppctl_routing_print(&response);
+            fprintf(stderr,
+                "dppctl: routing storage is uncertain; inspect routing-status, repair storage, then run routing-flush\n");
+            return EXIT_FAILURE;
+        }
         /*
          * EUCLEAN 与普通“完全未执行”错误不同：硬件和内存 repository 可能已经提交
          * 只是 snapshot 保存失败。apply 可以幂等重试，但 delete 已生效后用旧

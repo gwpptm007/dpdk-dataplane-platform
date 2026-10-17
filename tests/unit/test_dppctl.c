@@ -8,6 +8,47 @@
 #undef main
 #include <assert.h>
 
+/** 路由命令先完整解析再连接服务，错误文件不能被当成空配置发送 */
+static void test_routing_arguments(void)
+{
+    struct dppd_management_request request;
+    char *route[] = {"route-set", "10.2.3.4/16", "2", "direct", "7"};
+    assert(build_request(5, route, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_ROUTE_SET);
+    assert(request.payload.route.expected_generation == 7);
+    assert(request.payload.route.entry.prefix_be == htonl(0x0a020000));
+    assert(request.payload.route.entry.depth == 16 && request.payload.route.entry.port_id == 2);
+    route[4] = "any";
+    assert(build_request(5, route, &request) == -EINVAL);
+    route[4] = "7";
+    route[1] = "10.0.0.1/33";
+    assert(build_request(5, route, &request) == -EINVAL);
+    char *neighbor[] = {"neighbor-set", "2", "192.0.2.1", "02:00:00:00:00:07", "9"};
+    assert(build_request(5, neighbor, &request) == 0);
+    assert(request.payload.neighbor.entry.mac[5] == 7);
+    neighbor[3] = "02:00:00:00:00:777";
+    assert(build_request(5, neighbor, &request) == -EINVAL);
+    char path[] = "/tmp/dppctl-routing-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    const char text[] = "# complete pair\nroute 10.2.3.4/16 2 192.0.2.1\nneighbor 2 192.0.2.1 02:00:00:00:00:07\n";
+    assert(write(fd, text, sizeof(text) - 1) == sizeof(text) - 1);
+    char *replace[] = {"routing-replace", path, "9"};
+    assert(build_request(3, replace, &request) == 0);
+    assert(request.payload.routing_replace.configuration.route_count == 1);
+    assert(request.payload.routing_replace.configuration.neighbor_count == 1);
+    assert(write(fd, "broken\n", 7) == 7);
+    assert(build_request(3, replace, &request) == -EINVAL);
+    assert(ftruncate(fd, 0) == 0 && lseek(fd, 0, SEEK_SET) == 0);
+    assert(write(fd, "\0", 1) == 1);
+    assert(build_request(3, replace, &request) == -EINVAL);
+    assert(ftruncate(fd, 65537) == 0);
+    assert(build_request(3, replace, &request) != 0);
+    close(fd);
+    assert(unlink(path) == 0);
+    assert(build_request(3, replace, &request) == -ENOENT);
+}
+
 /** 状态查询默认读当前版本，也可携带精确非零版本，非法参数要在连接服务前被拒绝 */
 static void test_status_arguments(void)
 {
@@ -154,6 +195,7 @@ int main(void)
     char *stats[] = {"stats", "all", "2"};
 
     test_status_arguments();
+    test_routing_arguments();
     test_probe_arguments();
     test_history_arguments();
 

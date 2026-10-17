@@ -27,6 +27,10 @@ meson test -C build --print-errorlogs
 
 ## 端口和队列统计
 
+默认使用偶数端口对转发；加入 `--ipv4-routing /private/routes.bin` 切换为 IPv4 静态路由，
+接受 1–16 个端口。首次为空表，需配置路由和静态邻居后才能转发。`routing-show` 查询、
+单项增删和 `routing-replace` 整表更新均通过配套 dppctl，详见 [三层转发](ipv4_routing.md)。
+
 ```bash
 ./build/dppctl stats          # 全部端口、全部队列
 ./build/dppctl stats 0        # 端口 0 的全部队列
@@ -34,13 +38,15 @@ meson test -C build --print-errorlogs
 ./build/dppctl stats all 1    # 全部端口的队列 1
 ```
 
-管理协议为 v15，daemon 和 CLI 必须一起更新，v14 及更旧客户端返回 EPROTO。不存在的端口或
+管理协议为 v16，daemon 和 CLI 必须一起更新，旧客户端不会被当作当前协议接受。不存在的端口或
 队列返回 ENOENT。队列编号是运行配置中的 RX/TX queue id，不是物理 CPU/lcore id。
 这些计数记录本项目软件工作线程实际处理的报文，不是网卡硬件计数；硬件卸载后未进入
 CPU 的报文不会计入。运行时初始化后从零开始，不跨进程重启保存，不提供清零操作。
 
 接收包数、字节、畸形报文及策略丢弃归入口端口；发送和发送失败归出口端口。
-`policy_drops` 分为 `rule_drops`、`no_route_drops`、`egress_drops`；`tx_drops` 分为
+`policy_drops` 包含 `rule_drops`、`no_route_drops`、`egress_drops`，三层模式还记录
+`no_neighbor_drops`、`ipv4_ttl_drops`、`ipv4_checksum_drops`、`ipv4_unsupported_drops`
+和 `ipv4_rewrite_drops`；`tx_drops` 分为
 `tx_linearize_drops` 和 `tx_queue_drops`。畸形报文单独记录为 `rx_malformed`。
 `rx_unsupported` 是协议未深入解析的数量，不代表报文一定被丢弃。
 控制台和 telemetry `/dppd/stats` 保留整体统计，telemetry 同时返回新增丢弃原因。
@@ -306,7 +312,7 @@ status 在 management socket 开放时已经是恢复完成的 clean generation�
 或被强制终止时，应使用目标 PMD/设备支持的复位或清理流程，不能直接使用全端口 flush。
 可选的 `--recovery-path` 为这种跨进程情况保存线索并阻止未确认的重放，详见上述离线流程。
 
-管理 socket 权限为 `0600`。v15 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
+管理 socket 权限为 `0600`。v16 使用本机 C ABI，只用于同主机、同版本的 `dppd/dppctl`，不应直接暴露为网络协议。daemon 不会擅自删除启动前已存在的路径；异常退出后的残留 socket 应在确认旧进程不存在后由部署脚本清理。
 
 `health` 成功响应时退出码为 0，`live=yes` 证明管理线程能够响应；`ready` 只有
 `ready=yes` 才返回 0，否则打印全部未就绪原因并返回 1。两者都不修改规则或快照。

@@ -98,6 +98,12 @@ int main(void)
     assert(dppd_plan_rule(&context, &rule, &plan) == 0);
     assert(plan.backend == DPPD_PLAN_BACKEND_RTE_FLOW);
 
+    /** 三层转发必须经过软件改写，交换域直转即便硬件支持也不能绕过 worker */
+    context.ipv4_routing = true;
+    assert(dppd_plan_rule(&context, &rule, &plan) == -ENOTSUP);
+    assert(plan.reason == DPPD_PLAN_REASON_NO_EQUIVALENT_FALLBACK);
+    context.ipv4_routing = false;
+
     discovered.endpoints[2].switch_domain_id = 6;
     assert(dppd_plan_rule(&context, &rule, &plan) == -EXDEV);
     assert(plan.reason == DPPD_PLAN_REASON_TRANSFER_DOMAIN_MISMATCH);
