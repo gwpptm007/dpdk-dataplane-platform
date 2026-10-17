@@ -7,7 +7,7 @@
 | --- | --- | --- |
 | Windows 宿主机 | Lenovo 82WM；物理网卡为 Realtek PCIe GbE `10ec:8168` 和 RZ616 Wi-Fi `14c3:0616`；VMware Workstation 17 运行两个虚拟机 | 未发现可见的 Mellanox/BlueField/SmartNIC |
 | `192.168.65.135` | VMware 虚拟机；Ubuntu 22.04.5；kernel `6.8.0-138-generic`；8 vCPU、7.7 GiB 内存 | 可继续进行构建、TAP、软件和模拟后端测试 |
-| `192.168.65.134` | SSH 服务可达；BatchMode 缺少可用密钥，历史 `wq` 凭据认证失败；用户重启设备后再次只重试该凭据，仍返回 `Authentication failed` | 无法读取内部设备信息，不能据此推断其硬件情况 |
+| `192.168.65.134` | 用户更正凭据后已成功登录；VMware 虚拟机 `wanqi-vm`；Ubuntu 23.10；kernel `6.5.0-42-generic`；8 vCPU、7.7 GiB 内存 | 已完成普通用户只读盘点，仍无可用于 M3 实机卸载验收的物理设备 |
 
 ## 135 的可见网络设备
 
@@ -37,6 +37,34 @@
 | 权限与工具 | 已验证测试账号可 sudo；`ip`、`tc`、`ethtool`、`unshare`、`nsenter` 可用 |
 | 测试残留 | 盘点时没有 dppd 进程或命名网络 namespace |
 
+## 134 的可见网络设备与测试条件
+
+此前的认证失败记录已由用户更正凭据后的成功登录更新。本次通过标准输入执行只读盘点脚本，
+未把凭据或临时脚本写入项目、未 sudo、未安装软件，也未改变网络配置。
+
+| PCI 地址 | 接口 | 身份与驱动 | 使用情况 |
+| --- | --- | --- | --- |
+| `0000:02:01.0` | `ens33` | `8086:100f`，子系统 `15ad:0750`，`e1000` | VMware 模拟 82545EM；`192.168.65.134/24`，默认路由和 SSH 管理链路 |
+| `0000:03:00.0` | `ens160` | `15ad:07b0`，子系统 `15ad:07b0`，`vmxnet3` | VMware 虚拟网卡；`192.168.100.2/24` |
+
+| 项目 | 实测结果 |
+| --- | --- |
+| 设备身份 | DMI 为 `VMware Virtual Platform` / `VMware, Inc.`；两块网络设备均为明确的虚拟网卡 |
+| Mellanox 与 representor | PCI 无 `15b3`；devlink 设备和端口均为空；接口 `phys_switch_id/phys_port_name` 返回 `Operation not supported` |
+| SR-IOV / IOMMU / VFIO | 网络设备无 SR-IOV 属性和 IOMMU group；系统 IOMMU group 数为 0；`/dev/vfio` 只有控制节点 |
+| hugepage / TUN | hugepage 数为 0；`/dev/net/tun` 为可读写字符设备；未进行 TAP 创建或特权测试 |
+| DPDK 与构建工具 | GCC `13.2.0` 和 make 可用；Meson、Ninja、pkg-config 不在 PATH，也未发现用户常用前缀中的 Meson/Ninja |
+| 已安装包与库 | dpkg 未登记 dpdk/libdpdk、pkg-config/pkgconf、meson、ninja-build；常见系统和 `/usr/local`、`/opt/dpdk` 前缀无 `libdpdk.pc`；动态库缓存无 librte |
+| DPDK 版本 | 盘点结果为 `missing`，表示无法通过 pkg-config 读取版本；结合包与常见前缀查询，目前没有找到可直接用于严格构建的 DPDK 开发环境 |
+| 现有网络工具 | Python 3、ip、tc、ethtool、tcpdump、scp、unshare、nsenter、ping 可用 |
+| 内存与磁盘 | 7.7 GiB 内存，盘点时约 6.4 GiB 可用；`/tmp` 所在文件系统约 80 GiB 可用 |
+| 双机数据链路 | 已有 `192.168.100.2/24` 地址与直连路由；向 135 的 `192.168.100.1` 发送两次 ping 均无回复，尚未取得双机数据链路连通证据 |
+| 测试残留 | 盘点时没有 dppd 进程或命名网络 namespace |
+
+134 目前适合继续准备软件测试环境；尚不能直接运行本项目严格 DPDK 构建。
+本次没有搜索任意非标准安装目录，因此不把上述检查扩大解释为整机绝对不存在任何 DPDK 文件。
+安装软件可以补齐编译与仿真工具，但不能把这些 VMware 设备变成真实 mlx5 或物理非 mlx5 卸载设备。
+
 ## 可落地范围和验收边界
 
 当前环境能验证 representor/拓扑/规则图等纯逻辑、PMD 失败处理、模拟恢复，以及 TAP 上的管理与软件路径。
@@ -44,8 +72,7 @@
 也不能证明硬件 transfer、真实 representor、offloaded packets 绕过 CPU worker 或设备 reset 后的硬件恢复。
 这些项目必须保留为未验收，不能用模拟或 TAP 结果替代。
 
-134 重启后的复查仅完成 SSH 握手和一次已授权凭据认证，未能登录。
-因此其 DPDK 版本、TUN/虚拟网络条件以及 PCI 设备均为尚未观察，不能登记为缺少或已支持。
+134 已在更正凭据后完成只读盘点，其两块虚拟网卡也不能作为物理非 mlx5 实机验收证据。
 软件仿真可以覆盖控制逻辑和错误恢复，但不能代替真实设备的硬件卸载与 CPU 旁路验收。
 
 ## 可复用的只读盘点
