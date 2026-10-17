@@ -9,7 +9,8 @@ static bool inspection_complete(const struct dppd_recovery_inspection *inspectio
 
 static bool token_equal(const struct dppd_recovery_filter *filter, const struct dppd_recovery_attempt *attempt)
 {
-    return filter->cookie_valid && dppd_tap_cookie_present(attempt->owner_cookie) &&
+    return attempt->kind == DPPD_RECOVERY_OBJECT_FLOW && attempt->shared_id == 0 && attempt->shared_generation == 0 &&
+        filter->cookie_valid && dppd_tap_cookie_present(attempt->owner_cookie) &&
         memcmp(filter->cookie, attempt->owner_cookie, DPPD_TAP_COOKIE_SIZE) == 0;
 }
 
@@ -39,6 +40,11 @@ static enum dppd_recovery_plan_reason classify(const struct dppd_recovery_record
 {
     if (attempt->phase == DPPD_RECOVERY_REMOVED)
         return entry->token_matches != 0 ? DPPD_PLAN_REMOVED_TOKEN_PRESENT : DPPD_PLAN_REMOVED;
+    /** TC 列表无法证明间接对象不存在，带共享引用的规则也不能进入独立 TAP 清理 */
+    if (attempt->kind != DPPD_RECOVERY_OBJECT_FLOW)
+        return DPPD_PLAN_INDIRECT_OBJECT;
+    if (attempt->shared_id != 0 || attempt->shared_generation != 0)
+        return DPPD_PLAN_SHARED_REFERENCE;
     if (!dppd_tap_cookie_present(attempt->owner_cookie))
         return DPPD_PLAN_NO_TOKEN;
     if (attempt->expected.version != 1)
@@ -147,6 +153,10 @@ const char *dppd_recovery_plan_reason_name(enum dppd_recovery_plan_reason reason
         return "shared-action";
     case DPPD_PLAN_SCOPE_UNSUPPORTED:
         return "scope-unsupported";
+    case DPPD_PLAN_INDIRECT_OBJECT:
+        return "indirect-object-requires-external-cleanup";
+    case DPPD_PLAN_SHARED_REFERENCE:
+        return "shared-reference-requires-external-cleanup";
     default:
         return "unknown";
     }

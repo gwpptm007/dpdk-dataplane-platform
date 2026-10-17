@@ -23,7 +23,9 @@
 #define RECORD_V4_ATTEMPT 112U
 #define RECORD_V4_SIZE (RECORD_V2_SIZE + 32U + DPPD_RECOVERY_ATTEMPT_LIMIT * RECORD_V4_ATTEMPT)
 #define RECORD_ATTEMPT (RECORD_V4_ATTEMPT + DPPD_TAP_CONTENT_SIZE)
-#define RECORD_SIZE (RECORD_V2_SIZE + 32U + DPPD_RECOVERY_ATTEMPT_LIMIT * RECORD_ATTEMPT)
+#define RECORD_V56_SIZE (RECORD_V2_SIZE + 32U + DPPD_RECOVERY_ATTEMPT_LIMIT * RECORD_ATTEMPT)
+#define RECORD_V7_ATTEMPT (RECORD_ATTEMPT + 32U)
+#define RECORD_SIZE (RECORD_V2_SIZE + 32U + DPPD_RECOVERY_ATTEMPT_LIMIT * RECORD_V7_ATTEMPT)
 static const unsigned char magic[8] = {'D', 'P', 'P', 'R', 'E', 'C', '1', 0};
 
 /** 逐字节编码避免对齐和主机字节序影响，宽度只使用 2、4、8 字节 */
@@ -61,6 +63,7 @@ static size_t encode(const struct dppd_recovery_record *record, unsigned char *b
         : record->format == 2         ? RECORD_V2_SIZE
         : record->format == 3         ? RECORD_V3_SIZE
         : record->format == 4         ? RECORD_V4_SIZE
+        : record->format <= 6         ? RECORD_V56_SIZE
                                       : RECORD_SIZE;
     size_t stride = record->format == 1 ? RECORD_V1_PORT : RECORD_PORT;
     memset(bytes, 0, RECORD_SIZE);
@@ -74,6 +77,8 @@ static size_t encode(const struct dppd_recovery_record *record, unsigned char *b
         const struct dppd_recovery_port *port = &record->ports[index];
         unsigned char *row = bytes + RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + index * stride;
         put(row, port->port_id, 2);
+        if (record->format >= 7)
+            put(row + 2, port->first_kind, 2);
         put(row + 8, port->first_rule, 8);
         put(row + 16, port->first_generation, 8);
         memcpy(row + 24, port->device, strlen(port->device));
@@ -89,6 +94,8 @@ static size_t encode(const struct dppd_recovery_record *record, unsigned char *b
     if (record->format >= 3) {
         put(bytes + RECORD_V2_SIZE, record->last_attempt, 8);
         put(bytes + RECORD_V2_SIZE + 8, record->attempt_count, 4);
+        if (record->format >= 7)
+            put(bytes + RECORD_V2_SIZE + 12, record->features, 4);
         if (record->format >= 6)
             memcpy(bytes + RECORD_V2_SIZE + 16, record->monitor_session, DPPD_TAP_COOKIE_SIZE);
         for (uint32_t index = 0; index < record->attempt_count; ++index) {
@@ -97,7 +104,8 @@ static size_t encode(const struct dppd_recovery_record *record, unsigned char *b
                 index *
                     (record->format == 3          ? RECORD_V3_ATTEMPT
                             : record->format == 4 ? RECORD_V4_ATTEMPT
-                                                  : RECORD_ATTEMPT);
+                            : record->format <= 6 ? RECORD_ATTEMPT
+                                                  : RECORD_V7_ATTEMPT);
             put(row, attempt->id, 8);
             put(row + 8, attempt->rule_id, 8);
             put(row + 16, attempt->generation, 8);
@@ -106,6 +114,12 @@ static size_t encode(const struct dppd_recovery_record *record, unsigned char *b
                 memcpy(row + 96, attempt->owner_cookie, DPPD_TAP_COOKIE_SIZE);
             if (record->format >= 5)
                 dppd_tap_content_encode(&attempt->expected, row + RECORD_V4_ATTEMPT);
+            if (record->format >= 7) {
+                put(row + RECORD_ATTEMPT, attempt->kind, 4);
+                put(row + RECORD_ATTEMPT + 4, attempt->domain, 4);
+                put(row + RECORD_ATTEMPT + 8, attempt->shared_id, 8);
+                put(row + RECORD_ATTEMPT + 16, attempt->shared_generation, 8);
+            }
             row[26] = (unsigned char)attempt->phase;
             row[27] = (unsigned char)attempt->evidence;
             put(row + 28, (uint32_t)attempt->create_error, 4);
@@ -151,6 +165,46 @@ static bool valid_error(int value)
     return value <= 0 && value >= -4095;
 }
 
+bool dppd_recovery_record_requires_monitor(const struct dppd_recovery_record *record)
+{
+    return record != NULL &&
+        (record->format == 6 || (record->format >= 7 && (record->features & DPPD_RECOVERY_FEATURE_MONITORED) != 0));
+}
+
+static bool valid_shared_spec(const struct dppd_shared_count_spec *spec)
+{
+    return spec != NULL && spec->id != 0 && spec->id != UINT64_MAX && spec->generation != 0 &&
+        spec->generation != UINT64_MAX && spec->install_port_id != UINT16_MAX &&
+        spec->domain >= DPPD_RULE_DOMAIN_INGRESS && spec->domain <= DPPD_RULE_DOMAIN_TRANSFER;
+}
+
+/** v7 明确区分对象种类，引用只保存精确逻辑身份，不把共享计数器伪装成 TAP 规则 */
+static bool valid_typed_attempt(const struct dppd_recovery_attempt *attempt)
+{
+    if (attempt->kind != DPPD_RECOVERY_OBJECT_FLOW && attempt->kind != DPPD_RECOVERY_OBJECT_SHARED_COUNT)
+        return false;
+    bool has_reference = attempt->shared_id != 0 || attempt->shared_generation != 0;
+    bool domain_known = attempt->domain <= DPPD_RULE_DOMAIN_TRANSFER;
+    if (!domain_known && attempt->domain != DPPD_RECOVERY_DOMAIN_UNKNOWN)
+        return false;
+    if (has_reference &&
+        (attempt->shared_id == 0 || attempt->shared_id == UINT64_MAX || attempt->shared_generation == 0 ||
+            attempt->shared_generation == UINT64_MAX || !domain_known))
+        return false;
+    if (attempt->kind == DPPD_RECOVERY_OBJECT_SHARED_COUNT) {
+        const struct dppd_shared_count_spec spec = {.id = attempt->rule_id,
+            .generation = attempt->generation,
+            .install_port_id = attempt->port_id,
+            .domain = attempt->domain};
+        if (!valid_shared_spec(&spec) || has_reference || attempt->evidence != DPPD_EVIDENCE_NONE ||
+            attempt->observation_error != 0)
+            return false;
+    }
+    return (attempt->kind == DPPD_RECOVERY_OBJECT_FLOW && !has_reference) ||
+        (!dppd_tap_cookie_present(attempt->owner_cookie) && attempt->expected.version == 0 &&
+            dppd_tap_content_valid(&attempt->expected));
+}
+
 /** 同时校验状态和字段组合，意图未完成时不得带成功证据，删除成功才允许复用槽位 */
 static bool valid_attempt(const struct dppd_recovery_attempt *attempt)
 {
@@ -158,7 +212,7 @@ static bool valid_attempt(const struct dppd_recovery_attempt *attempt)
         attempt->phase < DPPD_RECOVERY_INTENT || attempt->phase > DPPD_RECOVERY_REMOVED ||
         attempt->evidence < DPPD_EVIDENCE_NONE || attempt->evidence > DPPD_EVIDENCE_UNAVAILABLE ||
         !valid_error(attempt->create_error) || !valid_error(attempt->remove_error) ||
-        !valid_error(attempt->observation_error))
+        !valid_error(attempt->observation_error) || !valid_typed_attempt(attempt))
         return false;
     if ((attempt->phase == DPPD_RECOVERY_CREATED && attempt->create_error != 0) ||
         (attempt->phase == DPPD_RECOVERY_CREATE_FAILED && attempt->create_error == 0) ||
@@ -180,12 +234,13 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
     uint32_t format = (uint32_t)get(bytes + 8, 4);
     size_t stride = format == 1 ? RECORD_V1_PORT : RECORD_PORT;
 
-    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format < 1 || format > 6) ||
+    if (memcmp(bytes, magic, sizeof(magic)) != 0 || (format < 1 || format > 7) ||
         size !=
             (format == 1          ? RECORD_V1_SIZE
                     : format == 2 ? RECORD_V2_SIZE
                     : format == 3 ? RECORD_V3_SIZE
                     : format == 4 ? RECORD_V4_SIZE
+                    : format <= 6 ? RECORD_V56_SIZE
                                   : RECORD_SIZE) ||
         get(bytes + 12, 4) != size || get(bytes + 28, 4) != checksum(bytes, size))
         return -EBADMSG;
@@ -201,12 +256,18 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
         struct dppd_recovery_port *port = &record->ports[index];
         const unsigned char *row = bytes + RECORD_HEADER + DPPD_STATE_PATH_CAPACITY + index * stride;
         port->port_id = (uint16_t)get(row, 2);
+        if (format >= 7)
+            port->first_kind = (enum dppd_recovery_object_kind)get(row + 2, 2);
         port->first_rule = get(row + 8, 8);
         port->first_generation = get(row + 16, 8);
         memcpy(port->device, row + 24, sizeof(port->device));
         memcpy(port->driver, row + 152, sizeof(port->driver));
         if (!valid_string(port->device, sizeof(port->device)) || !valid_string(port->driver, sizeof(port->driver)) ||
-            !port->first_rule || !port->first_generation)
+            !port->first_rule || !port->first_generation ||
+            (port->first_kind != DPPD_RECOVERY_OBJECT_FLOW && port->first_kind != DPPD_RECOVERY_OBJECT_SHARED_COUNT))
+            return -EBADMSG;
+        if (port->first_kind == DPPD_RECOVERY_OBJECT_SHARED_COUNT &&
+            (port->first_rule == UINT64_MAX || port->first_generation == UINT64_MAX))
             return -EBADMSG;
         if (format >= 2) {
             struct dppd_recovery_identity *identity = &port->identity;
@@ -229,9 +290,17 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
     if (format >= 3) {
         record->last_attempt = get(bytes + RECORD_V2_SIZE, 8);
         record->attempt_count = (uint32_t)get(bytes + RECORD_V2_SIZE + 8, 4);
+        if (format >= 7) {
+            record->features = (uint32_t)get(bytes + RECORD_V2_SIZE + 12, 4);
+            if ((record->features & ~DPPD_RECOVERY_FEATURE_MONITORED) != 0)
+                return -EBADMSG;
+        } else if (format == 6)
+            record->features = DPPD_RECOVERY_FEATURE_MONITORED;
         if (format >= 6) {
             memcpy(record->monitor_session, bytes + RECORD_V2_SIZE + 16, DPPD_TAP_COOKIE_SIZE);
-            if ((record->count != 0 && !dppd_tap_cookie_present(record->monitor_session)) ||
+            if ((dppd_recovery_record_requires_monitor(record) && record->count != 0 &&
+                    !dppd_tap_cookie_present(record->monitor_session)) ||
+                (!dppd_recovery_record_requires_monitor(record) && dppd_tap_cookie_present(record->monitor_session)) ||
                 (dppd_tap_cookie_present(record->monitor_session) && record->revision == 0))
                 return -EBADMSG;
         }
@@ -243,11 +312,19 @@ static int decode(const unsigned char *bytes, size_t size, struct dppd_recovery_
                 index *
                     (format == 3          ? RECORD_V3_ATTEMPT
                             : format == 4 ? RECORD_V4_ATTEMPT
-                                          : RECORD_ATTEMPT);
+                            : format <= 6 ? RECORD_ATTEMPT
+                                          : RECORD_V7_ATTEMPT);
             attempt->id = get(row, 8);
             attempt->rule_id = get(row + 8, 8);
             attempt->generation = get(row + 16, 8);
             attempt->port_id = (uint16_t)get(row + 24, 2);
+            attempt->domain = DPPD_RECOVERY_DOMAIN_UNKNOWN;
+            if (format >= 7) {
+                attempt->kind = (enum dppd_recovery_object_kind)get(row + RECORD_ATTEMPT, 4);
+                attempt->domain = (uint32_t)get(row + RECORD_ATTEMPT + 4, 4);
+                attempt->shared_id = get(row + RECORD_ATTEMPT + 8, 8);
+                attempt->shared_generation = get(row + RECORD_ATTEMPT + 16, 8);
+            }
             if (format >= 4)
                 memcpy(attempt->owner_cookie, row + 96, DPPD_TAP_COOKIE_SIZE);
             if (format >= 5 &&
@@ -331,8 +408,8 @@ static int load_record(int fd, struct dppd_recovery_record *record)
     struct stat info;
     if (fstat(fd, &info) != 0)
         return -errno;
-    if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V4_SIZE && info.st_size != RECORD_V3_SIZE &&
-        info.st_size != RECORD_V1_SIZE && info.st_size != RECORD_V2_SIZE)
+    if (info.st_size != RECORD_SIZE && info.st_size != RECORD_V56_SIZE && info.st_size != RECORD_V4_SIZE &&
+        info.st_size != RECORD_V3_SIZE && info.st_size != RECORD_V1_SIZE && info.st_size != RECORD_V2_SIZE)
         return -EBADMSG;
     size_t done = 0;
     while (done < (size_t)info.st_size) {
@@ -517,7 +594,8 @@ int dppd_recovery_guard_bind_monitor(struct dppd_recovery_guard *guard, const ui
     if (guard->record.revision == UINT64_MAX)
         return -EOVERFLOW;
     struct dppd_recovery_record next = guard->record;
-    next.format = 6;
+    next.format = next.format >= 7 ? 7 : 6;
+    next.features |= DPPD_RECOVERY_FEATURE_MONITORED;
     next.revision++;
     memcpy(next.monitor_session, session, DPPD_TAP_COOKIE_SIZE);
     int rc = save(guard, &next);
@@ -526,15 +604,25 @@ int dppd_recovery_guard_bind_monitor(struct dppd_recovery_guard *guard, const ui
     return rc;
 }
 
+/** 升级格式不改变原来的监护要求，普通 v5 记录升级后仍可在没有 TAP 监护时使用 */
+static void make_typed(struct dppd_recovery_record *record)
+{
+    if (record->format < 7) {
+        record->features = dppd_recovery_record_requires_monitor(record) ? DPPD_RECOVERY_FEATURE_MONITORED : 0;
+        record->format = 7;
+    }
+}
+
 /** 每个端口首次尝试前先持久化，之后同一身份可复用标记，软件路径完全不调用这里 */
-int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device,
-    const char *driver, uint64_t rule_id, uint64_t generation, const struct dppd_recovery_identity *identity)
+static int prepare_port(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device, const char *driver,
+    uint64_t rule_id, uint64_t generation, const struct dppd_recovery_identity *identity,
+    enum dppd_recovery_object_kind kind, bool typed)
 {
     struct dppd_recovery_record next;
     struct dppd_recovery_port *port;
     int rc;
 
-    if (guard != NULL && guard->record.format >= 6 &&
+    if (guard != NULL && dppd_recovery_record_requires_monitor(&guard->record) &&
         (!guard->monitor_bound || !dppd_tap_cookie_present(guard->record.monitor_session)))
         return -EACCES;
     if (guard == NULL || device == NULL || driver == NULL || device[0] == '\0' || driver[0] == '\0' ||
@@ -558,30 +646,56 @@ int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint
         if (port->port_id == port_id) {
             if (strcmp(port->device, device) != 0 || strcmp(port->driver, driver) != 0)
                 return -EXDEV;
-            if (identity == NULL)
-                return port->identity.ifindex == 0 ? 0 : -EXDEV;
-            return port->identity.ifindex == identity->ifindex &&
+            bool same_identity = identity == NULL ? port->identity.ifindex == 0
+                                                  : port->identity.ifindex == identity->ifindex &&
                     port->identity.netns_device == identity->netns_device &&
                     port->identity.netns_inode == identity->netns_inode &&
                     strcmp(port->identity.ifname, identity->ifname) == 0 &&
-                    strcmp(port->identity.boot_id, identity->boot_id) == 0
-                ? 0
-                : -EXDEV;
+                    strcmp(port->identity.boot_id, identity->boot_id) == 0;
+            if (!same_identity)
+                return -EXDEV;
+            if (!typed || guard->record.format >= 7)
+                return 0;
+            if (guard->record.revision == UINT64_MAX)
+                return -EOVERFLOW;
+            next = guard->record;
+            make_typed(&next);
+            ++next.revision;
+            return save(guard, &next);
         }
     }
     if (guard->record.count == DPPD_MAX_PORTS || guard->record.revision == UINT64_MAX)
         return -EOVERFLOW;
     next = guard->record;
+    if (typed)
+        make_typed(&next);
     next.revision++;
     port = &next.ports[next.count++];
     port->port_id = port_id;
     port->first_rule = rule_id;
     port->first_generation = generation;
+    port->first_kind = kind;
     strcpy(port->device, device);
     strcpy(port->driver, driver);
     if (identity != NULL)
         port->identity = *identity;
     return save(guard, &next);
+}
+
+int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device,
+    const char *driver, uint64_t rule_id, uint64_t generation, const struct dppd_recovery_identity *identity)
+{
+    return prepare_port(guard, port_id, device, driver, rule_id, generation, identity, DPPD_RECOVERY_OBJECT_FLOW,
+        false);
+}
+
+int dppd_recovery_guard_prepare_shared(struct dppd_recovery_guard *guard, const struct dppd_shared_count_spec *spec,
+    const char *device, const char *driver, const struct dppd_recovery_identity *identity)
+{
+    if (!valid_shared_spec(spec))
+        return -EINVAL;
+    return prepare_port(guard, spec->install_port_id, device, driver, spec->id, spec->generation, identity,
+        DPPD_RECOVERY_OBJECT_SHARED_COUNT, true);
 }
 
 /** 不支持内核定位的驱动沿用原保护，空身份必须明确保留为未知 */
@@ -618,18 +732,23 @@ static int new_cookie(const struct dppd_recovery_record *record, uint8_t cookie[
 
 /** 单调编号与意图一起落盘，删除过的槽位可复用，未清理线索满时显式拒绝新安装 */
 static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id, uint64_t rule_id, uint64_t generation,
-    uint64_t *attempt, uint8_t *cookie, const struct dppd_tap_content *expected)
+    uint64_t *attempt, uint8_t *cookie, const struct dppd_tap_content *expected,
+    const struct dppd_recovery_attempt *typed)
 {
     struct dppd_recovery_record next;
     bool known_port = false, known_tap = false;
     uint32_t slot;
     if (guard == NULL || attempt == NULL || rule_id == 0 || generation == 0)
         return -EINVAL;
-    *attempt = 0;
+    if (typed == NULL)
+        *attempt = 0;
     if (cookie != NULL)
         memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
     if (!guard->writable || guard->faulted || guard->record.format < 5)
         return -EUCLEAN;
+    if (dppd_recovery_record_requires_monitor(&guard->record) &&
+        (!guard->monitor_bound || !dppd_tap_cookie_present(guard->record.monitor_session)))
+        return -EACCES;
     if (guard->record.last_attempt == UINT64_MAX || guard->record.revision == UINT64_MAX)
         return -EOVERFLOW;
     for (uint32_t index = 0; index < guard->record.count; ++index) {
@@ -651,19 +770,30 @@ static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id, ui
     if (slot == DPPD_RECOVERY_ATTEMPT_LIMIT)
         return -ENOSPC;
     next = guard->record;
+    if (typed != NULL)
+        make_typed(&next);
     if (slot == next.attempt_count)
         next.attempt_count++;
     next.attempts[slot] = (struct dppd_recovery_attempt){.id = ++next.last_attempt,
         .rule_id = rule_id,
         .generation = generation,
         .port_id = port_id,
-        .phase = DPPD_RECOVERY_INTENT};
+        .phase = DPPD_RECOVERY_INTENT,
+        .domain = DPPD_RECOVERY_DOMAIN_UNKNOWN};
+    if (typed != NULL) {
+        next.attempts[slot].kind = typed->kind;
+        next.attempts[slot].domain = typed->domain;
+        next.attempts[slot].shared_id = typed->shared_id;
+        next.attempts[slot].shared_generation = typed->shared_generation;
+    }
     if (cookie != NULL) {
         next.attempts[slot].expected = *expected;
         int rc = new_cookie(&guard->record, next.attempts[slot].owner_cookie);
         if (rc != 0)
             return rc;
     }
+    if (!valid_attempt(&next.attempts[slot]))
+        return -EINVAL;
     next.revision++;
     int rc = save(guard, &next);
     if (rc == 0) {
@@ -678,7 +808,49 @@ static int begin_attempt(struct dppd_recovery_guard *guard, uint16_t port_id, ui
 int dppd_recovery_guard_begin(struct dppd_recovery_guard *guard, uint16_t port_id, uint64_t rule_id,
     uint64_t generation, uint64_t *attempt)
 {
-    return begin_attempt(guard, port_id, rule_id, generation, attempt, NULL, NULL);
+    return begin_attempt(guard, port_id, rule_id, generation, attempt, NULL, NULL, NULL);
+}
+
+int dppd_recovery_guard_begin_flow(struct dppd_recovery_guard *guard, uint16_t port_id, uint64_t rule_id,
+    uint64_t generation, enum dppd_rule_domain domain, uint64_t shared_id, uint64_t shared_generation,
+    uint64_t *attempt)
+{
+    struct dppd_recovery_attempt typed = {.kind = DPPD_RECOVERY_OBJECT_FLOW,
+        .domain = domain,
+        .shared_id = shared_id,
+        .shared_generation = shared_generation};
+    if (port_id == UINT16_MAX || domain < DPPD_RULE_DOMAIN_INGRESS || domain > DPPD_RULE_DOMAIN_TRANSFER ||
+        generation == UINT64_MAX || !valid_typed_attempt(&typed))
+        return -EINVAL;
+    if (guard != NULL && shared_id != 0) {
+        const struct dppd_recovery_attempt *latest = NULL;
+        uint32_t created = 0;
+        for (uint32_t i = 0; i < guard->record.attempt_count; ++i) {
+            const struct dppd_recovery_attempt *entry = &guard->record.attempts[i];
+            if (entry->kind != DPPD_RECOVERY_OBJECT_SHARED_COUNT || entry->rule_id != shared_id ||
+                entry->generation != shared_generation || entry->port_id != port_id ||
+                entry->domain != (uint32_t)domain)
+                continue;
+            if (latest == NULL || entry->id > latest->id)
+                latest = entry;
+            created += entry->phase == DPPD_RECOVERY_CREATED;
+        }
+        /** 槽位会复用，必须按尝试编号定位最近一轮，不能借用更早创建成功的记录 */
+        if (created > 1)
+            return -EUCLEAN;
+        if (latest == NULL || latest->phase != DPPD_RECOVERY_CREATED)
+            return -ENOENT;
+    }
+    return begin_attempt(guard, port_id, rule_id, generation, attempt, NULL, NULL, &typed);
+}
+
+int dppd_recovery_guard_begin_shared(struct dppd_recovery_guard *guard, const struct dppd_shared_count_spec *spec,
+    uint64_t *attempt)
+{
+    if (!valid_shared_spec(spec))
+        return -EINVAL;
+    const struct dppd_recovery_attempt typed = {.kind = DPPD_RECOVERY_OBJECT_SHARED_COUNT, .domain = spec->domain};
+    return begin_attempt(guard, spec->install_port_id, spec->id, spec->generation, attempt, NULL, NULL, &typed);
 }
 
 /** 成功返回表示随机标识已经与意图一起 fsync，调用方此后才可执行创建 */
@@ -688,7 +860,7 @@ int dppd_recovery_guard_begin_owned(struct dppd_recovery_guard *guard, uint16_t 
 {
     if (cookie == NULL)
         return -EINVAL;
-    return begin_attempt(guard, port_id, rule_id, generation, attempt, cookie, expected);
+    return begin_attempt(guard, port_id, rule_id, generation, attempt, cookie, expected, NULL);
 }
 
 /** 更新必须引用本文件仍保留的精确尝试编号，不能凭可能重复的业务 ID 修改另一轮记录 */

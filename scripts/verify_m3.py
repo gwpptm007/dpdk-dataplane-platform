@@ -40,6 +40,8 @@ def main():
                 ("regression", command, None),
                 ("transfer_process", [sys.executable, "tests/integration/m3_transfer.py",
                                       "--build-dir", str(build)], 180),
+                ("shared_recovery", [sys.executable, "tests/integration/m3_shared_recovery.py",
+                                     "--build-dir", str(build)], 180),
                 ("transfer_simulation", [sys.executable, "scripts/simulate_m3.py", "demo",
                                          "--build-dir", str(build)], 180)]
     try:

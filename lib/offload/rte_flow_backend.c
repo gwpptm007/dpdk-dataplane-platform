@@ -11,6 +11,8 @@ struct dppd_shared_count_object {
     struct dppd_shared_count_spec spec;
     struct dppd_shared_count_handle handle;
     uint32_t references;
+    /** 与这次 indirect 调用对应的日志编号，删除重建时重新分配 */
+    uint64_t recovery_attempt;
 };
 
 /**
@@ -52,6 +54,18 @@ static bool shared_spec_equal(const struct dppd_shared_count_spec *left, const s
         left->install_port_id == right->install_port_id && left->domain == right->domain;
 }
 
+/** 不允许只给共享创建接一半日志，否则规则引用和退出清理会失去对应记录 */
+static bool shared_recovery_ready(const struct dppd_rte_flow_backend *backend)
+{
+    bool protected = backend->before_create != NULL || backend->after_create != NULL || backend->after_remove != NULL ||
+        backend->before_shared_create != NULL || backend->after_shared_create != NULL ||
+        backend->after_shared_remove != NULL;
+    return !protected ||
+        (backend->before_create != NULL && backend->after_create != NULL && backend->after_remove != NULL &&
+            backend->before_shared_create != NULL && backend->after_shared_create != NULL &&
+            backend->after_shared_remove != NULL);
+}
+
 static struct dppd_shared_count_object *find_shared(const struct dppd_rte_flow_backend *backend, uint64_t id)
 {
     if (backend == NULL || backend->shared_counts == NULL)
@@ -89,6 +103,8 @@ static int destroy_shared(struct dppd_rte_flow_backend *backend, struct dppd_sha
     struct dppd_shared_count_handle next = object->handle;
     dppd_flow_probe_cache_invalidate_all(backend->probes);
     int rc = backend->api.shared_count_destroy(&next, error);
+    if (backend->after_shared_remove != NULL && object->recovery_attempt != 0)
+        backend->after_shared_remove(backend->before_create_context, object->recovery_attempt, rc);
     if (rc == 0) {
         memset(object, 0, sizeof(*object));
         --backend->shared_count_count;
@@ -131,8 +147,8 @@ static int resolve_shared(const struct dppd_rte_flow_backend *backend, uint16_t 
         const struct dppd_action *action = &rule->actions[i];
         if (action->type != DPPD_ACTION_SHARED_COUNT)
             continue;
-        if (backend->before_create != NULL)
-            return shared_error(error, -ENOTSUP, "native recovery journal cannot track indirect objects");
+        if (!shared_recovery_ready(backend))
+            return shared_error(error, -ENOTSUP, "indirect recovery callbacks are incomplete");
         struct dppd_shared_count_object *shared = find_shared(backend, action->conf.shared_count.id);
         if (shared == NULL)
             return shared_error(error, -ENOENT, "referenced object does not exist");
@@ -776,8 +792,8 @@ int dppd_rte_flow_backend_shared_count_create(struct dppd_rte_flow_backend *back
         spec->generation == 0 || spec->generation == UINT64_MAX || spec->install_port_id == UINT16_MAX ||
         spec->domain < DPPD_RULE_DOMAIN_INGRESS || spec->domain > DPPD_RULE_DOMAIN_TRANSFER)
         return shared_error(error, -EINVAL, "invalid backend or object identity");
-    if (backend->before_create != NULL)
-        return shared_error(error, -ENOTSUP, "native recovery journal cannot track indirect objects");
+    if (!shared_recovery_ready(backend))
+        return shared_error(error, -ENOTSUP, "indirect recovery callbacks are incomplete");
     if (find_shared(backend, spec->id) != NULL)
         return shared_error(error, -EEXIST, "object ID already exists");
     if (backend->shared_count_count == DPPD_SHARED_COUNT_MAX)
@@ -793,15 +809,28 @@ int dppd_rte_flow_backend_shared_count_create(struct dppd_rte_flow_backend *back
         }
     if (slot == NULL)
         return shared_error(error, -EUCLEAN, "registry occupancy is inconsistent");
+    uint64_t attempt = 0;
+    if (backend->before_shared_create != NULL) {
+        int prepared = backend->before_shared_create(backend->before_create_context, spec, &attempt);
+        if (prepared != 0)
+            return shared_error(error, prepared, "could not persist indirect create intent");
+        if (attempt == 0)
+            return shared_error(error, -EUCLEAN, "indirect create intent has no attempt identity");
+    }
     struct dppd_shared_count_handle next = {.spec = *spec};
     dppd_flow_probe_cache_invalidate_all(backend->probes);
     int rc = backend->api.shared_count_create(spec, &next, error);
+    int recorded = attempt != 0 ? backend->after_shared_create(backend->before_create_context, attempt, rc) : 0;
     if (rc != 0 && next.opaque == NULL)
-        return rc;
+        return recorded == 0 ? rc : shared_error(error, -EUCLEAN, "indirect create outcome was not durably recorded");
     /** 失败却留下句柄时保留清理线索，不能把这类部分成功对象当成可引用的正常对象 */
-    bool installed = rc == 0 && next.opaque != NULL && shared_spec_equal(spec, &next.spec);
+    bool installed = rc == 0 && recorded == 0 && next.opaque != NULL && shared_spec_equal(spec, &next.spec);
     next.spec = *spec;
-    *slot = (struct dppd_shared_count_object){.used = true, .installed = installed, .spec = *spec, .handle = next};
+    *slot = (struct dppd_shared_count_object){.used = true,
+        .installed = installed,
+        .spec = *spec,
+        .handle = next,
+        .recovery_attempt = attempt};
     ++backend->shared_count_count;
     if (!installed)
         return shared_error(error, -EUCLEAN, "create left an uncertain indirect object");

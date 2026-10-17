@@ -109,8 +109,8 @@ int dppd_recovery_cleanup(struct dppd_recovery_guard *guard, const char *session
 {
     if (guard == NULL || scope == NULL || !scope->enabled || scope->role != DPPD_SCOPE_RECOVERY)
         return -EACCES;
-    if (guard->fd < 0 || guard->faulted || guard->record.format != 6 || guard->record.count == 0 ||
-        guard->record.attempt_count == 0)
+    if (guard->fd < 0 || guard->faulted || !dppd_recovery_record_requires_monitor(&guard->record) ||
+        guard->record.count == 0 || guard->record.attempt_count == 0)
         return -ENODATA;
     int rc = dppd_scope_check(scope);
     const char *stage = "scope";

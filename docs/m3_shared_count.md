@@ -86,10 +86,10 @@ create/query/delete 返回 `EUCLEAN`；不能根据只读信息宣称设备已�
 不持久化，因此共享累计从零开始。带 AGE 的规则也重新开始闲置计时。
 这不保证进程崩溃后真实 ASIC 残留已清理。
 
-启用 native `--recovery-path` 所接入的 `before_create` 安装日志模式时，共享创建和
-绑定明确返回 **`ENOTSUP`**。现有跨进程恢复日志不能记录 indirect 对象生命周期，
-不能将新对象绕过日志创建，也不静默改成私有 COUNT。共享 v5 快照不等于旧恢复保护
-已经支持 indirect；生产部署仍需单独解决设备清理与复位恢复。
+后续已接通 [v7 共享恢复日志](m3_shared_recovery.md)，普通 `--recovery-path` 模式支持
+共享对象和精确引用的意图、结果及删除记录。TAP 原生 cookie/监护组合仍明确拒绝 indirect，
+不绕过日志创建，也不静默改成私有 COUNT。共享 v5 快照不等于真实 ASIC 残留已清理，
+生产部署仍需设备清理依据和真实复位恢复验收。
 
 ## 功能模拟
 

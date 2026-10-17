@@ -187,11 +187,31 @@ static void test_invalid_input(void)
     assert(dppd_recovery_plan_build(&record, inspections, errors, 0, &plan) == -EINVAL);
 }
 
+/** 即使给间接对象伪造相同 cookie，也不能由 TC 观察把它纳入规则清理候选 */
+static void test_indirect_scope(void)
+{
+    reset_fixture();
+    record.format = 7;
+    record.attempts[0].kind = DPPD_RECOVERY_OBJECT_SHARED_COUNT;
+    expect_reason(DPPD_PLAN_INDIRECT_OBJECT);
+    assert(plan.entries[0].token_matches == 0 && plan.unassociated_filters == 1);
+    assert(strcmp(dppd_recovery_plan_reason_name(plan.entries[0].reason),
+               "indirect-object-requires-external-cleanup") == 0);
+    record.attempts[0].kind = DPPD_RECOVERY_OBJECT_FLOW;
+    record.attempts[0].shared_id = 900;
+    record.attempts[0].shared_generation = 8;
+    expect_reason(DPPD_PLAN_SHARED_REFERENCE);
+    assert(plan.entries[0].token_matches == 0 && plan.unassociated_filters == 1);
+    record.attempts[0].phase = DPPD_RECOVERY_REMOVED;
+    expect_reason(DPPD_PLAN_REMOVED);
+}
+
 int main(void)
 {
     test_locations();
     test_verification();
     test_partial_inventory();
     test_invalid_input();
+    test_indirect_scope();
     return 0;
 }

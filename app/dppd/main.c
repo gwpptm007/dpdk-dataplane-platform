@@ -63,6 +63,15 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
         return rc;
     if (recovery->monitor->error != 0)
         return recovery->monitor->error;
+    uint64_t shared_id = 0, shared_generation = 0;
+    for (uint16_t index = 0; index < rule->nb_actions; ++index)
+        if (rule->actions[index].type == DPPD_ACTION_SHARED_COUNT) {
+            shared_id = rule->actions[index].conf.shared_count.id;
+            shared_generation = rule->actions[index].conf.shared_count.generation;
+        }
+    /** TAP 所有权模式依赖可读回的独立动作，不能给间接共享动作伪造同样的证明 */
+    if (shared_id != 0 && (recovery->native_owner || recovery->monitor->fd >= 0))
+        return -ENOTSUP;
     memset(cookie, 0, DPPD_TAP_COOKIE_SIZE);
     memset(recovery->pending_cookie, 0, sizeof(recovery->pending_cookie));
     /** 此标识仅用于无副作用的能力检查，真正创建的随机标识稍后生成并落盘 */
@@ -101,10 +110,14 @@ static int prepare_recovery(void *context, uint16_t port_id, const struct dppd_r
             rule->id, rule->generation);
     if (rc != 0)
         return rc;
-    rc = recovery->native_owner
-        ? dppd_recovery_guard_begin_owned(recovery->guard, port_id, rule->id, rule->generation, attempt, cookie,
-              &recovery->pending_content)
-        : dppd_recovery_guard_begin(recovery->guard, port_id, rule->id, rule->generation, attempt);
+    if (recovery->native_owner)
+        rc = dppd_recovery_guard_begin_owned(recovery->guard, port_id, rule->id, rule->generation, attempt, cookie,
+            &recovery->pending_content);
+    else if (shared_id != 0)
+        rc = dppd_recovery_guard_begin_flow(recovery->guard, port_id, rule->id, rule->generation, rule->domain,
+            shared_id, shared_generation, attempt);
+    else
+        rc = dppd_recovery_guard_begin(recovery->guard, port_id, rule->id, rule->generation, attempt);
     if (rc != 0)
         return rc;
     recovery->pending_port = port_id;
@@ -124,6 +137,53 @@ static void recovery_record_error(struct recovery_context *context, int error)
         fprintf(stderr, "[dppd] recovery attempt record failed: %d; external reconciliation required\n", error);
         context->record_error_reported = true;
     }
+}
+
+/** 共享计数器先持久化独立对象意图，不把 indirect 指针写入日志或伪装成 TAP filter */
+static int prepare_shared_recovery(void *context, const struct dppd_shared_count_spec *spec, uint64_t *attempt)
+{
+    struct recovery_context *recovery = context;
+    const struct dppd_port *port = dppd_devices_find(recovery->devices, spec->install_port_id);
+    const struct dppd_endpoint *endpoint = dppd_topology_find(&recovery->devices->topology, spec->install_port_id);
+    if (port == NULL || endpoint == NULL || !port->identity.device_name_known)
+        return -ENODEV;
+    if (recovery->native_owner || recovery->monitor->fd >= 0)
+        return -ENOTSUP;
+    int rc = dppd_scope_check(&managed_scope);
+    if (rc != 0)
+        return rc;
+    if (recovery->monitor->error != 0)
+        return recovery->monitor->error;
+    struct dppd_recovery_identity identity, *captured = NULL;
+    if (strcmp(endpoint->driver_name, "net_tap") == 0) {
+        struct rte_eth_dev_info info;
+        rc = rte_eth_dev_info_get(spec->install_port_id, &info);
+        if (rc == 0)
+            rc = dppd_recovery_tap_identity(info.if_index, &identity);
+        if (rc != 0)
+            return rc;
+        captured = &identity;
+    }
+    rc = dppd_recovery_guard_prepare_shared(recovery->guard, spec, port->identity.device_name, endpoint->driver_name,
+        captured);
+    if (rc == 0)
+        rc = dppd_recovery_guard_begin_shared(recovery->guard, spec, attempt);
+    /** 日志同步期间设备或受控作用域也可能改变，进入 PMD 前再核对一次 */
+    if (rc == 0)
+        rc = dppd_scope_check(&managed_scope);
+    return rc;
+}
+
+/** 只记录真实返回值，普通 flow 的 TC 新增观察不能用来定位 indirect 对象 */
+static int finish_shared_recovery_create(void *context, uint64_t attempt, int create_error)
+{
+    struct recovery_context *recovery = context;
+    int rc = dppd_recovery_guard_created(recovery->guard, attempt, create_error, DPPD_EVIDENCE_NONE, 0, NULL);
+    if (rc != 0)
+        recovery_record_error(recovery, rc);
+    if (rc == 0 && create_error == 0)
+        rc = dppd_scope_check(&managed_scope);
+    return rc;
 }
 
 /** 对比创建前后的只读列表，保留原始驱动结果，候选坐标只表示观察到一次新增 */
@@ -329,7 +389,7 @@ int main(int argc, char **argv)
                 recovery_guard.record.revision, recovery_guard.record.count);
             goto cleanup_eal;
         }
-        if (recovery_guard.record.format >= 6 && config.recovery_monitor[0] == '\0') {
+        if (dppd_recovery_record_requires_monitor(&recovery_guard.record) && config.recovery_monitor[0] == '\0') {
             fprintf(stderr, "[dppd] this recovery record requires --recovery-monitor\n");
             goto cleanup_eal;
         }
@@ -372,6 +432,9 @@ int main(int argc, char **argv)
         control.rte_flow.before_create_context = &recovery_context;
         control.rte_flow.after_create = finish_recovery_create;
         control.rte_flow.after_remove = finish_recovery_remove;
+        control.rte_flow.before_shared_create = prepare_shared_recovery;
+        control.rte_flow.after_shared_create = finish_shared_recovery_create;
+        control.rte_flow.after_shared_remove = finish_recovery_remove;
     }
     if (config.state_path[0] != '\0') {
         int restore_rc = dppd_control_persistence_restore(&control, config.state_path);

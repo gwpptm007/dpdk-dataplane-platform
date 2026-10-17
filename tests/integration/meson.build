@@ -39,6 +39,9 @@ shared_library(
   install: false,
 )
 
+# 正式 daemon 通过真实恢复日志管理测试共享对象，不作为任何硬件动作支持证据
+shared_library('dppd_shared_recovery_faults', 'shared_recovery_faults.c', dependencies: dpdk, install: false)
+
 # 只为恢复窗口测试暂停真实 TAP 创建，不链接生产程序
 shared_library('dppd_recovery_attempt_faults', 'recovery_attempt_faults.c',
   include_directories: dppd_inc,

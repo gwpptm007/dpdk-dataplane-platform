@@ -6,6 +6,7 @@
 #include "dppd/config.h"
 #include "dppd/tap_owner.h"
 #include "dppd/tap_content.h"
+#include "dppd/shared_count.h"
 
 #define DPPD_RECOVERY_DEVICE_SIZE 128U
 #define DPPD_RECOVERY_DRIVER_SIZE 64U
@@ -13,6 +14,14 @@
 #define DPPD_RECOVERY_BOOT_SIZE 40U
 #define DPPD_RECOVERY_ATTEMPT_LIMIT 256U
 #define DPPD_RECOVERY_KIND_SIZE 32U
+#define DPPD_RECOVERY_FEATURE_MONITORED 1U
+#define DPPD_RECOVERY_DOMAIN_UNKNOWN UINT32_MAX
+
+/** 规则和共享计数器使用不同对象种类，相同业务 ID 不能被离线工具混为同一个对象 */
+enum dppd_recovery_object_kind {
+    DPPD_RECOVERY_OBJECT_FLOW = 0,
+    DPPD_RECOVERY_OBJECT_SHARED_COUNT,
+};
 
 /** 内核坐标是观察线索，不包含跨进程有效的指针，也不构成对象所有权证明 */
 struct dppd_recovery_filter {
@@ -53,6 +62,11 @@ struct dppd_recovery_attempt {
     uint8_t owner_cookie[DPPD_TAP_COOKIE_SIZE];
     /** v5 保存创建前的规范化内容，旧版本不从候选坐标或当前内核反推 */
     struct dppd_tap_content expected;
+    /** v7 持久化对象种类和方向，旧格式只表示 FLOW，方向未知时不能猜成 ingress */
+    enum dppd_recovery_object_kind kind;
+    uint32_t domain;
+    /** FLOW 引用的共享对象精确身份，零值表示没有共享引用，不保存运行时引用数 */
+    uint64_t shared_id, shared_generation;
 };
 
 /**
@@ -68,8 +82,8 @@ struct dppd_recovery_identity {
 };
 
 /**
- * 每个可能安装过 flow 的端口保留一条线索，不把进程内端口号当作跨进程设备身份
- * first_rule 和 first_generation 是本轮首次尝试，不是残留规则总表或实际对象数量
+ * 每个可能安装过驱动对象的端口保留一条线索，不把进程内端口号当作跨进程设备身份
+ * first_rule 和 first_generation 是本轮首个对象的 ID 和版本，由 first_kind 说明种类
  */
 struct dppd_recovery_port {
     uint16_t port_id;
@@ -78,6 +92,8 @@ struct dppd_recovery_port {
     char device[DPPD_RECOVERY_DEVICE_SIZE];
     char driver[DPPD_RECOVERY_DRIVER_SIZE];
     struct dppd_recovery_identity identity;
+    /** 首次涉及端口的对象可以是共享计数器，旧格式始终是 FLOW */
+    enum dppd_recovery_object_kind first_kind;
 };
 
 /** 文件使用独立编码和校验和，不直接写出此 C 结构体，快照路径用于防止误配 */
@@ -93,6 +109,8 @@ struct dppd_recovery_record {
     struct dppd_recovery_attempt attempts[DPPD_RECOVERY_ATTEMPT_LIMIT];
     /** v6 在首次安装前保存监护会话，旧格式为零，清理后仍保留必须启用监护的格式约束 */
     uint8_t monitor_session[DPPD_TAP_COOKIE_SIZE];
+    /** v7 将监护要求与版本号分开，清理会话后仍保留 MONITORED 的部署约束 */
+    uint32_t features;
 };
 
 /**
@@ -114,19 +132,31 @@ int dppd_recovery_guard_open(struct dppd_recovery_guard *guard, const char *path
 int dppd_recovery_guard_read_locked(int fd, const char *path, struct dppd_recovery_record *record);
 /** 仅在干净文件上绑定，调用方先完成实际握手，落盘失败不得开始安装 */
 int dppd_recovery_guard_bind_monitor(struct dppd_recovery_guard *guard, const uint8_t session[DPPD_TAP_COOKIE_SIZE]);
+/** v6 始终需要监护，v7 由持久化特性位决定，不能用格式升级解除原有要求 */
+bool dppd_recovery_record_requires_monitor(const struct dppd_recovery_record *record);
 /** 必须在驱动 create 之前成功，首次涉及该端口时先写入并 fsync，失败就不得安装 */
 int dppd_recovery_guard_prepare(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device,
     const char *driver, uint64_t rule_id, uint64_t generation);
 /** 有可靠 TAP 定位时与端口线索一次落盘，同一端口身份发生变化时拒绝继续安装 */
 int dppd_recovery_guard_prepare_identity(struct dppd_recovery_guard *guard, uint16_t port_id, const char *device,
     const char *driver, uint64_t rule_id, uint64_t generation, const struct dppd_recovery_identity *identity);
-/** 仅本进程已确认全部 flow 删除后调用，软件状态是否成功保存由原持久化机制另行报告 */
+/** 共享对象与端口身份一起登记为 v7，identity 为空时不伪造 TAP 定位信息 */
+int dppd_recovery_guard_prepare_shared(struct dppd_recovery_guard *guard, const struct dppd_shared_count_spec *spec,
+    const char *device, const char *driver, const struct dppd_recovery_identity *identity);
+/** 仅本进程已确认全部规则和共享对象删除后调用，软件状态是否成功保存由原持久化机制另行报告 */
 int dppd_recovery_guard_clean(struct dppd_recovery_guard *guard);
 /** 离线确认外部清理已经完成，精确版本防止确认旧记录，此函数本身不执行设备清理 */
 int dppd_recovery_guard_acknowledge(struct dppd_recovery_guard *guard, uint64_t revision);
 /** 端口已登记后为本次驱动调用先写入意图，写盘失败或记录满时不能进入驱动 */
 int dppd_recovery_guard_begin(struct dppd_recovery_guard *guard, uint16_t port_id, uint64_t rule_id,
     uint64_t generation, uint64_t *attempt);
+/** v7 FLOW 意图保存实际方向与可选共享精确引用，共享 ID 和版本必须同时为零或同时有效 */
+int dppd_recovery_guard_begin_flow(struct dppd_recovery_guard *guard, uint16_t port_id, uint64_t rule_id,
+    uint64_t generation, enum dppd_rule_domain domain, uint64_t shared_id, uint64_t shared_generation,
+    uint64_t *attempt);
+/** 共享 COUNT 意图必须在真实 indirect create 前同步成功，不生成 cookie 或 TAP 候选 */
+int dppd_recovery_guard_begin_shared(struct dppd_recovery_guard *guard, const struct dppd_shared_count_spec *spec,
+    uint64_t *attempt);
 /** 为已核对身份的 TAP 生成随机标识，写盘成功才向驱动调用方返回 */
 int dppd_recovery_guard_begin_owned(struct dppd_recovery_guard *guard, uint16_t port_id, uint64_t rule_id,
     uint64_t generation, uint64_t *attempt, uint8_t cookie[DPPD_TAP_COOKIE_SIZE],

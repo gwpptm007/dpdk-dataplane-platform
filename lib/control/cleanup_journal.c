@@ -156,7 +156,7 @@ int dppd_cleanup_journal_open(struct dppd_cleanup_journal *journal, const struct
     const struct dppd_recovery_scope *scope)
 {
     if (journal == NULL || guard == NULL || scope == NULL || journal->fd >= 0 || guard->fd < 0 || !scope->enabled ||
-        scope->role != DPPD_SCOPE_RECOVERY || guard->record.format != 6 ||
+        scope->role != DPPD_SCOPE_RECOVERY || !dppd_recovery_record_requires_monitor(&guard->record) ||
         guard->record.attempt_count > DPPD_RECOVERY_ATTEMPT_LIMIT || !dppd_tap_cookie_present(scope->id) ||
         !dppd_tap_cookie_present(guard->record.monitor_session))
         return -EINVAL;

@@ -73,6 +73,29 @@ static const char *evidence_name(enum dppd_recovery_evidence evidence)
     }
 }
 
+/** 日志中的业务 ID 可以属于不同种类，输出对象种类后才能正确解释后面的编号 */
+static const char *object_name(enum dppd_recovery_object_kind kind)
+{
+    return kind == DPPD_RECOVERY_OBJECT_FLOW        ? "flow"
+        : kind == DPPD_RECOVERY_OBJECT_SHARED_COUNT ? "shared-count"
+                                                    : "unknown";
+}
+
+/** 旧格式方向未知时保留 unknown，不把零初始化误写成真实 ingress */
+static const char *domain_name(uint32_t domain)
+{
+    switch (domain) {
+    case DPPD_RULE_DOMAIN_INGRESS:
+        return "ingress";
+    case DPPD_RULE_DOMAIN_EGRESS:
+        return "egress";
+    case DPPD_RULE_DOMAIN_TRANSFER:
+        return "transfer";
+    default:
+        return "unknown";
+    }
+}
+
 /** 核验结论独立于标识结论，旧记录缺少预期内容时不能报告匹配 */
 static const char *verification_name(int error)
 {
@@ -103,6 +126,8 @@ static void correlate_attempts(const struct dppd_recovery_record *record, uint16
             continue;
         if (attempt->phase == DPPD_RECOVERY_REMOVED)
             status = "removed-record";
+        else if (attempt->kind != DPPD_RECOVERY_OBJECT_FLOW || attempt->shared_id != 0)
+            status = "external-cleanup-required";
         else if (dppd_tap_cookie_present(attempt->owner_cookie)) {
             content = scope = attempt->expected.version != 0 ? "unavailable" : "unchecked";
             int matches =
@@ -132,9 +157,10 @@ static void correlate_attempts(const struct dppd_recovery_record *record, uint16
                                         : "coordinate-ambiguous";
         }
         printf("correlation attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
-               " port=%u phase=%s evidence=%s status=%s owner=%s content=%s scope=%s\n",
+               " port=%u phase=%s evidence=%s status=%s owner=%s content=%s scope=%s kind=%s domain=%s\n",
             attempt->id, attempt->rule_id, attempt->generation, port_id, phase_name(attempt->phase),
-            evidence_name(attempt->evidence), status, owner, content, scope);
+            evidence_name(attempt->evidence), status, owner, content, scope, object_name(attempt->kind),
+            domain_name(attempt->domain));
     }
 }
 
@@ -250,11 +276,13 @@ static int plan_record(const struct dppd_recovery_record *record, uint64_t revis
         const char *decision = entry->reason == DPPD_PLAN_MATCH ? "candidate"
             : entry->reason == DPPD_PLAN_REMOVED                ? "excluded"
                                                                 : "rejected";
-        printf("plan-attempt attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
-               " port=%u phase=%s decision=%s reason=%s token-matches=%u content=%s scope=%s executable=no\n",
+        printf(
+            "plan-attempt attempt=%" PRIu64 " rule=%" PRIu64 " generation=%" PRIu64
+            " port=%u phase=%s decision=%s reason=%s token-matches=%u content=%s scope=%s executable=no kind=%s domain=%s\n",
             attempt->id, attempt->rule_id, attempt->generation, attempt->port_id, phase_name(attempt->phase), decision,
             dppd_recovery_plan_reason_name(entry->reason), entry->token_matches,
-            verification_name(entry->content_error), verification_name(entry->scope_error));
+            verification_name(entry->content_error), verification_name(entry->scope_error), object_name(attempt->kind),
+            domain_name(attempt->domain));
         if (entry->token_matches != 1)
             continue;
         const struct dppd_recovery_filter *filter = &inspections[entry->matched_port].filters[entry->matched_filter];
@@ -364,7 +392,7 @@ int main(int argc, char **argv)
             guard.record.count);
         printf("snapshot=%s\n", guard.record.state_path);
         printf("format=%u\n", guard.record.format);
-        if (guard.record.format >= 6) {
+        if (dppd_recovery_record_requires_monitor(&guard.record)) {
             printf("monitor-required=yes session=");
             for (unsigned int index = 0; index < sizeof(guard.record.monitor_session); ++index)
                 printf("%02x", guard.record.monitor_session[index]);
@@ -375,8 +403,9 @@ int main(int argc, char **argv)
                 guard.record.last_attempt, DPPD_RECOVERY_ATTEMPT_LIMIT);
         for (uint32_t index = 0; index < guard.record.count; ++index) {
             const struct dppd_recovery_port *port = &guard.record.ports[index];
-            printf("port=%u device=%s driver=%s first-rule=%" PRIu64 " first-generation=%" PRIu64 "\n", port->port_id,
-                port->device, port->driver, port->first_rule, port->first_generation);
+            printf("port=%u device=%s driver=%s first-rule=%" PRIu64 " first-generation=%" PRIu64 " first-kind=%s\n",
+                port->port_id, port->device, port->driver, port->first_rule, port->first_generation,
+                object_name(port->first_kind));
             if (port->identity.ifindex != 0)
                 printf("identity port=%u ifindex=%u ifname=%s boot=%s netns-device=%" PRIu64 " netns-inode=%" PRIu64
                        "\n",
@@ -391,6 +420,9 @@ int main(int argc, char **argv)
                 attempt->id, attempt->rule_id, attempt->generation, attempt->port_id, phase_name(attempt->phase),
                 attempt->create_error, attempt->remove_error, evidence_name(attempt->evidence),
                 attempt->observation_error);
+            printf("object attempt=%" PRIu64 " kind=%s domain=%s shared-id=%" PRIu64 " shared-generation=%" PRIu64 "\n",
+                attempt->id, object_name(attempt->kind), domain_name(attempt->domain), attempt->shared_id,
+                attempt->shared_generation);
             if (dppd_tap_cookie_present(attempt->owner_cookie)) {
                 printf("owner-token attempt=%" PRIu64 " cookie=", attempt->id);
                 print_cookie(attempt->owner_cookie);

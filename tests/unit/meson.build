@@ -275,6 +275,16 @@ recovery_attempt_test = executable('test_recovery_attempt', 'test_recovery_attem
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])
 test('durable recovery attempts', recovery_attempt_test)
 
+# 共享对象的类型、精确引用与监护要求持久化，覆盖跨进程崩溃和记录写入故障
+shared_recovery_journal_test = executable('test_shared_recovery_journal', 'test_shared_recovery_journal.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync', '-Wl,--wrap=pwrite', '-Wl,--wrap=pwrite64'])
+test('typed shared COUNT recovery journal', shared_recovery_journal_test)
+
+# 正式后端先写意图再创建，部分成功和日志故障保留句柄，退出按引用顺序删除
+shared_recovery_backend_test = executable('test_shared_recovery_backend', 'test_shared_recovery_backend.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])
+test('shared COUNT durable backend lifecycle', shared_recovery_backend_test)
+
 # 验证随机标识先落盘、熵源故障、私有动作编译和禁止无标识降级
 tap_owner_test = executable('test_tap_owner', 'test_tap_owner.c',
   dependencies: dppd_core_dep,

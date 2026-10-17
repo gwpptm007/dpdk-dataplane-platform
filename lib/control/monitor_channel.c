@@ -339,7 +339,7 @@ static int authorize(struct dppd_monitor_server *server, const struct dppd_monit
         server->business_pid = (uint32_t)peer.pid;
         return process_exited(server->business_pidfd) == 0 ? 0 : -EOWNERDEAD;
     }
-    if (recovery.format != 6 || recovery.revision <= record->baseline_revision ||
+    if (!dppd_recovery_record_requires_monitor(&recovery) || recovery.revision <= record->baseline_revision ||
         recovery.last_attempt < record->baseline_attempt || memcmp(recovery.monitor_session, record->session, 16) != 0)
         return -ESTALE;
     for (uint32_t index = 0; index < recovery.count; ++index) {
@@ -607,7 +607,8 @@ int dppd_monitor_recovery_open(struct dppd_monitor_client *client, const char *p
         return -EALREADY;
     if (guard->record.revision != revision)
         return -ESTALE;
-    if (guard->record.format != 6 || !dppd_tap_cookie_present(guard->record.monitor_session))
+    if (!dppd_recovery_record_requires_monitor(&guard->record) ||
+        !dppd_tap_cookie_present(guard->record.monitor_session))
         return -ENODATA;
     if (realpath(path, client->path) == NULL)
         return -errno;

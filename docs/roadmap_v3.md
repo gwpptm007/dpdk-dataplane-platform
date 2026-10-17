@@ -204,7 +204,8 @@ COUNT、故障与重启，134 的私有工具和 DPDK 环境也已完成严格�
 v4 快照和故障重试，协议 v25；三套同版本核心验收通过，未过期规则重启重新计时。
 首期 [indirect 共享 COUNT](m3_shared_count.md) 已接通生产接口、独立版本与引用管理、
 v5 单快照和协议 v26；三套各 60/60 单测、四步核心回归及 24 组功能模拟通过，源码摘要一致。
-native 恢复日志暂不支持 indirect，明确拒绝；共享 RSS/METER/AGE 及更新仍未实现。
+后续 [v7 共享恢复日志](m3_shared_recovery.md) 已支持普通恢复模式的对象与精确引用，
+异常退出后保守阻止重放；TAP 原生/监护组合仍拒绝 indirect。共享 RSS/METER/AGE 及更新仍未实现。
 新增 [独立复位与恢复模拟](m3_reset_simulation.md)：可选模拟回调成功才清除旧句柄，
 保留完整内存期望计划和快照，按涉及端点的精确身份重新核对，先共享对象后规则，
 失败隔离并显式恢复重试。COUNT 归零、AGE 重新计时；真实适配器默认不提供复位回调，
@@ -212,6 +213,9 @@ native 恢复日志暂不支持 indirect，明确拒绝；共享 RSS/METER/AGE �
 回归和 31 组模拟通过，237 项源码摘要一致；真实命令前端及退出清理也已通过。
 真实 PMD 的 AGE/共享 COUNT、mlx5 与非 mlx5 卸载、CPU 旁路、端点移除/真实设备复位恢复仍需推进，
 整个 M3 尚未完成。
+
+共享恢复日志轮次三套各 63/63 单测、五步 M3 验收和 31 组模拟通过，241 项源码摘要一致。
+该轮补齐真实 daemon 的日志和重启保护，不计为真实设备恢复或 ASIC 清理验收。
 
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。
 

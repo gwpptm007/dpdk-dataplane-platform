@@ -75,6 +75,10 @@ struct dppd_rte_flow_backend {
     int (*after_create)(void *context, uint64_t attempt, int create_error);
     /** 删除通知不替代驱动结果，记录故障由保护层锁存并阻止后续安装和自动清理确认 */
     void (*after_remove)(void *context, uint64_t attempt, int remove_error);
+    /** 共享对象也先写意图再调用驱动，三个回调必须与规则保护回调一起完整配置 */
+    int (*before_shared_create)(void *context, const struct dppd_shared_count_spec *spec, uint64_t *attempt);
+    int (*after_shared_create)(void *context, uint64_t attempt, int create_error);
+    void (*after_shared_remove)(void *context, uint64_t attempt, int remove_error);
 };
 
 /**
