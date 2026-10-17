@@ -132,6 +132,19 @@ TAP 命名空间验证无 `CAP_NET_ADMIN` 的进程可以读取和订阅链路�
 
 ## M2：可组合软件 pipeline
 
+2026-10-18 已完成原始 M2 软件交付及 [整体验收](m2_acceptance.md)：独立双栈 exact
+match、ACL、LPM/rewrite/neighbor、conntrack/NAT、规则批量 COUNT、IPv6 和
+VXLAN/Geneve/GRE 解析已接通。QUEUE 的 RX 分流与当前软件路径不等价，已完成明确
+拒绝的设计和策略矩阵验证，不用 TX 队列静默模拟。
+
+系统与本地 TAP 适配 DPDK 21.11.9 各 50/50 单测、各十二步完整验收通过；ASan/UBSan
+全部 50 项和正式单双队列 worker 通过。三份报告与同一 210 文件源码摘要一致。
+八组真实 TAP 验收覆盖双栈、ACL、状态/NAT、ND、隧道、异常及重启，未遗留业务进程。
+分片、校验和、多段包、老化和更新失败语义已登记；RA/SLAAC、重组、RELATED、HA、
+隧道终端及硬件/性能目标仍属于后续扩展或 M3/M4，未计入本次完成。
+
+以下为该阶段此前各次独立交付记录，历史待办应结合上面的最终验收结论阅读。
+
 2026-10-17 完成 [IPv6 动态 ND](nd6.md)：NS/NA、动态解析与有界首包、NUD 可达性、
 本机 DAD、VLAN 域隔离、静态优先和管理闭环接通。两套构建各 47/47 单测、sanitizer
 全部 47 项、单双队列共享首包与 NAT66、三种 VLAN 域的真实 TAP 和异常重启验收通过。

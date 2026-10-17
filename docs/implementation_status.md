@@ -5,6 +5,15 @@
 以下日期条目保留各次交付当时的验收状态，当前能力以最新条目、模块表和
 [M2 整体验收](m2_acceptance.md) 为准，不能将历史待办当作当前仍缺失的功能。
 
+2026-10-18 已完成原始 M2 软件数据面及 [整体验收](m2_acceptance.md)。本轮补齐独立
+双栈 exact match、规则批量 COUNT、VXLAN/Geneve/GRE 有界解析与统计，并登记 QUEUE
+不等价的软件拒绝语义、异常处理表和可重复执行的验收入口。管理协议为 v23。
+系统和本地 TAP 适配 DPDK 21.11.9 各 50/50 单测、各十二步完整验收通过，ASan/UBSan
+全部 50 项及单双队列正式 worker 通过。三份报告与当前 210 文件源码摘要一致，
+真实 TAP 的双栈/ACL/NAT/ND/隧道和异常重启全部通过，工作线程 mbuf 归还完整。
+IPv4 动态 ARP、RA/SLAAC、重组、RELATED、hairpin/NPTv6、HA、隧道终端及硬件/性能
+验收仍未完成，属于后续增强或 M3/M4，不把软件阶段完成推广为完整生产路由器。
+
 2026-10-18 已补齐 M2 规则 COUNT 批量归并，保持版本隔离、DROP 命中及 ND 重试语义，
 在正式 worker 发送和 QSBR 静默前提交。两套构建各 49/49 单测、全部 49 项 sanitizer、
 单双队列组合收发及 sanitizer worker 通过，详见 [M2 验收](m2_acceptance.md)。
