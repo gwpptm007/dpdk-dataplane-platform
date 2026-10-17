@@ -39,7 +39,9 @@ def main():
     commands = [("inventory", [sys.executable, "scripts/inspect_m3_environment.py"], 60),
                 ("regression", command, None),
                 ("transfer_process", [sys.executable, "tests/integration/m3_transfer.py",
-                                      "--build-dir", str(build)], 180)]
+                                      "--build-dir", str(build)], 180),
+                ("transfer_simulation", [sys.executable, "scripts/simulate_m3.py", "demo",
+                                         "--build-dir", str(build)], 180)]
     try:
         if args.tap and (not hasattr(os, "geteuid") or os.geteuid() != 0):
             raise RuntimeError("--tap 必须以 root 运行")

@@ -88,6 +88,13 @@ daemon，并把失败传回 M3，夹具没有残留进程。
 
 ## 后续验收条件
 
+已补充 [可直接运行的功能模拟](m3_simulation.md) 和 [134 工具环境](m3_simulation_environment.md)。
+独立模拟服务复用正式管理、事务和持久化，支持真实 CLI 与报文字节的正向演练；
+统一入口增加 `transfer_simulation` 步骤。135 系统/ASan 与 134 新 GCC 13 环境各 55/55
+单测、核心 worker、正式拒绝路径和十组正向模拟全部通过，报告对应同一 224 文件源码。
+这是上述 222 文件基础验收之后的功能模拟扩展；完整 TAP 结果仍按基础实现版本登记，
+新扩展的完整记录和摘要见 [功能模拟验收](m3_simulation.md)。
+
 需要至少一套可使用的 NVIDIA mlx5/BlueField 和一套物理非 mlx5 PMD 环境，明确哪些
 端口是管理口、哪些属于同一 embedded switch，再由实际 PMD 验证规则能力。
 之后补齐 AGE/indirect 生命周期、设备事件恢复，进行线缆流量和 CPU 旁路验收。

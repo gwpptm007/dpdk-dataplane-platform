@@ -5,6 +5,12 @@
 以下日期条目保留各次交付当时的验收状态，当前能力以最新条目、模块表和
 [M2 整体验收](m2_acceptance.md) 为准，不能将历史待办当作当前仍缺失的功能。
 
+2026-10-18 已提供 [M3 可运行功能模拟](m3_simulation.md)：独立测试服务可由真实
+dppctl 连接，演练七种模板的单向/双向报文、COUNT、优先级、故障补偿、隔离和重启。
+134 已安装最小工具和私有 DPDK 21.11.9，GCC 13.2 严格构建通过；与 135 系统、ASan
+构建各 55/55 单测、核心 worker、正式拒绝路径和十组正向模拟通过，对应同一 224 文件
+源码。模拟程序不链接到正式 daemon，M3 实机、AGE/共享动作及复位恢复限制继续保留。
+
 2026-10-18 推进 M3：完成 [只读环境盘点](m3_environment_20261018.md)、
 [驱动方向及 COUNT 有效性修复](m3_flow_contract.md)，接通带来源和错误信息的 mlx5
 角色发现、同交换域七种场景图、正式 `transfer-plan/transfer-apply` 和管理协议 v24。
@@ -223,6 +229,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | stats/telemetry | 已实现报文统计与规则诊断 | 工作线程、端口、队列统计及丢弃原因；规则汇总/分页、安装副本、失败指标、失败事件和耗时历史完整发布；规则 COUNT 独立查询 |
 | topology | 发现与有证据的 mlx5 角色解析已接通 | 当前命名空间 netlink、sysfs、PCI 身份交叉核对；支持 uplink/PF/VF/SF 严格名称，缺失或矛盾保留 unknown；实机尚未验收 |
 | transfer 场景 | 七种模板的图与管理入口已接通 | 同交换域、角色/父子证据、优先级冲突及版本检查；同批创建与补偿，永不软件降级；虚拟控制验证不等于硬件卸载 |
+| 独立功能模拟 | 可直接运行且明确标记模拟 | 真实管理 CLI、平坦 transfer 报文与 COUNT、单次故障、隔离和快照重放；仅测试构建提供，不接触真实网卡 |
 | capability profile / probe cache | 已实现本机诊断闭环 | 设备/固件/DPDK 身份、描述符和既有 queue/RSS/offload；完整规则校验结果缓存五秒、64 槽、强制刷新与失效；成功观察集合不承诺任意组合；正式安装始终新校验 |
 | rule IR | 已实现第一版 | 有序 match/action、domain/fallback、持久化 install port 和语义校验 |
 | rule repository | 已实现内存版和可选写路径 | 稳定 ID、单调 generation、幂等 CRUD、乐观并发、按 ID 稳定分页；control 可在 mutation 后保存完整 snapshot |

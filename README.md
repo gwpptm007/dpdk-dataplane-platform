@@ -41,6 +41,8 @@ M2 软件数据面已通过阶段验收，两套构建各 50/50 单测与完整 
 交付范围、阶段限制和可重复执行的入口见 [M2 验收](docs/m2_acceptance.md)。
 M3 已开始交付角色发现、transfer 图和正式管理入口；当前环境可运行模拟与软件回归，
 实机设备、CPU 旁路及复位恢复的边界见 [M3 验收](docs/m3_acceptance.md)。
+不接实体网卡也可运行 `python3 scripts/simulate_m3.py demo --build-dir build`，
+用真实命令行演练正向转发、计数、失败回滚和重启，见 [M3 功能模拟](docs/m3_simulation.md)。
 
 ## 快速开始
 

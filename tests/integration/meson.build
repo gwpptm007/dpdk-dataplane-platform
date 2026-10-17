@@ -1,3 +1,6 @@
+# 独立模拟服务只演练控制与报文字节，不初始化 EAL，也不进入正式 daemon
+executable('dppd_transfer_sim', 'transfer_sim.c', dependencies: dppd_core_dep, install: false)
+
 # 测试专用入口只包装读者注册，正式 daemon 的线程监控和资源清理保持不变
 executable(
   'test_worker_failure',

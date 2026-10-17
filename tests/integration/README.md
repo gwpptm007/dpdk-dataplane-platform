@@ -6,6 +6,7 @@
 python3 scripts/verify_m3.py --build-dir build
 sudo python3 scripts/verify_m3.py --build-dir build --tap
 python3 tests/integration/m3_transfer.py --build-dir build
+python3 scripts/simulate_m3.py demo --build-dir build
 ```
 
 统一入口先只读盘点，再运行开启 `tests/werror` 的全部单测和 M2 软件回归，最后使用
@@ -14,6 +15,8 @@ python3 tests/integration/m3_transfer.py --build-dir build
 报告保存到构建目录 `m3-acceptance/`，始终标记硬件验收未执行、M3 整体验收未完成。
 模拟驱动的正向图安装、COUNT 和故障补偿由单测覆盖，不能把 ring/TAP 当成交换芯片，
 具体边界见 [M3 控制闭环](../../docs/m3_transfer.md) 与 [M3 验收](../../docs/m3_acceptance.md)。
+统一 M3 入口现在还执行独立模拟服务的正向功能演练，覆盖真实管理命令、报文字节、
+七种模板、计数、故障补偿与重启；手动操作见 [功能模拟](../../docs/m3_simulation.md)。
 
 ## M2 整体验收
 
