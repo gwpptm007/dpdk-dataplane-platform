@@ -40,4 +40,6 @@ python3 tests/integration/m4_flow_traffic.py --build-dir build-perf
 ```
 
 本轮覆盖新 M4 软件批量路径，未重复整套 TAP，也不证明 ASIC 旁路或物理设备 AGE。
-剩余异步更新、共享/AGE 联动和最终同源联合验收继续推进。
+后续 [异步更新](m4_async_update.md) 已把同一夹具扩展为 272 包，增加等待时旧策略、
+成功后新策略、发布失败保留旧 COUNT 及新版本计数归零；224 包数字保留本次历史验收范围。
+当前联合状态见 [M4 软件整体验收](m4_final_acceptance.md)。

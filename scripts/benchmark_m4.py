@@ -22,6 +22,15 @@ def enforce_contract(report, path):
         raise RuntimeError("固定契约仅接受revision 1、4096/16384条规则及五轮完整测量")
     if report["cpu_affinity"] != [0, 1, 2, 3] or [item.get("version") for item in report["dpdk"]] != ["21.11.9"]:
         raise RuntimeError("固定性能门禁须使用约定的CPU 0-3与DPDK 21.11.9参考环境")
+    checks = evaluate_gates(report, contract)
+    report["contract_sha256"] = hashlib.sha256(content).hexdigest()
+    report["performance_gates"] = checks
+    if not all(checks.values()):
+        raise RuntimeError("固定门槛未通过：" + ", ".join(name for name, passed in checks.items() if not passed))
+
+
+def evaluate_gates(report, contract):
+    """联合验收重复核对数值，不把旧报告里的通过布尔值直接当作本轮结论"""
     gates = contract["performance_gates"]
     memory, _, software = report["median_cases"]
     checks = {
@@ -38,10 +47,7 @@ def enforce_contract(report, path):
             "memory_driver_16384_single_max_request_p99_ns"]
         checks["snapshot_replay_16384_max_ns"] = report["median_snapshot_replay_ns"] <= gates[
             "snapshot_replay_16384_max_ns"]
-    report["contract_sha256"] = hashlib.sha256(content).hexdigest()
-    report["performance_gates"] = checks
-    if not all(checks.values()):
-        raise RuntimeError("固定门槛未通过：" + ", ".join(name for name, passed in checks.items() if not passed))
+    return checks
 
 
 def main():

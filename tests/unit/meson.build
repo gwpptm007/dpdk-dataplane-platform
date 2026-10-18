@@ -67,6 +67,10 @@ native_shared_flow_test = executable('test_native_shared_flow', 'test_native_sha
               '-Wl,--wrap=rte_flow_push', '-Wl,--wrap=rte_flow_pull', '-Wl,--wrap=rte_flow_get_q_aged_flows'])
 test('native shared COUNT template queue AGE and compensation contract', native_shared_flow_test)
 
+# 联合报告缺少同源、完整 TAP、构建覆盖或固定门槛时不能得到整体完成标记
+test('M4 joint acceptance evidence gates', find_program('python3'),
+  args: [files('test_m4_acceptance.py')])
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',
