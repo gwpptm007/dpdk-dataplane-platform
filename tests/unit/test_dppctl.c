@@ -723,5 +723,23 @@ int main(void)
     assert(build_request(7, flow, &request) == 0 && request.payload.flow_change.expected[0] == 9);
     flow[6] = "any";
     assert(build_request(7, flow, &request) == -EINVAL);
+    /** 配置文件整批解析，坏行、嵌入零字节或超出条数都不能发送已解析的前缀 */
+    char configuration_path[] = "/tmp/dppctl-configuration-XXXXXX";
+    int configuration_fd = mkstemp(configuration_path);
+    assert(configuration_fd >= 0);
+    const char configuration[] = "count-add 800 7 ingress\n"
+                                 "template-add 2 64 1 apply-drop 1 7 0 shared:800:0\n";
+    assert(write(configuration_fd, configuration, sizeof(configuration) - 1U) == sizeof(configuration) - 1U);
+    char *configure[] = {"flow-config-apply", "0", configuration_path};
+    assert(build_request(3, configure, &request) == 0 && request.payload.flow_config_apply.count == 2);
+    assert(request.payload.flow_config_apply.changes[1].spec.table.example.actions[0].type == DPPD_ACTION_SHARED_COUNT);
+    assert(write(configuration_fd, "\0", 1) == 1);
+    assert(build_request(3, configure, &request) == -EINVAL);
+    assert(ftruncate(configuration_fd, 0) == 0 && lseek(configuration_fd, 0, SEEK_SET) == 0);
+    for (unsigned int i = 0; i < 9; ++i)
+        assert(write(configuration_fd, "template-delete 2\n", 18) == 18);
+    assert(build_request(3, configure, &request) == -E2BIG);
+    close(configuration_fd);
+    assert(unlink(configuration_path) == 0);
     return 0;
 }

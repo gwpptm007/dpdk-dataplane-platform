@@ -75,6 +75,10 @@ test('M4 joint acceptance evidence gates', find_program('python3'),
 flow_state_test = executable('test_flow_state', 'test_flow_state.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=write', '-Wl,--wrap=fsync', '-Wl,--wrap=rename'])
 test('M5 M4 configuration codec integrity and atomic persistence', flow_state_test)
+flow_configuration_test = executable('test_flow_configuration', 'test_flow_configuration.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync', '-Wl,--wrap=dppd_flow_template_create',
+      '-Wl,--wrap=dppd_flow_template_destroy'])
+test('M5 online definition transactions shared counting and durable recovery', flow_configuration_test)
 
 # 真正的 SIGKILL 与 exec 重启，不沿用旧地址空间，写盘失败不能领取成功回执
 flow_store_test = executable('test_flow_store', 'test_flow_store.c', dependencies: dppd_core_dep,
@@ -437,6 +441,7 @@ dppctl_test = executable(
   'test_dppctl',
   'test_dppctl.c',
   '../../app/dppctl/routing_cli.c',
+  '../../app/dppctl/config_cli.c',
   '../../app/dppctl/conntrack_cli.c',
   '../../app/dppctl/transfer_cli.c',
   include_directories: dppd_inc,

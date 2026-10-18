@@ -1032,6 +1032,20 @@ int dppd_flow_service_status(struct dppd_flow_service *service, struct dppd_flow
     return 0;
 }
 
+int dppd_flow_service_config_revision(struct dppd_flow_service *service, uint64_t expected)
+{
+    if (service == NULL || expected >= UINT64_MAX - 1U)
+        return -EINVAL;
+    pthread_mutex_lock(&service->lock);
+    int rc = service->rules.generation != expected ? -ESTALE
+        : service->replaying || service->shutting_down || service->status.jobs != 0 || service->status.isolated ? -EBUSY
+                                                                                                                : 0;
+    if (rc == 0)
+        ++service->rules.generation;
+    pthread_mutex_unlock(&service->lock);
+    return rc;
+}
+
 int dppd_flow_service_replay_begin(struct dppd_flow_service *service, uint64_t revision)
 {
     int rc = 0;

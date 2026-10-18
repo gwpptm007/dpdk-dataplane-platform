@@ -78,7 +78,8 @@ CLI 当前提供单条构造，复用 `apply-drop`、`apply-filter`、`apply-fil
 
 支持原有只读 `ping`、`health/ready`、`stats`、`get/list`、软件 `count` 及 `persistence-status`。
 列表使用可靠保存的配置及精确修订号分页；COUNT 只有规则包含计数动作时才可查询。
-其他旧控制面专属诊断、路由、硬件复位及在线模板/共享定义修改明确不支持。
+其他旧控制面专属诊断、路由、硬件复位仍不支持；后续已增加
+[在线模板和共享 COUNT 配置事务](m5_online_configuration.md)，协议升级到 v29。
 新模式目前使用管理 socket 查询统计及退出汇总，没有接入原控制面的规则 telemetry 和周期日志。
 连接跟踪、NAT、ND 依赖独立路由模式，在这个受管理端口对模式下也不启用。
 

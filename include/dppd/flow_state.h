@@ -63,6 +63,46 @@ struct dppd_flow_store_status {
 
 struct dppd_flow_store;
 
+#define DPPD_FLOW_CONFIG_OPERATIONS 8U
+enum dppd_flow_config_operation {
+    DPPD_FLOW_CONFIG_TEMPLATE_ADD = 1,
+    DPPD_FLOW_CONFIG_TEMPLATE_DELETE,
+    DPPD_FLOW_CONFIG_COUNT_ADD,
+    DPPD_FLOW_CONFIG_COUNT_DELETE
+};
+
+struct dppd_flow_config_change {
+    enum dppd_flow_config_operation operation;
+    uint64_t key, expected_generation;
+    union {
+        struct dppd_flow_template_spec table;
+        struct {
+            uint16_t port_id;
+            enum dppd_rule_domain domain;
+        } count;
+    } spec;
+};
+
+struct dppd_flow_config_result {
+    uint64_t revision, durable_revision, generations[8];
+    bool applied, durable;
+};
+
+/** 两张定义表独立翻页，共用同一个精确修订号，返回纯数据而不导出驱动句柄 */
+struct dppd_flow_config_page {
+    uint64_t revision, durable_revision, shared_next_generation, next_table, next_count;
+    uint32_t table_count, shared_count, tables_returned, counts_returned;
+    bool more_tables, more_counts, dirty, residual;
+    struct dppd_flow_state_table tables[2];
+    struct dppd_shared_count_spec counts[4];
+};
+
+int dppd_flow_store_configuration(struct dppd_flow_store *store, uint64_t expected, uint64_t after_table,
+    uint64_t after_count, struct dppd_flow_config_page *page);
+/** 整批配置先校验并准备，禁止删除被引用的定义，写盘失败保留已应用配置并封闭成功回执 */
+int dppd_flow_store_configure(struct dppd_flow_store *store, uint64_t expected,
+    const struct dppd_flow_config_change *changes, uint32_t count, struct dppd_flow_config_result *result);
+
 /**
  * 打开已存在的配置，独占文件写锁并完整重放，只有 ready 后才能取得 classifier 并启动 worker
  * 普通失败保持空输出，已知残留返回 EUCLEAN 并输出实例，调用者必须保留实例并重试关闭
@@ -84,6 +124,8 @@ int dppd_flow_store_get(struct dppd_flow_store *store, uint64_t id, struct dppd_
 /** 重启后共享对象身份保留，驱动累计值从零开始，查询不修改配置或计数 */
 int dppd_flow_store_query_shared(struct dppd_flow_store *store, uint64_t id, uint64_t generation, uint64_t *hits,
     uint64_t *bytes);
+int dppd_flow_store_shared_get(struct dppd_flow_store *store, uint64_t id, uint64_t generation,
+    struct dppd_flow_shared_count_info *info);
 /** 请求内模板使用文件稳定键，实际指针和进程内模板凭据都由本实例解析 */
 int dppd_flow_store_submit(struct dppd_flow_store *store, uint32_t queue, const struct dppd_flow_state_rule *rules,
     uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *job);

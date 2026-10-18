@@ -17,6 +17,7 @@ struct rte_rcu_qsbr;
 struct dppd_software_backend;
 struct dppd_software_decision;
 struct dppd_software_rule_metrics;
+struct dppd_flow_shared_counts;
 
 /** 每批先合并相同规则版本的 COUNT，满 32 个不同对象时先提交再继续接收 */
 #define DPPD_SOFTWARE_COUNT_BATCH_SIZE 32U
@@ -63,6 +64,8 @@ struct dppd_software_backend {
     uint32_t capacity;
     bool lock_initialized;
     bool qsbr_initialized;
+    /** 仅受管理模式绑定，生命周期必须覆盖全部活跃和退役快照 */
+    struct dppd_flow_shared_counts *shared_counts;
     /** 两组历史都由 writer_lock 保护，worker 不读取或更新，整批提交只记录一次 */
     struct dppd_rule_latency_histogram latency_single;
     struct dppd_rule_latency_histogram latency_batch;
@@ -104,6 +107,8 @@ int dppd_software_backend_clear(struct dppd_software_backend *backend);
 int dppd_software_backend_init(struct dppd_software_backend *backend, uint32_t capacity);
 /** 所有工作线程退出并注销后释放活跃表、退役表和回收器；此函数不负责停止线程 */
 void dppd_software_backend_fini(struct dppd_software_backend *backend);
+/** 只回收全部读者已经越过的退役快照，不等待 worker，也不发布新的规则表 */
+void dppd_software_backend_reclaim(struct dppd_software_backend *backend);
 
 /**
  * 对已经通过通用校验的规则检查软件能力，支持入口域的 ETH、IPv4、UDP、TCP 匹配
@@ -112,6 +117,8 @@ void dppd_software_backend_fini(struct dppd_software_backend *backend);
  * 该检查用于判断能否降级到软件执行，不代替规则结构和字段合法性的通用校验
  */
 bool dppd_software_backend_rule_supported(const struct dppd_rule *rule);
+/** 共享 COUNT 只在显式绑定对象库的管理模式可用，旧自动回退保持原有能力边界 */
+bool dppd_software_backend_rule_supported_managed(const struct dppd_rule *rule);
 /**
  * 读取活跃软件规则表的对象数，供控制面估算还剩多少临时安装空间
  * 退役快照不计入数量；查询使用控制面锁，不在逐包处理路径上调用

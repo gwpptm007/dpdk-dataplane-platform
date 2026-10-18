@@ -109,6 +109,37 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
         return 0;
     }
     switch (request->operation) {
+    case DPPD_MANAGEMENT_FLOW_CONFIG_GET:
+        rc = dppd_flow_store_configuration(flows->store, request->payload.flow_config_get.expected,
+            request->payload.flow_config_get.after_table, request->payload.flow_config_get.after_count,
+            &response->payload.flow_configuration);
+        break;
+    case DPPD_MANAGEMENT_FLOW_CONFIG_APPLY:
+        rc = request->payload.flow_config_apply.reserved != 0
+            ? -EINVAL
+            : dppd_flow_store_configure(flows->store, request->payload.flow_config_apply.expected,
+                  request->payload.flow_config_apply.changes, request->payload.flow_config_apply.count,
+                  &response->payload.flow_config_result);
+        break;
+    case DPPD_MANAGEMENT_SHARED_COUNT_GET:
+    case DPPD_MANAGEMENT_SHARED_COUNT_QUERY: {
+        struct dppd_flow_shared_count_info info;
+        rc = dppd_flow_store_shared_get(flows->store, request->payload.shared_count.id,
+            request->payload.shared_count.expected, &info);
+        if (rc != 0)
+            break;
+        if (request->operation == DPPD_MANAGEMENT_SHARED_COUNT_GET) {
+            response->payload.shared_count.spec = info.spec;
+            response->payload.shared_count.references = info.references;
+            break;
+        }
+        response->payload.shared_count_result.object.spec = info.spec;
+        response->payload.shared_count_result.object.references = info.references;
+        rc = dppd_flow_store_query_shared(flows->store, request->payload.shared_count.id,
+            request->payload.shared_count.expected, &response->payload.shared_count_result.hits,
+            &response->payload.shared_count_result.bytes);
+        break;
+    }
     case DPPD_MANAGEMENT_PING:
         response->payload.pong.repository_generation = status.service.revision;
         response->payload.pong.rule_count = status.service.rules;

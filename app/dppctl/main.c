@@ -16,10 +16,14 @@
 #include "routing_cli.h"
 #include "conntrack_cli.h"
 #include "transfer_cli.h"
+#include "config_cli.h"
 
 static void print_usage(const char *program)
 {
     fprintf(stderr, "usage:\n");
+    fprintf(stderr, "  %s [--socket PATH] flow-config-get [REVISION [AFTER_TABLE AFTER_COUNT]]\n", program);
+    fprintf(stderr, "  %s [--socket PATH] flow-config-apply EXACT_REVISION FILE\n", program);
+    fprintf(stderr, "  managed rule constructors accept a final shared:ID:GENERATION modifier\n");
     fprintf(stderr, "  %s [--socket PATH] flow-status|flow-retry\n", program);
     fprintf(stderr, "  %s [--socket PATH] flow-create|flow-update TABLE QUEUE apply-drop|acl-set|acl6-set ...\n",
         program);
@@ -690,8 +694,58 @@ static int build_acl_batch(const char *path, struct dppd_management_request *req
     return rc != 0 ? rc : request->payload.update_batch.count >= 2 ? 0 : -EINVAL;
 }
 
+static int build_request(int argc, char **argv, struct dppd_management_request *request);
+
+/** 共享动作只在显式管理命令中构造，旧控制面的自动软件回退不会因此扩大能力 */
+static int build_managed_rule(int argc, char **argv, struct dppd_management_request *request)
+{
+    if (argc < 1 ||
+        (strcmp(argv[0], "apply-drop") != 0 && strcmp(argv[0], "apply-filter") != 0 &&
+            strcmp(argv[0], "apply-filter-drop") != 0 && strcmp(argv[0], "acl-set") != 0 &&
+            strcmp(argv[0], "acl6-set") != 0))
+        return -EINVAL;
+    uint64_t id = 0, generation = 0;
+    if (argc > 1 && strncmp(argv[argc - 1], "shared:", 7) == 0) {
+        char copy[64];
+        if (strlen(argv[argc - 1] + 7) >= sizeof(copy))
+            return -EINVAL;
+        strcpy(copy, argv[argc - 1] + 7);
+        char *colon = strchr(copy, ':');
+        if (colon == NULL)
+            return -EINVAL;
+        *colon++ = '\0';
+        if (parse_u64(copy, 1, UINT64_MAX - 1U, &id) != 0 || parse_u64(colon, 0, UINT64_MAX - 1U, &generation) != 0)
+            return -EINVAL;
+        --argc;
+    }
+    int rc = build_request(argc, argv, request);
+    if (rc != 0 || request->operation != DPPD_MANAGEMENT_RULE_APPLY ||
+        request->payload.apply.rule.fallback == DPPD_FALLBACK_REQUIRE_HARDWARE)
+        return -EINVAL;
+    struct dppd_rule *rule = &request->payload.apply.rule;
+    rule->install_port_id = request->payload.apply.install_port_id;
+    rule->fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
+    if (id != 0) {
+        uint16_t index = 0;
+        while (index < rule->nb_actions && rule->actions[index].type != DPPD_ACTION_COUNT)
+            ++index;
+        if (index == rule->nb_actions) {
+            if (index == DPPD_RULE_MAX_ACTIONS)
+                return -ENOSPC;
+            index = 0;
+            memmove(rule->actions + 1, rule->actions, rule->nb_actions++ * sizeof(rule->actions[0]));
+        }
+        rule->actions[index] =
+            (struct dppd_action){.type = DPPD_ACTION_SHARED_COUNT, .conf.shared_count = {id, generation}};
+    }
+    return 0;
+}
+
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
+    int configured = dppctl_config_build(argc, argv, request, build_managed_rule, initialize_request);
+    if (configured != -ENOSYS)
+        return configured;
     /** 新模式复用已有规则构造器，模板键和控制队列必须显式给出，不能猜测安装语义 */
     if (argc >= 1 && (strcmp(argv[0], "flow-create") == 0 || strcmp(argv[0], "flow-update") == 0)) {
         uint64_t table, queue;
@@ -701,7 +755,7 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
                 strcmp(argv[3], "apply-filter-drop") != 0 && strcmp(argv[3], "acl-set") != 0 &&
                 strcmp(argv[3], "acl6-set") != 0))
             return -EINVAL;
-        int rc = build_request(argc - 3, argv + 3, &built);
+        int rc = build_managed_rule(argc - 3, argv + 3, &built);
         if (rc != 0 || built.operation != DPPD_MANAGEMENT_RULE_APPLY ||
             built.payload.apply.rule.fallback == DPPD_FALLBACK_REQUIRE_HARDWARE ||
             built.payload.apply.expected_generation == DPPD_RULE_GENERATION_ANY ||
@@ -1369,6 +1423,9 @@ static void print_shared_count(const struct dppd_shared_count_info *object)
 
 static int print_response(const struct dppd_management_response *response)
 {
+    int configuration = dppctl_config_print(response);
+    if (configuration != 0)
+        return configuration < 0 ? configuration : 0;
     int transfer = dppctl_transfer_print(response);
     if (transfer != 0)
         return transfer < 0 ? transfer : 0;
@@ -1783,6 +1840,13 @@ int main(int argc, char **argv)
 
         fprintf(stderr, "dppctl: request failed: %s (%d)\n",
             status < 0 && status >= -4095 ? strerror(-status) : "unknown error", status);
+        if (response.operation == DPPD_MANAGEMENT_FLOW_CONFIG_APPLY) {
+            (void)dppctl_config_print(&response);
+            if (status == -EUCLEAN)
+                fprintf(stderr,
+                    "dppctl: inspect flow-config-get and flow-status; repair storage with persistence-flush or known cleanup with flow-retry\n");
+            return EXIT_FAILURE;
+        }
         if (response.operation >= DPPD_MANAGEMENT_FLOW_STATUS && response.operation <= DPPD_MANAGEMENT_FLOW_RETRY) {
             if (status == -EAGAIN)
                 fprintf(stderr, "dppctl: job remains pending; collect again using the same token\n");

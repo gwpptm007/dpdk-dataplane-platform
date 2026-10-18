@@ -1,6 +1,7 @@
 #include "dppd/software_backend.h"
 #include "dppd/acl.h"
 #include "dppd/exact.h"
+#include "dppd/software_shared.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -33,6 +34,9 @@ struct dppd_software_rule_metrics {
     uint64_t install_duration_ns;
     uint32_t commit_rule_count;
     bool timing_available;
+    struct dppd_flow_shared_counts *counts;
+    struct dppd_flow_shared_count_lease shared_lease;
+    struct dppd_software_shared_counter *shared;
 };
 
 struct dppd_software_rule_object {
@@ -85,8 +89,11 @@ static struct dppd_acl *snapshot_acl(struct dppd_software_classifier_snapshot *s
 static void metrics_put(struct dppd_software_rule_metrics *metrics)
 {
     /** 最后一个 snapshot 消失才释放统计对象，确保 retired reader 仍可安全累加 COUNT */
-    if (metrics != NULL && atomic_fetch_sub_explicit(&metrics->references, 1, memory_order_acq_rel) == 1)
+    if (metrics != NULL && atomic_fetch_sub_explicit(&metrics->references, 1, memory_order_acq_rel) == 1) {
+        if (metrics->shared_lease.owner != 0)
+            (void)dppd_flow_shared_counts_unbind(metrics->counts, &metrics->shared_lease);
         free(metrics);
+    }
 }
 
 static void snapshot_destroy(struct dppd_software_classifier_snapshot *snapshot, uint32_t capacity)
@@ -186,6 +193,23 @@ static int publish_locked(struct dppd_software_backend *backend, struct dppd_sof
     for (uint32_t i = 0; i < backend->capacity; ++i) {
         if (next->objects[i].metrics == NULL)
             continue;
+        /** 快照自己借用共享对象，实际 flow 已删除时，旧 worker 仍可完成最后一次累计 */
+        struct dppd_software_rule_metrics *metrics = next->objects[i].metrics;
+        const struct dppd_rule *rule = &next->objects[i].rule;
+        if (backend->shared_counts != NULL && metrics->shared_lease.owner == 0) {
+            for (uint16_t a = 0; a < rule->nb_actions; ++a) {
+                if (rule->actions[a].type != DPPD_ACTION_SHARED_COUNT)
+                    continue;
+                struct dppd_flow_binding binding = {0};
+                int bound =
+                    dppd_flow_shared_counts_bind(backend->shared_counts, rule, &binding, &metrics->shared_lease);
+                if (bound != 0)
+                    return bound;
+                metrics->counts = backend->shared_counts;
+                metrics->shared = (void *)binding.actions[a];
+                break;
+            }
+        }
         int rc = dppd_exact_add(exact, &next->objects[i].rule, i + 1);
         if (rc == -ENOTSUP)
             rc = dppd_acl_add(acl, &next->objects[i].rule, i + 1);
@@ -239,6 +263,23 @@ bool dppd_software_backend_rule_supported(const struct dppd_rule *rule)
         }
     }
     return true;
+}
+
+bool dppd_software_backend_rule_supported_managed(const struct dppd_rule *rule)
+{
+    if (rule == NULL || rule->nb_actions > DPPD_RULE_MAX_ACTIONS)
+        return false;
+    struct dppd_rule normalized = *rule;
+    for (uint16_t i = 0; i < normalized.nb_actions; ++i)
+        if (normalized.actions[i].type == DPPD_ACTION_SHARED_COUNT)
+            normalized.actions[i].type = DPPD_ACTION_COUNT;
+    return dppd_software_backend_rule_supported(&normalized);
+}
+
+static bool supported(const struct dppd_software_backend *backend, const struct dppd_rule *rule)
+{
+    return backend->shared_counts == NULL ? dppd_software_backend_rule_supported(rule)
+                                          : dppd_software_backend_rule_supported_managed(rule);
 }
 
 int dppd_software_backend_init(struct dppd_software_backend *backend, uint32_t capacity)
@@ -312,7 +353,7 @@ static int transaction_validate(void *context, const struct dppd_transaction_ite
     struct dppd_software_backend *backend = context;
 
     if (backend == NULL || item == NULL || item->plan.backend != DPPD_PLAN_BACKEND_SOFTWARE ||
-        !dppd_software_backend_rule_supported(&item->rule))
+        !supported(backend, &item->rule))
         return -ENOTSUP;
     return 0;
 }
@@ -493,7 +534,7 @@ int dppd_software_backend_update_batch(struct dppd_software_backend *backend, co
             rc = -EINVAL;
             goto out;
         }
-        if (!dppd_software_backend_rule_supported(&rules[i])) {
+        if (!supported(backend, &rules[i])) {
             rc = -ENOTSUP;
             goto out;
         }
@@ -622,7 +663,7 @@ int dppd_software_backend_change_batch(struct dppd_software_backend *backend,
                 rc = -EINVAL;
                 goto done;
             }
-            if (!dppd_software_backend_rule_supported(rule)) {
+            if (!supported(backend, rule)) {
                 rc = -ENOTSUP;
                 goto done;
             }
@@ -716,7 +757,7 @@ static int replace_snapshot(struct dppd_software_backend *backend, const struct 
             rc = -EINVAL;
             goto done;
         }
-        if (!dppd_software_backend_rule_supported(&rules[i])) {
+        if (!supported(backend, &rules[i])) {
             rc = -ENOTSUP;
             goto done;
         }
@@ -821,13 +862,17 @@ int dppd_software_backend_remove_version(struct dppd_software_backend *backend, 
     return 0;
 }
 
-/**
- * 返回当前活跃软件规则表中的对象数量，供批量更新检查还剩多少临时槽位
- * 已退役但尚未释放的快照不参与计数，因为它们只是供尚未离开的读者继续使用
- *
- * 查询期间持有控制面的写锁，防止读取 active 后，该快照又被另一次更新回收
- * 这个锁只用于管理侧查询，不会让逐包匹配路径增加锁操作
- */
+/** 只回收已经没有旧读者的快照，配置删除共享对象前需要归还这些快照的借用 */
+void dppd_software_backend_reclaim(struct dppd_software_backend *backend)
+{
+    if (backend == NULL || !backend->lock_initialized)
+        return;
+    pthread_mutex_lock(&backend->writer_lock);
+    reclaim_locked(backend);
+    pthread_mutex_unlock(&backend->writer_lock);
+}
+
+/** 返回活跃规则数，退役快照不占新的逻辑容量，管理侧查询不会给逐包路径加锁 */
 uint32_t dppd_software_backend_count(const struct dppd_software_backend *backend)
 {
     struct dppd_software_classifier_snapshot *active;
@@ -1048,6 +1093,9 @@ void dppd_software_backend_decide_counted(struct dppd_software_backend *backend,
             else if (source->type == DPPD_ACTION_MARK) {
                 decision->has_mark = true;
                 decision->mark_id = source->conf.mark_id;
+            } else if (source->type == DPPD_ACTION_SHARED_COUNT && !packet->neighbor_retry) {
+                atomic_fetch_add_explicit(&selected->metrics->shared->hits, 1, memory_order_relaxed);
+                atomic_fetch_add_explicit(&selected->metrics->shared->bytes, packet->packet_len, memory_order_relaxed);
             } else if (source->type == DPPD_ACTION_COUNT && !packet->neighbor_retry)
                 count_packet(selected->metrics, packet->packet_len, batch);
         }

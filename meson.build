@@ -59,6 +59,7 @@ dppd_sources = files(
   'lib/dataplane/ipv4_router.c',
   'lib/dataplane/ipv4_rewrite.c',
   'lib/dataplane/software_backend.c',
+  'lib/dataplane/software_shared.c',
   'lib/dataplane/software_async_flow.c',
   'lib/dataplane/acl.c',
   'lib/dataplane/exact.c',
@@ -104,6 +105,7 @@ executable(
 executable(
   'dppctl',
   'app/dppctl/main.c',
+  'app/dppctl/config_cli.c',
   'app/dppctl/routing_cli.c',
   'app/dppctl/conntrack_cli.c',
   'app/dppctl/transfer_cli.c',

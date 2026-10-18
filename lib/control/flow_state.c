@@ -61,7 +61,7 @@ int dppd_flow_state_validate(const struct dppd_flow_state *state)
     for (uint32_t p = 0; p < c->admission.port_count; ++p)
         if (c->admission.ports[p].port_id == c->port_id)
             port = (int)p;
-    if (port < 0 || (c->mode == DPPD_FLOW_STATE_SOFTWARE && state->shared_count != 0))
+    if (port < 0)
         return -EINVAL;
     for (uint32_t q = 0; q < 8; ++q)
         if (q < c->queue_count ? c->queue_capacity[q] == 0 || c->queue_capacity[q] > 65536 : c->queue_capacity[q] != 0)
@@ -69,8 +69,8 @@ int dppd_flow_state_validate(const struct dppd_flow_state *state)
     for (uint32_t i = 0; i < state->shared_count; ++i) {
         const struct dppd_shared_count_spec *s = &state->counts[i];
         if (s->id == 0 || s->id == UINT64_MAX || s->generation == 0 || s->generation >= state->shared_next_generation ||
-            s->install_port_id != c->port_id || s->domain > DPPD_RULE_DOMAIN_TRANSFER ||
-            (i != 0 && state->counts[i - 1U].id >= s->id))
+            s->install_port_id != c->port_id || s->domain < DPPD_RULE_DOMAIN_INGRESS ||
+            s->domain > DPPD_RULE_DOMAIN_TRANSFER || (i != 0 && state->counts[i - 1U].id >= s->id))
             return -EINVAL;
         for (uint32_t j = 0; j < i; ++j)
             if (s->generation == state->counts[j].generation)
@@ -81,7 +81,7 @@ int dppd_flow_state_validate(const struct dppd_flow_state *state)
         if (t->key == 0 || t->key == UINT64_MAX || (i != 0 && state->tables[i - 1U].key >= t->key) ||
             t->spec.example.install_port_id != c->port_id || !dppd_flow_template_matches(&t->spec, &t->spec.example) ||
             !shared_valid(state, &t->spec.example) ||
-            (c->mode == DPPD_FLOW_STATE_SOFTWARE && !dppd_software_backend_rule_supported(&t->spec.example)))
+            (c->mode == DPPD_FLOW_STATE_SOFTWARE && !dppd_software_backend_rule_supported_managed(&t->spec.example)))
             return -EINVAL;
         for (uint16_t a = 0; a < t->spec.example.nb_actions; ++a)
             shared_refs += t->spec.example.actions[a].type == DPPD_ACTION_SHARED_COUNT;
@@ -102,7 +102,8 @@ int dppd_flow_state_validate(const struct dppd_flow_state *state)
         for (uint16_t a = 0; a < r->nb_actions; ++a) {
             required[DPPD_RESOURCE_COUNTER] += r->actions[a].type == DPPD_ACTION_COUNT;
             required[DPPD_RESOURCE_AGING_OBJECT] += r->actions[a].type == DPPD_ACTION_AGE;
-            shared_refs += 2U * (r->actions[a].type == DPPD_ACTION_SHARED_COUNT);
+            shared_refs +=
+                (c->mode == DPPD_FLOW_STATE_SOFTWARE ? 3U : 2U) * (r->actions[a].type == DPPD_ACTION_SHARED_COUNT);
         }
     }
     for (uint32_t i = 0; i < state->table_count; ++i)

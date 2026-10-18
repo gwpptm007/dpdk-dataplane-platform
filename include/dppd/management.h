@@ -27,7 +27,8 @@
 /** v26 增加共享 COUNT 的逻辑身份、精确引用和生命周期管理 */
 /** v27 增加正式设备事件状态与精确代次的完整端口组主动复位 */
 /** v28 增加独占 M4 配置模式，受理凭据与持久完成回执分开查询 */
-#define DPPD_MANAGEMENT_VERSION 28U
+/** v29 增加在线模板与共享定义的整批配置事务和精确修订号分页 */
+#define DPPD_MANAGEMENT_VERSION 29U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -120,6 +121,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_FLOW_COLLECT,
     DPPD_MANAGEMENT_FLOW_CANCEL,
     DPPD_MANAGEMENT_FLOW_RETRY,
+    DPPD_MANAGEMENT_FLOW_CONFIG_GET,
+    DPPD_MANAGEMENT_FLOW_CONFIG_APPLY,
 };
 
 /** 随机启动标识阻止重启前的任务凭据误领本次进程的新任务 */
@@ -140,6 +143,14 @@ struct dppd_management_request {
     uint32_t size;       /* 必须等于发送方 sizeof(*request) */
     uint64_t request_id; /* 客户端生成；响应原样回显，用于请求/响应配对 */
     union {
+        struct {
+            uint64_t expected, after_table, after_count;
+        } flow_config_get;
+        struct {
+            uint64_t expected;
+            uint32_t count, reserved;
+            struct dppd_flow_config_change changes[DPPD_FLOW_CONFIG_OPERATIONS];
+        } flow_config_apply;
         struct {
             uint32_t count, queue;
             uint64_t expected[4];
@@ -416,6 +427,8 @@ struct dppd_management_response {
     int32_t status;
     uint32_t reserved;
     union {
+        struct dppd_flow_config_page flow_configuration;
+        struct dppd_flow_config_result flow_config_result;
         struct {
             uint64_t session;
             struct dppd_flow_store_status status;

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "flow_state_io.h"
+#include "dppd/software_shared.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -27,7 +28,47 @@ struct dppd_flow_store {
     struct dppd_flow_store_status status;
     struct dppd_flow_job_id internal_job;
     bool pending;
+    /** 准备失败的新对象或提交后待删除的旧对象，都保留精确凭据供重试 */
+    struct dppd_flow_template_id retired_tables[64];
+    struct dppd_shared_count_spec retired_counts[64];
+    bool configuration_residual;
 };
+
+static int cleanup_configuration(struct dppd_flow_store *s)
+{
+    bool remaining = false;
+    if (s->software.lock_initialized)
+        dppd_software_backend_reclaim(&s->software);
+    for (uint32_t i = 0; i < 64; ++i)
+        if (s->retired_tables[i].owner != 0) {
+            if (dppd_flow_template_destroy(s->templates, &s->retired_tables[i]) == 0)
+                memset(&s->retired_tables[i], 0, sizeof(s->retired_tables[i]));
+            else
+                remaining = true;
+        }
+    /** 模板可能持有共享对象的借用，必须等全部待删除模板清除后再尝试共享回收 */
+    if (!remaining)
+        for (uint32_t i = 0; i < 64; ++i)
+            if (s->retired_counts[i].id != 0) {
+                if (dppd_flow_shared_counts_remove(s->counts, s->retired_counts[i].id,
+                        s->retired_counts[i].generation) == 0)
+                    memset(&s->retired_counts[i], 0, sizeof(s->retired_counts[i]));
+                else
+                    remaining = true;
+            }
+    if (remaining) {
+        s->configuration_residual = true;
+        s->status.residual = true;
+        s->status.last_error = -EUCLEAN;
+        return -EUCLEAN;
+    }
+    if (s->configuration_residual) {
+        s->configuration_residual = false;
+        s->status.residual = false;
+        s->status.last_error = 0;
+    }
+    return 0;
+}
 
 static uint64_t now_ns(void)
 {
@@ -128,6 +169,8 @@ static int flush(struct dppd_flow_store *s)
     s->status.last_error = rc;
     if (rc == 0)
         s->status.durable_revision = s->state->revision;
+    if (rc == 0)
+        rc = cleanup_configuration(s);
     return rc;
 }
 
@@ -138,6 +181,8 @@ static int teardown(struct dppd_flow_store *s)
     int rc;
     s->status.ready = false;
     s->status.closing = true;
+    if (cleanup_configuration(s) != 0)
+        return -EUCLEAN;
     if (s->service != NULL) {
         if (s->pending && wait_internal(s, true, &result) != 0)
             return -EUCLEAN;
@@ -175,6 +220,9 @@ static int teardown(struct dppd_flow_store *s)
             return -EUCLEAN;
     if (s->software_flows != NULL && dppd_software_async_flows_close(&s->software_flows) != 0)
         return -EUCLEAN;
+    /** 先释放退役快照的共享借用，再删除模板及共享库，避免旧读者引用被提前释放 */
+    if (s->software.lock_initialized)
+        dppd_software_backend_fini(&s->software);
     if (s->templates != NULL) {
         for (uint32_t t = s->state->table_count; t != 0; --t)
             if (s->tables[t - 1U].owner != 0) {
@@ -198,8 +246,6 @@ static int teardown(struct dppd_flow_store *s)
     }
     if (s->admission != NULL && dppd_admission_close(&s->admission) != 0)
         return -EUCLEAN;
-    if (s->software.lock_initialized)
-        dppd_software_backend_fini(&s->software);
     return 0;
 }
 
@@ -211,6 +257,17 @@ static void destroy(struct dppd_flow_store *s)
     free(s->path);
     dppd_flow_state_free(&s->state);
     free(s);
+}
+
+static int software_bind(void *context, const struct dppd_rule *rule, struct dppd_flow_binding *binding,
+    struct dppd_flow_shared_count_lease *lease)
+{
+    return dppd_flow_shared_counts_bind(context, rule, binding, lease);
+}
+
+static int software_unbind(void *context, const struct dppd_flow_shared_count_lease *lease)
+{
+    return lease->owner == 0 ? 0 : dppd_flow_shared_counts_unbind(context, lease);
 }
 
 static int build(struct dppd_flow_store *s, const struct dppd_flow_store_runtime *runtime)
@@ -234,9 +291,11 @@ static int build(struct dppd_flow_store *s, const struct dppd_flow_store_runtime
     rc = dppd_admission_create(&c->admission, &s->admission);
     if (rc != 0)
         return rc;
-    if (c->mode == DPPD_FLOW_STATE_NATIVE) {
-        struct dppd_flow_shared_count_driver driver =
-            runtime->counts.create != NULL ? runtime->counts : dppd_native_flow_shared_count_driver();
+    {
+        struct dppd_flow_shared_count_driver driver = c->mode == DPPD_FLOW_STATE_SOFTWARE
+            ? dppd_software_shared_count_driver()
+            : runtime->counts.create != NULL ? runtime->counts
+                                             : dppd_native_flow_shared_count_driver();
         rc = dppd_flow_shared_counts_create(s->admission, c->shared_leases, &driver, &s->counts);
         if (rc != 0)
             return rc;
@@ -261,6 +320,8 @@ static int build(struct dppd_flow_store *s, const struct dppd_flow_store_runtime
         rc = dppd_flow_shared_counts_seed(s->counts, s->state->shared_next_generation);
         if (rc != 0)
             return rc;
+    }
+    if (c->mode == DPPD_FLOW_STATE_NATIVE) {
         template_driver = runtime->templates != NULL ? runtime->templates(runtime->context, s->counts)
                                                      : dppd_native_flow_template_driver_shared(s->counts);
         flow_driver = runtime->flows.create != NULL ? runtime->flows : dppd_native_async_flow_driver();
@@ -275,9 +336,11 @@ static int build(struct dppd_flow_store *s, const struct dppd_flow_store_runtime
         rc = dppd_software_backend_init(&s->software, c->rule_capacity);
         if (rc != 0)
             return rc;
+        s->software.shared_counts = s->counts;
+        template_driver =
+            (struct dppd_flow_template_driver){.context = s->counts, .bind = software_bind, .unbind = software_unbind};
     }
-    rc = dppd_flow_templates_create(s->admission, c->template_leases,
-        c->mode == DPPD_FLOW_STATE_NATIVE ? &template_driver : NULL, &s->templates);
+    rc = dppd_flow_templates_create(s->admission, c->template_leases, &template_driver, &s->templates);
     if (rc != 0)
         return rc;
     for (uint32_t t = 0; t < s->state->table_count; ++t) {
@@ -649,7 +712,7 @@ int dppd_flow_store_retry(struct dppd_flow_store *s)
     if (s == NULL)
         return -EINVAL;
     pthread_mutex_lock(&s->lock);
-    int rc = available(s);
+    int rc = s->configuration_residual && !s->status.dirty ? cleanup_configuration(s) : available(s);
     if (rc == 0)
         rc = dppd_flow_service_retry(s->service);
     pthread_mutex_unlock(&s->lock);
@@ -662,6 +725,268 @@ int dppd_flow_store_flush(struct dppd_flow_store *s)
         return -EINVAL;
     pthread_mutex_lock(&s->lock);
     int rc = !s->status.ready || s->status.closing || s->status.residual ? -EUCLEAN : flush(s);
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_configuration(struct dppd_flow_store *s, uint64_t expected, uint64_t after_table,
+    uint64_t after_count, struct dppd_flow_config_page *page)
+{
+    if (s == NULL || page == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = expected != UINT64_MAX && expected != s->state->revision ? -ESTALE : 0;
+    if (rc == 0) {
+        memset(page, 0, sizeof(*page));
+        page->revision = s->state->revision;
+        page->durable_revision = s->status.durable_revision;
+        page->shared_next_generation = s->state->shared_next_generation;
+        page->dirty = s->status.dirty;
+        page->residual = s->status.residual;
+        page->table_count = s->state->table_count;
+        page->shared_count = s->state->shared_count;
+        page->next_table = after_table;
+        page->next_count = after_count;
+        for (uint32_t i = 0; i < s->state->table_count; ++i) {
+            if (s->state->tables[i].key <= after_table)
+                continue;
+            if (page->tables_returned == 2) {
+                page->more_tables = true;
+                break;
+            }
+            page->tables[page->tables_returned++] = s->state->tables[i];
+            page->next_table = s->state->tables[i].key;
+        }
+        for (uint32_t i = 0; i < s->state->shared_count; ++i) {
+            if (s->state->counts[i].id <= after_count)
+                continue;
+            if (page->counts_returned == 4) {
+                page->more_counts = true;
+                break;
+            }
+            page->counts[page->counts_returned++] = s->state->counts[i];
+            page->next_count = s->state->counts[i].id;
+        }
+    }
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+static int count_slot(const struct dppd_flow_state *state, uint64_t id)
+{
+    for (uint32_t i = 0; i < state->shared_count; ++i)
+        if (state->counts[i].id == id)
+            return (int)i;
+    return -1;
+}
+
+static int compare_tables(const void *left, const void *right)
+{
+    const struct dppd_flow_state_table *a = left, *b = right;
+    return (a->key > b->key) - (a->key < b->key);
+}
+
+static int compare_counts(const void *left, const void *right)
+{
+    const struct dppd_shared_count_spec *a = left, *b = right;
+    return (a->id > b->id) - (a->id < b->id);
+}
+
+static bool uses_count(const struct dppd_rule *rule, uint64_t id)
+{
+    for (uint16_t a = 0; a < rule->nb_actions; ++a)
+        if (rule->actions[a].type == DPPD_ACTION_SHARED_COUNT && rule->actions[a].conf.shared_count.id == id)
+            return true;
+    return false;
+}
+
+/** 候选配置只修改定义，规则不在本事务中迁移，重复键和被引用删除都在驱动前拒绝 */
+static int prepare_configuration(struct dppd_flow_store *s, struct dppd_flow_state *next,
+    const struct dppd_flow_config_change *changes, uint32_t count, uint64_t generations[8])
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        const struct dppd_flow_config_change *change = &changes[i];
+        bool table =
+            change->operation == DPPD_FLOW_CONFIG_TEMPLATE_ADD || change->operation == DPPD_FLOW_CONFIG_TEMPLATE_DELETE;
+        if (change->operation < DPPD_FLOW_CONFIG_TEMPLATE_ADD || change->operation > DPPD_FLOW_CONFIG_COUNT_DELETE ||
+            change->key == 0 || change->key == UINT64_MAX)
+            return -EINVAL;
+        for (uint32_t j = 0; j < i; ++j) {
+            bool previous_table = changes[j].operation <= DPPD_FLOW_CONFIG_TEMPLATE_DELETE;
+            if (changes[j].key == change->key && previous_table == table)
+                return -EINVAL;
+        }
+        int slot = table ? table_slot(s, change->key) : count_slot(s->state, change->key);
+        if (change->operation == DPPD_FLOW_CONFIG_TEMPLATE_ADD || change->operation == DPPD_FLOW_CONFIG_COUNT_ADD) {
+            if (slot >= 0)
+                return -EEXIST;
+            if (change->expected_generation != 0)
+                return -EINVAL;
+            if (table) {
+                if (next->table_count == 64)
+                    return -ENOSPC;
+                next->tables[next->table_count++] = (struct dppd_flow_state_table){change->key, change->spec.table};
+            } else {
+                if (next->shared_count == 64 || next->shared_next_generation == UINT64_MAX)
+                    return -ENOSPC;
+                generations[i] = next->shared_next_generation++;
+                next->counts[next->shared_count++] = (struct dppd_shared_count_spec){change->key, generations[i],
+                    change->spec.count.port_id, change->spec.count.domain};
+            }
+        } else {
+            if (slot < 0)
+                return -ENOENT;
+            if (table) {
+                if (change->expected_generation != 0)
+                    return -EINVAL;
+                for (uint32_t r = 0; r < s->state->rule_count; ++r)
+                    if (s->state->rules[r].table_key == change->key)
+                        return -EBUSY;
+                uint32_t n = 0;
+                while (next->tables[n].key != change->key)
+                    ++n;
+                memmove(next->tables + n, next->tables + n + 1, (--next->table_count - n) * sizeof(next->tables[0]));
+            } else {
+                if (change->expected_generation != s->state->counts[slot].generation)
+                    return -ESTALE;
+                int n = count_slot(next, change->key);
+                memmove(next->counts + n, next->counts + n + 1,
+                    (--next->shared_count - (uint32_t)n) * sizeof(next->counts[0]));
+            }
+        }
+    }
+    /** 同批新建的共享引用可填零代次，只有本批实际分配的身份才允许这样解析 */
+    for (uint32_t t = 0; t < next->table_count; ++t)
+        for (uint16_t a = 0; a < next->tables[t].spec.example.nb_actions && a < DPPD_RULE_MAX_ACTIONS; ++a) {
+            struct dppd_action *action = &next->tables[t].spec.example.actions[a];
+            if (action->type == DPPD_ACTION_SHARED_COUNT && action->conf.shared_count.generation == 0)
+                for (uint32_t i = 0; i < count; ++i)
+                    if (changes[i].operation == DPPD_FLOW_CONFIG_COUNT_ADD &&
+                        changes[i].key == action->conf.shared_count.id)
+                        action->conf.shared_count.generation = generations[i];
+        }
+    for (uint32_t i = 0; i < count; ++i)
+        if (changes[i].operation == DPPD_FLOW_CONFIG_COUNT_DELETE) {
+            for (uint32_t t = 0; t < next->table_count; ++t)
+                if (uses_count(&next->tables[t].spec.example, changes[i].key))
+                    return -EBUSY;
+            for (uint32_t r = 0; r < next->rule_count; ++r)
+                if (uses_count(&next->rules[r].rule, changes[i].key))
+                    return -EBUSY;
+        }
+    qsort(next->tables, next->table_count, sizeof(next->tables[0]), compare_tables);
+    qsort(next->counts, next->shared_count, sizeof(next->counts[0]), compare_counts);
+    return dppd_flow_state_validate(next);
+}
+
+int dppd_flow_store_configure(struct dppd_flow_store *s, uint64_t expected,
+    const struct dppd_flow_config_change *changes, uint32_t count, struct dppd_flow_config_result *result)
+{
+    if (s == NULL || changes == NULL || result == NULL || count == 0 || count > DPPD_FLOW_CONFIG_OPERATIONS)
+        return -EINVAL;
+    memset(result, 0, sizeof(*result));
+    pthread_mutex_lock(&s->lock);
+    struct dppd_flow_service_status status;
+    dppd_flow_service_status(s->service, &status);
+    int rc = available(s);
+    struct dppd_flow_state *next = NULL;
+    struct dppd_flow_template_id prepared[64] = {{0}};
+    struct dppd_shared_count_spec created[64] = {{0}};
+    if (rc == 0 && (status.jobs != 0 || status.isolated))
+        rc = -EBUSY;
+    if (rc == 0 && expected != status.revision)
+        rc = -ESTALE;
+    if (rc == 0 && expected >= UINT64_MAX - 1U)
+        rc = -EOVERFLOW;
+    if (rc != 0)
+        goto done;
+    next = malloc(sizeof(*next));
+    if (next == NULL) {
+        rc = -ENOMEM;
+        goto done;
+    }
+    *next = *s->state;
+    next->revision = expected + 1U;
+    rc = prepare_configuration(s, next, changes, count, result->generations);
+    if (rc != 0)
+        goto done;
+    /** 先可靠保存代次水位，创建失败或突然退出也不能在重启后复用已分配的身份 */
+    if (next->shared_next_generation != s->state->shared_next_generation) {
+        s->state->shared_next_generation = next->shared_next_generation;
+        rc = dppd_flow_state_write(s->path, s->guard, s->state);
+        if (rc != 0) {
+            s->status.dirty = true;
+            s->status.last_error = rc;
+            rc = -EUCLEAN;
+            goto done;
+        }
+    }
+    for (uint32_t i = 0; i < count && rc == 0; ++i)
+        if (changes[i].operation == DPPD_FLOW_CONFIG_COUNT_ADD) {
+            int n = count_slot(next, changes[i].key);
+            struct dppd_flow_shared_count_info info = {0};
+            rc = dppd_flow_shared_counts_replay_add(s->counts, &next->counts[n], &info);
+            if (info.spec.id != 0)
+                created[n] = info.spec;
+        }
+    (void)dppd_flow_shared_counts_seed(s->counts, s->state->shared_next_generation);
+    for (uint32_t t = 0; t < next->table_count && rc == 0; ++t) {
+        int old = table_slot(s, next->tables[t].key);
+        if (old >= 0)
+            prepared[t] = s->tables[old];
+        else
+            rc = dppd_flow_template_create(s->templates, &next->tables[t].spec, &prepared[t]);
+    }
+    if (rc == 0)
+        rc = dppd_flow_service_config_revision(s->service, expected);
+    if (rc != 0) {
+        for (uint32_t t = 0; t < next->table_count; ++t)
+            if (prepared[t].owner != 0 && table_slot(s, next->tables[t].key) < 0)
+                s->retired_tables[t] = prepared[t];
+        memcpy(s->retired_counts, created, sizeof(created));
+        int cleaned = cleanup_configuration(s);
+        if (cleaned != 0)
+            rc = cleaned;
+        goto done;
+    }
+    for (uint32_t t = 0; t < s->state->table_count; ++t) {
+        bool found = false;
+        for (uint32_t n = 0; n < next->table_count; ++n)
+            found |= s->state->tables[t].key == next->tables[n].key;
+        if (!found)
+            s->retired_tables[t] = s->tables[t];
+    }
+    for (uint32_t i = 0; i < s->state->shared_count; ++i)
+        if (count_slot(next, s->state->counts[i].id) < 0)
+            s->retired_counts[i] = s->state->counts[i];
+    memcpy(s->tables, prepared, sizeof(prepared));
+    memset(s->shared_created, 0, sizeof(s->shared_created));
+    for (uint32_t i = 0; i < next->shared_count; ++i)
+        s->shared_created[i] = true;
+    *s->state = *next;
+    result->applied = true;
+    /** 失败不撤回已经采用的期望配置，保留旧对象与新对象，显式 flush 成功后再回收 */
+    rc = flush(s);
+    if (rc != 0)
+        rc = -EUCLEAN;
+done:
+    result->revision = s->state->revision;
+    result->durable_revision = s->status.durable_revision;
+    result->durable = result->applied && !s->status.dirty && result->revision == result->durable_revision;
+    free(next);
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_shared_get(struct dppd_flow_store *s, uint64_t id, uint64_t generation,
+    struct dppd_flow_shared_count_info *info)
+{
+    if (s == NULL || info == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = available(s);
+    if (rc == 0)
+        rc = dppd_flow_shared_counts_get(s->counts, id, generation, info);
     pthread_mutex_unlock(&s->lock);
     return rc;
 }

@@ -34,7 +34,7 @@ static int initialize(int argc, char **argv)
         .depth = depth,
         .timeout_ns = UINT64_C(5000000000),
         .template_leases = 2U * capacity + 128U,
-        .shared_leases = 1};
+        .shared_leases = 3U * capacity + 128U};
     state->config.admission.ticket_capacity = 2U * capacity + 256U;
     state->config.admission.port_count = 1;
     state->config.admission.ports[0].port_id = (uint16_t)port;

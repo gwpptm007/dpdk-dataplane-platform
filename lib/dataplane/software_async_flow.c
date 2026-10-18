@@ -29,13 +29,19 @@ static int software_create(void *context, uint16_t port, uint32_t queue, void *t
     struct dppd_software_async_flows *flows = context;
     struct software_flow_object *object;
     char error[128];
+    if (rule == NULL)
+        return -EINVAL;
     if (binding != NULL)
         for (uint16_t i = 0; i < DPPD_RULE_MAX_ACTIONS; ++i)
-            if (binding->actions[i] != NULL)
+            if (binding->actions[i] != NULL &&
+                (i >= rule->nb_actions || rule->actions[i].type != DPPD_ACTION_SHARED_COUNT))
                 return -ENOTSUP;
     if (flows == NULL || queue >= 8 || table != NULL || rule->fallback != DPPD_FALLBACK_SOFTWARE_ONLY ||
-        dppd_rule_validate(rule, error, sizeof(error)) != 0 || !dppd_software_backend_rule_supported(rule))
+        dppd_rule_validate(rule, error, sizeof(error)) != 0 || !dppd_software_backend_rule_supported_managed(rule))
         return -ENOTSUP;
+    for (uint16_t i = 0; i < rule->nb_actions; ++i)
+        if (rule->actions[i].type == DPPD_ACTION_SHARED_COUNT && (binding == NULL || binding->actions[i] == NULL))
+            return -ENOTSUP;
     if (flows->queues[queue].count == DPPD_ASYNC_FLOW_DEPTH)
         return -EAGAIN;
     object = calloc(1, sizeof(*object));

@@ -224,6 +224,79 @@ def main():
             accepted("flow-remove", "0", "30", re.search(r"generation=(\d+)", cli("get", "30").stdout)[1])
             stop()
             report["steps"].append("write_failure_stops_workers_flush_recovers_durable_ack")
+            process = start()
+            wait_for(ready)
+            leftover = cli("get", "30", ok=False)
+            if leftover.returncode == 0:
+                old = re.search(r"generation=(\d+)", leftover.stdout)[1]
+                token = accepted("flow-remove", "0", "30", old)
+                wait_for(lambda: collect(token))
+
+            def config(text, ok=True):
+                transaction = directory / "transaction"
+                transaction.write_text(text)
+                revision = re.search(r"revision=(\d+)", cli("flow-config-get").stdout)[1]
+                return cli("flow-config-apply", revision, transaction, ok=ok)
+
+            configured = config("count-add 800 0 ingress\n"
+                                "template-add 2 80 1 apply-drop 1 0 0 shared:800:0\n"
+                                "template-add 3 80 1 apply-drop 1 0 0 shared:800:0\n")
+            assert "applied=yes durable=yes" in configured.stdout
+            shared_generation = re.search(r"allocated-generation=(\d+)", configured.stdout)[1]
+            tokens = [accepted("flow-create", table, queue, "apply-drop", identifier, "0", "0",
+                               "shared:800:" + shared_generation) for table, queue, identifier in ((2, 0, 50), (3, 1, 51))]
+            versions = [re.search(r"generation=(\d+)", wait_for(lambda token=token: collect(token)))[1] for token in tokens]
+            packets(True)
+            if args.tap:
+                assert "hits=8 bytes=512" in cli("shared-count-query", "800", shared_generation).stdout
+            assert config("count-delete 800 " + shared_generation + "\n", ok=False).returncode != 0
+            assert config("template-delete 3\n", ok=False).returncode != 0
+            token = accepted("flow-remove", "0", "50", versions[0])
+            wait_for(lambda: collect(token))
+            packets(True)
+            if args.tap:
+                assert "hits=16 bytes=1024" in cli("shared-count-query", "800", shared_generation).stdout
+            revision = re.search(r"revision=(\d+)", cli("flow-config-get").stdout)[1]
+            assert "template key=3" in cli("flow-config-get", revision, "2", "0").stdout
+            stop(kill=True)
+            process = start()
+            wait_for(ready)
+            assert "hits=0 bytes=0" in cli("shared-count-query", "800", shared_generation).stdout
+            assert f"generation={versions[1]}" in cli("get", "51").stdout
+            packets(True)
+            token = accepted("flow-remove", "0", "51", versions[1])
+            wait_for(lambda: collect(token))
+            packets(False)
+            assert "durable=yes" in config("count-delete 800 " + shared_generation +
+                                            "\ntemplate-delete 2\ntemplate-delete 3\n").stdout
+            assert cli("shared-count-query", "800", shared_generation, ok=False).returncode != 0
+            recreated = config("count-add 800 0 ingress\ntemplate-add 4 80 1 apply-drop 1 0 0 shared:800:0\n")
+            assert int(re.search(r"allocated-generation=(\d+)", recreated.stdout)[1]) > int(shared_generation)
+            stop()
+            process = start(fault=True)
+            wait_for(ready)
+            marker.touch()
+            failed = config("template-add 5 80 0 apply-drop 1 0 0\n", ok=False)
+            assert failed.returncode != 0 and "applied=yes durable=no" in failed.stdout
+            wait_for(lambda: "workers=0/1" in cli("health").stdout)
+            assert "dirty=yes" in cli("flow-config-get").stdout
+            marker.unlink()
+            cli("persistence-flush")
+            wait_for(ready)
+            stop()
+            process = start()
+            wait_for(ready)
+            revision = re.search(r"revision=(\d+)", cli("flow-config-get").stdout)[1]
+            assert "template key=5" in cli("flow-config-get", revision, "4", "0").stdout
+            token = accepted("flow-create", "5", "0", "apply-drop", "55", "0", "0")
+            installed = wait_for(lambda: collect(token))
+            packets(True)
+            generation = re.search(r"generation=(\d+)", installed)[1]
+            token = accepted("flow-remove", "0", "55", generation)
+            wait_for(lambda: collect(token))
+            packets(False)
+            stop()
+            report["steps"].append("online_templates_shared_transactions_counting_references_crash_and_storage_recovery")
             # 已存在文件不能被隐式创建或覆盖，损坏启动不得开放管理入口
             broken = directory / "broken"
             broken.write_bytes(b"broken")

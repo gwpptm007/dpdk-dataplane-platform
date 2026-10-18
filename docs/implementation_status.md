@@ -1,5 +1,11 @@
 # V3 实现状态
 
+2026-10-18 已接入 [在线模板与共享 COUNT 配置事务](m5_online_configuration.md)，管理协议 v29 提供
+整批新增/删除、定义分页、共享查询和精确版本保护，软件 classifier 通过 QSBR 保留旧共享借用。
+写盘失败保留已应用配置，准备或清理失败保留实际凭据并隔离；原生路径仍须独立端点与旧对象清空证明。
+四套各 88/88 单测、各 96 包正式 daemon 双 TAP、完整十二步 TAP 和八项固定性能门禁通过，
+319 项测试源码一致；完整 M5 与实际硬件验收继续保留。
+
 2026-10-18 已完成 **M5 首项：M4 配置持久化与进程重启恢复闭环**，见 [交付与验收](m5_flow_state.md)。
 独立版本配置保存模板、共享身份、配额、队列及精确规则；受管理实例先重放再就绪，发布后先落盘再回执，
 写盘或恢复失败保留 dirty/残留及写锁，退出不删除持久期望状态。四套严格构建各 86/86 单测、各 96 包
@@ -466,7 +472,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 - 没有查询 `rte_flow` 资源容量或预留规则空间；
 - COUNT id 由 rule id 的低 32 位生成，控制面必须保证其作用域内不冲突。
 - 硬件规则更新采用“先创建新 generation，再删除旧 generation”；若 PMD 拒绝重叠规则，更新失败并保留旧规则，当前不承诺跨 PMD 的无损原子替换。
-- management v28 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
+- management v29 直接传递本机构建的 C 结构体，只承诺同主机、同版本 `dppd/dppctl` 配对；跨版本或远程接入需要另行定义稳定序列化协议。
 - 批量更新保留 `rule_capacity + 1` 的 backend 容量。纯软件路径整批替换快照、复用旧槽位，满表可更新；每次分类使用完整旧表或新表，新版本 COUNT 归零，未更新规则保留计数。硬件及混合路径仍需要临时容量，只保证账本整批发布；PREFER 可能整表替换但最终成为混合计划时，会在安装前复查软件空间。
 - 普通 daemon 不自动删除启动前已存在的 socket；`dppd-scope` 只在自己确认旧业务退出后清除私有目录内属于服务账户的管理 socket。
 - snapshot v2 已连接 daemon `--state-path`、control mutation 和启动硬件重放；默认未指定路径时仍禁用。回滚失败时 daemon 进入允许 `reconcile-status/reconcile-retry` 和只读 `health/ready`、`capability-show`、`rule-metrics/rule-latency/rule-history` 与规则 telemetry 的进程内隔离模式。可选 `--recovery-path` 已提供异常退出后的重放阻断与外部清理确认；受控本地 TAP 的自动清理与快照重启已接通，其他 PMD 自动清理、degraded recovery 与多端口 v1 迁移尚未实现。格式及语义见 [snapshot v2 文档](persistence_snapshot_v2.md) 与 [恢复保护](recovery_guard.md)。

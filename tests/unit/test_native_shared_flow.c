@@ -7,6 +7,7 @@
 #include <rte_byteorder.h>
 #include <rte_flow.h>
 #include <rte_version.h>
+#include <rte_errno.h>
 #include "dppd/flow_service.h"
 #include "dppd/flow_state.h"
 
@@ -16,6 +17,7 @@ struct model_counter {
 
 static unsigned int counter_live;
 static struct model_counter *last_counter;
+static bool fail_counter_create, fail_counter_destroy;
 
 struct rte_flow_action_handle *__wrap_rte_flow_action_handle_create(uint16_t port,
     const struct rte_flow_indir_action_conf *conf, const struct rte_flow_action *action, struct rte_flow_error *error);
@@ -29,6 +31,10 @@ struct rte_flow_action_handle *__wrap_rte_flow_action_handle_create(uint16_t por
 {
     (void)error;
     assert(port == 7 && conf->ingress && !conf->egress && !conf->transfer);
+    if (fail_counter_create) {
+        rte_errno = ENOMEM;
+        return NULL;
+    }
     assert(action->type == RTE_FLOW_ACTION_TYPE_COUNT && ((const struct rte_flow_action_count *)action->conf)->id == 0);
     last_counter = calloc(1, sizeof(*last_counter));
     assert(last_counter != NULL);
@@ -55,6 +61,8 @@ int __wrap_rte_flow_action_handle_destroy(uint16_t port, struct rte_flow_action_
 {
     (void)error;
     assert(port == 7 && counter_live != 0);
+    if (fail_counter_destroy)
+        return -EIO;
     --counter_live;
     free(handle);
     return 0;
@@ -374,6 +382,38 @@ static void test_native_store_restart(void)
     assert(
         loaded->shared_next_generation == 20 && loaded->counts[0].generation == 9 && loaded->counts[1].generation == 3);
     dppd_flow_state_free(&loaded);
+    /** 在线定义继续使用正式原生工厂，清理失败必须保留模板借用和计数器句柄 */
+    struct dppd_flow_config_result configured;
+    struct dppd_flow_config_change changes[2] = {
+        {.operation = DPPD_FLOW_CONFIG_COUNT_DELETE, .key = 800, .expected_generation = 3}};
+    assert(dppd_flow_store_configure(store, 102, changes, 1, &configured) == 0 && counter_live == 1);
+    changes[0] = (struct dppd_flow_config_change){.operation = DPPD_FLOW_CONFIG_COUNT_ADD,
+        .key = 900,
+        .spec.count = {7, DPPD_RULE_DOMAIN_INGRESS}};
+    changes[1] = (struct dppd_flow_config_change){.operation = DPPD_FLOW_CONFIG_TEMPLATE_ADD, .key = 101};
+    changes[1].spec.table = state->tables[0].spec;
+    changes[1].spec.table.example.actions[0].conf.shared_count.id = 900;
+    changes[1].spec.table.example.actions[0].conf.shared_count.generation = 0;
+    fail_counter_create = true;
+    assert(dppd_flow_store_configure(store, 103, changes, 2, &configured) == -ENOMEM && !configured.applied);
+    fail_counter_create = false;
+    assert(dppd_flow_store_configure(store, 103, changes, 2, &configured) == 0 && counter_live == 2);
+    uint64_t new_generation = configured.generations[0];
+    assert(new_generation == 21);
+    changes[0] = (struct dppd_flow_config_change){.operation = DPPD_FLOW_CONFIG_COUNT_DELETE,
+        .key = 900,
+        .expected_generation = new_generation};
+    assert(dppd_flow_store_configure(store, 104, changes, 1, &configured) == -EBUSY);
+    changes[1] = (struct dppd_flow_config_change){.operation = DPPD_FLOW_CONFIG_TEMPLATE_DELETE, .key = 101};
+    fail_table_destroy = true;
+    assert(dppd_flow_store_configure(store, 104, changes, 2, &configured) == -EUCLEAN && configured.applied &&
+        configured.durable);
+    assert(counter_live == 2);
+    fail_table_destroy = false;
+    fail_counter_destroy = true;
+    assert(dppd_flow_store_retry(store) == -EUCLEAN && counter_live == 2);
+    fail_counter_destroy = false;
+    assert(dppd_flow_store_retry(store) == 0 && counter_live == 1);
     assert(dppd_flow_store_close(&store) == 0 && counter_live == 0);
     assert(dppd_flow_state_save(path, state) == 0);
     fail_create_completion = fail_table_destroy = true;

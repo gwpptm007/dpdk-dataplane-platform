@@ -59,6 +59,8 @@ int dppd_flow_service_replay_submit(struct dppd_flow_service *service, uint32_t 
     const struct dppd_async_flow_create_request *requests, uint32_t count, uint64_t now_ns,
     struct dppd_flow_job_id *job);
 int dppd_flow_service_replay_end(struct dppd_flow_service *service);
+/** 配置事务只在没有在途任务和隔离时推进同一个全局修订号，不改动现有规则版本 */
+int dppd_flow_service_config_revision(struct dppd_flow_service *service, uint64_t expected);
 /** 停机后只允许精确删除，回收不改变持久配置的修订号，也不会继续自动 AGE */
 int dppd_flow_service_shutdown_begin(struct dppd_flow_service *service);
 /** 在服务锁内复制已提交期望状态，不导出实际指针、进行中的批次或私有计数 */

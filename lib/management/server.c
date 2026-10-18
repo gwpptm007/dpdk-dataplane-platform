@@ -878,6 +878,12 @@ int dppd_management_poll(struct dppd_management_server *server)
          */
         if (server->control != NULL && server->control->recovery_state != DPPD_CONTROL_RECOVERY_READY)
             break;
+        if (server->flows != NULL) {
+            struct dppd_flow_store_status status;
+            dppd_flow_store_status(server->flows->store, &status);
+            if (!status.ready)
+                break;
+        }
     }
     return 0;
 }

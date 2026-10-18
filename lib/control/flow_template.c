@@ -113,7 +113,8 @@ int dppd_flow_templates_create(struct dppd_admission *admission, uint32_t lease_
     if (admission == NULL || output == NULL || *output != NULL || lease_capacity == 0 ||
         lease_capacity > DPPD_FLOW_TEMPLATE_LEASE_LIMIT ||
         (driver != NULL &&
-            (driver->create == NULL || driver->destroy == NULL ||
+            ((driver->create == NULL && driver->bind == NULL) ||
+                (driver->create == NULL) != (driver->destroy == NULL) ||
                 ((driver->bind == NULL) != (driver->unbind == NULL)))))
         return -EINVAL;
     templates = calloc(1, sizeof(*templates));
