@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | 环境与设备 | 标准库只读盘点、权限/缺失保留、管理口识别 | 当前环境没有已验证的 mlx5/BlueField 实机 |
 | representor 角色 | mlx5 严格名称解析、netlink/sysfs/PCI 交叉核对，未知保留来源与错误 | 实际 PF/VF/SF 与跨控制器设备验证 |
-| 非 mlx5 适配 | pair 控制层可保留未知角色，不能据此推断命名模板支持 | 当前尚缺非 mlx5 的生产接口身份采集与可信角色适配，硬件 runner 也不能跳过该身份门禁 |
+| 非 mlx5 适配 | 通用 PCI 与非零 ifindex 交叉核对；pair 保留 UNKNOWN，不猜角色 | 无宿主接口的 PCI 目标须另有身份适配；六个命名模板仍缺非 mlx5 可信角色来源，实机未验收 |
 | 同域与场景图 | 七种单向/双向模板、同域/别名/父子证据检查 | PMD 对具体匹配和动作组合的支持 |
 | 正式控制入口 | v27 的 plan/apply、共享对象管理、精确全局版本、整批创建/补偿、隔离和持久化复用；设备状态与全组主动复位 | 无硬件逐包原子承诺；复位依赖真实 PMD 支持 |
 | counter | transfer 方向契约、COUNT 64 位值及有效位检查 | 实机线缆报文与计数、CPU worker 对照 |
@@ -19,6 +19,8 @@
 
 角色与图的使用方法见 [M3 控制闭环](m3_transfer.md)，适配器修复见
 [驱动契约](m3_flow_contract.md)，实际设备观察见 [环境记录](m3_environment_20261018.md)。
+通用身份语义见 [PCI 与接口核对](m3_generic_identity.md)，DPDK 21.11.9 的具体驱动缺口见
+[PMD 能力矩阵](m3_pmd_capabilities_21_11.md)。mlx5 的端口动作支持不能代替源端口匹配项支持。
 纯名称解析只证明语法；正式控制面使用经过发现核对的拓扑，测试夹具仅构造模拟证据。
 
 ## 验收分层
@@ -61,7 +63,18 @@ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 杀掉负责清理的父进程而留下内层测试或 daemon。其他 M3 步骤仍有各自的超时保护。
 ASan/UBSan 本轮关闭 LeakSanitizer，实际 mbuf 归还由 worker 的内存池记录另行核对。
 
-## 最新硬件验收工具轮次
+## 最新通用身份核对轮次
+
+[通用 PCI 身份](m3_generic_identity.md) 已支持非 mlx5 的非零 ifindex 核对，角色保持 UNKNOWN。
+基础核对失败不发布接口字段，物理名称可以双边缺失，权限、半截读取和名称变化不能作为缺失放行。
+硬件工具分别核对 parent PCI 与完整 ethdev 名，允许 UNKNOWN pair，六个命名模板仍严格要求可信角色。
+
+四套同版本各 70/70 单测，其中各含 68 项硬件门禁；六步 M3、五组共享恢复、四组正式事件和
+31 组模拟全部通过，255 项源码一致。135 系统与本地适配各十二步完整 M2/TAP 回归，
+135 ASan/UBSan 与 134 GCC 13 各四步核心回归通过。两机硬件预检仍为 blocked，
+报告 schema 和工具源码摘要核对通过。无宿主接口的目标适配、非 mlx5 角色来源和实机证据仍缺。
+
+## 硬件验收工具首轮
 
 [独立硬件入口](m3_hardware_acceptance.md) 已提供只读预检、外部报文 helper、COUNT/AGE/
 共享 COUNT 生命周期、可选完整组主动复位、能力矩阵及报告 schema。正式管理 socket 身份、

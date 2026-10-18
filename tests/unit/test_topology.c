@@ -22,6 +22,7 @@ static unsigned int info_calls, reader_calls;
 static unsigned int reader_fail_at;
 static int kernel_mode, open_kind, kernel_fds;
 static unsigned int kernel_receives;
+static unsigned int kernel_realpaths;
 static size_t read_offset;
 static const char *current_device_name = "0000:03:00.0";
 #if RTE_VERSION < RTE_VERSION_NUM(22, 11, 0, 0)
@@ -96,6 +97,9 @@ static int fake_reader(uint32_t if_index, const char *device_name, struct dppd_t
     case 8:
         memcpy(identity->phys_port_name, "p0", sizeof("p0"));
         break;
+    case 9:
+        identity->phys_port_name[0] = '\0';
+        break;
     default:
         break;
     }
@@ -116,6 +120,8 @@ static void reset(void)
     reader_error = reader_mode = 0;
     info_calls = reader_calls = 0;
     reader_fail_at = 0;
+    kernel_mode = kernel_fds = 0;
+    kernel_receives = kernel_realpaths = 0;
 }
 
 static void check_unknown(const struct dppd_endpoint *endpoint, int error)
@@ -125,6 +131,13 @@ static void check_unknown(const struct dppd_endpoint *endpoint, int error)
     assert(!endpoint->has_controller && !endpoint->has_pf && !endpoint->has_function && !endpoint->has_physical_port);
     assert(endpoint->controller_id == 0 && endpoint->pf_id == 0 && endpoint->function_id == 0);
     assert(endpoint->physical_port_id == 0);
+}
+
+/** 接口和物理名称只表示已核对身份，失败的原始字符串不能进入这些可信字段 */
+static void check_unverified(const struct dppd_endpoint *endpoint, int error)
+{
+    check_unknown(endpoint, error);
+    assert(endpoint->interface_name[0] == '\0' && endpoint->phys_port_name[0] == '\0');
 }
 
 /** 同一结构反复解析，既检查合法编号，也确保失败不会残留上一次的身份 */
@@ -221,18 +234,19 @@ static void test_identity_evidence(void)
 
     for (reader_mode = 1; reader_mode <= 7; ++reader_mode) {
         assert(dppd_topology_discover_with_reader(&config, &topology, fake_reader, &reader_mode) == 0);
-        check_unknown(&topology.endpoints[0], -EXDEV);
+        check_unverified(&topology.endpoints[0], -EXDEV);
     }
     reader_mode = 8;
     assert(dppd_topology_discover_with_reader(&config, &topology, fake_reader, &reader_mode) == 0);
     check_unknown(&topology.endpoints[0], -EPROTO);
+    assert(strcmp(topology.endpoints[0].interface_name, "pf0vf2") == 0);
     reader_mode = 0;
     const int errors[] = {-EIO, -ENOTSUP, -EOVERFLOW, -ENAMETOOLONG, -ENODEV, -EAGAIN, -EPERM, 1};
     for (unsigned int i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i) {
         reader_error = errors[i];
         assert(dppd_topology_discover_with_reader(&config, &topology, fake_reader, &reader_mode) == 0);
-        check_unknown(&topology.endpoints[0], reader_error < 0 ? reader_error : -EIO);
-        assert(strcmp(topology.endpoints[0].phys_port_name, "c0pf0vf2") == 0);
+        check_unverified(&topology.endpoints[0], reader_error < 0 ? reader_error : -EIO);
+        assert(topology.endpoints[0].if_index == 13 && strcmp(topology.endpoints[0].device_name, "0000:03:00.0") == 0);
     }
     reader_error = 0;
     information[3].dev_flags = NULL;
@@ -242,7 +256,9 @@ static void test_identity_evidence(void)
     unsigned int previous = reader_calls;
     assert(dppd_topology_discover_with_reader(&config, &topology, fake_reader, &reader_mode) == 0);
     check_unknown(&topology.endpoints[0], -ENOTSUP);
-    assert(reader_calls == previous);
+    assert(reader_calls == previous + 1U);
+    assert(strcmp(topology.endpoints[0].interface_name, "pf0vf2") == 0);
+    previous = reader_calls;
     information[3].driver_name = "mlx5_pci";
     information[3].device = NULL;
     assert(dppd_topology_discover_with_reader(&config, &topology, fake_reader, &reader_mode) == 0);
@@ -370,6 +386,9 @@ ssize_t __wrap_recvmsg(int fd, struct msghdr *message, int flags)
     memset(header, 0, 1024);
     sender->nl_pid = kernel_mode == 2 ? 9 : 0;
     sender->nl_groups = 0;
+    sender->nl_family = kernel_mode == 38 ? AF_UNIX : AF_NETLINK;
+    if (kernel_mode == 39)
+        message->msg_namelen = 1;
     message->msg_flags = kernel_mode == 1 ? MSG_TRUNC : 0;
     header->nlmsg_seq = kernel_mode == 7 ? 2 : 1;
     header->nlmsg_type = RTM_NEWLINK;
@@ -382,8 +401,18 @@ ssize_t __wrap_recvmsg(int fd, struct msghdr *message, int flags)
         ((struct nlmsgerr *)NLMSG_DATA(header))->error = -EIO;
         return header->nlmsg_len;
     }
-    if (kernel_mode != 8)
-        append_attribute(header, IFLA_IFNAME, "pf0vf2", sizeof("pf0vf2"));
+    if (kernel_mode != 8) {
+        const char *name = kernel_mode == 35 && kernel_receives >= 2 ? "other0" : "pf0vf2";
+        append_attribute(header, IFLA_IFNAME, name, strlen(name) + 1U);
+        if (kernel_mode == 36)
+            append_attribute(header, IFLA_IFNAME, "pf0vf2", sizeof("pf0vf2"));
+    }
+    bool missing_phys = (kernel_mode >= 25 && kernel_mode <= 28) || (kernel_mode >= 30 && kernel_mode <= 33) ||
+        kernel_mode == 42 || kernel_mode == 43;
+    if (kernel_mode == 33 && kernel_receives >= 2)
+        missing_phys = false;
+    if (kernel_mode == 34 && kernel_receives >= 2)
+        missing_phys = true;
     if (kernel_mode == 4 || kernel_mode == 5) {
         memset(oversized, 'x', sizeof(oversized));
         if (kernel_mode == 4)
@@ -391,7 +420,14 @@ ssize_t __wrap_recvmsg(int fd, struct msghdr *message, int flags)
         append_attribute(header, IFLA_PHYS_PORT_NAME, oversized, kernel_mode == 4 ? 65 : 8);
     } else if (kernel_mode == 10 && kernel_receives >= 2)
         append_attribute(header, IFLA_PHYS_PORT_NAME, "pf0vf3", sizeof("pf0vf3"));
-    else
+    else if (kernel_mode == 41)
+        append_attribute(header, IFLA_PHYS_PORT_NAME, "", 1);
+    else if (kernel_mode == 45) {
+        const char malformed[] = {'c', '0', '\0', 'v', 'f', '2', '\0'};
+        append_attribute(header, IFLA_PHYS_PORT_NAME, malformed, sizeof(malformed));
+    } else if (!missing_phys)
+        append_attribute(header, IFLA_PHYS_PORT_NAME, "c0pf0vf2", sizeof("c0pf0vf2"));
+    if (kernel_mode == 37)
         append_attribute(header, IFLA_PHYS_PORT_NAME, "c0pf0vf2", sizeof("c0pf0vf2"));
     if (kernel_mode == 9)
         ++header->nlmsg_len;
@@ -417,6 +453,14 @@ static int fake_open(const char *path, int flags)
         open_kind = 1;
     else {
         assert(strcmp(path, "/sys/class/net/pf0vf2/phys_port_name") == 0);
+        if (kernel_mode == 25 || kernel_mode == 29 || kernel_mode == 33 || kernel_mode == 42) {
+            errno = ENOENT;
+            return -1;
+        }
+        if (kernel_mode == 30) {
+            errno = EACCES;
+            return -1;
+        }
         open_kind = 2;
     }
     read_offset = 0;
@@ -437,6 +481,7 @@ int __wrap_open64(const char *path, int flags, ...)
 ssize_t __wrap_read(int fd, void *buffer, size_t count)
 {
     const char *value = open_kind == 1 ? "13\n" : "c0pf0vf2\n";
+    const char malformed[] = {'a', '\0', 'b', '\n'};
     char oversized[65];
     size_t available;
 
@@ -445,18 +490,26 @@ ssize_t __wrap_read(int fd, void *buffer, size_t count)
         errno = EIO;
         return -1;
     }
+    if (open_kind == 2 && (kernel_mode == 26 || (kernel_mode == 43 && read_offset != 0))) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
     if (open_kind == 1 && kernel_mode == 11)
         value = "14\n";
     if (open_kind == 1 && kernel_mode == 23)
         value = "13junk\n";
     if (open_kind == 2 && kernel_mode == 12)
         value = "pf0vf3\n";
-    if (open_kind == 2 && kernel_mode == 14) {
+    if (open_kind == 2 && (kernel_mode == 27 || kernel_mode == 41))
+        value = "\n";
+    if (open_kind == 2 && (kernel_mode == 14 || kernel_mode == 31)) {
         memset(oversized, 'x', sizeof(oversized));
         oversized[64] = '\0';
         value = oversized;
     }
-    available = strlen(value);
+    if (open_kind == 2 && kernel_mode == 32)
+        value = malformed;
+    available = open_kind == 2 && kernel_mode == 32 ? sizeof(malformed) : strlen(value);
     if (read_offset >= available)
         return 0;
     available -= read_offset;
@@ -465,6 +518,8 @@ ssize_t __wrap_read(int fd, void *buffer, size_t count)
     /** 故意让每次读取只返回少量字节，验证短读不会被误当成完整名称 */
     if (kernel_mode == 24 && available > 2)
         available = 2;
+    if (open_kind == 2 && kernel_mode == 43 && available > 2)
+        available = 2;
     memcpy(buffer, value + read_offset, available);
     read_offset += available;
     return (ssize_t)available;
@@ -472,10 +527,11 @@ ssize_t __wrap_read(int fd, void *buffer, size_t count)
 
 char *__wrap_realpath(const char *path, char *resolved)
 {
-    const char *target =
-        kernel_mode == 13 ? "/sys/devices/pci0000:00/0000:03:00.1" : "/sys/devices/pci0000:00/0000:03:00.0";
+    const char *target = kernel_mode == 13 || kernel_mode == 42 ? "/sys/devices/pci0000:00/0000:03:00.1"
+                                                                : "/sys/devices/pci0000:00/0000:03:00.0";
 
     assert(strcmp(path, "/sys/class/net/pf0vf2/device") == 0);
+    ++kernel_realpaths;
     if (kernel_mode == 17) {
         errno = ENOENT;
         return NULL;
@@ -510,12 +566,117 @@ static void test_default_reader(void)
         assert(dppd_topology_discover(&config, &topology) == 0);
         assert(topology.nb_endpoints == 1 && kernel_fds == 0);
         if (expected[kernel_mode] != 0)
-            check_unknown(&topology.endpoints[0], expected[kernel_mode]);
+            check_unverified(&topology.endpoints[0], expected[kernel_mode]);
         else {
             assert(topology.endpoints[0].role == DPPD_ENDPOINT_ROLE_VF && topology.endpoints[0].function_id == 2);
             assert(kernel_receives == 2 && topology.endpoints[0].role_error == 0);
         }
     }
+}
+
+/** 通用 PCI PMD 复用相同接口核对，缺少角色名称不等于可以跳过 PCI 或命名空间证据 */
+static void test_generic_identity(void)
+{
+    struct dppd_config config = {.nb_ports = 1, .ports = {3}};
+    struct dppd_topology topology;
+    static const struct {
+        int mode, error;
+        bool verified, phys_present;
+    } cases[] = {{0, -ENOTSUP, true, true}, {11, -EXDEV, false, false}, {13, -EXDEV, false, false},
+        {17, -ENOENT, false, false}, {25, -ENOTSUP, true, false}, {26, -ENOTSUP, true, false},
+        {27, -ENOTSUP, true, false}, {28, -EXDEV, false, false}, {29, -EXDEV, false, false},
+        {30, -EACCES, false, false}, {31, -EOVERFLOW, false, false}, {32, -EPROTO, false, false},
+        {33, -EAGAIN, false, false}, {34, -EAGAIN, false, false}, {35, -EAGAIN, false, false},
+        {36, -EPROTO, false, false}, {37, -EPROTO, false, false}, {38, -EPROTO, false, false},
+        {39, -EPROTO, false, false}, {41, -ENOTSUP, true, false}, {42, -EXDEV, false, false}, {43, -EIO, false, false},
+        {45, -EPROTO, false, false}};
+
+    reset();
+    information[3].device = (struct rte_device *)&fake_device;
+    information[3].driver_name = "net_i40e";
+    information[3].if_index = 13;
+    flags[3] = RTE_ETH_DEV_REPRESENTOR;
+    for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        kernel_mode = cases[i].mode;
+        kernel_fds = 0;
+        kernel_receives = kernel_realpaths = 0;
+        assert(dppd_topology_discover(&config, &topology) == 0);
+        const struct dppd_endpoint *endpoint = &topology.endpoints[0];
+        assert(topology.nb_endpoints == 1 && endpoint->if_index == 13 && kernel_fds == 0);
+        assert(endpoint->kind == DPPD_ENDPOINT_REPRESENTOR);
+        assert(strcmp(endpoint->device_name, "0000:03:00.0") == 0);
+        if (cases[i].verified) {
+            check_unknown(endpoint, -ENOTSUP);
+            assert(strcmp(endpoint->interface_name, "pf0vf2") == 0 && kernel_receives == 2 && kernel_realpaths == 1);
+            assert(strcmp(endpoint->phys_port_name, cases[i].phys_present ? "c0pf0vf2" : "") == 0);
+        } else
+            check_unverified(endpoint, cases[i].error);
+        if (cases[i].mode == 42)
+            assert(kernel_realpaths == 1 && kernel_receives == 1);
+    }
+
+    /** mlx5 也先形成接口身份，双方没有物理端口名时不能凭 representor 标志推测角色 */
+    information[3].driver_name = "mlx5_pci";
+    const int missing_phys_modes[] = {25, 26, 27, 41};
+    for (unsigned int i = 0; i < sizeof(missing_phys_modes) / sizeof(missing_phys_modes[0]); ++i) {
+        kernel_mode = missing_phys_modes[i];
+        kernel_receives = kernel_realpaths = 0;
+        assert(dppd_topology_discover(&config, &topology) == 0);
+        check_unknown(&topology.endpoints[0], -ENODATA);
+        assert(strcmp(topology.endpoints[0].interface_name, "pf0vf2") == 0 &&
+            topology.endpoints[0].phys_port_name[0] == '\0');
+        assert(kernel_receives == 2 && kernel_realpaths == 1 && kernel_fds == 0);
+    }
+
+    /** 通用角色未知仍可稳定重发现，换 PCI 设备或读取失败都不能覆盖原来的可信拓扑 */
+    information[3].driver_name = "net_ice";
+    kernel_mode = 25;
+    kernel_receives = 0;
+    assert(dppd_topology_discover(&config, &topology) == 0);
+    struct dppd_topology expected = topology, output, sentinel;
+    assert(dppd_topology_rediscover_verified(&config, &expected, &output) == 0);
+    memset(&sentinel, 0xa5, sizeof(sentinel));
+    memcpy(&output, &sentinel, sizeof(output));
+    kernel_mode = 42;
+    assert(dppd_topology_rediscover_verified(&config, &expected, &output) == -EXDEV);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0);
+    kernel_mode = 30;
+    assert(dppd_topology_rediscover_verified(&config, &expected, &output) == -EXDEV);
+    assert(memcmp(&output, &sentinel, sizeof(output)) == 0 && kernel_fds == 0);
+
+    /** 没有宿主接口、超范围编号和 auxiliary/vdev 名称都不能补成可信 PCI 接口 */
+    kernel_mode = 0;
+    information[3].if_index = 0;
+    kernel_receives = 0;
+    assert(dppd_topology_discover(&config, &topology) == 0);
+    check_unverified(&topology.endpoints[0], -ENODEV);
+    assert(kernel_receives == 0 && kernel_fds == 0);
+    information[3].if_index = UINT32_MAX;
+    assert(dppd_topology_discover(&config, &topology) == 0);
+    check_unverified(&topology.endpoints[0], -ENODEV);
+    assert(kernel_receives == 0 && topology.endpoints[0].if_index == UINT32_MAX);
+    information[3].if_index = 13;
+    set_device_name("mlx5_core.sf.1");
+    assert(dppd_topology_discover(&config, &topology) == 0);
+    check_unverified(&topology.endpoints[0], -ENOTSUP);
+    assert(kernel_receives == 0);
+    set_device_name("0000:03:00.0");
+    assert(dppd_topology_discover_with_reader(&config, &topology, NULL, NULL) == 0);
+    check_unverified(&topology.endpoints[0], -ENODATA);
+    for (reader_mode = 1; reader_mode <= 7; ++reader_mode) {
+        assert(dppd_topology_discover_with_reader(&config, &topology, fake_reader, &reader_mode) == 0);
+        check_unverified(&topology.endpoints[0], -EXDEV);
+    }
+    reader_mode = 0;
+    reader_error = -EIO;
+    assert(dppd_topology_discover_with_reader(&config, &topology, fake_reader, &reader_mode) == 0);
+    check_unverified(&topology.endpoints[0], -EIO);
+    reader_error = 0;
+    reader_mode = 9;
+    assert(dppd_topology_discover_with_reader(&config, &topology, fake_reader, &reader_mode) == 0);
+    check_unknown(&topology.endpoints[0], -ENOTSUP);
+    assert(
+        strcmp(topology.endpoints[0].interface_name, "pf0vf2") == 0 && topology.endpoints[0].phys_port_name[0] == '\0');
 }
 
 /** 每次重新建立带完整身份的双端口夹具，不把已知字符串解析当作真实设备证明 */
@@ -761,6 +922,7 @@ int main(void)
     test_identity_evidence();
     test_discovery_atomicity();
     test_default_reader();
+    test_generic_identity();
     test_identity_comparison();
     test_verified_rediscovery();
     return 0;

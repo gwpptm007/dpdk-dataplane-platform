@@ -154,6 +154,7 @@ static void identity_queries(struct dppd_control_service *control, const struct 
             assert(port->controller_id == endpoint->controller_id && port->pf_id == endpoint->pf_id);
             assert(port->function_id == endpoint->function_id && port->physical_port_id == endpoint->physical_port_id);
             assert(strcmp(port->interface_name, endpoint->interface_name) == 0);
+            assert(strcmp(port->driver_name, endpoint->driver_name) == 0);
             assert(strcmp(port->device_name, endpoint->device_name) == 0);
             assert(strcmp(port->phys_port_name, endpoint->phys_port_name) == 0);
             if (i == 2)
@@ -272,6 +273,121 @@ static void recovery_requests(const struct dppd_device_set *devices)
     assert(dppd_control_fini(&control) == 0);
 }
 
+/** 通用身份不授予角色，管理查询完整保留 UNKNOWN，只有 pair 可以进入正式硬件事务 */
+static void generic_identity_requests(void)
+{
+    struct dppd_device_set devices;
+    struct dppd_control_service control;
+    struct dppd_management_request request;
+    struct dppd_management_response response;
+    make_devices(&devices);
+    for (uint16_t i = 0; i < devices.nb_ports; ++i) {
+        struct dppd_endpoint *endpoint = &devices.topology.endpoints[i];
+        snprintf(endpoint->driver_name, sizeof(endpoint->driver_name), "net_contract");
+        assert(dppd_topology_resolve_role(endpoint, endpoint->driver_name, endpoint->kind == DPPD_ENDPOINT_REPRESENTOR,
+                   i == 2 ? "pf0vf9" : "") == -ENOTSUP);
+    }
+    creates = validates = removes = queries = 0;
+    create_failure = -1;
+    query_error = 0;
+    remove_failure = false;
+    assert(dppd_control_init(&control, &devices.topology, 8, &api) == 0);
+    identity_queries(&control, &devices);
+    transfer_request(&request, DPPD_MANAGEMENT_TRANSFER_PLAN);
+    request.payload.transfer.scenario = DPPD_TRANSFER_PAIR;
+    dispatch(&control, &devices, &request, &response, 0);
+    assert(response.payload.transfer.graph.count == 2 && response.payload.transfer.graph.repository_generation == 0);
+    assert(creates == 0 && validates == 0 && control.rules.generation == 0);
+    request.operation = DPPD_MANAGEMENT_TRANSFER_APPLY;
+    request.payload.transfer.expected_repository_generation = response.payload.transfer.graph.repository_generation;
+    dispatch(&control, &devices, &request, &response, 0);
+    assert(creates == 2 && validates == 2 && control.rules.generation == 2 && control.rules.count == 2);
+    struct dppd_flow_handle handles[2];
+    for (uint64_t i = 0; i < 2; ++i) {
+        const struct dppd_rule *rule = &response.payload.transfer.graph.rules[i];
+        assert(rule->id == 100U + i && rule->generation == 1U + i);
+        assert(response.payload.transfer.graph.plans[i].rule_generation == rule->generation);
+        handles[i] = *dppd_rte_flow_backend_find_version(&control.rte_flow, rule->id, rule->generation);
+    }
+    for (uint64_t i = 0; i < 2; ++i) {
+        initialize_request(&request, DPPD_MANAGEMENT_RULE_COUNT_QUERY);
+        request.payload.count_query.rule_id = 100U + i;
+        request.payload.count_query.expected_generation = 1U + i;
+        dispatch(&control, &devices, &request, &response, 0);
+        assert(response.payload.count.rule_id == 100U + i && response.payload.count.generation == 1U + i);
+        assert(response.payload.count.hits == UINT64_C(0x100000009) &&
+            response.payload.count.bytes == UINT64_C(0x200000017));
+    }
+    assert(queries == 2);
+    request.payload.count_query.expected_generation = 99;
+    dispatch(&control, &devices, &request, &response, -ESTALE);
+    assert(queries == 2 && response.payload.count.rule_id == 0 && response.payload.count.generation == 0);
+    for (uint8_t scenario = DPPD_TRANSFER_UPLINK_VF; scenario < DPPD_TRANSFER_TEMPLATE_COUNT; ++scenario) {
+        transfer_request(&request, DPPD_MANAGEMENT_TRANSFER_PLAN);
+        request.payload.transfer.first_rule_id = 200;
+        request.payload.transfer.expected_repository_generation = 2;
+        request.payload.transfer.scenario = scenario;
+        dispatch(&control, &devices, &request, &response, -ENOTSUP);
+        assert(response.payload.transfer.graph.count == 0);
+        request.operation = DPPD_MANAGEMENT_TRANSFER_APPLY;
+        dispatch(&control, &devices, &request, &response, -ENOTSUP);
+        assert(response.payload.transfer.graph.count == 0);
+    }
+    struct dppd_topology saved = devices.topology;
+    for (unsigned int variant = 0; variant < 3; ++variant) {
+        devices.topology = saved;
+        if (variant == 0)
+            devices.topology.endpoints[1].has_switch_domain = false;
+        else if (variant == 1)
+            devices.topology.endpoints[1].switch_domain_id++;
+        else
+            devices.topology.endpoints[1].switch_port_id = devices.topology.endpoints[0].switch_port_id;
+        transfer_request(&request, DPPD_MANAGEMENT_TRANSFER_PLAN);
+        request.payload.transfer.first_rule_id = 200;
+        request.payload.transfer.expected_repository_generation = 2;
+        request.payload.transfer.scenario = DPPD_TRANSFER_PAIR;
+        int expected = variant == 0 ? -ENOTSUP : variant == 1 ? -EXDEV : -EINVAL;
+        dispatch(&control, &devices, &request, &response, expected);
+        assert(response.payload.transfer.graph.count == 0);
+        request.operation = DPPD_MANAGEMENT_TRANSFER_APPLY;
+        dispatch(&control, &devices, &request, &response, expected);
+        assert(response.payload.transfer.graph.count == 0);
+    }
+    devices.topology = saved;
+    assert(creates == 2 && validates == 2 && removes == 0 && queries == 2);
+    assert(control.rules.count == 2 && control.rules.generation == 2 && control.shared_count_revision == 0);
+    assert(control.recovery_state == DPPD_CONTROL_RECOVERY_READY);
+    for (uint64_t i = 0; i < 2; ++i) {
+        const struct dppd_flow_handle *handle = dppd_rte_flow_backend_find_version(&control.rte_flow, 100U + i, 1U + i);
+        assert(handle != NULL && memcmp(handle, &handles[i], sizeof(*handle)) == 0);
+    }
+    for (uint16_t i = 0; i < devices.nb_ports; ++i) {
+        const struct dppd_endpoint *endpoint = &devices.topology.endpoints[i];
+        assert(
+            endpoint->role == DPPD_ENDPOINT_ROLE_UNKNOWN && endpoint->role_source == DPPD_ENDPOINT_ROLE_SOURCE_UNKNOWN);
+        assert(endpoint->role_error == -ENOTSUP && !endpoint->has_controller && !endpoint->has_pf &&
+            !endpoint->has_function && !endpoint->has_physical_port);
+        for (unsigned int capability = 0; capability < 2; ++capability) {
+            initialize_request(&request, capability ? DPPD_MANAGEMENT_CAPABILITY_GET : DPPD_MANAGEMENT_PORT_GET);
+            if (capability)
+                request.payload.capability.port_id = devices.ports[i].port_id;
+            else
+                request.payload.port_get.port_id = devices.ports[i].port_id;
+            dispatch(&control, &devices, &request, &response, 0);
+            const struct dppd_management_port_info *port =
+                capability ? &response.payload.capability.port : &response.payload.port;
+            assert(port->role == DPPD_ENDPOINT_ROLE_UNKNOWN && port->role_source == DPPD_ENDPOINT_ROLE_SOURCE_UNKNOWN &&
+                port->role_error == -ENOTSUP && port->if_index == endpoint->if_index);
+            assert(strcmp(port->driver_name, "net_contract") == 0 &&
+                strcmp(port->interface_name, endpoint->interface_name) == 0 &&
+                strcmp(port->device_name, endpoint->device_name) == 0 &&
+                strcmp(port->phys_port_name, endpoint->phys_port_name) == 0);
+        }
+    }
+    assert(creates == 2 && validates == 2 && removes == 0 && queries == 2);
+    assert(dppd_control_fini(&control) == 0 && removes == 2);
+}
+
 int main(void)
 {
     struct dppd_device_set devices;
@@ -283,6 +399,7 @@ int main(void)
     invalid_requests(&control, &devices);
     assert(dppd_control_fini(&control) == 0);
     recovery_requests(&devices);
+    generic_identity_requests();
     puts("PASS transfer management with simulated driver; hardware acceptance remains pending");
     return 0;
 }

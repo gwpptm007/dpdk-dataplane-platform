@@ -24,6 +24,8 @@ from verify_m2 import source_digest
 
 
 TEMPLATES = ("pair", "uplink-vf", "uplink-sf", "pf-vf", "pf-sf", "vf-vf", "sf-sf")
+TEMPLATE_ROLES = {"uplink-vf": ("uplink", "vf"), "uplink-sf": ("uplink", "sf"), "pf-vf": ("pf", "vf"),
+                  "pf-sf": ("pf", "sf"), "vf-vf": ("vf", "vf"), "sf-sf": ("sf", "sf")}
 VIRTUAL_PMDS = ("ring", "tap", "null", "pcap", "af_packet", "af_xdp", "virtio", "vmxnet3", "vhost", "memif", "failsafe")
 RESET_STAGE = "physical_reset_recovery"
 
@@ -140,6 +142,18 @@ def configured_endpoints(config):
     return endpoints
 
 
+def validate_transfer_roles(config):
+    expected = TEMPLATE_ROLES.get(config["template"])
+    if expected is None:
+        return
+    # 安装口只验证交换域，命名模板的角色要求针对源和目的，不替安装口猜测身份
+    actual = tuple(config["ports"][name]["role"] for name in ("source", "destination"))
+    if "unknown" in actual:
+        raise Blocked("命名 transfer 模板要求源和目的都有可信角色，UNKNOWN 只能显式选择 pair")
+    if actual != expected:
+        raise Blocked("源和目的角色与显式 transfer 模板不匹配")
+
+
 def validate_config(config):
     if not isinstance(config, dict) or config.get("schema_version") != 1:
         raise Blocked("配置 schema_version 必须为 1")
@@ -154,6 +168,7 @@ def validate_config(config):
         raise Blocked("安装、源和目的端口不在同一个已知交换域")
     if config.get("template") not in TEMPLATES:
         raise Blocked("未选择已实现的 transfer 模板")
+    validate_transfer_roles(config)
     stages = config.get("stages", ["basic", "age", "shared_count"])
     if not isinstance(stages, list) or not stages or any(not isinstance(item, str) for item in stages) or len(set(stages)) != len(stages) or any(
             item not in ("basic", "age", "shared_count", "planned_reset") for item in stages) or "basic" not in stages:
@@ -499,13 +514,16 @@ def _age(ctl, rid, generation):
     return age
 
 
-def runtime_port_identities(config, ctl):
+def runtime_port_identities(config, ctl, ifindex_reader=None):
+    validate_transfer_roles(config)
+    ifindex_reader = socket.if_nametoindex if ifindex_reader is None else ifindex_reader
     identities = {}
     for role, configured in configured_endpoints(config):
         port = ctl("port-show", configured["port_id"])
         capability = ctl("capability-show", configured["port_id"])
         actual, caps = fields(port["stdout"]), fields(capability["stdout"])
-        expected = {"driver": configured["pmd"], "device": configured["device_name"],
+        # port-show 是 PCI 父设备名，capability-show 则是完整 ethdev 名，representor 上两者不同
+        expected = {"driver": configured["pmd"], "device": configured["pci_address"],
                     "interface": configured["interface"], "role": configured["role"],
                     "switch-domain": str(configured["switch_domain"])}
         if any(actual.get(key) != expected_value for key, expected_value in expected.items()):
@@ -514,12 +532,33 @@ def runtime_port_identities(config, ctl):
                 caps.get("firmware") in (None, "unknown", "") or caps.get("device") != configured["device_name"] or
                 caps.get("driver") != configured["pmd"] or not caps.get("dpdk")):
             raise Blocked(role + " PMD/device/firmware/DPDK 证据不完整或不一致")
+        index = actual.get("ifindex", "")
+        if not index.isdecimal() or not 1 <= int(index) <= (1 << 31) - 1:
+            raise Blocked(role + " 缺少真实 host netdev ifindex，UNKNOWN pair 也不能跳过接口身份核对")
+        try:
+            kernel_index = ifindex_reader(configured["interface"])
+        except (OSError, ValueError) as error:
+            raise Blocked(role + " 无法在当前网络命名空间核对 host netdev: " + str(error)) from error
+        if kernel_index != int(index):
+            raise Blocked(role + " port-show ifindex 与实际 host netdev 不一致")
+        switch_port = actual.get("switch-port", "")
+        if not switch_port.isdecimal() or not 0 <= int(switch_port) <= 65535:
+            raise Blocked(role + " 已知交换域缺少有效 switch-port 身份")
+        if config["template"] != "pair" and role in ("source", "destination"):
+            kind = "ethdev" if configured["role"] == "uplink" else "representor"
+            if (actual.get("role-source") != "mlx5-phys-port-name" or actual.get("role-error") != "0" or
+                    actual.get("kind") != kind):
+                raise Blocked(role + " 命名模板角色来源、错误码或端点种类没有形成可信证据")
         if "planned_reset" in config.get("stages", []) and any(caps.get(key) != "yes" for key in ("configured", "started")):
             raise Blocked(role + " 复位完整端口组尚未全部配置和启动")
         # 缓存命中次数会变化，拓扑、设备和实际队列配置则必须在复位前后完全一致
         stable = {key: item for key, item in actual.items() if key not in ("state", "link")}
         identities[str(configured["port_id"])] = {
             "port": stable, "capability": fields("\n".join(capability["stdout"].splitlines()[:2]))}
+    source = identities[str(config["ports"]["source"]["port_id"])]["port"]
+    destination = identities[str(config["ports"]["destination"]["port_id"])]["port"]
+    if source["switch-port"] == destination["switch-port"]:
+        raise Blocked("源和目的虽然 ethdev 编号不同，实际指向同一交换端口")
     return identities
 
 

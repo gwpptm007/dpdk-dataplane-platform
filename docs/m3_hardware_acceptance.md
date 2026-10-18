@@ -27,10 +27,13 @@ AGE 核对驱动查询、再次命中续期、闲置自动删除和旧 COUNT 消
 没有可见的 15b3 设备、SR-IOV 或 IOMMU group，firmware 字段为空，hugepage 数为零。
 没有取得独立真实硬件及物理线缆的证据，不能执行本入口的硬件正向阶段。
 
-非 mlx5 还存在当前软件适配缺口：生产角色发现路径尚未为这些 PMD 采集完整的
-`interface_name` 和 `phys_port_name`，因此严格接口身份核对会保守 blocked。
-`pair` 允许 UNKNOWN 角色，不会放宽接口与 PCI 的独立核对；该类别需要先完成目标 PMD 的身份/角色适配，
-再补真实设备与报文验收，不能把剩余工作只登记为“缺硬件证据”。
+生产发现现已补充通用内核接口身份采集，非 mlx5 的接口名、ifindex 与可选的 phys_port_name
+可以单独核对，不会因此推导 PF、VF、SF、上联角色或新增 GENERIC 角色来源。
+非 mlx5 成功采集接口后仍保留 `role=unknown`、`role-source=unknown` 和不支持角色解析的错误码。
+工具只在显式选择 `pair` 且接口、PCI parent、已知交换域、固件等证据全部一致时允许进入下一门禁。
+目标 PMD 没有 host netdev、返回 ifindex=0、未提供交换域或固件时仍为 blocked。
+通用身份适配不是目标 PMD 支持 transfer、COUNT、AGE、共享动作或物理复位的证明，
+这些物理能力以及具体非 mlx5 型号仍未验收。
 
 这里的实机缺口不会因软件工具安装而消失。既有软件环境和功能模拟仍可使用，详见
 [环境盘点](m3_environment_20261018.md)、[软件模拟环境](m3_simulation_environment.md)、
@@ -70,9 +73,9 @@ python3 scripts/verify_m3_hardware.py --build-dir build --report-dir build/m3-ha
 | --- | --- |
 | `ports.install` | 规则实际安装 ethdev，不能把它当成源或目的端点的别名 |
 | `ports.source`、`ports.destination` | 不同的源/目的 ethdev，各自有已核对接口和 PCI 设备 |
-| `port_id / pci_address / interface` | DPDK 端口、Linux 接口和 sysfs PCI 独立一致 |
-| `pmd / device_name / firmware` | 与当前 daemon 的 `port-show`、`capability-show` 原始结果完全一致 |
-| `role / switch_domain` | 角色保留来源；安装、源和目的都在同一个已知交换域 |
+| `port_id / pci_address / interface` | DPDK 端口、Linux 接口和 sysfs PCI 独立一致，port-show 的 device 等于此 PCI BDF |
+| `pmd / device_name / firmware` | 分别严格核对 PMD、capability-show 的完整 ethdev 名与固件，不能把 ethdev 名当 PCI 父名 |
+| `role / switch_domain` | 安装、源和目的都在同一已知交换域；UNKNOWN 源或目的只能显式选择 pair |
 | `eal_devargs` | 必须是当前测试 daemon 命令行中真实存在的完整参数，不接受虚拟设备或 `--no-pci` |
 | `daemon_pid / socket` | 已启动的专用测试 daemon，Unix socket 的 `SO_PEERCRED` 必须指向这个 PID |
 | `peer.ssh_argv` | SSH 的参数数组，例如 `ssh -o BatchMode=yes tester@peer` 分成独立元素 |
@@ -89,10 +92,30 @@ python3 scripts/verify_m3_hardware.py --build-dir build --report-dir build/m3-ha
 AGE 阶段的专用规则在基础规则删除后复用 ID；共享阶段再使用该 ID 和 ID+1，
 共享对象使用独立命名空间中的同一 ID。所有这些规则和共享对象都必须事先不存在。
 
+代表端口有两类设备名称，必须分别填写和核对：`port-show.device` 来自 ethdev 归属的
+PCI 设备名，严格等于 `pci_address`；`capability-show.device` 是完整 ethdev 名，严格等于
+`device_name`。例如前者是 `0000:03:00.0`，后者可以是 `0000:03:00.0_representor_vf1`。
+普通端口两者可以相同，不能强迫真实代表端口的两个名字也相同。
+完整 ethdev 名只接受同一完整 BDF 或其合法且非空的 representor 后缀，仍须独立核对接口的 sysfs PCI。
+管理保护继续沿 PCI `physfn` 归到 PF，这与 ethdev 名称中的代表关系分别核对，不能相互替代。
+主动复位的完整端口组也逐项执行上述两个名字的严格检查，不能遗漏图外的额外端口。
+
 连接说明来自使用者登记，不能把文字本身当成已经观察到物理线缆。
 本轮外部实际接收、真实硬件 COUNT 和 daemon 全线程暂停期间的转发共同补充路径证据。
 复杂 VF/SF 场景仍需用户准确描述数据端点所在机器和实际接线；默认 runner 不自动创建 VF、SF 或 representor。
 辅助总线 SF 或其他无法独立映射到完整 PCI parent 的身份会保守 blocked，不能用相似名称绕过门禁。
+
+`pair` 是通用端点配对，不声明源和目的属于哪种设备角色。
+需要使用未知角色的非 mlx5 端点时，配置中明确写 `template=pair`、`role=unknown`，
+实际 `port-show` 的 UNKNOWN 及原始角色来源、错误码保持原样记录。
+每个端点仍须有非空接口、正 ifindex，且 ifindex 与当前网络命名空间的真实接口编号完全相等。
+不同 ethdev 编号如果指向同一个 switch-port，也会被拒绝。
+这些条件只允许继续运行正式 plan/PMD 验证与真实报文阶段，不产生硬件通过结论。
+
+`uplink-vf`、`uplink-sf`、`pf-vf`、`pf-sf`、`vf-vf`、`sf-sf` 六个命名模板要求源和目的
+具有匹配的可信角色；任一方 UNKNOWN 会在查询、创建规则或发包前明确拒绝。
+运行期还要检查正式角色来源、错误码与 ethdev/representor 类型，不能用通用接口采集结果替代这些角色证据。
+独立安装口的角色可以是 UNKNOWN，其安装身份和交换域仍受严格核对。
 
 管理保护同时检查默认路由和当前 SSH 本地地址，保护整个管理 PCI 设备。
 即使一个 representor 没有 IP，只要与管理接口共用被保护的 PCI 设备，也拒绝测试。
@@ -223,7 +246,7 @@ health 隔离以及外部报文停止的证据；禁止针对未知旧对象发�
 | shared COUNT | 双向规则共用真实对象，逐轮计数汇总、在用 EBUSY、删一边继续累计和精确销毁 |
 | physical reset recovery | 显式选择 planned_reset 后核对全组正式 PMD reset、版本/快照保持、计数归零和恢复后的真实流量 |
 | physical removal | 保留 blocked，人工准备单不能替代受验证的真实移除与恢复证据 |
-| mlx5 / non-mlx5 | 只更新本轮实际验证的类别，非 mlx5 还需补齐生产接口身份采集适配，再补独立实机报告 |
+| mlx5 / non-mlx5 | 只更新本轮实际验证的类别，通用身份采集允许 UNKNOWN pair 继续门禁，目标 PMD 与物理能力仍需独立验收 |
 | performance | `out_of_scope`，属于 M4，不作为 M3 门槛 |
 
 | 退出码 | 报告状态 | 含义 |

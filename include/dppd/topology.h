@@ -35,7 +35,9 @@ struct dppd_endpoint {
     /** 身份信息缺失时保留 UNKNOWN 和错误码，不根据交换端口号猜测 PF、VF 或 SF */
     enum dppd_endpoint_role role;
     enum dppd_endpoint_role_source role_source;
+    /** 基础核对失败时记录读取错误，否则记录角色解析结果，非 mlx5 成功仍为 ENOTSUP */
     int32_t role_error;
+    /** PMD 提供的接口编号是原始观察，不能仅凭编号认领当前网络命名空间的接口 */
     uint32_t if_index;
     bool has_controller;
     bool has_pf;
@@ -45,8 +47,10 @@ struct dppd_endpoint {
     uint32_t pf_id;
     uint32_t function_id;
     uint32_t physical_port_id;
+    /** 正式 discover 只在 netns、sysfs、PCI 和二次读取全部一致后发布接口名 */
     char interface_name[16];
     char device_name[64];
+    /** 正式 discover 只发布核对一致的名称，名称缺失不妨碍通用身份，但不能证明角色 */
     char phys_port_name[64];
 };
 
@@ -55,7 +59,11 @@ struct dppd_topology {
     struct dppd_endpoint endpoints[DPPD_MAX_PORTS];
 };
 
-/** 读取器必须核对当前网络命名空间、接口编号和 PCI 设备，不能只凭同名 sysfs 目录认领接口 */
+/**
+ * 读取器成功返回前必须核对当前 netns、接口编号、PCI 和二次观察，不能凭同名目录认领接口
+ * phys_port_name 可以为空，若任一观察存在该名称则各处完整值必须一致
+ * 失败时填写的原始字符串不作为可信身份发布，调用方不能用自定义读取器绕过这些前置条件
+ */
 struct dppd_topology_identity {
     uint32_t if_index;
     char interface_name[16];

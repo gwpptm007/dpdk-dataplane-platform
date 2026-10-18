@@ -1,8 +1,13 @@
+#define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include "dppd/persistence.h"
 #include "dppd/transfer.h"
 
 /** 这里只替换驱动接口，图构造、正式控制事务、账本和恢复隔离均使用产品代码 */
@@ -108,6 +113,157 @@ static struct dppd_transfer_spec make_spec(void)
         .scenario = DPPD_TRANSFER_PAIR,
         .bidirectional = 1,
         .with_count = 1};
+}
+
+/** 通用 PCI 身份已经单独核对，角色仍未知，不能凭接口名或代表标志补出 PF/VF/SF */
+static struct dppd_topology make_generic_topology(void)
+{
+    struct dppd_topology topology = make_topology();
+    for (uint16_t i = 0; i < topology.nb_endpoints; ++i) {
+        struct dppd_endpoint *endpoint = &topology.endpoints[i];
+        *endpoint = (struct dppd_endpoint){.ethdev_port_id = endpoint->ethdev_port_id,
+            .kind = endpoint->kind,
+            .has_switch_domain = true,
+            .switch_domain_id = endpoint->switch_domain_id,
+            .switch_port_id = endpoint->switch_port_id,
+            .if_index = 400U + i,
+            .role_error = -ENOTSUP};
+        snprintf(endpoint->driver_name, sizeof(endpoint->driver_name), "net_contract");
+        snprintf(endpoint->device_name, sizeof(endpoint->device_name), "0000:03:%02x.0", i);
+        snprintf(endpoint->interface_name, sizeof(endpoint->interface_name), "generic%u", i);
+    }
+    return topology;
+}
+
+struct snapshot_stamp {
+    uint64_t hash;
+    struct stat metadata;
+};
+
+static struct snapshot_stamp snapshot_stamp(const char *path)
+{
+    struct snapshot_stamp result = {.hash = UINT64_C(14695981039346656037)};
+    assert(stat(path, &result.metadata) == 0);
+    FILE *file = fopen(path, "rb");
+    assert(file != NULL);
+    int byte;
+    while ((byte = fgetc(file)) != EOF) {
+        result.hash ^= (unsigned char)byte;
+        result.hash *= UINT64_C(1099511628211);
+    }
+    assert(!ferror(file) && fclose(file) == 0);
+    return result;
+}
+
+static void assert_snapshot_unchanged(const char *path, const struct snapshot_stamp *before)
+{
+    struct snapshot_stamp after = snapshot_stamp(path);
+    assert(after.hash == before->hash && after.metadata.st_ino == before->metadata.st_ino &&
+        after.metadata.st_size == before->metadata.st_size &&
+        after.metadata.st_mtim.tv_sec == before->metadata.st_mtim.tv_sec &&
+        after.metadata.st_mtim.tv_nsec == before->metadata.st_mtim.tv_nsec);
+}
+
+static void check_graph(const struct dppd_transfer_graph *graph, const struct dppd_transfer_spec *spec);
+
+/** 未知角色只允许通用 pair，失败规划和驱动拒绝均不能改旧规则、计数身份或快照 */
+static void generic_unknown_pair(void)
+{
+    for (uint8_t bidirectional = 0; bidirectional < 2; ++bidirectional) {
+        struct dppd_topology topology = make_generic_topology();
+        struct dppd_control_service control;
+        struct dppd_transfer_spec spec = make_spec();
+        struct dppd_transfer_graph graph;
+        struct dppd_control_apply_result results[2];
+        char message[160], directory[] = "/tmp/dppd-generic-pair-XXXXXX", path[256];
+        assert(mkdtemp(directory) != NULL);
+        assert(snprintf(path, sizeof(path), "%s/state.bin", directory) > 0);
+        reset_fake();
+        assert(dppd_control_init(&control, &topology, 8, &api) == 0);
+        assert(dppd_control_persistence_attach(&control, path) == 0);
+        assert(dppd_control_persistence_flush(&control) == 0);
+        struct snapshot_stamp empty = snapshot_stamp(path);
+        spec.source_port_id = 16;
+        spec.bidirectional = bidirectional;
+        assert(dppd_control_transfer(&control, &spec, false, &graph, results, message, sizeof(message)) == 0);
+        assert(fake.validations == 0 && fake.creates == 0 && control.rules.generation == 0);
+        assert_snapshot_unchanged(path, &empty);
+        spec.expected_repository_generation = graph.repository_generation;
+        assert(dppd_control_transfer(&control, &spec, true, &graph, results, message, sizeof(message)) == 0);
+        check_graph(&graph, &spec);
+        const uint32_t count = bidirectional ? 2 : 1;
+        assert(control.rules.count == count && control.rules.generation == count);
+        assert(fake.validations == count && fake.creates == count && fake.removes == 0);
+        struct dppd_flow_handle handles[2];
+        struct dppd_rule installed[2];
+        for (uint32_t i = 0; i < count; ++i) {
+            assert(dppd_rule_repository_get(&control.rules, 100U + i, &installed[i]) == 0);
+            handles[i] = *dppd_rte_flow_backend_find_version(&control.rte_flow, 100U + i, installed[i].generation);
+            struct dppd_control_count_result observed;
+            assert(dppd_control_query_count(&control, 100U + i, installed[i].generation, &observed) == 0);
+            assert(observed.rule_id == 100U + i && observed.generation == installed[i].generation);
+            assert(observed.hits == UINT64_C(0x100000003) && observed.bytes == UINT64_C(0x200000007));
+        }
+        struct snapshot_stamp persisted = snapshot_stamp(path);
+        struct dppd_transfer_spec rejected = spec;
+        rejected.first_rule_id = 200;
+        rejected.priority++;
+        rejected.expected_repository_generation = count;
+        for (uint8_t scenario = DPPD_TRANSFER_UPLINK_VF; scenario < DPPD_TRANSFER_TEMPLATE_COUNT; ++scenario) {
+            rejected.scenario = scenario;
+            for (unsigned int apply = 0; apply < 2; ++apply)
+                assert(dppd_control_transfer(&control, &rejected, apply != 0, &graph, results, message,
+                           sizeof(message)) == -ENOTSUP);
+        }
+        rejected.scenario = DPPD_TRANSFER_PAIR;
+        struct dppd_topology saved = topology;
+        for (unsigned int variant = 0; variant < 5; ++variant) {
+            topology = saved;
+            if (variant < 3)
+                topology.endpoints[variant == 0 ? 0 : variant == 1 ? 6 : 2].has_switch_domain = false;
+            else if (variant == 3)
+                topology.endpoints[2].switch_domain_id++;
+            else
+                topology.endpoints[2].switch_port_id = topology.endpoints[6].switch_port_id;
+            int expected = variant < 3 ? -ENOTSUP : variant == 3 ? -EXDEV : -EINVAL;
+            for (unsigned int apply = 0; apply < 2; ++apply)
+                assert(dppd_control_transfer(&control, &rejected, apply != 0, &graph, results, message,
+                           sizeof(message)) == expected);
+        }
+        topology = saved;
+        assert(fake.validations == count && fake.creates == count && fake.removes == 0 && fake.queries == count);
+        fake.fail_validate_at = (int)fake.validations;
+        assert(dppd_control_transfer(&control, &rejected, true, &graph, results, message, sizeof(message)) == -ENOTSUP);
+        assert(fake.validations == count + 1U && fake.creates == count && fake.removes == 0);
+        assert(control.rules.generation == count && control.rules.count == count && control.shared_count_revision == 0);
+        assert(control.recovery_state == DPPD_CONTROL_RECOVERY_READY && !control.persistence_dirty);
+        for (uint32_t i = 0; i < count; ++i) {
+            const struct dppd_flow_handle *handle =
+                dppd_rte_flow_backend_find_version(&control.rte_flow, 100U + i, installed[i].generation);
+            struct dppd_rule rule;
+            assert(handle != NULL && memcmp(handle, &handles[i], sizeof(*handle)) == 0);
+            assert(dppd_rule_repository_get(&control.rules, 100U + i, &rule) == 0 &&
+                dppd_rule_equal(&rule, &installed[i]) && rule.generation == installed[i].generation);
+        }
+        for (uint16_t i = 0; i < topology.nb_endpoints; ++i) {
+            const struct dppd_endpoint *endpoint = &topology.endpoints[i];
+            assert(endpoint->role == DPPD_ENDPOINT_ROLE_UNKNOWN &&
+                endpoint->role_source == DPPD_ENDPOINT_ROLE_SOURCE_UNKNOWN);
+            assert(endpoint->role_error == -ENOTSUP && !endpoint->has_controller && !endpoint->has_pf &&
+                !endpoint->has_function && !endpoint->has_physical_port && endpoint->phys_port_name[0] == '\0');
+        }
+        assert_snapshot_unchanged(path, &persisted);
+        struct dppd_persisted_snapshot snapshot;
+        assert(dppd_persistence_load(path, &snapshot) == 0 && snapshot.count == count &&
+            snapshot.repository_generation == count && snapshot.shared_count == 0 && snapshot.shared_revision == 0);
+        for (uint32_t i = 0; i < count; ++i)
+            assert(dppd_rule_equal(&snapshot.rules[i], &installed[i]) &&
+                snapshot.rules[i].generation == installed[i].generation);
+        dppd_persisted_snapshot_destroy(&snapshot);
+        assert(dppd_control_fini(&control) == 0 && fake.removes == count);
+        assert_snapshot_unchanged(path, &persisted);
+        assert(unlink(path) == 0 && rmdir(directory) == 0);
+    }
 }
 
 static void check_graph(const struct dppd_transfer_graph *graph, const struct dppd_transfer_spec *spec)
@@ -544,6 +700,7 @@ static void alias_overlap(void)
 int main(void)
 {
     templates();
+    generic_unknown_pair();
     reset_fake();
     invalid_graphs();
     parent_evidence();

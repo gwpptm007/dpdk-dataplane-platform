@@ -225,13 +225,19 @@ v5 单快照和协议 v26；三套各 60/60 单测、四步核心回归及 24 �
 不能替代下面的实际设备、外部流量、CPU 旁路和恢复报告，整个 M3 保持未完成。
 本轮四套各 69/69 单测、六步 M3、四组正式设备事件及 31 组模拟通过，252 项源码一致；
 135 系统与本地 TAP 适配各十二步完整 M2 回归，ASan/UBSan 与 134 GCC 13 各四步核心通过。
-非 mlx5 除缺少实机证据外，当前还缺生产接口身份采集和可信角色适配；pair 控制层允许
-未知角色不代表其他命名模板或现成硬件 runner 已支持，不能把该软件缺口只登记为等待硬件。
+后续已补齐 [通用 PCI 与接口身份核对](m3_generic_identity.md)，非零 ifindex 的端点可以保留
+可信接口与 UNKNOWN 角色；没有宿主接口的目标须另有身份适配，六个命名模板仍缺非 mlx5
+可信角色来源。pair 允许 UNKNOWN 不代表任意 PMD 均支持，具体版本缺口见
+[21.11.9 能力矩阵](m3_pmd_capabilities_21_11.md)。
 
 新增 [独立实机验收工具](m3_hardware_acceptance.md)：只读预检、外部报文、COUNT、AGE、
 共享 COUNT 与可选完整组主动复位 runner、能力矩阵和报告 schema。三套各 70/70 单测、
 58 项门禁、六步 M3 和 31 组模拟通过，255 项源码一致。两机实际预检仍为 blocked，
 报告通过 schema 核对，未执行物理 reset；真实移除和双类设备实机证据继续保留缺口。
+
+通用身份轮次四套各 70/70 单测、68 项硬件门禁、六步 M3、四组正式事件和 31 组模拟通过，
+255 项源码一致。135 系统/本地适配各十二步完整 M2/TAP 回归，ASan/UBSan 与 134 GCC 13
+各四步核心通过，完整证据和源码摘要见 [通用身份验收](m3_generic_identity.md#本轮整体验收)。
 
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。
 

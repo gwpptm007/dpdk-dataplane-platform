@@ -53,6 +53,179 @@ def fixture_gate(report, config):
     return HARDWARE.hardware_gate(report, config, environ={}, parent_reader=lambda bdf: bdf)
 
 
+def generic_configuration():
+    config = configuration()
+    for endpoint in config["ports"].values():
+        endpoint.update(role="unknown", pmd="net_i40e")
+    return config
+
+
+def identity_reader(config, overrides=None):
+    """只生成端口查询夹具，不声明真实 PMD 或硬件已经通过验收"""
+    endpoints = {item["port_id"]: item for _, item in HARDWARE.configured_endpoints(config)}
+    calls = []
+
+    def command(operation, port):
+        calls.append((operation, port))
+        endpoint = endpoints[port]
+        if operation == "port-show":
+            role = endpoint["role"]
+            observed = {"port": str(port), "driver": endpoint["pmd"], "device": endpoint["pci_address"],
+                        "interface": endpoint["interface"], "ifindex": "7", "role": role,
+                        "role-source": "unknown" if role == "unknown" else "mlx5-phys-port-name",
+                        "role-error": "-95" if role == "unknown" else "0", "phys-port-name": "",
+                        "kind": "ethdev" if role in ("unknown", "uplink") else "representor",
+                        "switch-domain": str(endpoint["switch_domain"]), "switch-port": str(port)}
+        elif operation == "capability-show":
+            observed = {"device": endpoint["device_name"], "driver": endpoint["pmd"], "dpdk": "DPDK 21.11.9",
+                        "firmware": endpoint["firmware"], "firmware-error": "0", "configured": "yes", "started": "yes"}
+        else:
+            raise AssertionError("身份门禁不应创建规则或发包: " + operation)
+        observed.update((overrides or {}).get((operation, port), {}))
+        return {"returncode": 0, "stdout": " ".join(key + "=" + item for key, item in observed.items()) + "\n",
+                "stderr": ""}
+
+    return command, calls
+
+
+class GenericIdentityTests(unittest.TestCase):
+    def test_explicit_unknown_pair_advances_only_with_complete_independent_identity(self):
+        config = generic_configuration()
+        self.assertIs(HARDWARE.validate_config(config), config)
+        self.assertEqual(fixture_gate(inventory(), config), ["0000:02:00.0"])
+        command, calls = identity_reader(config)
+        identities = HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 7)
+        for identity in identities.values():
+            self.assertEqual(identity["port"]["role"], "unknown")
+            self.assertEqual(identity["port"]["role-source"], "unknown")
+            self.assertEqual(identity["port"]["role-error"], "-95")
+        self.assertTrue(all(operation in ("port-show", "capability-show") for operation, _ in calls))
+        self.assertTrue(all(row["status"] in ("blocked", "out_of_scope") for row in HARDWARE.matrix()))
+
+    def test_all_six_named_templates_reject_unknown_source_or_destination_before_queries(self):
+        for template, roles in HARDWARE.TEMPLATE_ROLES.items():
+            for missing in ("source", "destination"):
+                config = generic_configuration(); config["template"] = template
+                for name, role in zip(("source", "destination"), roles): config["ports"][name]["role"] = role
+                config["ports"][missing]["role"] = "unknown"
+                command, calls = identity_reader(config)
+                with self.subTest(template=template, missing=missing):
+                    with self.assertRaisesRegex(HARDWARE.Blocked, "UNKNOWN"):
+                        HARDWARE.validate_config(config)
+                    with self.assertRaises(HARDWARE.Blocked):
+                        HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 7)
+                    self.assertFalse(calls)
+
+    def test_named_template_still_allows_a_separate_unknown_install_port(self):
+        config = generic_configuration(); config["template"] = "uplink-vf"
+        config["ports"]["install"]["port_id"] = 2
+        config["ports"]["source"].update(role="uplink", pmd="mlx5_pci")
+        config["ports"]["destination"].update(role="vf", pmd="mlx5_pci")
+        HARDWARE.validate_config(config)
+        command, _ = identity_reader(config)
+        identities = HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 7)
+        self.assertEqual(identities["2"]["port"]["role"], "unknown")
+
+    def test_unknown_pair_without_host_netdev_or_positive_matching_ifindex_remains_blocked(self):
+        variants = ({"ifindex": "0"}, {"ifindex": ""}, {"ifindex": "unknown"}, {"interface": ""})
+        for replacement in variants:
+            config = generic_configuration()
+            command, _ = identity_reader(config, {("port-show", 0): replacement})
+            with self.subTest(replacement=replacement), self.assertRaises(HARDWARE.Blocked):
+                HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 7)
+        config = generic_configuration(); command, _ = identity_reader(config)
+        with self.assertRaises(HARDWARE.Blocked):
+            HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 99)
+        def absent(unused): raise OSError(errno.ENODEV, "fixture host netdev absent")
+        with self.assertRaises(HARDWARE.Blocked): HARDWARE.runtime_port_identities(config, command, ifindex_reader=absent)
+
+    def test_unknown_pair_does_not_relax_switch_domain_port_alias_firmware_or_management_parent(self):
+        variants = {("port-show", 1): {"switch-domain": "none"}}
+        for overrides in (variants, {("port-show", 1): {"switch-port": "0"}},
+                          {("port-show", 1): {"switch-port": "unknown"}},
+                          {("capability-show", 1): {"firmware": "unknown", "firmware-error": "-95"}}):
+            config = generic_configuration(); command, _ = identity_reader(config, overrides)
+            with self.subTest(overrides=overrides), self.assertRaises(HARDWARE.Blocked):
+                HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 7)
+        with self.assertRaises(HARDWARE.Blocked):
+            HARDWARE.hardware_gate(inventory(), generic_configuration(), environ={}, parent_reader=lambda unused: "0000:02:00.0")
+
+    def test_named_roles_cannot_be_derived_from_generic_role_source_or_wrong_endpoint_kind(self):
+        config = generic_configuration(); config["template"] = "vf-vf"
+        config["ports"]["install"]["port_id"] = 2
+        config["ports"]["source"]["role"] = config["ports"]["destination"]["role"] = "vf"
+        for replacement in ({"role-source": "unknown"}, {"role-source": "generic"},
+                            {"role-error": "-95"}, {"kind": "ethdev"}):
+            command, _ = identity_reader(config, {("port-show", 0): replacement})
+            with self.subTest(replacement=replacement), self.assertRaises(HARDWARE.Blocked):
+                HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 7)
+
+
+class RepresentorNameTests(unittest.TestCase):
+    def representor_config(self):
+        config = configuration(); config["template"] = "uplink-vf"
+        destination = config["ports"]["destination"]
+        destination.update(role="vf", device_name=destination["pci_address"] + "_representor_vf1")
+        return config
+
+    def test_pci_parent_name_and_full_ethdev_name_are_independently_required(self):
+        config = self.representor_config()
+        HARDWARE.validate_config(config)
+        fixture_gate(inventory(), config)
+        command, _ = identity_reader(config)
+        observed = HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 7)
+        self.assertEqual(observed["1"]["port"]["device"], "0000:03:00.0")
+        self.assertEqual(observed["1"]["capability"]["device"], "0000:03:00.0_representor_vf1")
+
+    def test_ethdev_name_must_use_the_exact_complete_bdf_and_a_nonempty_representor_suffix(self):
+        for name in ("0000:04:00.0_representor_vf1", "0000:03:00.00_representor_vf1", "0000:03:00.0evil",
+                     "0000:03:00.0_representor_", "0000:03:00.0_representor_vf1/extra"):
+            config = self.representor_config(); config["ports"]["destination"]["device_name"] = name
+            with self.subTest(name=name), self.assertRaises(HARDWARE.Blocked): HARDWARE.validate_config(config)
+
+    def test_parent_or_ethdev_suffix_mismatch_cannot_borrow_another_identity(self):
+        variants = ({("port-show", 1): {"device": "0000:04:00.0"}},
+                    {("port-show", 1): {"device": "0000:03:00.0_representor_vf1"}},
+                    {("capability-show", 1): {"device": "0000:03:00.0"}},
+                    {("capability-show", 1): {"device": "0000:03:00.0_representor_vf9"}})
+        for replacement in variants:
+            config = self.representor_config(); command, _ = identity_reader(config, replacement)
+            with self.subTest(replacement=replacement), self.assertRaises(HARDWARE.Blocked):
+                HARDWARE.runtime_port_identities(config, command, ifindex_reader=lambda unused: 7)
+        sample = inventory(); sample["interface_scan"]["interfaces"][1]["pci_device"] = observed("0000:04:00.0")
+        with self.assertRaises(HARDWARE.Blocked): fixture_gate(sample, self.representor_config())
+
+    def test_planned_reset_checks_both_names_for_every_configured_port_including_extra_representor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); snapshot = directory / "snapshot"; snapshot.write_bytes(b"fixture")
+            config = self.representor_config(); config["stages"] = ["basic", "planned_reset"]
+            extra = dict(config["ports"]["destination"], port_id=2, device_name="0000:03:00.0_representor_vf9")
+            config["planned_reset"] = {"allow_full_group_reset": True, "modes": ["count"],
+                                       "snapshot_path": str(snapshot), "device_ports": [
+                                           dict(config["ports"]["source"]), dict(config["ports"]["destination"]), extra]}
+            HARDWARE.validate_config(config)
+            for failure in (None, ("port-show", {"device": "0000:03:00.0_representor_vf9"}),
+                            ("capability-show", {"device": "0000:03:00.0_representor_vf8"})):
+                overrides = {} if failure is None else {(failure[0], 2): failure[1]}
+                command, calls = identity_reader(config, overrides)
+                with self.subTest(failure=failure), patch.object(HARDWARE, "inspect_environment", return_value=inventory()), \
+                        patch.object(HARDWARE, "pci_parent", side_effect=lambda bdf: bdf), \
+                        patch.object(HARDWARE, "reset_snapshot", return_value=snapshot), \
+                        patch.object(HARDWARE, "read_device_status", return_value={"device_ports": [0, 1, 2]}) as status, \
+                        patch.object(HARDWARE.socket, "if_nametoindex", return_value=7), \
+                        patch.dict(HARDWARE.os.environ, {"SSH_CONNECTION": ""}):
+                    if failure is None:
+                        _, identities, _ = HARDWARE.reset_preflight(config, {}, command, {}, directory)
+                        self.assertEqual(identities["2"]["port"]["device"], "0000:03:00.0")
+                        self.assertEqual(identities["2"]["capability"]["device"], extra["device_name"])
+                        status.assert_called_once()
+                    else:
+                        with self.assertRaises(HARDWARE.Blocked): HARDWARE.reset_preflight(config, {}, command, {}, directory)
+                        status.assert_not_called()
+                    self.assertIn(("capability-show", 2), calls)
+                    self.assertTrue(all(operation in ("port-show", "capability-show") for operation, _ in calls))
+
+
 class HardwareGateTests(unittest.TestCase):
     def test_candidate_only_allows_next_preflight_without_claiming_acceptance(self):
         self.assertEqual(fixture_gate(inventory(), configuration()), ["0000:02:00.0"])
@@ -394,7 +567,8 @@ class ProcessSafetyTests(unittest.TestCase):
             del unused, options
             if argv[0] == "meson": return {"returncode": 0, "stdout": "", "stderr": ""}
             operation, arguments = argv[3], argv[4:]; calls.append((operation, arguments))
-            output = {"port-show": "driver=mlx5_pci device=0000:03:00.0 interface=test0 role=uplink switch-domain=3\n",
+            output = {"port-show": "driver=mlx5_pci device=0000:03:00.0 interface=test0 ifindex=2 role=uplink "
+                                   f"switch-domain=3 switch-port={arguments[0] if arguments else 0}\n",
                       "capability-show": "device=0000:03:00.0 driver=mlx5_pci dpdk=21.11.9 firmware=test-firmware firmware-error=0\n",
                       "transfer-plan": "repository-generation=42\n",
                       "transfer-apply": "repository-generation=43\nedge=0 generation=7\n",
@@ -430,6 +604,7 @@ class ProcessSafetyTests(unittest.TestCase):
                 patch.object(HARDWARE, "wait_stopped", return_value={"1": "State:\tT (stopped)"}), \
                 patch.object(HARDWARE, "all_tasks_stopped", return_value={"1": "State:\tT (stopped)"}), \
                 patch.object(HARDWARE, "peer", side_effect=peer), patch.object(Path, "read_bytes", read), \
+                patch.object(HARDWARE.socket, "if_nametoindex", return_value=2), \
                 patch.object(HARDWARE.signal, "SIGSTOP", getattr(signal, "SIGSTOP", 19), create=True), \
                 patch.object(HARDWARE.signal, "SIGCONT", getattr(signal, "SIGCONT", 18), create=True), \
                 patch.object(HARDWARE.signal, "pidfd_send_signal", side_effect=signal_error, create=True) as send, \

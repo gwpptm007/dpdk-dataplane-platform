@@ -172,6 +172,7 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
     struct nlmsghdr *header;
     ssize_t received;
     int remaining, fd, rc = -ENODATA;
+    bool has_interface = false, has_phys_port = false;
 
     if (if_index == 0 || if_index > INT_MAX)
         return -ENODEV;
@@ -194,6 +195,10 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
     }
     if ((message.msg_flags & MSG_TRUNC) != 0 || kernel.nl_pid != 0 || kernel.nl_groups != 0) {
         rc = -EOVERFLOW;
+        goto done;
+    }
+    if (message.msg_namelen < sizeof(kernel) || kernel.nl_family != AF_NETLINK) {
+        rc = -EPROTO;
         goto done;
     }
     remaining = (int)received;
@@ -221,18 +226,27 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
         identity->if_index = if_index;
         attributes = IFLA_PAYLOAD(header);
         for (attribute = IFLA_RTA(link); RTA_OK(attribute, attributes); attribute = RTA_NEXT(attribute, attributes)) {
-            if (attribute->rta_type == IFLA_IFNAME)
+            if (attribute->rta_type == IFLA_IFNAME) {
+                if (has_interface) {
+                    rc = -EPROTO;
+                    goto done;
+                }
+                has_interface = true;
                 rc = copy_attribute(identity->interface_name, sizeof(identity->interface_name), attribute);
-            else if (attribute->rta_type == IFLA_PHYS_PORT_NAME)
+            } else if (attribute->rta_type == IFLA_PHYS_PORT_NAME) {
+                if (has_phys_port) {
+                    rc = -EPROTO;
+                    goto done;
+                }
+                has_phys_port = true;
                 rc = copy_attribute(identity->phys_port_name, sizeof(identity->phys_port_name), attribute);
-            else
+            } else
                 continue;
             if (rc != 0)
                 goto done;
         }
-        rc = attributes != 0                                                             ? -EPROTO
-            : identity->interface_name[0] == '\0' || identity->phys_port_name[0] == '\0' ? -ENODATA
-                                                                                         : 0;
+        /** 物理端口名是可选证据，通用 PCI 接口缺少它时仍须继续核对接口和设备 */
+        rc = attributes != 0 ? -EPROTO : identity->interface_name[0] == '\0' ? -ENODATA : 0;
         goto done;
     }
 
@@ -288,23 +302,41 @@ static int read_sysfs_text(const char *path, char *output, size_t capacity)
         used += (size_t)length;
     }
     close(fd);
-    if (rc != 0)
+    if (rc != 0) {
+        /** 已读到半份内容后才报缺失或不支持，不能把它当成可选字段完全不存在 */
+        if (used != 0 && (rc == -ENOENT || rc == -EOPNOTSUPP || rc == -ENODATA))
+            return -EIO;
         return rc;
+    }
     if (used >= capacity)
         return -EOVERFLOW;
     if (used > 0 && output[used - 1U] == '\n')
         --used;
     output[used] = '\0';
-    if (used == 0 || memchr(output, '\0', used) != NULL)
+    if (memchr(output, '\0', used) != NULL)
+        return -EPROTO;
+    if (used == 0)
         return -ENODATA;
     return 0;
 }
 
-/** 同时核对 netlink、sysfs 和 PCI BDF，缺少任何证据都仅保留未知角色 */
+/** 双方没有物理端口名时允许通用身份成立，权限或格式错误不能被吞成“没有名称” */
+static int read_optional_phys_port(const char *path, char *output, size_t capacity)
+{
+    int rc = read_sysfs_text(path, output, capacity);
+
+    if (rc == -ENOENT || rc == -EOPNOTSUPP || rc == -ENODATA) {
+        output[0] = '\0';
+        return 0;
+    }
+    return rc;
+}
+
+/** 先核对通用 PCI 与接口身份，全部成功后再交给上层按驱动解析角色 */
 static int read_identity(uint32_t if_index, const char *device_name, struct dppd_topology_identity *identity,
     void *opaque)
 {
-    struct dppd_topology_identity current = {0};
+    struct dppd_topology_identity observed = {0}, current = {0};
     char path[PATH_MAX], target[PATH_MAX], text[64];
     const char *basename;
     const char *cursor;
@@ -314,39 +346,40 @@ static int read_identity(uint32_t if_index, const char *device_name, struct dppd
     (void)opaque;
     if (!valid_pci_name(device_name))
         return -ENOTSUP;
-    rc = read_netlink_identity(if_index, identity);
+    rc = read_netlink_identity(if_index, &observed);
     if (rc != 0)
         return rc;
-    if (!valid_interface_name(identity->interface_name))
+    if (!valid_interface_name(observed.interface_name))
         return -EINVAL;
-    snprintf(path, sizeof(path), "/sys/class/net/%s/ifindex", identity->interface_name);
+    snprintf(path, sizeof(path), "/sys/class/net/%s/ifindex", observed.interface_name);
     rc = read_sysfs_text(path, text, sizeof(text));
     if (rc != 0)
         return rc;
     cursor = text;
     if (parse_number(&cursor, &observed_index) != 0 || *cursor != '\0' || observed_index != if_index)
         return -EXDEV;
-    snprintf(path, sizeof(path), "/sys/class/net/%s/phys_port_name", identity->interface_name);
-    rc = read_sysfs_text(path, text, sizeof(text));
-    if (rc != 0)
-        return rc;
-    if (strcmp(text, identity->phys_port_name) != 0)
-        return -EXDEV;
-    snprintf(path, sizeof(path), "/sys/class/net/%s/device", identity->interface_name);
+    snprintf(path, sizeof(path), "/sys/class/net/%s/device", observed.interface_name);
     if (realpath(path, target) == NULL)
         return -errno;
     basename = strrchr(target, '/');
     if (basename == NULL || strcmp(basename + 1, device_name) != 0)
         return -EXDEV;
+    snprintf(path, sizeof(path), "/sys/class/net/%s/phys_port_name", observed.interface_name);
+    rc = read_optional_phys_port(path, text, sizeof(text));
+    if (rc != 0)
+        return rc;
+    if (strcmp(text, observed.phys_port_name) != 0)
+        return -EXDEV;
     /** 再查一次当前命名空间，避免读取期间接口改名或编号被另一个设备复用 */
     rc = read_netlink_identity(if_index, &current);
     if (rc != 0)
         return rc;
-    if (strcmp(current.interface_name, identity->interface_name) != 0 ||
-        strcmp(current.phys_port_name, identity->phys_port_name) != 0 ||
-        if_nametoindex(identity->interface_name) != if_index)
+    if (strcmp(current.interface_name, observed.interface_name) != 0 ||
+        strcmp(current.phys_port_name, observed.phys_port_name) != 0 ||
+        if_nametoindex(observed.interface_name) != if_index)
         return -EAGAIN;
-    memcpy(identity->device_name, device_name, strlen(device_name) + 1U);
+    memcpy(observed.device_name, device_name, strlen(device_name) + 1U);
+    *identity = observed;
     return 0;
 }
 
@@ -361,7 +394,7 @@ static const char *get_device_name(const struct rte_eth_dev_info *info)
 #endif
 }
 
-static void discover_role(struct dppd_endpoint *endpoint, const struct rte_eth_dev_info *info,
+static void discover_identity(struct dppd_endpoint *endpoint, const struct rte_eth_dev_info *info,
     dppd_topology_identity_reader reader, void *opaque)
 {
     struct dppd_topology_identity identity = {0};
@@ -370,20 +403,26 @@ static void discover_role(struct dppd_endpoint *endpoint, const struct rte_eth_d
 
     endpoint->if_index = info->if_index;
     clear_role(endpoint, -ENOTSUP);
+    /** 可信接口字段只从完整成功的读取器发布，错误时不保留容易被误认领的原始名称 */
+    endpoint->interface_name[0] = endpoint->phys_port_name[0] = '\0';
     if (device_name != NULL && strnlen(device_name, sizeof(endpoint->device_name)) < sizeof(endpoint->device_name))
         memcpy(endpoint->device_name, device_name, strlen(device_name) + 1U);
-    if (strcmp(endpoint->driver_name, "mlx5_pci") != 0 && strcmp(endpoint->driver_name, "net_mlx5") != 0)
+    bool mlx5 = strcmp(endpoint->driver_name, "mlx5_pci") == 0 || strcmp(endpoint->driver_name, "net_mlx5") == 0;
+    if (device_name == NULL || device_name[0] == '\0') {
+        endpoint->role_error = mlx5 || info->if_index != 0 ? -ENODATA : -ENOTSUP;
         return;
-    if (device_name == NULL || !valid_pci_name(device_name) || reader == NULL) {
+    }
+    if (!valid_pci_name(device_name))
+        return;
+    if (info->if_index == 0 || info->if_index > INT_MAX) {
+        endpoint->role_error = -ENODEV;
+        return;
+    }
+    if (reader == NULL) {
         endpoint->role_error = -ENODATA;
         return;
     }
     rc = reader(info->if_index, device_name, &identity, opaque);
-    /** 失败时也保留完整、可打印的原始观察值，便于定位命名空间或名称不一致 */
-    if (memchr(identity.interface_name, '\0', sizeof(identity.interface_name)) != NULL)
-        memcpy(endpoint->interface_name, identity.interface_name, sizeof(endpoint->interface_name));
-    if (memchr(identity.phys_port_name, '\0', sizeof(identity.phys_port_name)) != NULL)
-        memcpy(endpoint->phys_port_name, identity.phys_port_name, sizeof(endpoint->phys_port_name));
     if (rc != 0) {
         endpoint->role_error = rc < 0 ? rc : -EIO;
         return;
@@ -394,6 +433,15 @@ static void discover_role(struct dppd_endpoint *endpoint, const struct rte_eth_d
         memchr(identity.phys_port_name, '\0', sizeof(identity.phys_port_name)) == NULL ||
         !valid_interface_name(identity.interface_name) || strcmp(identity.device_name, device_name) != 0) {
         endpoint->role_error = -EXDEV;
+        return;
+    }
+    memcpy(endpoint->interface_name, identity.interface_name, sizeof(endpoint->interface_name));
+    memcpy(endpoint->phys_port_name, identity.phys_port_name, sizeof(endpoint->phys_port_name));
+    /** 通用接口身份不能证明 PF/VF/SF，只有原有 mlx5 名称与 representor 契约可继续解析 */
+    if (!mlx5)
+        return;
+    if (identity.phys_port_name[0] == '\0') {
+        endpoint->role_error = -ENODATA;
         return;
     }
     dppd_topology_resolve_role(endpoint, endpoint->driver_name, endpoint->kind == DPPD_ENDPOINT_REPRESENTOR,
@@ -449,7 +497,7 @@ int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dpp
         const char *device_name = get_device_name(&info);
         if (device_name != NULL && strnlen(device_name, sizeof(endpoint->device_name)) == sizeof(endpoint->device_name))
             return -ENAMETOOLONG;
-        discover_role(endpoint, &info, reader, opaque);
+        discover_identity(endpoint, &info, reader, opaque);
         discovered.nb_endpoints++;
     }
     /** 所有 PMD 信息读取成功后才发布，调用方不会拿到只发现一半的拓扑 */
