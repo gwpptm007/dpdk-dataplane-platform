@@ -15,6 +15,18 @@ slot_index_test = executable('test_slot_index', 'test_slot_index.c', dependencie
   link_args: ['-Wl,--wrap=calloc'])
 test('stable slot index ordering reuse and allocation failure', slot_index_test)
 
+# 容量、引用凭据和部分失败保留实际句柄及配额，旧版本明确拒绝原生模板
+flow_template_test = executable('test_flow_template', 'test_flow_template.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'])
+test('template masks leases quotas and partial cleanup', flow_template_test)
+
+native_template_test = executable('test_native_template', 'test_native_template.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_flow_info_get', '-Wl,--wrap=rte_flow_configure',
+              '-Wl,--wrap=rte_flow_pattern_template_create', '-Wl,--wrap=rte_flow_actions_template_create',
+              '-Wl,--wrap=rte_flow_template_table_create', '-Wl,--wrap=rte_flow_template_table_destroy',
+              '-Wl,--wrap=rte_flow_actions_template_destroy', '-Wl,--wrap=rte_flow_pattern_template_destroy'])
+test('native DPDK template API and version contract', native_template_test)
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',
