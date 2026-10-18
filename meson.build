@@ -20,6 +20,7 @@ dppd_sources = files(
   'lib/control/snapshot.c',
   'lib/control/rule.c',
   'lib/control/rule_repository.c',
+  'lib/control/slot_index.c',
   'lib/control/persistence.c',
   'lib/control/routing.c',
   'lib/control/recovery_guard.c',

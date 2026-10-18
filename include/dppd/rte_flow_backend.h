@@ -8,6 +8,7 @@
 #include "dppd/capability.h"
 #include "dppd/offload.h"
 #include "dppd/transaction.h"
+#include "dppd/slot_index.h"
 
 /**
  * 控制层调用硬件规则能力的接口集合，默认接入真实 rte_flow，单测可替换为故障注入接口
@@ -52,6 +53,8 @@ struct dppd_shared_count_object;
 struct dppd_rte_flow_backend {
     /** 固定地址的对象数组，事务 token 会直接引用其中的槽位 */
     struct dppd_rte_flow_object *objects;
+    /** 精确版本及最新版本都按索引查找，槽位地址保持不变供事务凭据继续引用 */
+    struct dppd_slot_index index;
     struct dppd_shared_count_object *shared_counts;
     uint32_t shared_count_count;
     /** 本地仓库槽位上限，不代表网卡还能安装多少条规则 */

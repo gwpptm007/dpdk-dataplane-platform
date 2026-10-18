@@ -10,6 +10,11 @@ admission_test = executable('test_admission', 'test_admission.c', dependencies: 
   link_args: ['-Wl,--wrap=calloc'])
 test('atomic global and per-port resource admission', admission_test)
 
+# 倒序和随机复用核对排序与固定槽位，分配失败不能留下半份索引
+slot_index_test = executable('test_slot_index', 'test_slot_index.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'])
+test('stable slot index ordering reuse and allocation failure', slot_index_test)
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',

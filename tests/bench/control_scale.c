@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include "dppd/control.h"
 
 /** 基准依赖断言核对实际安装，关闭断言会把没有执行操作的空循环误当成性能提升 */
@@ -147,6 +148,37 @@ static uint64_t measure_recovery(void)
     return elapsed;
 }
 
+/** 使用真实快照保存与重放，计时包含新服务初始化、文件读取和内存驱动安装 */
+static uint64_t measure_replay(uint32_t count)
+{
+    struct dppd_control_service service;
+    struct dppd_control_apply_result result;
+    char directory[] = "/tmp/dppd-m4-benchmark-XXXXXX", path[128];
+    assert(mkdtemp(directory) != NULL);
+    assert(snprintf(path, sizeof(path), "%s/state.bin", directory) > 0);
+    create_calls = fail_create_at = fail_removes = 0;
+    assert(dppd_control_init(&service, &topology, count, &api) == 0);
+    for (uint32_t i = 0; i < count; ++i) {
+        struct dppd_rule rule = make_rule(i + 1U, false);
+        assert(dppd_control_apply(&service, 5, &rule, 0, &result) == 0);
+    }
+    assert(dppd_control_persistence_attach(&service, path) == 0);
+    assert(dppd_control_persistence_flush(&service) == 0 && dppd_control_fini(&service) == 0);
+    create_calls = 0;
+    uint64_t start = now_ns();
+    assert(dppd_control_init(&service, &topology, count, &api) == 0);
+    assert(dppd_control_persistence_restore(&service, path) == 0);
+    uint64_t elapsed = now_ns() - start;
+    assert(service.rules.count == count && service.rules.generation == count && create_calls == count);
+    for (uint32_t i = 0; i < count; ++i) {
+        struct dppd_rule stored;
+        assert(dppd_rule_repository_get(&service.rules, i + 1U, &stored) == 0);
+        assert(stored.id == i + 1U && stored.generation == i + 1U && stored.install_port_id == 5);
+    }
+    assert(dppd_control_fini(&service) == 0 && unlink(path) == 0 && rmdir(directory) == 0);
+    return elapsed;
+}
+
 int main(int argc, char **argv)
 {
     char *end;
@@ -164,6 +196,9 @@ int main(int argc, char **argv)
     measure(count, BATCH_SIZE, false);
     printf(",");
     measure(count > 1024 ? 1024 : count, 1, true);
-    printf("],\"inprocess_residual_cleanup_ns\":%" PRIu64 "}\n", measure_recovery());
+    uint64_t replay_ns = measure_replay(count);
+    printf("],\"inprocess_residual_cleanup_ns\":%" PRIu64
+           ",\"snapshot_replay_rules\":%u,\"snapshot_replay_ns\":%" PRIu64 "}\n",
+        measure_recovery(), count, replay_ns);
     return 0;
 }

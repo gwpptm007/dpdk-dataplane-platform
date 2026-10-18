@@ -110,8 +110,8 @@ int dppd_rte_flow_backend_resume_empty(struct dppd_rte_flow_backend *backend)
         return -EINVAL;
     if (!backend->quarantined)
         return -EALREADY;
-    if (backend->count != 0 || backend->shared_count_count != 0 ||
-        !empty_storage(backend->objects, backend->capacity * sizeof(*backend->objects)) ||
+    if (backend->count != 0 || backend->shared_count_count != 0 || backend->index.storage == NULL ||
+        backend->index.count != 0 || !empty_storage(backend->objects, backend->capacity * sizeof(*backend->objects)) ||
         !empty_storage(backend->shared_counts, DPPD_SHARED_COUNT_MAX * sizeof(*backend->shared_counts)))
         return -EUCLEAN;
     /** 这里只核对主线程提供的事件证据，不把隔离标志自身当作设备事件 */
@@ -247,28 +247,16 @@ static int resolve_shared(const struct dppd_rte_flow_backend *backend, uint16_t 
 static struct dppd_rte_flow_object *find_object(struct dppd_rte_flow_backend *backend, uint64_t rule_id,
     uint64_t generation)
 {
-    uint32_t i;
-
-    for (i = 0; i < backend->capacity; ++i) {
-        if (backend->objects[i].occupied && backend->objects[i].rule_id == rule_id &&
-            backend->objects[i].generation == generation)
-            return &backend->objects[i];
-    }
-    return NULL;
+    uint32_t slot = dppd_slot_index_find(&backend->index, rule_id, generation);
+    return slot == DPPD_SLOT_NONE ? NULL : &backend->objects[slot];
 }
 
 /** 提供只读的精确版本查找，是否已经安装由调用方进一步检查 */
 static const struct dppd_rte_flow_object *find_object_const(const struct dppd_rte_flow_backend *backend,
     uint64_t rule_id, uint64_t generation)
 {
-    uint32_t i;
-
-    for (i = 0; i < backend->capacity; ++i) {
-        if (backend->objects[i].occupied && backend->objects[i].rule_id == rule_id &&
-            backend->objects[i].generation == generation)
-            return &backend->objects[i];
-    }
-    return NULL;
+    uint32_t slot = dppd_slot_index_find(&backend->index, rule_id, generation);
+    return slot == DPPD_SLOT_NONE ? NULL : &backend->objects[slot];
 }
 
 /**
@@ -277,36 +265,16 @@ static const struct dppd_rte_flow_object *find_object_const(const struct dppd_rt
  */
 static struct dppd_rte_flow_object *find_latest_object(struct dppd_rte_flow_backend *backend, uint64_t rule_id)
 {
-    struct dppd_rte_flow_object *latest = NULL;
-    uint32_t i;
-
-    for (i = 0; i < backend->capacity; ++i) {
-        struct dppd_rte_flow_object *object = &backend->objects[i];
-
-        if (!object->occupied || object->rule_id != rule_id)
-            continue;
-        if (latest == NULL || object->generation > latest->generation)
-            latest = object;
-    }
-    return latest;
+    uint32_t slot = dppd_slot_index_latest(&backend->index, rule_id);
+    return slot == DPPD_SLOT_NONE ? NULL : &backend->objects[slot];
 }
 
 /** 只读查找最大版本槽位，用于不修改对象内容的查询入口 */
 static const struct dppd_rte_flow_object *find_latest_object_const(const struct dppd_rte_flow_backend *backend,
     uint64_t rule_id)
 {
-    const struct dppd_rte_flow_object *latest = NULL;
-    uint32_t i;
-
-    for (i = 0; i < backend->capacity; ++i) {
-        const struct dppd_rte_flow_object *object = &backend->objects[i];
-
-        if (!object->occupied || object->rule_id != rule_id)
-            continue;
-        if (latest == NULL || object->generation > latest->generation)
-            latest = object;
-    }
-    return latest;
+    uint32_t slot = dppd_slot_index_latest(&backend->index, rule_id);
+    return slot == DPPD_SLOT_NONE ? NULL : &backend->objects[slot];
 }
 
 /**
@@ -316,34 +284,37 @@ static const struct dppd_rte_flow_object *find_latest_object_const(const struct 
 static struct dppd_rte_flow_object *reserve_object(struct dppd_rte_flow_backend *backend, uint64_t rule_id,
     uint64_t generation)
 {
-    uint32_t i;
-
     /** 同一 ID 的相同版本不能重复占用，不同版本则允许共存，以支持先建新规则再删旧规则 */
-    if (find_object(backend, rule_id, generation) != NULL)
+    uint32_t slot;
+    if (dppd_slot_index_insert(&backend->index, rule_id, generation, &slot) != 0)
         return NULL;
-    for (i = 0; i < backend->capacity; ++i) {
-        if (!backend->objects[i].occupied) {
-            backend->objects[i].occupied = true;
-            backend->objects[i].rule_id = rule_id;
-            backend->objects[i].generation = generation;
-            backend->count++;
-            return &backend->objects[i];
-        }
-    }
-    return NULL;
+    struct dppd_rte_flow_object *object = &backend->objects[slot];
+    object->occupied = true;
+    object->rule_id = rule_id;
+    object->generation = generation;
+    backend->count++;
+    return object;
 }
 
 /**
  * 只归还本地仓库槽位，不负责删除硬件规则
  * 调用方必须先确认无需硬件清理或驱动删除已经成功，否则清空 handle 会丢失重试线索
  */
-static void release_object(struct dppd_rte_flow_backend *backend, struct dppd_rte_flow_object *object)
+static int release_object(struct dppd_rte_flow_backend *backend, struct dppd_rte_flow_object *object)
 {
+    /** 索引和对象对不上时保留现场，不归还槽位或共享引用来掩盖内部身份不一致 */
+    uint32_t slot = dppd_slot_index_find(&backend->index, object->rule_id, object->generation);
+    if (slot == DPPD_SLOT_NONE || &backend->objects[slot] != object ||
+        dppd_slot_index_erase(&backend->index, object->rule_id, object->generation) != 0) {
+        backend->quarantined = true;
+        return -EUCLEAN;
+    }
     for (uint16_t i = 0; i < DPPD_RULE_MAX_ACTIONS; ++i)
         if (object->shared_refs[i] != NULL && object->shared_refs[i]->references != 0)
             --object->shared_refs[i]->references;
     memset(object, 0, sizeof(*object));
     backend->count--;
+    return 0;
 }
 
 /** 删除尝试可能影响共享资源，先清空所有探测结果，再保留原有驱动删除和失败重试语义 */
@@ -532,7 +503,7 @@ static int transaction_rollback(void *context, const struct dppd_transaction_ite
     if (object->installed || object->handle.flow != NULL)
         rc = remove_object(backend, object, &error);
     if (rc == 0)
-        release_object(backend, object);
+        rc = release_object(backend, object);
     return rc;
 }
 
@@ -578,8 +549,11 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend, uint32_t c
         memset(backend, 0, sizeof(*backend));
         return -EINVAL;
     }
-    rc = dppd_flow_probe_cache_init(&backend->probes);
+    rc = dppd_slot_index_init(&backend->index, capacity);
+    if (rc == 0)
+        rc = dppd_flow_probe_cache_init(&backend->probes);
     if (rc != 0) {
+        dppd_slot_index_fini(&backend->index);
         free(backend->shared_counts);
         free(backend->objects);
         memset(backend, 0, sizeof(*backend));
@@ -615,8 +589,8 @@ int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
             return ready;
         rc = object->installed || object->handle.flow != NULL ? remove_object(backend, object, &error) : 0;
         if (rc == 0)
-            release_object(backend, object);
-        else if (result == 0)
+            rc = release_object(backend, object);
+        if (rc != 0 && result == 0)
             result = rc;
     }
     if (backend->shared_counts != NULL) {
@@ -628,6 +602,7 @@ int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
         return result;
     free(backend->shared_counts);
     free(backend->objects);
+    dppd_slot_index_fini(&backend->index);
     dppd_flow_probe_cache_destroy(backend->probes);
     memset(backend, 0, sizeof(*backend));
     return result;
@@ -662,6 +637,7 @@ int dppd_rte_flow_backend_simulate_reset(struct dppd_rte_flow_backend *backend, 
         return rc;
     /** 成功后旧句柄已经失效，不能再调用删除接口，也不逐条归还已失效的引用 */
     memset(backend->objects, 0, backend->capacity * sizeof(*backend->objects));
+    dppd_slot_index_clear(&backend->index);
     memset(backend->shared_counts, 0, DPPD_SHARED_COUNT_MAX * sizeof(*backend->shared_counts));
     backend->count = 0;
     backend->shared_count_count = 0;
@@ -760,7 +736,7 @@ int dppd_rte_flow_backend_remove(struct dppd_rte_flow_backend *backend, uint64_t
         return -ENOENT;
     rc = remove_object(backend, object, error);
     if (rc == 0)
-        release_object(backend, object);
+        rc = release_object(backend, object);
     return rc;
 }
 
@@ -784,7 +760,7 @@ int dppd_rte_flow_backend_remove_version(struct dppd_rte_flow_backend *backend, 
         return -ENOENT;
     rc = remove_object(backend, object, error);
     if (rc == 0)
-        release_object(backend, object);
+        rc = release_object(backend, object);
     return rc;
 }
 
@@ -821,8 +797,8 @@ int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend, uint3
         if (object->installed || object->handle.flow != NULL)
             rc = remove_object(backend, object, &error);
         if (rc == 0)
-            release_object(backend, object);
-        else if (first_error == 0)
+            rc = release_object(backend, object);
+        if (rc != 0 && first_error == 0)
             first_error = rc;
     }
     int rc = cleanup_shared(backend);

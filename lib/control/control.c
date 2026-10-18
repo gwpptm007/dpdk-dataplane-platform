@@ -799,6 +799,9 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
             return -ENOSPC;
     }
 
+    /** 版本耗尽时先拒绝，不能等实际对象安装后才发现账本无法接收新版本 */
+    if (dppd_rule_repository_generation(&service->rules) >= UINT64_MAX - 1U)
+        return -EOVERFLOW;
     candidate.generation = dppd_rule_repository_generation(&service->rules) + 1U;
     planner_context.topology = service->topology;
     planner_context.ipv4_routing = service->routing != NULL;

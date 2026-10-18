@@ -5,6 +5,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import statistics
 import subprocess
@@ -13,12 +14,43 @@ import sys
 from verify_m2 import run_command, source_digest
 
 
+def enforce_contract(report, path):
+    """只检查本工具确实测到的指标，队列、模板和硬件门槛仍留给各自验收"""
+    content = path.read_bytes().replace(b"\r\n", b"\n")
+    contract = json.loads(content)
+    if contract.get("revision") != 1 or report["rules"] not in (4096, 16384) or report["repetitions"] != 5:
+        raise RuntimeError("固定契约仅接受revision 1、4096/16384条规则及五轮完整测量")
+    if report["cpu_affinity"] != [0, 1, 2, 3] or [item.get("version") for item in report["dpdk"]] != ["21.11.9"]:
+        raise RuntimeError("固定性能门禁须使用约定的CPU 0-3与DPDK 21.11.9参考环境")
+    gates = contract["performance_gates"]
+    memory, _, software = report["median_cases"]
+    checks = {
+        f"memory_driver_{report['rules']}_single_min_rules_per_second": memory["rules_per_second"] >= gates[
+            f"memory_driver_{report['rules']}_single_min_rules_per_second"],
+        "software_1024_single_min_rules_per_second": software["rules_per_second"] >= gates[
+            "software_1024_single_min_rules_per_second"],
+        "software_1024_single_max_request_p99_ns": software["request_p99_ns"] <= gates[
+            "software_1024_single_max_request_p99_ns"],
+        "inprocess_residual_cleanup_max_ns": report["median_residual_cleanup_ns"] <= gates[
+            "inprocess_residual_cleanup_max_ns"]}
+    if report["rules"] == 16384:
+        checks["memory_driver_16384_single_max_request_p99_ns"] = memory["request_p99_ns"] <= gates[
+            "memory_driver_16384_single_max_request_p99_ns"]
+        checks["snapshot_replay_16384_max_ns"] = report["median_snapshot_replay_ns"] <= gates[
+            "snapshot_replay_16384_max_ns"]
+    report["contract_sha256"] = hashlib.sha256(content).hexdigest()
+    report["performance_gates"] = checks
+    if not all(checks.values()):
+        raise RuntimeError("固定门槛未通过：" + ", ".join(name for name, passed in checks.items() if not passed))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--rules", type=int, default=4096)
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--report-dir", type=Path)
+    parser.add_argument("--enforce-contract", action="store_true", help="执行已固定的参考环境性能门禁，不降低阈值")
     args = parser.parse_args()
     if args.rules < 64 or args.rules > 65536 or args.rules % 64 or not 3 <= args.repetitions <= 15:
         parser.error("规则数须为64的倍数且不超过65536，重复次数须为3到15")
@@ -30,6 +62,7 @@ def main():
               "scope": "production_control_with_memory_driver_and_software_backend",
               "hardware_acceptance": "not_run", "complete_m4_validation": False, "success": False,
               "source_sha256": source_digest(root), "rules": args.rules, "repetitions": args.repetitions,
+              "cpu_affinity": sorted(os.sched_getaffinity(0)),
               "runs": []}
     output = destination / "report.json"
     # 先撤销旧通过状态，中断或失败也不能留下看起来属于本轮的成功报告
@@ -70,6 +103,8 @@ def main():
             for case in cases:
                 if any(case[key] <= 0 for key in ("install_ns", "rules_per_second", "request_p99_ns", "remove_ns")):
                     raise RuntimeError("基准包含无效计时")
+            if result.get("snapshot_replay_rules") != args.rules or result.get("snapshot_replay_ns", 0) <= 0:
+                raise RuntimeError("快照重放没有覆盖本轮全部规则或计时无效")
             report["runs"].append(result)
         # 每轮都保留，汇总只取中位数，不从多次运行里挑最好的一次
         report["median_cases"] = []
@@ -80,6 +115,9 @@ def main():
             report["median_cases"].append(summary)
         report["median_residual_cleanup_ns"] = statistics.median(
             run["inprocess_residual_cleanup_ns"] for run in report["runs"])
+        report["median_snapshot_replay_ns"] = statistics.median(run["snapshot_replay_ns"] for run in report["runs"])
+        if args.enforce_contract:
+            enforce_contract(report, root / "docs/m4_acceptance_contract.json")
         if source_digest(root) != report["source_sha256"]:
             raise RuntimeError("基准期间源码改变")
         report["success"] = True

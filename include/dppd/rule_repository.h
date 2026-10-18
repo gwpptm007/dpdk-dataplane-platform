@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dppd/rule.h"
+#include "dppd/slot_index.h"
 
 #define DPPD_RULE_GENERATION_ANY UINT64_MAX
 
@@ -22,6 +23,8 @@ struct dppd_rule_record;
 
 struct dppd_rule_repository {
     struct dppd_rule_record *records;
+    /** 只移动紧凑槽位编号，查找和分页不再反复扫描完整规则数组 */
+    struct dppd_slot_index index;
     uint32_t capacity;
     uint32_t count;
     uint64_t generation;
