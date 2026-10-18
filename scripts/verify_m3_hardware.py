@@ -28,6 +28,7 @@ TEMPLATE_ROLES = {"uplink-vf": ("uplink", "vf"), "uplink-sf": ("uplink", "sf"), 
                   "pf-sf": ("pf", "sf"), "vf-vf": ("vf", "vf"), "sf-sf": ("sf", "sf")}
 VIRTUAL_PMDS = ("ring", "tap", "null", "pcap", "af_packet", "af_xdp", "virtio", "vmxnet3", "vhost", "memif", "failsafe")
 RESET_STAGE = "physical_reset_recovery"
+PCI_ONLY_PMDS = ("net_sfc_efx", "net_bnxt")
 
 
 class Blocked(RuntimeError):
@@ -116,9 +117,67 @@ def validate_ssh_argv(argv):
     return argv
 
 
-def validate_endpoint(endpoint, role):
+def pci_only(config):
+    provider = config.get("identity_provider")
+    if provider is None:
+        return False
+    if not isinstance(provider, dict) or provider.get("type") != "pci_only":
+        raise Blocked("identity_provider 只接受显式 pci_only，不根据接口失败自动降级")
+    return True
+
+
+def validate_pci_endpoint(endpoint, role, provider):
+    require_integer(endpoint.get("port_id"), 0, 65534, role + " port_id")
+    bdf = endpoint.get("pci_address", "")
+    if not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-1][0-9a-f]\.[0-7]", bdf):
+        raise Blocked(role + " PCI-only 必须填写完整规范 BDF")
+    if endpoint.get("pmd") != provider.get("pmd") or endpoint.get("pmd") not in PCI_ONLY_PMDS:
+        raise Blocked(role + " PCI-only 仅支持精确 net_sfc_efx/net_bnxt PMD")
+    if (endpoint.get("ifindex") != 0 or isinstance(endpoint.get("ifindex"), bool) or endpoint.get("interface") != "" or
+            endpoint.get("phys_port_name") != "" or endpoint.get("role") != "unknown" or
+            endpoint.get("role_source") != "unknown" or endpoint.get("role_error") != -19):
+        raise Blocked(role + " PCI-only 必须显式保留 ifindex=0、空接口和 UNKNOWN/-ENODEV 原始角色")
+    if any(key in endpoint for key in ("controller", "pf", "function", "physical_port")) or any(
+            endpoint.get(key, False) is not False for key in ("has_controller", "has_pf", "has_function", "has_physical_port")):
+        raise Blocked(role + " PCI-only 不能虚构控制器、PF、VF、SF 或物理口角色编号")
+    for key in ("pci_vendor", "pci_device", "pci_class"):
+        digits = 6 if key == "pci_class" else 4
+        if not isinstance(endpoint.get(key), str) or not re.fullmatch(r"0x[0-9a-f]{" + str(digits) + r"}", endpoint[key]):
+            raise Blocked(role + " PCI-only 缺少明确 " + key)
+    if int(endpoint["pci_class"], 16) >> 16 != 2 or not int(endpoint["pci_vendor"], 16):
+        raise Blocked(role + " PCI-only 不是明确的 PCI 网络设备身份")
+    if endpoint.get("pci_driver") not in ("vfio-pci", "igb_uio", "uio_pci_generic"):
+        raise Blocked(role + " PCI-only 缺少明确支持的内核 PCI 绑定驱动")
+    require_integer(endpoint.get("switch_domain"), 0, 65534, role + " switch_domain")
+    require_integer(endpoint.get("switch_port"), 0, 65535, role + " opaque switch_port")
+    if type(endpoint.get("firmware_error")) is not int:
+        raise Blocked(role + " 固件错误必须是明确的原始整数")
+    kind, name = endpoint.get("kind"), endpoint.get("device_name")
+    if kind == "ethdev":
+        if name != bdf or endpoint.get("firmware_scope") != {"type": "self"} or endpoint.get("firmware_error") != 0:
+            raise Blocked(role + " PCI backer 必须是完整 BDF ethdev 并独立读取自己的固件")
+        firmware = endpoint.get("firmware")
+        if not isinstance(firmware, str) or firmware in ("", "unknown") or "FILL" in firmware:
+            raise Blocked(role + " PCI backer 缺少精确已知固件")
+    elif kind == "representor":
+        suffix = r"c[0-9]+pf[0-9]+(?:vf[0-9]+)?" if provider["pmd"] == "net_sfc_efx" else r"[0-9]+"
+        if not isinstance(name, str) or not re.fullmatch("net_" + re.escape(bdf) + "_representor_" + suffix, name):
+            raise Blocked(role + " representor 完整 ethdev 名不符合所选 PMD 与完整 BDF 契约")
+        scope = endpoint.get("firmware_scope")
+        if (not isinstance(scope, dict) or set(scope) != {"type", "source_port_id"} or scope.get("type") != "parent-pci" or
+                endpoint.get("firmware") != "unknown" or endpoint.get("firmware_error") != -95):
+            raise Blocked(role + " representor 固件必须保留 unknown/-ENOTSUP 并显式引用 parent-pci 范围")
+        require_integer(scope.get("source_port_id"), 0, 65534, role + " firmware source_port_id")
+    else:
+        raise Blocked(role + " PCI-only 必须精确声明 ethdev 或 representor 种类")
+
+
+def validate_endpoint(endpoint, role, provider=None):
     if not isinstance(endpoint, dict):
         raise Blocked(role + " 端点必须为对象")
+    if provider is not None:
+        validate_pci_endpoint(endpoint, role, provider)
+        return
     require_integer(endpoint.get("port_id"), 0, 65534, role + " port_id")
     for key in ("pci_address", "interface", "pmd", "device_name", "firmware", "role"):
         if not isinstance(endpoint.get(key), str) or not endpoint[key] or "FILL" in endpoint[key]:
@@ -137,9 +196,38 @@ def validate_endpoint(endpoint, role):
 
 def configured_endpoints(config):
     endpoints = list(config["ports"].items())
+    if pci_only(config):
+        endpoints += [("backer-" + str(item["port_id"]), item) for item in config["identity_provider"]["backers"]]
     if "planned_reset" in config.get("stages", []):
         endpoints += [("reset-port-" + str(item["port_id"]), item) for item in config["planned_reset"]["device_ports"]]
     return endpoints
+
+
+def validate_pci_provider(config):
+    provider = config["identity_provider"]
+    if (set(provider) != {"type", "pmd", "backers"} or provider.get("pmd") not in PCI_ONLY_PMDS or
+            config.get("stages") != ["basic"] or config.get("template") != "pair" or "planned_reset" in config):
+        raise Blocked("PCI-only 只允许显式 basic + pair + 私有 COUNT，禁止 AGE/shared/planned_reset")
+    backers = provider.get("backers")
+    if not isinstance(backers, list) or len(backers) != 1:
+        raise Blocked("首期 PCI-only 必须独立列出唯一 parent/backer 安装口")
+    backer = backers[0]
+    validate_endpoint(backer, "backer", provider)
+    if backer["kind"] != "ethdev" or backer != config["ports"]["install"]:
+        raise Blocked("PCI-only 安装口必须精确等于独立列出的非 representor backer")
+    definitions = {}
+    for _, endpoint in configured_endpoints(config):
+        port_id = endpoint["port_id"]
+        if port_id in definitions and definitions[port_id] != endpoint:
+            raise Blocked("PCI-only 同端口号声明了不同的身份")
+        definitions[port_id] = endpoint
+        if (endpoint["pci_address"] != backer["pci_address"] or endpoint["pmd"] != backer["pmd"] or
+                endpoint["switch_domain"] != backer["switch_domain"]):
+            raise Blocked("representor 固件来源必须是同 PCI、同 PMD、同交换域的唯一 backer")
+        if endpoint["kind"] == "representor" and endpoint["firmware_scope"]["source_port_id"] != backer["port_id"]:
+            raise Blocked("representor 固件来源不能自环、指向另一 representor 或跨 PCI")
+        if endpoint["kind"] == "ethdev" and endpoint != backer:
+            raise Blocked("PCI-only 不接受未独立核对的其他 parent ethdev")
 
 
 def validate_transfer_roles(config):
@@ -160,8 +248,12 @@ def validate_config(config):
     ports = config.get("ports", {})
     if not isinstance(ports, dict) or set(ports) != {"install", "source", "destination"}:
         raise Blocked("必须只显式列出 install/source/destination 三个端点")
+    typed = pci_only(config)
+    provider = config["identity_provider"] if typed else None
     for role in ("install", "source", "destination"):
-        validate_endpoint(ports.get(role, {}), role)
+        validate_endpoint(ports.get(role, {}), role, provider)
+    if typed:
+        validate_pci_provider(config)
     if ports["source"]["port_id"] == ports["destination"]["port_id"]:
         raise Blocked("源端口与目的端口相同")
     if len({item["switch_domain"] for item in ports.values()}) != 1:
@@ -258,17 +350,85 @@ def hardware_gate(inventory, config, environ=None, parent_reader=None):
         return parent
 
     parents = {bdf: checked_parent(bdf) for bdf in protected}
+    typed = pci_only(config)
+    if typed:
+        pci_inventory_evidence(inventory, config)
     for role, configured in configured_endpoints(config):
         bdf, name = configured["pci_address"], configured["interface"]
         device, interface = devices.get(bdf), interfaces.get(name)
         if device is None or device["classification"]["kind"] != "physical_candidate":
             raise Blocked(role + " 没有真实 PCI 候选证据，虚拟网卡和库文件不能替代设备")
-        if interface is None or value(interface["pci_device"]) != bdf:
+        if not typed and (interface is None or value(interface["pci_device"]) != bdf):
             raise Blocked(role + " 接口与 PCI 设备未独立核对")
-        if (interface.get("management_interface") is not False or bdf in protected or
+        if ((not typed and interface.get("management_interface") is not False) or bdf in protected or
                 checked_parent(bdf) in parents.values()):
             raise Blocked(role + " 与管理链路或管理 PCI 设备重合/未知")
     return sorted(set(parents.values()))
+
+
+def pci_inventory_evidence(inventory, config):
+    devices = {item["pci_address"]: item for item in inventory["pci_scan"]["network_devices"]}
+    observed = {}
+    for label, endpoint in configured_endpoints(config):
+        device = devices.get(endpoint["pci_address"])
+        if device is None or device["classification"]["kind"] != "physical_candidate":
+            raise Blocked(label + " PCI-only 没有独立物理 PCI 候选")
+        identity = {}
+        for field, expected in (("class", endpoint["pci_class"]), ("vendor", endpoint["pci_vendor"]),
+                                ("device", endpoint["pci_device"]), ("driver", endpoint["pci_driver"])):
+            record = device.get(field, {})
+            if record.get("status") != "observed" or value(record) != expected:
+                raise Blocked(label + " 独立 PCI " + field + " 身份不匹配或读取不完整")
+            identity[field] = value(record)
+        observed[endpoint["pci_address"]] = identity
+    return observed
+
+
+def pci_allowlist_evidence(config, identity):
+    arguments = identity["cmdline"]
+    if "--" not in arguments:
+        raise Blocked("PCI-only 无法确定 EAL 和应用参数边界")
+    eal, allowed = arguments[:arguments.index("--")], []
+    values = {"-c", "-l", "-n", "-m", "-s", "-S", "--file-prefix", "--lcores", "--socket-mem", "--socket-limit",
+              "--log-level", "--iova-mode", "--huge-dir", "--base-virtaddr", "--proc-type", "--vfio-intr", "--vfio-vf-token"}
+    switches = {"--no-huge", "--no-shconf", "--in-memory", "--single-file-segments", "--legacy-mem",
+                "--match-allocations", "--huge-unlink", "--no-telemetry", "--telemetry"}
+    index = 1
+    while index < len(eal):
+        item = eal[index]
+        option = item.split("=", 1)[0]
+        if (option in ("--no-pci", "--vdev", "--block", "--blocklist", "--pci-blacklist", "--pci-whitelist", "-b", "-w") or
+                (item.startswith("-b") and not item.startswith("--")) or item.startswith("-w")):
+            raise Blocked("PCI-only 实际 EAL 使用禁用、虚拟设备、denylist 或旧别名参数")
+        if option in ("-a", "--allow", "--allowlist") or (item.startswith("-a") and not item.startswith("--")):
+            if "=" in item and item.startswith("--"):
+                devargs = item.split("=", 1)[1]
+            elif item.startswith("-a") and len(item) > 2:
+                devargs = item[2:]
+            else:
+                index += 1
+                if index == len(eal):
+                    raise Blocked("实际 EAL allowlist 缺少参数")
+                devargs = eal[index]
+            match = re.fullmatch(r"([0-9a-f]{4}:[0-9a-f]{2}:[0-1][0-9a-f]\.[0-7])(?:,(.+))?", devargs)
+            if match is None:
+                raise Blocked("实际 EAL allowlist 不是精确完整 PCI BDF 与 devargs")
+            allowed.append({"pci_address": match[1], "devargs": devargs})
+        elif option in values or (item[:2] in values and not item.startswith("--") and len(item) > 2):
+            if option in values and "=" not in item:
+                index += 1
+                if index == len(eal):
+                    raise Blocked("PCI-only EAL 选项缺少参数: " + option)
+            elif item.endswith("="):
+                raise Blocked("PCI-only EAL 选项参数为空: " + option)
+        elif item not in switches:
+            raise Blocked("PCI-only EAL 参数语法未知，不能把其他选项的值误认作 allowlist: " + item)
+        index += 1
+    target = config["ports"]["install"]["pci_address"]
+    if (len(allowed) != 1 or allowed[0]["pci_address"] != target or
+            config["eal_devargs"] != [allowed[0]["devargs"]]):
+        raise Blocked("PCI-only 必须仅显式允许本轮唯一 backer，并逐字匹配实际 EAL devargs")
+    return allowed
 
 
 def parse_pcap(data):
@@ -507,6 +667,21 @@ def _check_batch(batch, before, after):
                                   batch["workers_before"], batch["workers_after"])
 
 
+def wait_private_count(ctl, rid, generation, before, frames, packets, timeout=3):
+    target = {"hits": before["hits"] + len(frames) * packets,
+              "bytes": before["bytes"] + sum(len(frame) * packets for frame in frames)}
+    deadline = time.monotonic() + timeout
+    while True:
+        current = _count(ctl, "count", rid, generation)
+        if any(current[key] < before[key] or current[key] > target[key] for key in target):
+            raise RuntimeError("私有 COUNT 超出本轮精确范围或意外归零")
+        if current == target:
+            return current
+        if time.monotonic() >= deadline:
+            raise RuntimeError("恢复全部 daemon 线程后私有 COUNT 在限时内没有更新到精确报文数量")
+        time.sleep(0.02)
+
+
 def _age(ctl, rid, generation):
     age = fields(ctl("rule-age", rid, generation)["stdout"])
     if age.get("rule") != str(rid) or age.get("generation") != str(generation):
@@ -514,7 +689,36 @@ def _age(ctl, rid, generation):
     return age
 
 
+def runtime_pci_identities(config, ctl):
+    validate_config(config)
+    identities = {}
+    for label, endpoint in configured_endpoints(config):
+        actual = fields(ctl("port-show", endpoint["port_id"])["stdout"])
+        caps_raw = ctl("capability-show", endpoint["port_id"])["stdout"]
+        caps = fields(caps_raw)
+        expected = {"device": endpoint["pci_address"], "driver": endpoint["pmd"], "kind": endpoint["kind"],
+                    "ifindex": "0", "interface": "", "phys-port-name": "", "role": "unknown", "role-source": "unknown",
+                    "role-error": "-19", "switch-domain": str(endpoint["switch_domain"]), "switch-port": str(endpoint["switch_port"])}
+        if any(actual.get(key) != item for key, item in expected.items()) or any(
+                key in actual for key in ("controller", "pf", "function", "physical-port")):
+            raise Blocked(label + " PCI-only 实际端点、opaque 交换端口或 UNKNOWN 身份与显式配置不一致")
+        expected_caps = {"device": endpoint["device_name"], "driver": endpoint["pmd"], "kind": endpoint["kind"],
+                         "firmware": endpoint["firmware"], "firmware-error": str(endpoint["firmware_error"]),
+                         "configured": "yes", "started": "yes"}
+        if (any(caps.get(key) != item for key, item in expected_caps.items()) or
+                re.fullmatch(r"DPDK 21\.11\.[0-9]+", caps.get("dpdk", "")) is None):
+            raise Blocked(label + " PCI-only 的实际 PMD/完整 ethdev 名/固件原始结果或 DPDK 21.11 身份不匹配")
+        identities[str(endpoint["port_id"])] = {"port": actual, "capability": fields("\n".join(caps_raw.splitlines()[:2]))}
+    source = identities[str(config["ports"]["source"]["port_id"])]["port"]
+    destination = identities[str(config["ports"]["destination"]["port_id"])]["port"]
+    if source["switch-port"] == destination["switch-port"]:
+        raise Blocked("PCI-only 源和目的 alias 同一个 opaque switch-port")
+    return identities
+
+
 def runtime_port_identities(config, ctl, ifindex_reader=None):
+    if pci_only(config):
+        return runtime_pci_identities(config, ctl)
     validate_transfer_roles(config)
     ifindex_reader = socket.if_nametoindex if ifindex_reader is None else ifindex_reader
     identities = {}
@@ -967,7 +1171,7 @@ def live_run(root, build, destination, config, report):
     report["binding"] = build_binding(root, build)
     identity = process_identity(config["daemon_pid"], build, socket_path)
     report["daemon"] = identity
-    if any(item not in identity["cmdline"] for item in config["eal_devargs"]):
+    if not pci_only(config) and any(item not in identity["cmdline"] for item in config["eal_devargs"]):
         raise Blocked("指定 EAL devargs 未在实际 daemon 命令行观察到")
     if any(item == "--no-pci" or item.startswith("--vdev") for item in identity["cmdline"]):
         raise Blocked("实际 daemon 使用了虚拟设备或禁用 PCI")
@@ -982,7 +1186,33 @@ def live_run(root, build, destination, config, report):
             raise RuntimeError("管理命令失败: " + str(arguments) + " " + record["stderr"])
         return record
 
-    runtime_port_identities(config, ctl)
+    runtime_identities = runtime_port_identities(config, ctl)
+    if pci_only(config):
+        allowlist = pci_allowlist_evidence(config, identity)
+        observed_inventory = inspect_environment()
+        protected = hardware_gate(observed_inventory, config)
+        (destination / "pci-provider-inventory.json").write_text(
+            json.dumps(observed_inventory, ensure_ascii=False, indent=2), encoding="utf-8")
+        backer = config["identity_provider"]["backers"][0]
+        pci_evidence = pci_inventory_evidence(observed_inventory, config)
+        for bdf, observed in pci_evidence.items():
+            observed["parent"] = pci_parent(bdf)
+            if observed["parent"] in protected:
+                raise Blocked("PCI-only 实际 parent 与管理口重合")
+        scopes = {}
+        for _, endpoint in configured_endpoints(config):
+            port_id = str(endpoint["port_id"])
+            scopes[port_id] = {"type": endpoint["firmware_scope"]["type"],
+                               "raw_firmware": runtime_identities[port_id]["capability"]["firmware"],
+                               "raw_error": int(runtime_identities[port_id]["capability"]["firmware-error"])}
+            if endpoint["kind"] == "representor":
+                scopes[port_id]["source_port_id"] = backer["port_id"]
+        # 只有独立库存、实际 argv 和运行期端点都核对成功才发布已绑定证据
+        report["identity_provider"] = {"type": "pci_only", "validated": True, "bound": True,
+            "pmd": config["identity_provider"]["pmd"], "pci": pci_evidence,
+            "ports": runtime_identities, "backer_port_id": backer["port_id"], "firmware_scopes": scopes,
+            "eal_allowlist": allowlist, "protected_management_pci": protected,
+            "scope": "basic_pair_private_count_only"}
 
     def prepare_reset(tag):
         stage = destination / ("reset-" + tag)
@@ -1074,8 +1304,11 @@ def live_run(root, build, destination, config, report):
         stop_attempted = False
         if process_identity(pid, build, socket_path)["start_time"] != identity["start_time"]:
             raise RuntimeError("恢复后 daemon 身份变化")
-        after = {key: int(number) for key, number in fields(ctl("count", rid, installed_generation)["stdout"]).items()
-                 if key in ("hits", "bytes")}
+        if pci_only(config):
+            after = wait_private_count(ctl, rid, installed_generation, before, frames, 8)
+        else:
+            after = {key: int(number) for key, number in fields(ctl("count", rid, installed_generation)["stdout"]).items()
+                     if key in ("hits", "bytes")}
         time.sleep(0.05)
         workers_after = {key: int(number) for key, number in fields(ctl("stats")["stdout"]).items()}
         report["packet_evidence"] = verify_packet_evidence(tx, rx, frames, 8, before, after,

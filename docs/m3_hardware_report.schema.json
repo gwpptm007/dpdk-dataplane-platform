@@ -232,6 +232,268 @@
           }
         }
       }
+    },
+    "identity_provider": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "pci_only"
+        },
+        "validated": {
+          "type": "boolean"
+        },
+        "bound": {
+          "type": "boolean"
+        },
+        "pmd": {
+          "enum": [
+            "net_sfc_efx",
+            "net_bnxt"
+          ]
+        },
+        "scope": {
+          "const": "basic_pair_private_count_only"
+        },
+        "pci": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "class",
+              "vendor",
+              "device",
+              "driver",
+              "parent"
+            ],
+            "properties": {
+              "class": {
+                "type": "string",
+                "minLength": 1
+              },
+              "vendor": {
+                "type": "string",
+                "minLength": 1
+              },
+              "device": {
+                "type": "string",
+                "minLength": 1
+              },
+              "driver": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parent": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "ports": {
+          "type": "object",
+          "minProperties": 2,
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "port",
+              "capability"
+            ],
+            "properties": {
+              "port": {
+                "type": "object",
+                "required": [
+                  "device",
+                  "driver",
+                  "kind",
+                  "ifindex",
+                  "interface",
+                  "phys-port-name",
+                  "role",
+                  "role-source",
+                  "role-error",
+                  "switch-domain",
+                  "switch-port"
+                ],
+                "properties": {
+                  "ifindex": {
+                    "const": "0"
+                  },
+                  "interface": {
+                    "const": ""
+                  },
+                  "phys-port-name": {
+                    "const": ""
+                  },
+                  "role": {
+                    "const": "unknown"
+                  },
+                  "role-source": {
+                    "const": "unknown"
+                  },
+                  "role-error": {
+                    "const": "-19"
+                  }
+                }
+              },
+              "capability": {
+                "type": "object",
+                "required": [
+                  "device",
+                  "driver",
+                  "kind",
+                  "firmware",
+                  "firmware-error",
+                  "dpdk"
+                ]
+              }
+            }
+          }
+        },
+        "backer_port_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65534
+        },
+        "firmware_scopes": {
+          "type": "object",
+          "minProperties": 2,
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "type",
+                  "raw_firmware",
+                  "raw_error"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "self"
+                  },
+                  "raw_firmware": {
+                    "type": "string",
+                    "minLength": 1,
+                    "not": {
+                      "const": "unknown"
+                    }
+                  },
+                  "raw_error": {
+                    "const": 0
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type",
+                  "source_port_id",
+                  "raw_firmware",
+                  "raw_error"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "parent-pci"
+                  },
+                  "source_port_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65534
+                  },
+                  "raw_firmware": {
+                    "const": "unknown"
+                  },
+                  "raw_error": {
+                    "const": -95
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "eal_allowlist": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "pci_address",
+              "devargs"
+            ],
+            "properties": {
+              "pci_address": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-1][0-9a-f]\\.[0-7]$"
+              },
+              "devargs": {
+                "type": "string",
+                "minLength": 12
+              }
+            }
+          }
+        },
+        "protected_management_pci": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {
+                "properties": {
+                  "validated": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "validated"
+                ]
+              },
+              {
+                "properties": {
+                  "bound": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "bound"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "validated",
+              "bound",
+              "pmd",
+              "scope",
+              "pci",
+              "ports",
+              "backer_port_id",
+              "firmware_scopes",
+              "eal_allowlist",
+              "protected_management_pci"
+            ],
+            "properties": {
+              "bound": {
+                "const": true
+              },
+              "validated": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
     }
   },
   "allOf": [
@@ -354,6 +616,61 @@
                       }
                     }
                   ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "identity_provider"
+        ],
+        "properties": {
+          "status": {
+            "const": "partial"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "identity_provider": {
+            "required": [
+              "validated",
+              "bound"
+            ],
+            "properties": {
+              "validated": {
+                "const": true
+              },
+              "bound": {
+                "const": true
+              }
+            }
+          },
+          "capability_matrix": {
+            "items": {
+              "if": {
+                "properties": {
+                  "stage": {
+                    "enum": [
+                      "age",
+                      "shared_count",
+                      "physical_reset_recovery"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "status": {
+                    "const": "blocked"
+                  },
+                  "capability": {
+                    "const": "unknown"
+                  }
                 }
               }
             }

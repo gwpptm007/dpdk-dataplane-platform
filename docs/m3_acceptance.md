@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | 环境与设备 | 标准库只读盘点、权限/缺失保留、管理口识别 | 当前环境没有已验证的 mlx5/BlueField 实机 |
 | representor 角色 | mlx5 严格名称解析、netlink/sysfs/PCI 交叉核对，未知保留来源与错误 | 实际 PF/VF/SF 与跨控制器设备验证 |
-| 非 mlx5 适配 | 通用 PCI 与非零 ifindex 交叉核对；pair 保留 UNKNOWN，不猜角色 | 无宿主接口的 PCI 目标须另有身份适配；六个命名模板仍缺非 mlx5 可信角色来源，实机未验收 |
+| 非 mlx5 适配 | 通用 PCI/非零 ifindex 身份；sfc/bnxt 有显式 PCI-only basic pair 工具，保留 UNKNOWN | 其他无宿主接口目标及六个命名模板仍需适配；AGE/共享/复位不得绕过 PMD 限制，实机未验收 |
 | 同域与场景图 | 七种单向/双向模板、同域/别名/父子证据检查 | PMD 对具体匹配和动作组合的支持 |
 | 正式控制入口 | v27 的 plan/apply、共享对象管理、精确全局版本、整批创建/补偿、隔离和持久化复用；设备状态与全组主动复位 | 无硬件逐包原子承诺；复位依赖真实 PMD 支持 |
 | counter | transfer 方向契约、COUNT 64 位值及有效位检查 | 实机线缆报文与计数、CPU worker 对照 |
@@ -63,7 +63,17 @@ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 杀掉负责清理的父进程而留下内层测试或 daemon。其他 M3 步骤仍有各自的超时保护。
 ASan/UBSan 本轮关闭 LeakSanitizer，实际 mbuf 归还由 worker 的内存池记录另行核对。
 
-## 最新通用身份核对轮次
+## 最新 PCI-only 工具轮次
+
+[显式 PCI-only provider](m3_hardware_acceptance.md#显式-pci-only-基础阶段) 已支持 DPDK 21.11
+的 `net_sfc_efx`、`net_bnxt` 基础 pair/私有 COUNT 验收入口。实际 PCI、唯一 backer、完整名字、
+EAL 参数和固件作用域独立核对，保留代表端口 UNKNOWN/-ENOTSUP，不自动降级默认接口路径。
+
+三套各 70/70 单测、76 项门禁、四步核心回归、六步 M3、四组正式事件及 31 组模拟通过，
+255 项源码一致；七项 schema 正负夹具和此前实际默认报告的兼容验证通过。
+两机只读预检仍为 blocked，未执行物理转发、COUNT 或复位，完整 M3 仍缺实机证据。
+
+## 通用身份核对轮次
 
 [通用 PCI 身份](m3_generic_identity.md) 已支持非 mlx5 的非零 ifindex 核对，角色保持 UNKNOWN。
 基础核对失败不发布接口字段，物理名称可以双边缺失，权限、半截读取和名称变化不能作为缺失放行。

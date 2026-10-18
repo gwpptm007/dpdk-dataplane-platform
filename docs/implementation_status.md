@@ -5,6 +5,12 @@
 以下日期条目保留各次交付当时的验收状态，当前能力以最新条目、模块表和
 [M2 整体验收](m2_acceptance.md) 为准，不能将历史待办当作当前仍缺失的功能。
 
+2026-10-18 已提供 [显式 PCI-only 验收适配](m3_hardware_acceptance.md#显式-pci-only-基础阶段)：
+DPDK 21.11 的 sfc/bnxt 仅执行 basic pair/私有 COUNT，核对实际 PCI、EAL allowlist、唯一 backer
+和固件作用域，不填造接口或角色，也不开放 AGE/共享 COUNT/主动复位。三套各 70/70 单测、
+76 项门禁、四步核心回归、六步 M3 和 31 组模拟通过，255 项源码一致；七项 schema 正负例通过。
+两机实际预检仍 blocked，硬件正向与 CPU 旁路未验收，M3 未完成。
+
 2026-10-18 已补齐 [M3 通用 PCI 与接口身份](m3_generic_identity.md)：非零 ifindex 经过
 netlink/sysfs/PCI 和第二次观察核对，非 mlx5 保持 UNKNOWN，基础失败不发布接口字段。
 硬件工具分开核对完整 ethdev 名与 parent PCI；UNKNOWN pair 可验证，六个命名模板不放宽角色来源。

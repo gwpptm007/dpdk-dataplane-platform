@@ -239,6 +239,11 @@ v5 单快照和协议 v26；三套各 60/60 单测、四步核心回归及 24 �
 255 项源码一致。135 系统/本地适配各十二步完整 M2/TAP 回归，ASan/UBSan 与 134 GCC 13
 各四步核心通过，完整证据和源码摘要见 [通用身份验收](m3_generic_identity.md#本轮整体验收)。
 
+无宿主接口的 DPDK 21.11 sfc/bnxt 已有 [显式 PCI-only 基础验收适配](m3_hardware_acceptance.md#显式-pci-only-基础阶段)，
+仅 basic pair/私有 COUNT；实际 PCI、EAL、backer 与固件归属须独立核对，不补猜角色。
+三套各 70/70 单测、76 项门禁、四步核心回归、六步 M3 和 31 组模拟通过，255 项源码一致；
+七项 schema 正负例通过。两机真实预检仍 blocked，未取得实机正向或 CPU 旁路证据。
+
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。
 
 验收：至少在 NVIDIA mlx5/BlueField 和一个非 mlx5 PMD 上形成可复现实机报告；证明 offloaded packets 不经过 CPU worker；端点移除和 device reset 后可 reconciliation。

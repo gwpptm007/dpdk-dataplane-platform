@@ -88,6 +88,138 @@ def identity_reader(config, overrides=None):
     return command, calls
 
 
+def pci_configuration(pmd="net_sfc_efx"):
+    config = configuration()
+    base = {"port_id": 0, "pci_address": "0000:03:00.0", "device_name": "0000:03:00.0", "pmd": pmd,
+            "interface": "", "phys_port_name": "", "ifindex": 0, "kind": "ethdev", "role": "unknown",
+            "role_source": "unknown", "role_error": -19, "switch_domain": 3, "switch_port": 100,
+            "pci_vendor": "0x1924" if pmd == "net_sfc_efx" else "0x14e4", "pci_device": "0x1234",
+            "pci_class": "0x020000", "pci_driver": "vfio-pci", "firmware": "1.2.3 rxAAA txBBB",
+            "firmware_error": 0, "firmware_scope": {"type": "self"}}
+    def representor(number):
+        suffix = "c0pf0vf" + str(number) if pmd == "net_sfc_efx" else str(number)
+        return dict(base, port_id=number, switch_port=100 + number, kind="representor", firmware="unknown", firmware_error=-95,
+                    device_name="net_0000:03:00.0_representor_" + suffix,
+                    firmware_scope={"type": "parent-pci", "source_port_id": 0})
+    config["ports"] = {"install": copy.deepcopy(base), "source": representor(1), "destination": representor(2)}
+    config["identity_provider"] = {"type": "pci_only", "pmd": pmd, "backers": [copy.deepcopy(base)]}
+    return config
+
+
+def pci_inventory(config):
+    data = inventory(); endpoint = config["ports"]["install"]
+    device = data["pci_scan"]["network_devices"][0]
+    device.update({key: observed(endpoint[name]) for key, name in
+                   (("class", "pci_class"), ("vendor", "pci_vendor"), ("device", "pci_device"), ("driver", "pci_driver"))})
+    data["interface_scan"]["interfaces"] = data["interface_scan"]["interfaces"][:1]
+    return data
+
+
+def pci_identity_reader(config, overrides=None):
+    endpoints = {item["port_id"]: item for _, item in HARDWARE.configured_endpoints(config)}
+    def command(operation, port, **unused):
+        del unused
+        endpoint = endpoints[int(port)]
+        if operation == "port-show":
+            result = {"device": endpoint["pci_address"], "driver": endpoint["pmd"], "kind": endpoint["kind"],
+                      "ifindex": "0", "interface": "", "phys-port-name": "", "role": "unknown", "role-source": "unknown",
+                      "role-error": "-19", "switch-domain": str(endpoint["switch_domain"]), "switch-port": str(endpoint["switch_port"])}
+        elif operation == "capability-show":
+            result = {"device": endpoint["device_name"], "driver": endpoint["pmd"], "kind": endpoint["kind"],
+                      "dpdk": "DPDK 21.11.9", "firmware": endpoint["firmware"], "firmware-error": str(endpoint["firmware_error"]),
+                      "configured": "yes", "started": "yes"}
+        else:
+            raise AssertionError(operation)
+        result.update((overrides or {}).get((operation, int(port)), {}))
+        return {"returncode": 0, "stdout": " ".join(key + "=" + item for key, item in result.items()) + "\n", "stderr": ""}
+    return command
+
+
+class PciOnlyTests(unittest.TestCase):
+    def test_both_typed_pm_ds_preserve_raw_repr_firmware_and_unknown_identity(self):
+        for pmd in HARDWARE.PCI_ONLY_PMDS:
+            config = pci_configuration(pmd); HARDWARE.validate_config(config)
+            self.assertEqual(fixture_gate(pci_inventory(config), config), ["0000:02:00.0"])
+            actual = HARDWARE.runtime_port_identities(config, pci_identity_reader(config))
+            self.assertEqual(actual["1"]["capability"]["firmware-error"], "-95")
+            self.assertEqual(actual["1"]["port"]["role-error"], "-19")
+            self.assertEqual(actual["0"]["capability"]["firmware"], "1.2.3 rxAAA txBBB")
+            config.pop("identity_provider")
+            with self.assertRaises(HARDWARE.Blocked): HARDWARE.validate_config(config)
+
+    def test_typed_profile_never_enables_other_stages_templates_roles_or_netdev_fallback(self):
+        for key, replacement in (("stages", ["basic", "age"]), ("stages", ["basic", "shared_count"]),
+                                 ("stages", ["basic", "planned_reset"]), ("template", "vf-vf")):
+            config = pci_configuration(); config[key] = replacement
+            with self.subTest(key=key, replacement=replacement), self.assertRaises(HARDWARE.Blocked): HARDWARE.validate_config(config)
+        for key, replacement in (("ifindex", 4), ("interface", "fake0"), ("phys_port_name", "p0"),
+                                 ("role", "vf"), ("has_pf", True), ("kind", "fake"), ("pmd", "net_fake")):
+            config = pci_configuration(); config["ports"]["source"][key] = replacement
+            with self.subTest(key=key), self.assertRaises(HARDWARE.Blocked): HARDWARE.validate_config(config)
+
+    def test_parent_firmware_scope_cannot_be_faked_rebound_or_used_after_failure(self):
+        for change in ("repr-known", "missing-parent", "repr-parent", "cross-pci", "same-id-other-name", "parent-failed"):
+            config = pci_configuration(); endpoint = config["ports"]["source"]
+            if change == "repr-known": endpoint.update(firmware="fake", firmware_error=0)
+            if change == "missing-parent": endpoint["firmware_scope"]["source_port_id"] = 99
+            if change == "repr-parent": endpoint["firmware_scope"]["source_port_id"] = 2
+            if change == "cross-pci": endpoint["pci_address"] = "0000:04:00.0"
+            if change == "same-id-other-name": endpoint["port_id"] = 0
+            if change == "parent-failed": config["identity_provider"]["backers"][0]["firmware_error"] = -95
+            with self.subTest(change=change), self.assertRaises(HARDWARE.Blocked): HARDWARE.validate_config(config)
+
+    def test_actual_identity_opaque_port_and_fw_errors_are_not_replaced_by_configuration(self):
+        for operation, change in (("port-show", {"ifindex": "4"}), ("port-show", {"interface": "fake0"}),
+                                  ("port-show", {"pf": "0"}), ("port-show", {"switch-port": "999"}),
+                                  ("port-show", {"device": "0000:04:00.0"}), ("port-show", {"kind": "ethdev"}),
+                                  ("capability-show", {"firmware": "fake", "firmware-error": "0"}),
+                                  ("capability-show", {"device": "net_0000:03:00.0_representor_c0pf0vf9"})):
+            config = pci_configuration(); reader = pci_identity_reader(config, {(operation, 1): change})
+            with self.subTest(change=change), self.assertRaises(HARDWARE.Blocked): HARDWARE.runtime_port_identities(config, reader)
+
+    def test_pci_inventory_and_management_parent_are_independent_of_no_netdev_declaration(self):
+        config = pci_configuration()
+        for field in ("class", "vendor", "device", "driver"):
+            data = pci_inventory(config); data["pci_scan"]["network_devices"][0][field] = observed("wrong")
+            with self.subTest(field=field), self.assertRaises(HARDWARE.Blocked): fixture_gate(data, config)
+        with self.assertRaises(HARDWARE.Blocked):
+            HARDWARE.hardware_gate(pci_inventory(config), config, environ={}, parent_reader=lambda unused: "0000:02:00.0")
+
+    def test_eal_allowlist_parses_real_options_and_rejects_app_values_aliases_and_conflicts(self):
+        config = pci_configuration(); devargs = config["eal_devargs"][0]
+        for option in (["-a", devargs], ["--allow=" + devargs], ["-a" + devargs], ["--allowlist", devargs]):
+            actual = {"cmdline": ["dppd", "-l", "0,1", "--file-prefix", "test"] + option + ["--"]}
+            self.assertEqual(HARDWARE.pci_allowlist_evidence(config, actual)[0]["devargs"], devargs)
+        for options in (["--", "-a", devargs], ["--file-prefix", "-a" + devargs, "--"],
+                        ["-a", "0000:03:00.00", "--"], ["-a", devargs + "extra", "--"],
+                        ["-a", devargs, "--no-pci", "--"], ["-a", devargs, "--vdev=net_ring0", "--"],
+                        ["-a", devargs, "-b", "0000:04:00.0", "--"]):
+            with self.subTest(options=options), self.assertRaises(HARDWARE.Blocked):
+                HARDWARE.pci_allowlist_evidence(config, {"cmdline": ["dppd"] + options})
+
+    def test_real_wrapper_accepts_attached_allow_options_and_only_uses_private_count(self):
+        for option in ("--allow=", "-a"):
+            report, calls, _, error = ProcessSafetyTests().run_fixture(typed_allow=option)
+            self.assertIsNone(error)
+            self.assertTrue(report["identity_provider"]["validated"])
+            self.assertEqual(report["identity_provider"]["firmware_scopes"]["1"]["raw_error"], -95)
+            self.assertTrue(report["cleanup"]["rule_deleted"])
+            self.assertFalse(any(name.startswith(("shared-count", "rule-age", "device-reset")) for name, _ in calls))
+
+    def test_delayed_service_counter_requires_exact_bounded_result_without_overshoot(self):
+        now = [0.0]
+        def sleep(seconds): now[0] += seconds
+        def counter(hits): return {"stdout": f"count rule=1 generation=7 hits={hits} bytes={hits * 96}"}
+        with patch.object(HARDWARE.time, "monotonic", side_effect=lambda: now[0]), patch.object(HARDWARE.time, "sleep", side_effect=sleep):
+            results = iter([counter(0), counter(1), counter(2)])
+            self.assertEqual(HARDWARE.wait_private_count(lambda *unused: next(results), 1, 7,
+                             {"hits": 0, "bytes": 0}, [b"x" * 96], 2), {"hits": 2, "bytes": 192})
+            with self.assertRaises(RuntimeError):
+                HARDWARE.wait_private_count(lambda *unused: counter(3), 1, 7, {"hits": 0, "bytes": 0}, [b"x" * 96], 2)
+            with self.assertRaises(RuntimeError):
+                HARDWARE.wait_private_count(lambda *unused: counter(0), 1, 7, {"hits": 0, "bytes": 0}, [b"x" * 96], 2, timeout=0.03)
+
+
 class GenericIdentityTests(unittest.TestCase):
     def test_explicit_unknown_pair_advances_only_with_complete_independent_identity(self):
         config = generic_configuration()
@@ -552,9 +684,11 @@ class ProcessSafetyTests(unittest.TestCase):
                 HARDWARE.pin_process({"pid": 1234, "start_time": "10"}, ROOT / "build", "/fixture.sock")
             kill.assert_not_called()
 
-    def run_fixture(self, peer_error=None, signal_error=None):
-        config = configuration(); config.update(daemon_pid=1234, socket=str(ROOT / "build/fixture.sock"))
-        identity = {"pid": 1234, "start_time": "10", "cmdline": config["eal_devargs"]}
+    def run_fixture(self, peer_error=None, signal_error=None, typed_allow=None):
+        config = configuration() if typed_allow is None else pci_configuration()
+        config.update(daemon_pid=1234, socket=str(ROOT / "build/fixture.sock"))
+        arguments = config["eal_devargs"] if typed_allow is None else ["dppd", typed_allow + config["eal_devargs"][0], "--"]
+        identity = {"pid": 1234, "start_time": "10", "cmdline": arguments}
         observation = {"machine_id": "separate-fixture-peer", "management_interfaces": ["management0"],
                        "management_pci": ["management-pci"], "interfaces": [
                            {"interface": "peer0", "mac": "02:00:00:00:00:01"},
@@ -567,6 +701,8 @@ class ProcessSafetyTests(unittest.TestCase):
             del unused, options
             if argv[0] == "meson": return {"returncode": 0, "stdout": "", "stderr": ""}
             operation, arguments = argv[3], argv[4:]; calls.append((operation, arguments))
+            if typed_allow is not None and operation in ("port-show", "capability-show"):
+                return pci_identity_reader(config)(operation, int(arguments[0]))
             output = {"port-show": "driver=mlx5_pci device=0000:03:00.0 interface=test0 ifindex=2 role=uplink "
                                    f"switch-domain=3 switch-port={arguments[0] if arguments else 0}\n",
                       "capability-show": "device=0000:03:00.0 driver=mlx5_pci dpdk=21.11.9 firmware=test-firmware firmware-error=0\n",
@@ -577,7 +713,7 @@ class ProcessSafetyTests(unittest.TestCase):
             if operation == "get": return {"returncode": 1, "stdout": "", "stderr": "No such file or directory (-2)"}
             if operation == "count":
                 count_queries += 1
-                output = "hits=0 bytes=0\n" if count_queries == 1 else "hits=16 bytes=1792\n"
+                output = "count rule=50000 generation=7 " + ("hits=0 bytes=0\n" if count_queries == 1 else "hits=16 bytes=1792\n")
             return {"returncode": 0, "stdout": output, "stderr": ""}
 
         def peer(configured, request, destination):
@@ -604,6 +740,9 @@ class ProcessSafetyTests(unittest.TestCase):
                 patch.object(HARDWARE, "wait_stopped", return_value={"1": "State:\tT (stopped)"}), \
                 patch.object(HARDWARE, "all_tasks_stopped", return_value={"1": "State:\tT (stopped)"}), \
                 patch.object(HARDWARE, "peer", side_effect=peer), patch.object(Path, "read_bytes", read), \
+                patch.object(HARDWARE, "inspect_environment", return_value=pci_inventory(config) if typed_allow else inventory()), \
+                patch.object(HARDWARE, "pci_parent", side_effect=lambda bdf: bdf), \
+                patch.dict(HARDWARE.os.environ, {"SSH_CONNECTION": ""}), \
                 patch.object(HARDWARE.socket, "if_nametoindex", return_value=2), \
                 patch.object(HARDWARE.signal, "SIGSTOP", getattr(signal, "SIGSTOP", 19), create=True), \
                 patch.object(HARDWARE.signal, "SIGCONT", getattr(signal, "SIGCONT", 18), create=True), \

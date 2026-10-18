@@ -32,6 +32,7 @@ AGE 核对驱动查询、再次命中续期、闲置自动删除和旧 COUNT 消
 非 mlx5 成功采集接口后仍保留 `role=unknown`、`role-source=unknown` 和不支持角色解析的错误码。
 工具只在显式选择 `pair` 且接口、PCI parent、已知交换域、固件等证据全部一致时允许进入下一门禁。
 目标 PMD 没有 host netdev、返回 ifindex=0、未提供交换域或固件时仍为 blocked。
+下述显式 PCI-only provider 为两种已核对 PMD 提供独立路径，不会从默认 netdev 失败自动切换。
 通用身份适配不是目标 PMD 支持 transfer、COUNT、AGE、共享动作或物理复位的证明，
 这些物理能力以及具体非 mlx5 型号仍未验收。
 
@@ -164,6 +165,47 @@ CPU 旁路证据由入口自己采集：核对 Unix socket PID、进程开始时
 再次核对线程仍停止，恢复后检查 COUNT 增量与 worker RX/TX 包数/字节数不变。
 配置里的 `success`、`worker_paused` 或任何离线 adapter 声明都不能替代这些观察。
 这是本次暂停窗口内的路径证据，不是吞吐率或 CPU 利用率性能结论。
+
+## 显式 PCI-only 基础阶段
+
+DPDK 21.11 的 `net_sfc_efx` 与 `net_bnxt` 可以没有 host netdev，代表端口也没有固件查询回调。
+仅这两种精确 PMD 可通过 [独立 PCI 配置示例](m3_hardware_pci_only.example.json) 显式选择
+`identity_provider.type=pci_only`，并且只允许 `stages=["basic"]`、`template=pair` 和私有 COUNT。
+AGE、共享 COUNT、planned_reset 均在配置阶段拒绝，不借父设备固件绕过生产复位前提。
+默认配置与 netdev 路径保持严格，不会因为接口查询失败而自动采用此模式。
+
+配置必须完整填写 PCI class/vendor/device、内核绑定驱动、PMD、精确 ethdev 名、kind 和 opaque switch-domain/port。
+现场独立读取 sysfs PCI 网络 class、vendor/device、vfio-pci/igb_uio/uio_pci_generic 绑定驱动及 physfn 父 PF，
+并保护默认路由和 SSH 本地接口对应的整个管理 PF。测试端点不从 net 目录挑一个名字填空。
+所有端点必须原样保留 ifindex=0、空 interface/phys_port_name、UNKNOWN 角色与来源、role-error=-ENODEV。
+只要实际 ifindex 非零、接口非空、角色编号出现或证据不一致，就 blocked，不进行降级。
+配置中的 switch-port 是不解释含义的驱动编号，不能从它猜测 VF、SF 或 PF。
+
+唯一 backer 必须独立列在 `identity_provider.backers` 中，并精确等于安装端口：
+实际 kind=ethdev，完整 ethdev 名等于该 PCI BDF，PMD 与各代表端口一致，交换域相同。
+`net_sfc_efx` 代表名按实际 `net_BDF_representor_cNpfN[vfN]` 核对，
+`net_bnxt` 按实际 `net_BDF_representor_N` 核对；名字只用于确认对象归属，不发布角色。
+
+backer 固件使用 `firmware_scope={"type":"self"}`，必须实际 error=0 且完整字符串精确匹配，版本允许空格。
+代表端口必须保留原始 firmware=unknown、firmware-error=-ENOTSUP，配置显式引用
+`firmware_scope={"type":"parent-pci","source_port_id":安装口编号}`。
+报告只把父 PCI 的固件作为父设备范围证据，不把它填成代表端口固件已知。
+缺失来源、代表端口互相引用、自环、跨 PCI、父固件查询失败或同 ID 异名都会 blocked。
+
+实际绑定 PID 的 `/proc/.../cmdline` 必须在 EAL `--` 之前显式使用 `-a`、`--allow` 或 `--allowlist`，
+仅允许本轮唯一 backer，完整 devargs 与配置逐字相等。
+参数解析按选项消费取值，不把 file-prefix 等其他参数中的 BDF 或应用参数中的 BDF 当成 allowlist。
+禁用 PCI、vdev、denylist、未知/不完整参数和别名均会被拒绝。
+仍需源码/构建/daemon 内容绑定、独立真实 peer、nonce PCAP、逐字节收包与实际私有 COUNT。
+
+SFC 的 COUNT 服务可能需要 daemon 内的 service lcore 更新缓存。
+CPU 旁路窗口仍暂停整个 daemon 的所有线程，外部帧必须在这一窗口真实收到；不会只停 worker。
+恢复后仅允许三秒内有界轮询 COUNT 到本轮精确包数和字节数，超出范围或超时即失败。
+这不放宽 CPU worker 统计，也不构成吞吐性能或全部硬件功能通过。
+只有独立库存、实际 EAL 和端点身份均完成核对，报告才填写 provider validated/bound 证据。
+初始或 blocked 报告可以尚无该证据，配置声明本身不能充当已观察结果。
+
+当前环境仍没有这两类实体设备；本模式只完成工具与反例夹具验证，真实报文和 ASIC 能力仍未验收。
 
 ## 可选的正式物理复位阶段
 
@@ -307,3 +349,23 @@ VF 与管理口同 PF、未知 parent、旧报告、PCAP/COUNT/CPU 不一致及�
 135/134 的实际只读预检均返回 2、blocked/false，两份原始报告通过 JSON Schema
 2020-12 验证，工具摘要与本轮已测源码相同。没有运行真实报文或物理 reset 正向阶段。
 原始报告与日志保存在 `build/native-check/m3-hardware-artifacts/`，M3 始终保持未完成。
+
+## PCI-only 工具验收结果
+
+2026-10-18，135 系统 GCC 11、135 ASan/UBSan 与 134 GCC 13 三套严格构建各 70/70 单测，
+其中硬件工具门禁各 76/76 且无跳过。各套四步核心回归、六步 M3、五组共享恢复、
+四组正式设备事件及 31 组功能模拟全部通过，255 项源码逐项相同，摘要为：
+
+```text
+8dbe18d8bca6898eec5235e7154e1bec6fff01edd146740c2e35833644dedd0a
+```
+
+新增八项覆盖两种精确 PMD、完整名字与 UNKNOWN 角色、父设备固件范围、实际 PCI/管理 PF、
+EAL 参数值冒充 allowlist、运行期身份及服务恢复后的精确 COUNT 轮询。
+schema 另外通过七项正负夹具；validated/bound 任一为 true 都必须同时提供完整证据，
+不能只靠配置或单个布尔值绕过。此前两机的真实默认 netdev blocked 报告仍通过新版 schema。
+
+本轮三套报告与两机实际只读预检已核对工具摘要，预检均为 blocked/false。
+原始报告、精确 staged schema 和七项夹具结果保存在 `build/native-check/m3-provider-artifacts/`。
+本轮没有修改 C 数据面，完整 TAP 结果仍按 [通用身份轮次](m3_generic_identity.md#本轮整体验收) 登记。
+PCI-only 的硬件转发、COUNT 与 CPU 旁路均未运行，M3 保持未完成。

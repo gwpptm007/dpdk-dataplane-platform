@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "stages": [
+    "basic"
+  ],
+  "ports": {
+    "install": {
+      "port_id": 0,
+      "pci_address": "0000:03:00.0",
+      "device_name": "0000:03:00.0",
+      "pmd": "net_sfc_efx",
+      "interface": "",
+      "phys_port_name": "",
+      "ifindex": 0,
+      "kind": "ethdev",
+      "role": "unknown",
+      "role_source": "unknown",
+      "role_error": -19,
+      "switch_domain": 3,
+      "switch_port": 100,
+      "pci_vendor": "0x1924",
+      "pci_device": "0xFILL",
+      "pci_class": "0x020000",
+      "pci_driver": "vfio-pci",
+      "firmware": "FILL-actual-parent-firmware",
+      "firmware_error": 0,
+      "firmware_scope": {
+        "type": "self"
+      }
+    },
+    "source": {
+      "port_id": 1,
+      "pci_address": "0000:03:00.0",
+      "device_name": "net_0000:03:00.0_representor_c0pf0vf1",
+      "pmd": "net_sfc_efx",
+      "interface": "",
+      "phys_port_name": "",
+      "ifindex": 0,
+      "kind": "representor",
+      "role": "unknown",
+      "role_source": "unknown",
+      "role_error": -19,
+      "switch_domain": 3,
+      "switch_port": 101,
+      "pci_vendor": "0x1924",
+      "pci_device": "0xFILL",
+      "pci_class": "0x020000",
+      "pci_driver": "vfio-pci",
+      "firmware": "unknown",
+      "firmware_error": -95,
+      "firmware_scope": {
+        "type": "parent-pci",
+        "source_port_id": 0
+      }
+    },
+    "destination": {
+      "port_id": 2,
+      "pci_address": "0000:03:00.0",
+      "device_name": "net_0000:03:00.0_representor_c0pf0vf2",
+      "pmd": "net_sfc_efx",
+      "interface": "",
+      "phys_port_name": "",
+      "ifindex": 0,
+      "kind": "representor",
+      "role": "unknown",
+      "role_source": "unknown",
+      "role_error": -19,
+      "switch_domain": 3,
+      "switch_port": 102,
+      "pci_vendor": "0x1924",
+      "pci_device": "0xFILL",
+      "pci_class": "0x020000",
+      "pci_driver": "vfio-pci",
+      "firmware": "unknown",
+      "firmware_error": -95,
+      "firmware_scope": {
+        "type": "parent-pci",
+        "source_port_id": 0
+      }
+    }
+  },
+  "template": "pair",
+  "rule_id": 50000,
+  "eal_devargs": [
+    "0000:03:00.0,FILL-actual-representor-devargs"
+  ],
+  "peer": {
+    "ssh_argv": [
+      "ssh",
+      "-o",
+      "BatchMode=yes",
+      "FILL-user@FILL-peer"
+    ],
+    "tx_interface": "FILL-tx",
+    "rx_interface": "FILL-rx"
+  },
+  "physical_links": [
+    "FILL-physical-source-to-peer-tx",
+    "FILL-physical-destination-to-peer-rx"
+  ],
+  "identity_provider": {
+    "type": "pci_only",
+    "pmd": "net_sfc_efx",
+    "backers": [
+      {
+        "port_id": 0,
+        "pci_address": "0000:03:00.0",
+        "device_name": "0000:03:00.0",
+        "pmd": "net_sfc_efx",
+        "interface": "",
+        "phys_port_name": "",
+        "ifindex": 0,
+        "kind": "ethdev",
+        "role": "unknown",
+        "role_source": "unknown",
+        "role_error": -19,
+        "switch_domain": 3,
+        "switch_port": 100,
+        "pci_vendor": "0x1924",
+        "pci_device": "0xFILL",
+        "pci_class": "0x020000",
+        "pci_driver": "vfio-pci",
+        "firmware": "FILL-actual-parent-firmware",
+        "firmware_error": 0,
+        "firmware_scope": {
+          "type": "self"
+        }
+      }
+    ]
+  },
+  "daemon_pid": 12345,
+  "socket": "/absolute/path/FILL-dedicated-daemon.sock"
+}
