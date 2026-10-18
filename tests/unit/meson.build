@@ -27,6 +27,16 @@ native_template_test = executable('test_native_template', 'test_native_template.
               '-Wl,--wrap=rte_flow_actions_template_destroy', '-Wl,--wrap=rte_flow_pattern_template_destroy'])
 test('native DPDK template API and version contract', native_template_test)
 
+# 乱序完成、未领取结果背压、资源保留和真实线程竞争不能混淆受理与完成
+async_flow_test = executable('test_async_flow', 'test_async_flow.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'])
+test('bounded asynchronous flow lifecycle and completion identity', async_flow_test)
+
+native_async_flow_test = executable('test_native_async_flow', 'test_native_async_flow.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_flow_async_create', '-Wl,--wrap=rte_flow_async_destroy',
+              '-Wl,--wrap=rte_flow_push', '-Wl,--wrap=rte_flow_pull'])
+test('native asynchronous enqueue push pull and retained storage', native_async_flow_test)
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',
