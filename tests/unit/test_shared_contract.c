@@ -4,6 +4,7 @@
 #include <string.h>
 #include <rte_errno.h>
 #include <rte_flow.h>
+#include <rte_version.h>
 #include "dppd/offload.h"
 
 static struct rte_flow_action_handle *const indirect = (struct rte_flow_action_handle *)(uintptr_t)0x1234;
@@ -68,7 +69,13 @@ int __wrap_rte_flow_action_handle_destroy(uint16_t port, struct rte_flow_action_
 static void check_rule(uint16_t port, const struct rte_flow_attr *attr, const struct rte_flow_item *pattern,
     const struct rte_flow_action *actions)
 {
-    assert(port == expected.install_port_id && attr->ingress && attr->transfer && !attr->egress);
+    assert(port == expected.install_port_id && attr->transfer && !attr->egress);
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 11, 0, 0)
+    /** 绑定共享动作仍使用普通规则属性，不沿用共享对象自己的方向配置 */
+    assert(!attr->ingress);
+#else
+    assert(attr->ingress);
+#endif
     assert(pattern[0].type == RTE_FLOW_ITEM_TYPE_ETH && pattern[1].type == RTE_FLOW_ITEM_TYPE_END);
     assert(actions[0].type == RTE_FLOW_ACTION_TYPE_AGE);
     assert(((const struct rte_flow_action_age *)actions[0].conf)->timeout == 13);

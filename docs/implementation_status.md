@@ -5,6 +5,12 @@
 以下日期条目保留各次交付当时的验收状态，当前能力以最新条目、模块表和
 [M2 整体验收](m2_acceptance.md) 为准，不能将历史待办当作当前仍缺失的功能。
 
+2026-10-18 已完成 [DPDK 版本兼容修复](m3_dpdk_compatibility.md)：22.11 起 transfer 不混用方向，
+23.03 起使用新 Telemetry 无符号接口，两个失败计数字段键规范为下划线，测试夹具跟随实际 API。
+135 系统/ASan、134 GCC 13 的 21.11.9 与 135 私有 24.11.8 四套各 70/70 单测、76 项门禁、
+四步核心回归、六步 M3 与 31 组模拟通过，255 项源码一致。真实公共 API 演练、现代动态库与
+mlx5 PMD 安装核对通过；两机实机预检仍 blocked，M3 的硬件正向、CPU 旁路与恢复证据仍缺。
+
 2026-10-18 已提供 [显式 PCI-only 验收适配](m3_hardware_acceptance.md#显式-pci-only-基础阶段)：
 DPDK 21.11 的 sfc/bnxt 仅执行 basic pair/私有 COUNT，核对实际 PCI、EAL allowlist、唯一 backer
 和固件作用域，不填造接口或角色，也不开放 AGE/共享 COUNT/主动复位。三套各 70/70 单测、

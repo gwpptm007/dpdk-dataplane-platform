@@ -259,11 +259,14 @@ rule_observation_test = executable('test_rule_observation', 'test_rule_observati
 test('rule failure classification and outcomes', rule_observation_test)
 
 # 真实容器配合并发回调，检查完整副本发布与退出时的指针生命周期
+rule_telemetry_unsigned_suffix = dpdk.version().version_compare('>=23.03') ? 'uint' : 'u64'
 rule_telemetry_test = executable('test_rule_telemetry', 'test_rule_telemetry.c',
   dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=calloc', '-Wl,--wrap=rte_telemetry_register_cmd',
-              '-Wl,--wrap=rte_tel_data_add_dict_u64', '-Wl,--wrap=rte_tel_data_add_dict_int',
-              '-Wl,--wrap=rte_tel_data_add_array_u64', '-Wl,--wrap=rte_tel_data_add_dict_container',
+              '-Wl,--wrap=rte_tel_data_add_dict_' + rule_telemetry_unsigned_suffix,
+              '-Wl,--wrap=rte_tel_data_add_dict_int',
+              '-Wl,--wrap=rte_tel_data_add_array_' + rule_telemetry_unsigned_suffix,
+              '-Wl,--wrap=rte_tel_data_add_dict_container',
               '-Wl,--wrap=dppd_runtime_stats_read'])
 test('rule telemetry publication and lifetime', rule_telemetry_test, timeout: 30)
 

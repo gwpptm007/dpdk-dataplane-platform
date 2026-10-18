@@ -8,9 +8,21 @@
 #include <stdlib.h>
 #include <string.h>
 #include <rte_telemetry.h>
+#include <rte_version.h>
 #include "dppd/control.h"
 #include "dppd/runtime.h"
 #include "dppd/telemetry.h"
+
+/** 包装符号和整数宽度必须跟随真实 API，否则新版调用会绕过采集和故障注入 */
+#if RTE_VERSION >= RTE_VERSION_NUM(23, 3, 0, 0)
+#define __real_rte_tel_data_add_dict_u64 __real_rte_tel_data_add_dict_uint
+#define __wrap_rte_tel_data_add_dict_u64 __wrap_rte_tel_data_add_dict_uint
+#define __real_rte_tel_data_add_array_u64 __real_rte_tel_data_add_array_uint
+#define __wrap_rte_tel_data_add_array_u64 __wrap_rte_tel_data_add_array_uint
+typedef int64_t telemetry_int;
+#else
+typedef int telemetry_int;
+#endif
 
 /** 保存生产代码实际注册的回调，用真实 DPDK 数据容器验证输出，不启动额外服务进程 */
 static telemetry_cb callbacks[6];
@@ -19,7 +31,7 @@ static _Thread_local unsigned int fail_allocation, fail_field;
 static _Thread_local struct {
     uint64_t publication, repository_generation, generation, operations, succeeded, failed;
     uint64_t total, returned, ids[64];
-    unsigned int id_count;
+    unsigned int id_count, failure_keys;
     int more;
     uint64_t software_samples, software_batch_samples, software_batch_rules, rte_flow_samples;
     uint64_t software_batch_buckets;
@@ -40,8 +52,8 @@ void *__wrap_calloc(size_t count, size_t size);
 int __wrap_rte_telemetry_register_cmd(const char *name, telemetry_cb callback, const char *help);
 int __real_rte_tel_data_add_dict_u64(struct rte_tel_data *data, const char *name, uint64_t value);
 int __wrap_rte_tel_data_add_dict_u64(struct rte_tel_data *data, const char *name, uint64_t value);
-int __real_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name, int value);
-int __wrap_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name, int value);
+int __real_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name, telemetry_int value);
+int __wrap_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name, telemetry_int value);
 int __real_rte_tel_data_add_array_u64(struct rte_tel_data *data, uint64_t value);
 int __wrap_rte_tel_data_add_array_u64(struct rte_tel_data *data, uint64_t value);
 int __real_rte_tel_data_add_dict_container(struct rte_tel_data *data, const char *name, struct rte_tel_data *value,
@@ -76,6 +88,11 @@ int __wrap_rte_tel_data_add_dict_u64(struct rte_tel_data *data, const char *name
 {
     if (fail_field != 0 && --fail_field == 0)
         return -E2BIG;
+    assert(strchr(name, '-') == NULL);
+    if (strcmp(name, "failed_invalid_input") == 0)
+        output.failure_keys |= 1U;
+    if (strcmp(name, "failed_not_found") == 0)
+        output.failure_keys |= 2U;
 #define CAPTURE(field)             \
     if (strcmp(name, #field) == 0) \
         output.field = value;
@@ -113,7 +130,7 @@ int __wrap_rte_tel_data_add_dict_u64(struct rte_tel_data *data, const char *name
 }
 
 /** 分页标志与 ID 数组分别采集，不通过复制一份 JSON 实现来伪造生产输出 */
-int __wrap_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name, int value)
+int __wrap_rte_tel_data_add_dict_int(struct rte_tel_data *data, const char *name, telemetry_int value)
 {
     if (strcmp(name, "has_more") == 0)
         output.more = value;
@@ -227,7 +244,7 @@ static void *read_snapshots(void *unused)
 {
     (void)unused;
     do {
-        assert(query(3, NULL) == 0);
+        assert(query(3, NULL) == 0 && output.failure_keys == 3U);
         assert(output.operations == output.succeeded + output.failed);
         assert(query(2, "1") == 0);
         assert(output.generation <= output.repository_generation && output.publication > 0);
@@ -278,6 +295,21 @@ static void *detach_runtime(void *unused)
     return NULL;
 }
 
+/** 真实容器核对规范字段键，新版同时明确拒绝带短横线的旧键 */
+static void check_dictionary_names(void)
+{
+    struct rte_tel_data *data = rte_tel_data_alloc();
+
+    assert(data != NULL && rte_tel_data_start_dict(data) == 0);
+#if RTE_VERSION >= RTE_VERSION_NUM(23, 3, 0, 0)
+    assert(__real_rte_tel_data_add_dict_u64(data, "failed_invalid-input", 0) == -EINVAL);
+    assert(__real_rte_tel_data_add_dict_u64(data, "failed_not-found", 0) == -EINVAL);
+#endif
+    assert(__real_rte_tel_data_add_dict_u64(data, "failed_invalid_input", UINT64_MAX) == 0);
+    assert(__real_rte_tel_data_add_dict_u64(data, "failed_not_found", UINT64_MAX) == 0);
+    rte_tel_data_free(data);
+}
+
 /** 覆盖分页、严格参数、失败重试、并发完整性、慢驱动查询和退出生命周期 */
 int main(void)
 {
@@ -290,6 +322,7 @@ int main(void)
     uint64_t publication, operations;
     char parameters[64];
 
+    check_dictionary_names();
     assert(dppd_control_init(&control, &topology, 72, &api) == 0);
     for (uint64_t id = 1; id <= 70; ++id) {
         struct dppd_rule value = rule(id == 70 ? UINT64_MAX : id, DPPD_FALLBACK_SOFTWARE_ONLY);
@@ -304,6 +337,7 @@ int main(void)
     assert(registrations == 2 && query(1, NULL) == -EAGAIN);
     assert(dppd_telemetry_register(&runtime, &control) == 0 && registrations == 6 && register_calls == 7);
     assert(dppd_telemetry_register(&runtime, &control) == -EALREADY);
+    assert(query(3, NULL) == 0 && output.failure_keys == 3U);
     assert(query(1, NULL) == 0 && output.id_count == 64 && output.ids[63] == 64 && output.more);
     publication = output.publication;
     assert(query(1, "64,70") == 0 && output.id_count == 6 && !output.more);

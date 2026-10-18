@@ -8,11 +8,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include <rte_telemetry.h>
+#include <rte_version.h>
 #include "dppd/control.h"
 #include "dppd/runtime.h"
 
 /** 小页保证 JSON 回复受控，规则数量超过一页时用 ID 与仓库版本继续查询 */
 #define RULE_PAGE_SIZE 64U
+
+/** 23.03 起使用新的无符号接口名称，数值仍按完整六十四位传递 */
+static int telemetry_add_u64(struct rte_tel_data *data, const char *name, uint64_t value)
+{
+#if RTE_VERSION >= RTE_VERSION_NUM(23, 3, 0, 0)
+    return rte_tel_data_add_dict_uint(data, name, value);
+#else
+    return rte_tel_data_add_dict_u64(data, name, value);
+#endif
+}
+
+/** 数组中的规则编号也保留六十四位，不能继续调用新版已弃用的旧名称 */
+static int telemetry_add_array_u64(struct rte_tel_data *data, uint64_t value)
+{
+#if RTE_VERSION >= RTE_VERSION_NUM(23, 3, 0, 0)
+    return rte_tel_data_add_array_uint(data, value);
+#else
+    return rte_tel_data_add_array_u64(data, value);
+#endif
+}
 
 /** 规则副本只包含值，查询线程不会持有软件快照、规则仓库或网卡 handle */
 struct telemetry_rule {
@@ -60,11 +81,11 @@ static struct {
 static unsigned int registered_commands;
 
 /** 每个字段的构造错误都回传，不能展示一份被静默截断的成功 JSON */
-#define ADD_U64(name, value)                                         \
-    do {                                                             \
-        int field_rc = rte_tel_data_add_dict_u64(data, name, value); \
-        if (field_rc != 0)                                           \
-            return field_rc;                                         \
+#define ADD_U64(name, value)                                 \
+    do {                                                     \
+        int field_rc = telemetry_add_u64(data, name, value); \
+        if (field_rc != 0)                                   \
+            return field_rc;                                 \
     } while (0)
 #define ADD_INT(name, value)                                         \
     do {                                                             \
@@ -253,7 +274,7 @@ static int rules_callback(const char *command, const char *parameters, struct rt
         return -ENOMEM;
     rc = rte_tel_data_start_array(array, RTE_TEL_U64_VAL);
     for (uint32_t index = 0; rc == 0 && index < count; ++index)
-        rc = rte_tel_data_add_array_u64(array, ids[index]);
+        rc = telemetry_add_array_u64(array, ids[index]);
     if (rc == 0)
         rc = rte_tel_data_add_dict_container(data, "rule_ids", array, 0);
     /** 成功交接后由 telemetry 释放容器，失败时所有权还在本函数 */
@@ -345,6 +366,10 @@ static int failures_callback(const char *command, const char *parameters, struct
         char name[64];
 
         snprintf(name, sizeof(name), "failed_%s", dppd_rule_failure_kind_name(kind));
+        /** 分类名称保留原样，字段键只使用 DPDK 字典允许的下划线 */
+        for (char *cursor = name; *cursor != '\0'; ++cursor)
+            if (*cursor == '-')
+                *cursor = '_';
         ADD_U64(name, metrics.failures[kind]);
     }
     ADD_U64("last_sequence", last->sequence);

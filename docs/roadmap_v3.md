@@ -244,6 +244,11 @@ v5 单快照和协议 v26；三套各 60/60 单测、四步核心回归及 24 �
 三套各 70/70 单测、76 项门禁、四步核心回归、六步 M3 和 31 组模拟通过，255 项源码一致；
 七项 schema 正负例通过。两机真实预检仍 blocked，未取得实机正向或 CPU 旁路证据。
 
+后续 [DPDK 版本兼容验收](m3_dpdk_compatibility.md) 已补齐新版本方向、Telemetry API/字段键与测试夹具差异。
+21.11.9 的系统/ASan/GCC 13 和私有 24.11.8 四套各 70/70 单测、76 项门禁、四步核心回归、
+六步 M3 与 31 组模拟通过，255 项最终源码一致；实际动态库和真实公共 API 已核对。
+版本升级与 mlx5 PMD 成功安装不等于实机验收，整体 M3 仍保持未完成。
+
 交付：representor 角色解析、同 switch-domain 拓扑校验、transfer rule graph、uplink/PF/VF/SF 场景模板、counter/age/indirect action。
 
 验收：至少在 NVIDIA mlx5/BlueField 和一个非 mlx5 PMD 上形成可复现实机报告；证明 offloaded packets 不经过 CPU worker；端点移除和 device reset 后可 reconciliation。

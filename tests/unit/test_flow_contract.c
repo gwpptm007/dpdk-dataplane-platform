@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <rte_errno.h>
 #include <rte_flow.h>
+#include <rte_version.h>
 #include "dppd/offload.h"
 
 static const struct dppd_rule *expected;
@@ -34,7 +35,13 @@ static void check_compiled(uint16_t port, const struct rte_flow_attr *attr, cons
 {
     assert(expected != NULL && port == install_port);
     assert(attr->group == expected->group && attr->priority == expected->priority && attr->reserved == 0);
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 11, 0, 0)
+    /** 新版本公共入口就会拒绝混用方向，不能只靠模拟驱动接受来判断兼容 */
+    assert(attr->ingress == (expected->domain == DPPD_RULE_DOMAIN_INGRESS));
+    assert(attr->ingress + attr->egress + attr->transfer == 1);
+#else
     assert(attr->ingress == (expected->domain != DPPD_RULE_DOMAIN_EGRESS));
+#endif
     assert(attr->egress == (expected->domain == DPPD_RULE_DOMAIN_EGRESS));
     assert(attr->transfer == (expected->domain == DPPD_RULE_DOMAIN_TRANSFER));
     for (uint16_t i = 0; i < expected->nb_matches; ++i) {

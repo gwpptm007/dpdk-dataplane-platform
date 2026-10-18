@@ -63,11 +63,19 @@ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 杀掉负责清理的父进程而留下内层测试或 daemon。其他 M3 步骤仍有各自的超时保护。
 ASan/UBSan 本轮关闭 LeakSanitizer，实际 mbuf 归还由 worker 的内存池记录另行核对。
 
-## 最新 PCI-only 工具轮次
+## 最新 DPDK 版本兼容轮次
+
+[版本兼容修复](m3_dpdk_compatibility.md) 已按 22.11 方向边界与 23.03 Telemetry API 边界分别处理，
+修正失败计数字段键，并使测试夹具包装真实版本的符号和整数宽度，保留严格告警与原有故障注入。
+135 系统/ASan、134 GCC 13 的 DPDK 21.11.9，以及 135 私有 DPDK 24.11.8 四套各 70/70 单测、
+76 项门禁、四步核心回归、六步 M3 和 31 组模拟通过，255 项最终源码逐项一致。
+现代构建的实际运行库、mlx5 PMD 安装和真实公共 API 行为已核对；实机报文、CPU 旁路和复位仍未验收。
+
+## PCI-only 工具轮次
 
 [显式 PCI-only provider](m3_hardware_acceptance.md#显式-pci-only-基础阶段) 已支持 DPDK 21.11
 的 `net_sfc_efx`、`net_bnxt` 基础 pair/私有 COUNT 验收入口。实际 PCI、唯一 backer、完整名字、
-EAL 参数和固件作用域独立核对，保留代表端口 UNKNOWN/-ENOTSUP，不自动降级默认接口路径。
+EAL 参数和固件作用域独立核对，保留代表端口固件 unknown/-ENOTSUP，不自动降级默认接口路径。
 
 三套各 70/70 单测、76 项门禁、四步核心回归、六步 M3、四组正式事件及 31 组模拟通过，
 255 项源码一致；七项 schema 正负夹具和此前实际默认报告的兼容验证通过。

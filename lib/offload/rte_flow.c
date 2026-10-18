@@ -7,6 +7,7 @@
 #include <rte_errno.h>
 #include <rte_ethdev.h>
 #include <rte_flow.h>
+#include <rte_version.h>
 
 /**
  * 匹配项和动作中的指针都指向此结构体里的配置，避免引用编译函数已经失效的局部变量
@@ -172,8 +173,10 @@ static int compile_rule(const struct dppd_rule *rule, const struct dppd_flow_bin
     else if (rule->domain == DPPD_RULE_DOMAIN_EGRESS)
         compiled->attr.egress = 1;
     else {
-        /** transfer 将规则交给交换域，仍需指定入方向以匹配源端口进入交换域的报文 */
+#if RTE_VERSION < RTE_VERSION_NUM(22, 11, 0, 0)
+        /** 21.11 保留入方向兼容，22.11 起 transfer 必须与 ingress 和 egress 分开设置 */
         compiled->attr.ingress = 1;
+#endif
         compiled->attr.transfer = 1;
     }
 
