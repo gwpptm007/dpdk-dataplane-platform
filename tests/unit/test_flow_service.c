@@ -343,6 +343,7 @@ struct producer {
     struct dppd_flow_job_id job;
     uint64_t id;
     int status;
+    bool update;
 };
 
 static void *produce(void *context)
@@ -350,7 +351,12 @@ static void *produce(void *context)
     struct producer *producer = context;
     struct dppd_async_flow_create_request req = request(producer->fixture, producer->id);
     pthread_barrier_wait(producer->barrier);
-    producer->status = dppd_flow_service_submit(producer->fixture->service, 0, &req, 1, 1, &producer->job);
+    if (producer->update) {
+        struct dppd_flow_update_request update = {producer->id, req};
+        producer->status = dppd_flow_service_update(producer->fixture->service, 0, &update, 1, 1, &producer->job);
+    } else {
+        producer->status = dppd_flow_service_submit(producer->fixture->service, 0, &req, 1, 1, &producer->job);
+    }
     return NULL;
 }
 
@@ -474,6 +480,175 @@ static void test_repository_batch_boundaries(void)
     dppd_rule_repository_destroy(&repository);
 }
 
+static void prepare_updates(struct fixture *fixture, struct dppd_flow_update_request *updates, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        struct dppd_rule current;
+        assert(dppd_flow_service_get(fixture->service, i + 1U, &current) == 0);
+        updates[i] = (struct dppd_flow_update_request){current.generation, request(fixture, i + 1U)};
+        updates[i].replacement.rule.actions[0].conf.mark_id = 200 + i;
+    }
+}
+
+/** 逻辑表和 classifier 都已满，临时流使用单独预留的实际容量，64 条跨队列切换只推进一次账本 */
+static void test_full_batch_updates(void)
+{
+    struct fixture fixture = {0};
+    struct dppd_async_flow_create_request creates[64];
+    struct dppd_flow_update_request updates[64];
+    struct dppd_flow_job_id job, untouched = {.owner = 999};
+    struct dppd_flow_service_status status;
+    struct dppd_admission_snapshot usage;
+    setup(&fixture, 128, 64, 2);
+    assert(dppd_flow_service_close(&fixture.service) == 0);
+    dppd_software_backend_fini(&fixture.software);
+    assert(dppd_software_backend_init(&fixture.software, 64) == 0);
+    fixture.config.rule_capacity = 64;
+    assert(dppd_flow_service_create(&fixture.config, &fixture.service) == 0);
+    for (unsigned int i = 0; i < 64; ++i)
+        creates[i] = request(&fixture, i + 1U);
+    assert(dppd_flow_service_submit(fixture.service, 0, creates, 64, 1, &job) == 0);
+    assert(finish(&fixture, &job).applied);
+    prepare_updates(&fixture, updates, 64);
+    updates[1].expected_generation = 99;
+    assert(dppd_flow_service_update(fixture.service, 1, updates, 64, 1, &untouched) == -ESTALE);
+    assert(untouched.owner == 999 && fixture.faults.creates == 64);
+    prepare_updates(&fixture, updates, 64);
+    updates[1] = updates[0];
+    assert(dppd_flow_service_update(fixture.service, 1, updates, 64, 1, &untouched) == -EBUSY);
+    prepare_updates(&fixture, updates, 64);
+    assert(dppd_flow_service_update(fixture.service, 1, updates, 64, 1, &job) == 0);
+    assert(dppd_flow_service_cancel(fixture.service, &job) == 0);
+    assert(finish(&fixture, &job).status == -ECANCELED);
+    assert(dppd_flow_service_update(fixture.service, 1, updates, 64, 1, &job) == 0);
+    assert(dppd_flow_service_update(fixture.service, 1, updates, 1, 1, &untouched) == -EAGAIN);
+    assert(dppd_flow_service_process(fixture.service, 2, 1) == 0);
+    struct dppd_rule old;
+    assert(dppd_flow_service_get(fixture.service, 1, &old) == 0 && old.generation == 1);
+    struct dppd_flow_job_result result = finish(&fixture, &job);
+    assert(result.applied && result.update && !result.remove && result.generations[0] == 65);
+    for (unsigned int i = 0; i < 64; ++i) {
+        assert(dppd_flow_service_get(fixture.service, i + 1U, &old) == 0);
+        assert(old.generation == i + 65U && old.actions[0].conf.mark_id == i + 200U);
+    }
+    assert(dppd_flow_service_status(fixture.service, &status) == 0 && status.rules == 64 && status.revision == 128);
+    assert(dppd_admission_snapshot(fixture.admission, &usage) == 0);
+    assert(usage.global.committed[DPPD_RESOURCE_RULE] == 64 && usage.global.committed[DPPD_RESOURCE_COUNTER] == 64);
+    remove_all(&fixture, 64);
+    teardown(&fixture);
+}
+
+/** 注入不同阶段的故障，失败后旧 generation 和软件计数始终可见，补偿残留保留引用直至重试 */
+static void test_update_failures(void)
+{
+    for (unsigned int fault = 0; fault < 5; ++fault) {
+        struct fixture fixture = {0};
+        struct dppd_async_flow_create_request creates[2];
+        struct dppd_flow_update_request updates[2];
+        struct dppd_flow_job_id job;
+        struct dppd_flow_job_result result;
+        struct dppd_rule rule;
+        setup(&fixture, 8, 8, 2);
+        creates[0] = request(&fixture, 1);
+        creates[1] = request(&fixture, 2);
+        assert(dppd_flow_service_submit(fixture.service, 0, creates, 2, 1, &job) == 0);
+        assert(finish(&fixture, &job).applied);
+        prepare_updates(&fixture, updates, 2);
+        if (fault == 0)
+            fixture.faults.fail_create_at = fixture.faults.creates + 2;
+        else if (fault == 1 || fault == 3 || fault == 4)
+            fixture.faults.fail_destroy_ack_at = fixture.faults.destroys + 1;
+        assert(dppd_flow_service_update(fixture.service, 1, updates, 2, 1, &job) == 0);
+        if (fault == 2) {
+            assert(dppd_flow_service_process(fixture.service, 2, 64) == 0);
+            assert(fixture.faults.creates == 4);
+            fail_allocation = 1;
+        }
+        if (fault == 3 || fault == 4) {
+            for (unsigned int i = 0; i < 2; ++i)
+                dppd_flow_service_process(fixture.service, 2, 64);
+            if (fault == 3)
+                fixture.faults.fail_destroy_ack_at = fixture.faults.destroys + 1;
+            else
+                fixture.faults.fail_create_at = fixture.faults.creates + 1;
+            int rc = -EAGAIN;
+            for (unsigned int i = 0; i < 32 && rc == -EAGAIN; ++i) {
+                dppd_flow_service_process(fixture.service, 2, 64);
+                rc = dppd_flow_service_collect(fixture.service, &job, &result);
+            }
+            assert(rc == -EUCLEAN);
+            assert(dppd_flow_service_get(fixture.service, 1, &rule) == 0 && rule.generation == 1);
+            fixture.faults.fail_create_at = fixture.faults.fail_destroy_ack_at = 0;
+            assert(dppd_flow_service_retry(fixture.service) == 0);
+        }
+        result = finish(&fixture, &job);
+        assert(!result.applied && result.update && result.status < 0);
+        assert(dppd_flow_service_retry(fixture.service) == 0);
+        for (unsigned int i = 0; i < 2; ++i) {
+            assert(dppd_flow_service_get(fixture.service, i + 1U, &rule) == 0 && rule.generation == i + 1U);
+            assert(rule.actions[0].conf.mark_id == i + 1U);
+        }
+        assert(dppd_software_backend_count(&fixture.software) == 2);
+        remove_all(&fixture, 2);
+        teardown(&fixture);
+    }
+}
+
+static void test_update_admission_and_concurrency(void)
+{
+    struct fixture fixture = {0};
+    struct dppd_async_flow_create_request creates[2];
+    struct dppd_flow_update_request updates[2];
+    struct dppd_flow_job_id job = {.owner = 999};
+    struct dppd_admission_config limits = {.ticket_capacity = 18, .port_count = 1};
+    struct dppd_admission_snapshot usage;
+    setup(&fixture, 4, 4, 1);
+    creates[0] = request(&fixture, 1);
+    creates[1] = request(&fixture, 2);
+    assert(dppd_flow_service_submit(fixture.service, 0, creates, 2, 1, &job) == 0);
+    assert(finish(&fixture, &job).applied);
+    prepare_updates(&fixture, updates, 2);
+    job.owner = 999;
+    fail_allocation = 1;
+    assert(dppd_flow_service_update(fixture.service, 0, updates, 2, 1, &job) == -ENOMEM && job.owner == 999);
+    limits.ports[0].port_id = 7;
+    for (unsigned int k = 0; k < DPPD_RESOURCE_KIND_COUNT; ++k)
+        limits.limits[k] = limits.ports[0].limits[k] = 4;
+    limits.limits[DPPD_RESOURCE_SOFTWARE_RULE] = 2;
+    assert(dppd_admission_snapshot(fixture.admission, &usage) == 0);
+    assert(dppd_admission_set_limits(fixture.admission, &limits, usage.revision) == 0);
+    assert(dppd_flow_service_update(fixture.service, 0, updates, 2, 1, &job) == 0);
+    struct dppd_flow_job_result result = finish(&fixture, &job);
+    assert(!result.applied && result.status == -ENOSPC && fixture.faults.creates == 2);
+    assert(dppd_flow_service_update(fixture.service, 0, updates, 2, 1, &job) == 0);
+    assert(dppd_flow_service_process(fixture.service, 2000, 64) == 0);
+    result = finish(&fixture, &job);
+    assert(!result.applied && result.status == -ETIMEDOUT && fixture.faults.creates == 2);
+    limits.limits[DPPD_RESOURCE_SOFTWARE_RULE] = 4;
+    assert(dppd_admission_snapshot(fixture.admission, &usage) == 0);
+    assert(dppd_admission_set_limits(fixture.admission, &limits, usage.revision) == 0);
+    pthread_barrier_t barrier;
+    pthread_t threads[8];
+    struct producer producers[8];
+    assert(pthread_barrier_init(&barrier, NULL, 8) == 0);
+    for (unsigned int i = 0; i < 8; ++i) {
+        producers[i] = (struct producer){.fixture = &fixture, .barrier = &barrier, .id = 1, .update = true};
+        assert(pthread_create(&threads[i], NULL, produce, &producers[i]) == 0);
+    }
+    unsigned int accepted = 0, rejected = 0;
+    for (unsigned int i = 0; i < 8; ++i) {
+        assert(pthread_join(threads[i], NULL) == 0);
+        accepted += producers[i].status == 0;
+        rejected += producers[i].status == -EBUSY;
+        if (producers[i].status == 0)
+            job = producers[i].job;
+    }
+    assert(accepted == 1 && rejected == 7 && finish(&fixture, &job).applied);
+    pthread_barrier_destroy(&barrier);
+    remove_all(&fixture, 2);
+    teardown(&fixture);
+}
+
 int main(void)
 {
     test_batch_packet_and_backpressure();
@@ -484,5 +659,8 @@ int main(void)
     test_resource_exhaustion();
     test_active_timeout_preserves_existing_rules();
     test_repository_batch_boundaries();
+    test_full_batch_updates();
+    test_update_failures();
+    test_update_admission_and_concurrency();
     return 0;
 }

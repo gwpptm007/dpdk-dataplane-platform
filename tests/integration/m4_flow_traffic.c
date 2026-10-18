@@ -192,7 +192,7 @@ int main(int argc, char **argv)
         .flow_resource = DPPD_RESOURCE_SOFTWARE_RULE,
         .port_id = fixture.ports[0],
         .depth = 64,
-        .flow_capacity = 64};
+        .flow_capacity = 128};
     assert(dppd_async_flow_queue_create(&queue, &fixture.queue) == 0);
     struct dppd_flow_service_config service = {.admission = fixture.admission,
         .templates = fixture.templates,
@@ -223,10 +223,36 @@ int main(int argc, char **argv)
         assert(dppd_software_backend_query_count(&fixture.software, 1, removals[0].generation, &hits, &bytes) == 0);
         assert(rte_get_timer_cycles() < deadline);
     } while (hits != 32 || bytes != 2048);
+    /** 失败更新保留旧 COUNT，成功更新在同一次软件发布中交换两条策略并重置新版本计数 */
+    struct dppd_flow_update_request updates[2] = {{removals[0].generation, request(&fixture, true, 1)},
+        {removals[1].generation, request(&fixture, false, 2)}};
+    updates[0].replacement.rule.matches[2].spec.l4.dst_be = rte_cpu_to_be_16(9000);
+    updates[1].replacement.rule.matches[2].spec.l4.dst_be = rte_cpu_to_be_16(9001);
+    assert(dppd_flow_service_update(fixture.service, 0, updates, 2, now_ns(), &job) == 0);
+    assert(dppd_flow_service_process(fixture.service, now_ns(), 64) == 0);
+    fail_allocation = 1;
+    result = finish(&fixture, &job);
+    assert(!result.applied && result.status == -ENOMEM);
+    assert(dppd_software_backend_query_count(&fixture.software, 1, removals[0].generation, &hits, &bytes) == 0);
+    assert(hits == 32 && bytes == 2048);
+    traffic(&fixture, 9000, 8, true, false);
+    traffic(&fixture, 9001, 8, false, true);
+    assert(dppd_flow_service_update(fixture.service, 0, updates, 2, now_ns(), &job) == 0);
+    assert(dppd_flow_service_process(fixture.service, now_ns(), 1) == 0);
+    traffic(&fixture, 9000, 8, true, false);
+    traffic(&fixture, 9001, 8, false, true);
+    result = finish(&fixture, &job);
+    assert(result.applied && result.update);
+    removals[0].generation = result.generations[0];
+    removals[1].generation = result.generations[1];
+    traffic(&fixture, 9000, 8, false, true);
+    traffic(&fixture, 9001, 8, true, false);
+    assert(dppd_software_backend_query_count(&fixture.software, 1, removals[0].generation, &hits, &bytes) == 0);
+    assert(hits == 8 && bytes == 512);
     assert(dppd_flow_service_remove(fixture.service, 0, removals, 2, now_ns(), &job) == 0);
     assert(dppd_flow_service_process(fixture.service, now_ns(), 1) == 0);
-    traffic(&fixture, 9000, 16, true, false);
-    traffic(&fixture, 9001, 16, false, true);
+    traffic(&fixture, 9000, 16, false, true);
+    traffic(&fixture, 9001, 16, true, false);
     result = finish(&fixture, &job);
     assert(result.status == 0 && result.applied);
     traffic(&fixture, 9000, 32, false, false);
@@ -257,7 +283,8 @@ int main(int argc, char **argv)
     }
     assert(rte_eal_cleanup() == 0);
     printf("PASS M4 worker rx=%" PRIu64 " forwarded=%" PRIu64 " dropped=%" PRIu64
-           " atomic-create=passed atomic-delete=passed allocation-rollback=passed MARK=42 COUNT=32/2048"
+           " atomic-create=passed atomic-delete=passed atomic-update=passed update-count-reset=passed"
+           " allocation-rollback=passed MARK=42 COUNT=32/2048"
            " native-rejection=%d mbuf-leaks=0 hardware=not_run\n",
         fixture.sent, fixture.forwarded, fixture.dropped, native_result);
     return 0;

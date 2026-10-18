@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <rte_byteorder.h>
 #include <rte_flow.h>
 #include <rte_version.h>
@@ -70,7 +71,7 @@ struct model_completion {
     bool destroy, failure;
 };
 
-static struct model_flow *flows[64];
+static struct model_flow *flows[128];
 static struct model_completion completions[128];
 static unsigned int flow_count, completion_count, ready;
 static bool emit_age, fail_create_completion, fail_destroy_completion, fail_table_destroy;
@@ -114,7 +115,7 @@ int __wrap_rte_flow_info_get(uint16_t port, struct rte_flow_port_info *info, str
     assert(port == 7);
     *info = (struct rte_flow_port_info){.max_nb_queues = 1,
         .max_nb_counters = 2,
-        .max_nb_aging_objects = 64,
+        .max_nb_aging_objects = 128,
         .supported_flags = RTE_FLOW_PORT_FLAG_STRICT_QUEUE};
     queue->max_size = 64;
     return 0;
@@ -125,7 +126,7 @@ int __wrap_rte_flow_configure(uint16_t port, const struct rte_flow_port_attr *at
 {
     (void)error;
     assert(port == 7 && queues == 1 && attributes[0]->size == 64 && attr->nb_counters == 2);
-    assert(attr->nb_aging_objects == 64 && attr->flags == RTE_FLOW_PORT_FLAG_STRICT_QUEUE);
+    assert(attr->nb_aging_objects == 128 && attr->flags == RTE_FLOW_PORT_FLAG_STRICT_QUEUE);
     return 0;
 }
 
@@ -158,7 +159,7 @@ struct rte_flow_template_table *__wrap_rte_flow_template_table_create(uint16_t p
     struct rte_flow_actions_template *actions[], uint8_t na, struct rte_flow_error *error)
 {
     (void)error;
-    assert(port == 7 && np == 1 && na == 1 && attr->flow_attr.group == 1 && attr->nb_flows == 64);
+    assert(port == 7 && np == 1 && na == 1 && attr->flow_attr.group == 1 && attr->nb_flows == 128);
     assert(patterns[0] == (struct rte_flow_pattern_template *)&pattern_object);
     assert(actions[0] == (struct rte_flow_actions_template *)&actions_object);
     return (struct rte_flow_template_table *)&table_object;
@@ -197,7 +198,7 @@ struct rte_flow *__wrap_rte_flow_async_create(uint16_t port, uint32_t queue, con
     assert(table == (struct rte_flow_template_table *)&table_object && pattern[1].type == RTE_FLOW_ITEM_TYPE_IPV4);
     assert(actions[0].type == RTE_FLOW_ACTION_TYPE_INDIRECT && actions[0].conf == expected_counter);
     struct model_flow *flow = calloc(1, sizeof(*flow));
-    assert(flow != NULL && flow_count < 64 && completion_count < 128);
+    assert(flow != NULL && flow_count < 128 && completion_count < 128);
     flow->counter = (struct model_counter *)actions[0].conf;
     flow->age = actions[1].conf;
     assert(actions[1].type == RTE_FLOW_ACTION_TYPE_AGE && flow->age->context == tag);
@@ -285,7 +286,7 @@ static struct dppd_flow_job_result finish(struct dppd_flow_service *service, con
 
 int main(void)
 {
-    struct dppd_admission_config limits = {.ticket_capacity = 256, .port_count = 1};
+    struct dppd_admission_config limits = {.ticket_capacity = 320, .port_count = 1};
     struct dppd_admission *admission = NULL;
     struct dppd_flow_shared_counts *counts = NULL;
     struct dppd_flow_templates *templates = NULL;
@@ -294,20 +295,20 @@ int main(void)
     uint64_t hits, bytes;
     limits.ports[0].port_id = 7;
     for (unsigned int k = 0; k < DPPD_RESOURCE_KIND_COUNT; ++k)
-        limits.limits[k] = limits.ports[0].limits[k] = 64;
+        limits.limits[k] = limits.ports[0].limits[k] = 128;
     limits.limits[DPPD_RESOURCE_COUNTER] = limits.ports[0].limits[DPPD_RESOURCE_COUNTER] = 2;
     assert(dppd_admission_create(&limits, &admission) == 0);
 #if RTE_VERSION >= RTE_VERSION_NUM(24, 11, 0, 0)
-    assert(dppd_native_flow_configure(7, 1, 64, 2, 64) == 0);
+    assert(dppd_native_flow_configure(7, 1, 64, 2, 128) == 0);
 #else
-    assert(dppd_native_flow_configure(7, 1, 64, 2, 64) == -ENOTSUP);
+    assert(dppd_native_flow_configure(7, 1, 64, 2, 128) == -ENOTSUP);
 #endif
     struct dppd_flow_shared_count_driver counter_driver = dppd_native_flow_shared_count_driver();
-    assert(dppd_flow_shared_counts_create(admission, 256, &counter_driver, &counts) == 0);
+    assert(dppd_flow_shared_counts_create(admission, 512, &counter_driver, &counts) == 0);
     assert(dppd_flow_shared_counts_add(counts, UINT64_C(0x100000001), 7, DPPD_RULE_DOMAIN_INGRESS, &a) == 0);
     struct model_counter *counter_a = last_counter;
     assert(dppd_flow_shared_counts_add(counts, UINT64_C(0x200000001), 7, DPPD_RULE_DOMAIN_INGRESS, &b) == 0);
-    struct dppd_flow_template_spec shape = {.capacity = 64, .dynamic_actions = 1};
+    struct dppd_flow_template_spec shape = {.capacity = 128, .dynamic_actions = 1};
     shape.example = (struct dppd_rule){.id = 1, .install_port_id = 7, .group = 1, .nb_matches = 2, .nb_actions = 3};
     shape.example.matches[0].type = DPPD_MATCH_ETH;
     shape.example.matches[1].type = DPPD_MATCH_IPV4;
@@ -318,7 +319,7 @@ int main(void)
     shape.example.actions[1] = (struct dppd_action){.type = DPPD_ACTION_AGE, .conf.age_timeout_seconds = 1};
     shape.example.actions[2].type = DPPD_ACTION_DROP;
     struct dppd_flow_template_driver template_driver = dppd_native_flow_template_driver_shared(counts);
-    assert(dppd_flow_templates_create(admission, 128, &template_driver, &templates) == 0);
+    assert(dppd_flow_templates_create(admission, 256, &template_driver, &templates) == 0);
 #if RTE_VERSION >= RTE_VERSION_NUM(24, 11, 0, 0)
     expected_counter = counter_a;
     assert(dppd_flow_template_create(templates, &shape, &table) == 0);
@@ -330,7 +331,7 @@ int main(void)
         .flow_resource = DPPD_RESOURCE_HARDWARE_FLOW,
         .port_id = 7,
         .depth = 64,
-        .flow_capacity = 64};
+        .flow_capacity = 128};
     assert(dppd_async_flow_queue_create(&queue_config, &queue) == 0);
     struct dppd_flow_service *service = NULL;
     struct dppd_flow_service_config service_config = {.admission = admission,
@@ -366,6 +367,22 @@ int main(void)
         bytes == 8192);
     assert(dppd_flow_shared_counts_query(counts, a.spec.id, a.spec.generation, &hits, &bytes) == 0 && hits == 0 &&
         bytes == 0);
+    /** 整批从 B 改绑到 A，旧 pin 在全部旧流删除前持续保护 B，物理计数器额度仍只占两个 */
+    struct dppd_flow_update_request updates[64];
+    for (unsigned int i = 0; i < 64; ++i) {
+        updates[i] = (struct dppd_flow_update_request){i + 1U, requests[i]};
+        updates[i].replacement.rule.actions[0].conf.shared_count.id = a.spec.id;
+        updates[i].replacement.rule.actions[0].conf.shared_count.generation = a.spec.generation;
+    }
+    expected_counter = counter_a;
+    assert(dppd_flow_service_update(service, 0, updates, 64, 3, &job) == 0);
+    assert(dppd_flow_shared_counts_remove(counts, b.spec.id, b.spec.generation) == -EBUSY);
+    struct dppd_flow_job_result updated = finish(service, &job, 4);
+    if (!updated.applied)
+        fprintf(stderr, "shared update status=%d flows=%u\n", updated.status, flow_count);
+    assert(updated.applied && flow_count == 64);
+    assert(dppd_flow_shared_counts_get(counts, b.spec.id, b.spec.generation, &info) == 0 && info.references == 0);
+    assert(dppd_flow_shared_counts_get(counts, a.spec.id, a.spec.generation, &info) == 0 && info.references == 129);
     emit_age = true;
     for (unsigned int i = 0; i < 16; ++i)
         assert(dppd_flow_service_process(service, UINT64_C(200000000), 64) == 0);
@@ -373,6 +390,8 @@ int main(void)
     assert(dppd_flow_shared_counts_get(counts, b.spec.id, b.spec.generation, &info) == 0 && info.references == 0);
     assert(dppd_flow_shared_counts_query(counts, b.spec.id, b.spec.generation, &hits, &bytes) == 0 && hits == 128 &&
         bytes == 8192);
+    assert(dppd_flow_shared_counts_get(counts, a.spec.id, a.spec.generation, &info) == 0 && info.references == 1);
+    expected_counter = last_counter;
     requests[0].rule.id = 100;
     requests[1].rule.id = 101;
     fail_create_completion = fail_destroy_completion = true;

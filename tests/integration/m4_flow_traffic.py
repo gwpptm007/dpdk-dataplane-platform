@@ -42,15 +42,16 @@ def main():
             with (destination / "traffic.log").open("w") as log:
                 report["returncode"] = run_command(command, root, log, 60)
         text = (destination / "traffic.log").read_text()
-        expected = "PASS M4 worker rx=224 forwarded=176 dropped=48"
+        expected = "PASS M4 worker rx=272 forwarded=200 dropped=72"
         if report["returncode"] != 0 or expected not in text:
             raise RuntimeError("M4 真实报文、统计或进程清理未通过")
         if not all(token in text for token in ("atomic-create=passed", "atomic-delete=passed",
-                   "allocation-rollback=passed", "MARK=42 COUNT=32/2048", "mbuf-leaks=0", "hardware=not_run")):
+                   "atomic-update=passed", "update-count-reset=passed", "allocation-rollback=passed",
+                   "MARK=42 COUNT=32/2048", "mbuf-leaks=0", "hardware=not_run")):
             raise RuntimeError("缺少批量发布、回滚、COUNT 或资源回收证据")
         if "native-rejection=-95" not in text and "native-rejection=-38" not in text:
             raise RuntimeError("真实 net_ring 未明确拒绝原生模板配置")
-        report["packets"] = {"received": 224, "forwarded": 176, "dropped": 48}
+        report["packets"] = {"received": 272, "forwarded": 200, "dropped": 72}
         if source_digest(root) != report["source_sha256"]:
             raise RuntimeError("测试期间源码改变")
         report["success"] = True

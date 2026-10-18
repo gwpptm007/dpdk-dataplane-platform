@@ -36,14 +36,24 @@ struct job_item {
     bool pending, have_flow, healthy;
 };
 
+/** 更新期间旧模板和共享引用始终保留，临时数据只为更新任务分配，不放大所有队列槽位 */
+struct update_item {
+    struct dppd_async_flow_create_request original;
+    struct service_rule record;
+    struct dppd_flow_template_lease pin;
+    struct dppd_async_flow_id replacement;
+    bool old_have, old_healthy;
+};
+
 struct flow_job {
     struct dppd_async_flow_create_request requests[64];
     struct job_item items[64];
     struct dppd_flow_job_result result;
+    struct update_item *updates;
     uint64_t serial, submitted_ns;
     uint32_t queue, waiting;
     enum job_state state;
-    bool cleanup_failed, publication_unknown, auto_collect;
+    bool cleanup_failed, publication_unknown, auto_collect, old_phase, restoring;
 };
 
 /** 多个队列可各自积压有界请求，控制消费者按顺序提交一整批，避免版本与账本交叉发布 */
@@ -359,6 +369,124 @@ int dppd_flow_service_remove(struct dppd_flow_service *service, uint32_t queue,
     return submit_remove(service, queue, requests, count, now_ns, false, id);
 }
 
+/** 更新只借用原逻辑额度，受理时锁定全部旧版本并保护新模板，失败时逐项撤销准备 */
+int dppd_flow_service_update(struct dppd_flow_service *service, uint32_t queue,
+    const struct dppd_flow_update_request *requests, uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *id)
+{
+    struct flow_job *job;
+    uint32_t job_slot, prepared = 0;
+    int rc;
+    if (service == NULL || requests == NULL || id == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&service->lock);
+    rc = new_job(service, queue, count, now_ns, false, &job, &job_slot);
+    if (rc != 0)
+        goto done;
+    job->updates = calloc(count, sizeof(*job->updates));
+    if (job->updates == NULL) {
+        rc = -ENOMEM;
+        goto failed;
+    }
+    job->result.update = true;
+    for (; prepared < count; ++prepared) {
+        const struct dppd_async_flow_create_request *request = &requests[prepared].replacement;
+        const struct dppd_rule *rule = &request->rule;
+        uint32_t slot = dppd_slot_index_find(&service->owners, rule->id, 0);
+        struct update_item *update = &job->updates[prepared];
+        struct service_rule *record;
+        if (slot == DPPD_SLOT_NONE || requests[prepared].expected_generation == 0 ||
+            requests[prepared].expected_generation == UINT64_MAX) {
+            rc = -ESTALE;
+            break;
+        }
+        record = &service->records[slot];
+        if (!record->committed || record->busy) {
+            rc = -EBUSY;
+            break;
+        }
+        if (rule->generation != 0 || rule->install_port_id != service->config.port_id ||
+            (service->config.software != NULL && rule->fallback != DPPD_FALLBACK_SOFTWARE_ONLY) ||
+            (service->config.software == NULL && rule->fallback == DPPD_FALLBACK_SOFTWARE_ONLY)) {
+            rc = -EINVAL;
+            break;
+        }
+        rc = dppd_rule_repository_get(&service->rules, rule->id, &update->original.rule);
+        if (rc != 0 || update->original.rule.generation != requests[prepared].expected_generation) {
+            rc = -ESTALE;
+            break;
+        }
+        rc = dppd_flow_template_pin(service->config.templates, &request->table, rule, &update->pin);
+        if (rc != 0)
+            break;
+        update->original.table = record->table;
+        update->record = *record;
+        update->old_have = update->old_healthy = true;
+        job->items[prepared].slot = slot;
+        job->requests[prepared] = *request;
+        job->result.ids[prepared] = rule->id;
+        record->busy = true;
+        record->job = job_slot;
+        record->item = prepared;
+    }
+    if (rc != 0)
+        goto failed;
+    job->state = JOB_NEW;
+    service->weights[queue] += count;
+    ++service->status.jobs;
+    *id = (struct dppd_flow_job_id){service->owner, job->serial, job_slot};
+    goto done;
+failed:
+    for (uint32_t i = 0; i < prepared; ++i) {
+        dppd_flow_template_release(service->config.templates, &job->updates[i].pin);
+        service->records[job->items[i].slot].busy = false;
+    }
+    free(job->updates);
+    memset(job, 0, sizeof(*job));
+done:
+    pthread_mutex_unlock(&service->lock);
+    return rc;
+}
+
+/** 一个阶段只跟踪一组完成凭据，切换前保存另一组实际状态，不按规则 ID 猜测句柄 */
+static void select_update_flows(struct dppd_flow_service *service, struct flow_job *job, bool old)
+{
+    if (!job->result.update || job->old_phase == old)
+        return;
+    for (uint32_t i = 0; i < job->result.count; ++i) {
+        struct job_item *item = &job->items[i];
+        struct update_item *update = &job->updates[i];
+        struct service_rule *record = &service->records[item->slot];
+        if (old) {
+            update->replacement = record->flow;
+            record->flow = update->record.flow;
+            record->queue = update->record.queue;
+            item->have_flow = update->old_have;
+            item->healthy = update->old_healthy;
+        } else {
+            update->record.flow = record->flow;
+            update->old_have = item->have_flow;
+            update->old_healthy = item->healthy;
+            record->flow = update->replacement;
+            record->queue = job->queue;
+            item->have_flow = item->healthy = true;
+        }
+    }
+    job->old_phase = old;
+}
+
+static int release_update_pins(struct dppd_flow_service *service, struct flow_job *job)
+{
+    for (uint32_t i = 0; i < job->result.count; ++i) {
+        if (dppd_flow_template_release(service->config.templates, &job->updates[i].pin) != 0) {
+            job->publication_unknown = true;
+            job->state = JOB_RESIDUAL;
+            isolate(service, -EUCLEAN);
+            return -EUCLEAN;
+        }
+    }
+    return 0;
+}
+
 static bool rule_aging(const struct dppd_rule *rule)
 {
     for (uint16_t i = 0; i < rule->nb_actions; ++i)
@@ -406,7 +534,8 @@ static int software_publish(struct dppd_flow_service *service, struct flow_job *
         return 0;
     for (uint32_t i = 0; i < job->result.count; ++i)
         changes[i] = (struct dppd_software_change){job->requests[i].rule.id,
-            job->result.remove ? job->requests[i].rule.generation : 0,
+            job->result.update ? job->updates[i].original.rule.generation
+                               : (job->result.remove ? job->requests[i].rule.generation : 0),
             job->result.remove ? NULL : &job->requests[i].rule};
     return dppd_software_backend_change_batch(service->config.software, changes, job->result.count);
 }
@@ -415,12 +544,15 @@ static int software_publish(struct dppd_flow_service *service, struct flow_job *
 static int publish(struct dppd_flow_service *service, struct flow_job *job)
 {
     struct dppd_rule rules[64];
+    uint64_t expected[64];
     uint64_t base = service->rules.generation;
     uint32_t count = job->result.count;
     int rc;
     for (uint32_t i = 0; i < count; ++i) {
         rules[i] = job->requests[i].rule;
-        if (!job->result.remove) {
+        if (job->result.update)
+            expected[i] = job->updates[i].original.rule.generation;
+        if (!job->result.remove && !job->result.update) {
             rc = dppd_admission_commit(service->config.admission, &service->records[job->items[i].slot].ticket);
             if (rc != 0)
                 return rc;
@@ -429,8 +561,9 @@ static int publish(struct dppd_flow_service *service, struct flow_job *job)
     rc = software_publish(service, job);
     if (rc != 0)
         return rc;
-    rc = job->result.remove ? dppd_rule_repository_remove_batch(&service->rules, rules, count)
-                            : dppd_rule_repository_create_batch(&service->rules, rules, count);
+    rc = job->result.update  ? dppd_rule_repository_update_batch(&service->rules, rules, expected, count)
+        : job->result.remove ? dppd_rule_repository_remove_batch(&service->rules, rules, count)
+                             : dppd_rule_repository_create_batch(&service->rules, rules, count);
     if (rc != 0) {
         isolate(service, -EUCLEAN);
         job->state = JOB_RESIDUAL;
@@ -451,6 +584,21 @@ static int publish(struct dppd_flow_service *service, struct flow_job *job)
             if (rule_aging(&rules[i]))
                 --service->status.aged_rules;
         } else {
+            if (job->result.update) {
+                if (dppd_flow_template_release(service->config.templates, &record->pin) != 0) {
+                    job->publication_unknown = true;
+                    job->state = JOB_RESIDUAL;
+                    isolate(service, -EUCLEAN);
+                    return -EUCLEAN;
+                }
+                record->pin = job->updates[i].pin;
+                job->updates[i].pin = (struct dppd_flow_template_lease){0};
+                record->table = job->requests[i].table;
+                record->flow = job->updates[i].replacement;
+                record->queue = job->queue;
+                if (rule_aging(&job->updates[i].original.rule))
+                    --service->status.aged_rules;
+            }
             record->committed = true;
             record->busy = false;
             if (rule_aging(&rules[i]))
@@ -459,6 +607,22 @@ static int publish(struct dppd_flow_service *service, struct flow_job *job)
     }
     complete_job(service, job, true);
     return 0;
+}
+
+static void delete_originals(struct dppd_flow_service *service, struct flow_job *job, uint64_t now_ns)
+{
+    select_update_flows(service, job, true);
+    job->state = JOB_DELETE_WAIT;
+    for (uint32_t i = 0; i < job->result.count; ++i) {
+        struct service_rule *record = &service->records[job->items[i].slot];
+        int rc = dppd_async_flow_destroy(service->config.queues[record->queue], &record->flow, now_ns);
+        if (rc == 0) {
+            job->items[i].pending = true;
+            ++job->waiting;
+        } else if (job->result.status == 0) {
+            job->result.status = rc;
+        }
+    }
 }
 
 /** 开始处理时才分配连续版本，先检查整批版本空间，过期的未发送请求可以直接撤销 */
@@ -490,17 +654,7 @@ static void activate(struct dppd_flow_service *service, struct flow_job *job, ui
         return;
     }
     if (job->result.remove) {
-        job->state = JOB_DELETE_WAIT;
-        for (uint32_t i = 0; i < count; ++i) {
-            struct service_rule *record = &service->records[job->items[i].slot];
-            rc = dppd_async_flow_destroy(service->config.queues[record->queue], &record->flow, now_ns);
-            if (rc == 0) {
-                job->items[i].pending = true;
-                ++job->waiting;
-            } else if (job->result.status == 0) {
-                job->result.status = rc;
-            }
-        }
+        delete_originals(service, job, now_ns);
         return;
     }
     for (uint32_t i = 0; i < count; ++i)
@@ -513,6 +667,7 @@ static void activate(struct dppd_flow_service *service, struct flow_job *job, ui
     }
     for (uint32_t i = 0; i < count; ++i) {
         service->records[job->items[i].slot].flow = flows[i];
+        service->records[job->items[i].slot].queue = job->queue;
         job->items[i].pending = true;
         job->items[i].have_flow = true;
     }
@@ -563,7 +718,7 @@ static void cleanup(struct dppd_flow_service *service, struct flow_job *job, uin
     for (uint32_t i = 0; i < job->result.count; ++i) {
         struct job_item *item = &job->items[i];
         struct service_rule *record = &service->records[item->slot];
-        if (!item->have_flow || (job->result.remove && item->healthy))
+        if (!item->have_flow || ((job->result.remove || job->restoring) && item->healthy))
             continue;
         ++remaining;
         int rc = dppd_async_flow_destroy(service->config.queues[record->queue], &record->flow, now_ns);
@@ -580,7 +735,9 @@ static void cleanup(struct dppd_flow_service *service, struct flow_job *job, uin
         job->state = JOB_RESIDUAL;
         isolate(service, -EUCLEAN);
     } else if (remaining == 0) {
-        if (job->result.remove) {
+        if (job->result.remove || job->result.update) {
+            select_update_flows(service, job, true);
+            job->restoring = job->result.update;
             job->state = JOB_RESTORE_START;
         } else {
             for (uint32_t i = 0; i < job->result.count; ++i)
@@ -609,7 +766,7 @@ static void restore(struct dppd_flow_service *service, struct flow_job *job, uin
             if (job->items[i].healthy) {
                 ++healthy;
             } else if (!job->items[i].have_flow) {
-                requests[count] = job->requests[i];
+                requests[count] = job->result.update ? job->updates[i].original : job->requests[i];
                 item_indices[count++] = i;
             }
         }
@@ -628,6 +785,8 @@ static void restore(struct dppd_flow_service *service, struct flow_job *job, uin
         }
     }
     if (healthy == job->result.count) {
+        if (job->result.update && release_update_pins(service, job) != 0)
+            return;
         for (uint32_t i = 0; i < job->result.count; ++i)
             service->records[job->items[i].slot].busy = false;
         complete_job(service, job, false);
@@ -647,12 +806,18 @@ static void advance(struct dppd_flow_service *service, struct flow_job *job, uin
     switch (job->state) {
     case JOB_CREATE_WAIT:
     case JOB_DELETE_WAIT:
+        if (job->state == JOB_CREATE_WAIT && job->result.update && job->result.status == 0) {
+            delete_originals(service, job, now_ns);
+            break;
+        }
         if (job->result.status == 0) {
             int rc = publish(service, job);
             if (rc == 0 || job->state == JOB_RESIDUAL)
                 break;
             job->result.status = rc;
         }
+        if (job->result.update)
+            select_update_flows(service, job, false);
         job->state = job->result.remove ? JOB_RESTORE_START : JOB_CLEAN_START;
         break;
     case JOB_CLEAN_START:
@@ -734,6 +899,7 @@ int dppd_flow_service_collect(struct dppd_flow_service *service, const struct dp
         service->weights[job->queue] -= job->result.count;
         --service->status.jobs;
         --service->status.completed;
+        free(job->updates);
         memset(job, 0, sizeof(*job));
     }
     pthread_mutex_unlock(&service->lock);
@@ -755,8 +921,10 @@ int dppd_flow_service_cancel(struct dppd_flow_service *service, const struct dpp
     else if (job->state != JOB_NEW)
         rc = -EBUSY;
     else {
+        if (job->result.update)
+            rc = release_update_pins(service, job);
         for (uint32_t i = 0; i < job->result.count; ++i)
-            if (job->result.remove)
+            if (job->result.remove || job->result.update)
                 service->records[job->items[i].slot].busy = false;
             else if (release_record(service, job->requests[i].rule.id, job->items[i].slot) != 0)
                 rc = -EUCLEAN;

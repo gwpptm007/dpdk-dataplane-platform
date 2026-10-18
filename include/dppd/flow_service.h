@@ -24,10 +24,15 @@ struct dppd_flow_remove_request {
     uint64_t id, generation;
 };
 
+struct dppd_flow_update_request {
+    uint64_t expected_generation;
+    struct dppd_async_flow_create_request replacement;
+};
+
 struct dppd_flow_job_result {
     uint32_t count;
     int status;
-    bool applied, remove;
+    bool applied, remove, update;
     uint64_t ids[64], generations[64];
 };
 
@@ -52,6 +57,9 @@ int dppd_flow_service_submit(struct dppd_flow_service *service, uint32_t queue,
     struct dppd_flow_job_id *job);
 int dppd_flow_service_remove(struct dppd_flow_service *service, uint32_t queue,
     const struct dppd_flow_remove_request *requests, uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *job);
+/** 先创建全部新版本再删除旧流，账本和软件分类整批发布，临时实际容量不足时保留旧规则 */
+int dppd_flow_service_update(struct dppd_flow_service *service, uint32_t queue,
+    const struct dppd_flow_update_request *requests, uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *job);
 /** 同一控制消费者按受理顺序执行完整批次，驱动完成仍可乱序，不等待硬件 */
 int dppd_flow_service_process(struct dppd_flow_service *service, uint64_t now_ns, uint32_t budget);
 /** 未完成返回 EAGAIN，补偿残留返回 EUCLEAN 且保留任务，只有完整终态才释放回执槽位 */
