@@ -457,6 +457,16 @@ int dppd_flow_store_status(struct dppd_flow_store *s, struct dppd_flow_store_sta
     return 0;
 }
 
+int dppd_flow_store_config(struct dppd_flow_store *s, struct dppd_flow_state_config *config)
+{
+    if (s == NULL || config == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    *config = s->state->config;
+    pthread_mutex_unlock(&s->lock);
+    return 0;
+}
+
 struct dppd_software_backend *dppd_flow_store_software(struct dppd_flow_store *s)
 {
     if (s == NULL)
@@ -471,6 +481,47 @@ struct dppd_software_backend *dppd_flow_store_software(struct dppd_flow_store *s
     }
     pthread_mutex_unlock(&s->lock);
     return result;
+}
+
+int dppd_flow_store_list(struct dppd_flow_store *s, uint64_t after, uint64_t expected,
+    struct dppd_flow_state_rule *rules, uint32_t capacity, uint32_t *count, uint64_t *revision, bool *more)
+{
+    if (s == NULL || rules == NULL || capacity == 0 || count == NULL || revision == NULL || more == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = available(s);
+    if (rc == 0 && expected != UINT64_MAX && expected != s->state->revision)
+        rc = -ESTALE;
+    if (rc == 0) {
+        *count = 0;
+        *more = false;
+        *revision = s->state->revision;
+        for (uint32_t i = 0; i < s->state->rule_count; ++i) {
+            if (s->state->rules[i].rule.id <= after)
+                continue;
+            if (*count == capacity) {
+                *more = true;
+                break;
+            }
+            rules[(*count)++] = s->state->rules[i];
+        }
+    }
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_query_count(struct dppd_flow_store *s, uint64_t id, uint64_t generation, uint64_t *hits,
+    uint64_t *bytes)
+{
+    if (s == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = available(s);
+    if (rc == 0)
+        rc = s->software.lock_initialized ? dppd_software_backend_query_count(&s->software, id, generation, hits, bytes)
+                                          : -ENOTSUP;
+    pthread_mutex_unlock(&s->lock);
+    return rc;
 }
 
 int dppd_flow_store_get(struct dppd_flow_store *s, uint64_t id, struct dppd_rule *rule)

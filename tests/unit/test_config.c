@@ -181,5 +181,14 @@ int main(void)
     assert(dppd_config_parse(5, discovery, &config) == DPPD_CONFIG_ERROR);
     discovery[4] = "0,fe80::10,4095";
     assert(dppd_config_parse(5, discovery, &config) == DPPD_CONFIG_ERROR);
+    /** 新模式是显式选择，不能同时启动旧快照或路由控制面 */
+    dppd_config_defaults(&config);
+    strcpy(config.flow_state_path, "/private/m4-state");
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    strcpy(config.state_path, "/private/legacy-state");
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.state_path[0] = '\0';
+    strcpy(config.routing_path, "/private/routes");
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
     return 0;
 }

@@ -21,6 +21,7 @@ def main():
     destination.mkdir(parents=True, exist_ok=True)
     report = {"success": False, "scope": "M5_M4_configuration_persistence_and_process_restart",
               "m4_configuration_recovery_validated": False, "complete_m5_validation": False,
+              "m4_daemon_protocol_validated": False,
               "hardware_acceptance": "not_run", "source_sha256": source_digest(root), "steps": [],
               "started_utc": datetime.now(timezone.utc).isoformat()}
     output = destination / "report.json"
@@ -31,6 +32,8 @@ def main():
                                "--report-dir", str(destination / "m4")], None, destination / "m4/report.json"),
             ("fresh_process_worker", [sys.executable, "tests/integration/m5_flow_restart.py", "--build-dir", str(build),
                                       "--report-dir", str(destination / "restart")], 180, destination / "restart/report.json"),
+            ("formal_daemon", [sys.executable, "tests/integration/m5_daemon.py", "--build-dir", str(build),
+                               "--report-dir", str(destination / "daemon")], 180, destination / "daemon/report.json"),
         )
         for name, command, timeout, path in commands:
             path.unlink(missing_ok=True)
@@ -48,22 +51,26 @@ def main():
                     raise ValueError("要求严格构建并开启断言")
                 report["unit_passed"] = result["unit_passed"]
                 report["dpdk"] = result["dpdk"]
-            else:
+            elif name == "fresh_process_worker":
                 if [item["name"] for item in result["stages"]] != ["before", "after"] or result["packets"] != {
                         "received": 96, "forwarded": 48, "dropped": 48}:
                     raise ValueError("缺少两个全新进程的实际报文及统计")
                 report["restart_packets"] = result["packets"]
+            elif len(result["steps"]) != 4:
+                raise ValueError("缺少正式 daemon 配置与管理闭环")
         tests = [json.loads(line) for line in (build / "meson-logs/testlog.json").read_text().splitlines()]
         required = ("M5 M4 configuration codec integrity and atomic persistence",
                     "M5 M4 durable receipts crash replay and residual cleanup",
                     "M5 16384 rule configuration replay and exact teardown",
                     "M5 configuration CLI create check and software replay")
+        required += ("M5 managed protocol durable receipts and session boundaries",)
         for name in required:
             if not any(test["name"] == name and test["result"] == "OK" and test["returncode"] == 0 for test in tests):
                 raise ValueError("缺少配置恢复验收：" + name)
         if source_digest(root) != report["source_sha256"]:
             raise ValueError("验收期间源码改变")
         report["success"] = report["m4_configuration_recovery_validated"] = True
+        report["m4_daemon_protocol_validated"] = True
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
         report["error"] = str(error)
         print(str(error), file=sys.stderr)

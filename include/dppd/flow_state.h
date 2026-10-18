@@ -72,6 +72,13 @@ int dppd_flow_store_open(const char *path, const struct dppd_flow_store_runtime 
 /** 先停止并注销 worker，未领取任务返回 EBUSY，已知残留保留凭据和写锁供重试关闭 */
 int dppd_flow_store_close(struct dppd_flow_store **store);
 int dppd_flow_store_status(struct dppd_flow_store *store, struct dppd_flow_store_status *status);
+/** 返回独占锁保护下实际恢复的配置，启动检查不能复用加锁前读取的文件副本 */
+int dppd_flow_store_config(struct dppd_flow_store *store, struct dppd_flow_state_config *config);
+/** 仅分页读取已可靠保存的规则，精确修订号可防止翻页时混入另一批配置 */
+int dppd_flow_store_list(struct dppd_flow_store *store, uint64_t after, uint64_t expected,
+    struct dppd_flow_state_rule *rules, uint32_t capacity, uint32_t *count, uint64_t *revision, bool *more);
+int dppd_flow_store_query_count(struct dppd_flow_store *store, uint64_t id, uint64_t generation, uint64_t *hits,
+    uint64_t *bytes);
 struct dppd_software_backend *dppd_flow_store_software(struct dppd_flow_store *store);
 int dppd_flow_store_get(struct dppd_flow_store *store, uint64_t id, struct dppd_rule *rule);
 /** 重启后共享对象身份保留，驱动累计值从零开始，查询不修改配置或计数 */

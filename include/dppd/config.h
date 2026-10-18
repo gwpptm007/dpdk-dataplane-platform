@@ -61,6 +61,8 @@ struct dppd_config {
     char control_socket[DPPD_CONTROL_SOCKET_PATH_CAPACITY];
     /* 为空表示禁用持久化；非空时启动必须成功恢复或创建该 snapshot */
     char state_path[DPPD_STATE_PATH_CAPACITY];
+    /** 显式启用 M4 管理实例，完整配置由此文件恢复，与旧控制面互斥 */
+    char flow_state_path[DPPD_STATE_PATH_CAPACITY];
     /** 非空时显式启用双栈路由并使用独立配置快照，默认仍为固定端口对转发 */
     char routing_path[DPPD_STATE_PATH_CAPACITY];
     /** 显式启用跨进程安装保护，须与 state_path 配对，默认不创建额外文件 */

@@ -2,6 +2,7 @@
 #include "dppd/management.h"
 #include "dppd/device.h"
 #include "dppd/runtime.h"
+#include "dppd/flow_management.h"
 
 #include <errno.h>
 #include <stddef.h>
@@ -732,14 +733,15 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
     return 0;
 }
 
-int dppd_management_start(struct dppd_management_server *server, struct dppd_control_service *control,
-    const struct dppd_device_set *devices, struct dppd_runtime *runtime, const char *socket_path)
+static int start_server(struct dppd_management_server *server, struct dppd_control_service *control,
+    struct dppd_flow_management *flows, const struct dppd_device_set *devices, struct dppd_runtime *runtime,
+    const char *socket_path)
 {
     struct sockaddr_un address;
     size_t path_length;
     int fd;
 
-    if (server == NULL || control == NULL || devices == NULL || socket_path == NULL)
+    if (server == NULL || (control == NULL) == (flows == NULL) || devices == NULL || socket_path == NULL)
         return -EINVAL;
     path_length = strlen(socket_path);
     if (path_length == 0 || path_length > DPPD_MANAGEMENT_SOCKET_PATH_MAX)
@@ -778,11 +780,24 @@ int dppd_management_start(struct dppd_management_server *server, struct dppd_con
     /* 只有 bind/chmod/listen 全部成功后才发布 started 状态 */
     server->socket_fd = fd;
     server->control = control;
+    server->flows = flows;
     server->devices = devices;
     memcpy(server->socket_path, socket_path, path_length + 1U);
     server->started = true;
     printf("[dppd] management socket=%s\n", socket_path);
     return 0;
+}
+
+int dppd_management_start(struct dppd_management_server *server, struct dppd_control_service *control,
+    const struct dppd_device_set *devices, struct dppd_runtime *runtime, const char *socket_path)
+{
+    return start_server(server, control, NULL, devices, runtime, socket_path);
+}
+
+int dppd_management_start_flow(struct dppd_management_server *server, struct dppd_flow_management *flows,
+    struct dppd_runtime *runtime, const char *socket_path)
+{
+    return runtime == NULL ? -EINVAL : start_server(server, NULL, flows, &runtime->devices, runtime, socket_path);
 }
 
 int dppd_management_poll(struct dppd_management_server *server)
@@ -836,7 +851,10 @@ int dppd_management_poll(struct dppd_management_server *server)
         memset(&request, 0, sizeof(request));
         received = recv(client, &request, sizeof(request), MSG_TRUNC);
         if (received == (ssize_t)sizeof(request)) {
-            (void)dppd_management_handle(server->control, server->devices, server->runtime, &request, &response);
+            if (server->flows != NULL)
+                (void)dppd_flow_management_handle(server->flows, server->runtime, &request, &response);
+            else
+                (void)dppd_management_handle(server->control, server->devices, server->runtime, &request, &response);
         } else {
             memset(&response, 0, sizeof(response));
             response.version = DPPD_MANAGEMENT_VERSION;
@@ -858,7 +876,7 @@ int dppd_management_poll(struct dppd_management_server *server)
          * 如果继续处理已排队的清理请求，就可能在线程仍转发报文时提前删除残留对象
          * 下一轮轮询才接收恢复查询或重试请求，确保生命周期顺序清楚
          */
-        if (server->control->recovery_state != DPPD_CONTROL_RECOVERY_READY)
+        if (server->control != NULL && server->control->recovery_state != DPPD_CONTROL_RECOVERY_READY)
             break;
     }
     return 0;

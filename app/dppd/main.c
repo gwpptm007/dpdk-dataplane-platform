@@ -20,6 +20,7 @@
 #include "dppd/recovery_scope.h"
 #include "dppd/monitor_channel.h"
 #include "dppd/telemetry.h"
+#include "dppd/managed.h"
 
 static volatile sig_atomic_t stop_signal;
 static struct dppd_recovery_scope managed_scope = {.fd = -1};
@@ -363,6 +364,15 @@ int main(int argc, char **argv)
         goto cleanup_eal;
     }
 
+    if (config.flow_state_path[0] != '\0') {
+        char error[256];
+        if (dppd_config_validate(&config, error, sizeof(error)) != 0) {
+            fprintf(stderr, "[dppd] managed configuration refused: %s\n", error);
+            goto cleanup_eal;
+        }
+        rc = dppd_managed_run(&config, &managed_scope);
+        goto cleanup_eal;
+    }
     const char *other_storage[] = {config.state_path, config.recovery_path, config.recovery_monitor,
         config.control_socket};
     int routing_paths_error =

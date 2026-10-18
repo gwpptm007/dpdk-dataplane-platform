@@ -10,6 +10,7 @@
 #include "dppd/nd6.h"
 #include "dppd/transfer.h"
 #include "dppd/device_recovery.h"
+#include "dppd/flow_state.h"
 
 /*
  * 管理协议版本在请求和响应中显式传递。当前实现不做版本协商：版本不一致时
@@ -25,7 +26,8 @@
 /** v25 增加 AGE 策略和老化状态，客户端与 daemon 必须配套更新 */
 /** v26 增加共享 COUNT 的逻辑身份、精确引用和生命周期管理 */
 /** v27 增加正式设备事件状态与精确代次的完整端口组主动复位 */
-#define DPPD_MANAGEMENT_VERSION 27U
+/** v28 增加独占 M4 配置模式，受理凭据与持久完成回执分开查询 */
+#define DPPD_MANAGEMENT_VERSION 28U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -111,6 +113,19 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_SHARED_COUNT_LIST,
     DPPD_MANAGEMENT_DEVICE_STATUS,
     DPPD_MANAGEMENT_DEVICE_RESET,
+    DPPD_MANAGEMENT_FLOW_STATUS,
+    DPPD_MANAGEMENT_FLOW_CREATE,
+    DPPD_MANAGEMENT_FLOW_UPDATE,
+    DPPD_MANAGEMENT_FLOW_REMOVE,
+    DPPD_MANAGEMENT_FLOW_COLLECT,
+    DPPD_MANAGEMENT_FLOW_CANCEL,
+    DPPD_MANAGEMENT_FLOW_RETRY,
+};
+
+/** 随机启动标识阻止重启前的任务凭据误领本次进程的新任务 */
+struct dppd_management_flow_token {
+    uint64_t session;
+    struct dppd_flow_job_id job;
 };
 
 /*
@@ -125,6 +140,16 @@ struct dppd_management_request {
     uint32_t size;       /* 必须等于发送方 sizeof(*request) */
     uint64_t request_id; /* 客户端生成；响应原样回显，用于请求/响应配对 */
     union {
+        struct {
+            uint32_t count, queue;
+            uint64_t expected[4];
+            struct dppd_flow_state_rule rules[4];
+        } flow_change;
+        struct {
+            uint32_t count, queue;
+            struct dppd_flow_remove_request rules[4];
+        } flow_remove;
+        struct dppd_management_flow_token flow_token;
         struct dppd_transfer_spec transfer;
         struct {
             uint64_t expected_sequence;
@@ -391,6 +416,12 @@ struct dppd_management_response {
     int32_t status;
     uint32_t reserved;
     union {
+        struct {
+            uint64_t session;
+            struct dppd_flow_store_status status;
+        } flow_status;
+        struct dppd_management_flow_token flow_token;
+        struct dppd_flow_job_result flow_result;
         struct dppd_conntrack_status conntrack;
         struct dppd_nd6_status nd6;
         struct dppd_nd6_page dynamic_neighbors;
@@ -477,6 +508,7 @@ struct dppd_management_response {
 
 struct dppd_device_set;
 struct dppd_runtime;
+struct dppd_flow_management;
 
 struct dppd_management_server {
     int socket_fd; /* 非阻塞监听 socket；未启动时为 -1 */
@@ -485,6 +517,8 @@ struct dppd_management_server {
     /* device_set 同样由 runtime 持有，必须比 management server 生命周期更长 */
     const struct dppd_device_set *devices;
     struct dppd_runtime *runtime;
+    /** 新模式仅借用管理实例，control 保持为空，不创建第二个 classifier 写入者 */
+    struct dppd_flow_management *flows;
     /* 保存 bind 成功的路径，stop 时只删除本实例创建的 socket */
     char socket_path[DPPD_MANAGEMENT_SOCKET_PATH_MAX + 1U];
     bool started;
@@ -500,6 +534,8 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
 int dppd_management_start(struct dppd_management_server *server, struct dppd_control_service *control,
     const struct dppd_device_set *devices, struct dppd_runtime *runtime, const char *socket_path);
 int dppd_management_poll(struct dppd_management_server *server);
+int dppd_management_start_flow(struct dppd_management_server *server, struct dppd_flow_management *flows,
+    struct dppd_runtime *runtime, const char *socket_path);
 /* stop 可重复调用；成功启动过时会关闭 fd 并删除对应文件系统路径 */
 void dppd_management_stop(struct dppd_management_server *server);
 

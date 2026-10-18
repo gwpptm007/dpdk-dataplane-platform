@@ -337,6 +337,11 @@ rule_observation_test = executable('test_rule_observation', 'test_rule_observati
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=calloc'])
 test('rule failure classification and outcomes', rule_observation_test)
 
+# 正式管理分发搭配真实配置实例，验证落盘失败不能领取成功回执
+flow_management_test = executable('test_flow_management', 'test_flow_management.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])
+test('M5 managed protocol durable receipts and session boundaries', flow_management_test)
+
 # 真实容器配合并发回调，检查完整副本发布与退出时的指针生命周期
 rule_telemetry_unsigned_suffix = dpdk.version().version_compare('>=23.03') ? 'uint' : 'u64'
 rule_telemetry_test = executable('test_rule_telemetry', 'test_rule_telemetry.c',

@@ -48,6 +48,8 @@ dppd_sources = files(
   'lib/control/age.c',
   'lib/control/reset.c',
   'lib/management/server.c',
+  'lib/management/flow_management.c',
+  'lib/runtime/managed.c',
   'lib/dataplane/packet.c',
   'lib/dataplane/ipv6.c',
   'lib/dataplane/nd6.c',

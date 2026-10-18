@@ -310,6 +310,7 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"dnat6", required_argument, NULL, 1014},
         {"nd6", required_argument, NULL, 1015},
         {"nd6-reachable-ms", required_argument, NULL, 1016},
+        {"flow-state", required_argument, NULL, 1017},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -430,6 +431,11 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
             if (parse_u32(optarg, 1000, 3600000, &cfg->nd6_reachable_ms) != 0)
                 return DPPD_CONFIG_ERROR;
             break;
+        case 1017:
+            if (optarg == NULL || optarg[0] == '\0' || strlen(optarg) >= sizeof(cfg->flow_state_path))
+                return DPPD_CONFIG_ERROR;
+            strcpy(cfg->flow_state_path, optarg);
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -459,6 +465,12 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
 
     if (cfg == NULL || error == NULL || error_len == 0)
         return -1;
+    if (cfg->flow_state_path[0] != '\0' &&
+        (cfg->state_path[0] != '\0' || cfg->recovery_path[0] != '\0' || cfg->routing_path[0] != '\0' ||
+            cfg->recovery_monitor[0] != '\0' || cfg->tap_owner_cookie)) {
+        snprintf(error, error_len, "flow-state requires exclusive managed mode without legacy state/routing/recovery");
+        return -1;
+    }
     if (cfg->nd6_count > DPPD_ND6_LOCAL_LIMIT ||
         (cfg->nd6_count != 0 &&
             (cfg->routing_path[0] == '\0' || cfg->nd6_reachable_ms < 1000 || cfg->nd6_reachable_ms > 3600000))) {
@@ -591,6 +603,7 @@ void dppd_config_print_usage(const char *program)
     printf("  --promisc           enable promiscuous mode\n");
     printf("  --enable-pdump      initialize the packet capture service\n");
     printf("  --control-socket P  management socket path (default %s)\n", DPPD_MANAGEMENT_DEFAULT_SOCKET);
+    printf("  --flow-state P      restore complete M4 software configuration in exclusive managed mode\n");
     printf("  --rule-capacity N   maximum number of desired rules (default %u)\n", DPPD_DEFAULT_RULE_CAPACITY);
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");
     printf("  --ipv4-routing P    enable IPv4 routing with a durable route and static-neighbor snapshot\n");

@@ -20,6 +20,11 @@
 static void print_usage(const char *program)
 {
     fprintf(stderr, "usage:\n");
+    fprintf(stderr, "  %s [--socket PATH] flow-status|flow-retry\n", program);
+    fprintf(stderr, "  %s [--socket PATH] flow-create|flow-update TABLE QUEUE apply-drop|acl-set|acl6-set ...\n",
+        program);
+    fprintf(stderr, "  %s [--socket PATH] flow-remove QUEUE ID EXACT_GENERATION\n", program);
+    fprintf(stderr, "  %s [--socket PATH] flow-collect|flow-cancel SESSION OWNER SERIAL SLOT\n", program);
     fprintf(stderr,
         "  %s [--socket PATH] acl-set ID PORT EXPECTED PRIORITY ipv4|udp|tcp|ip:N"
         " SRC_CIDR DST_CIDR SRC_RANGE DST_RANGE allow|drop [count] [mark:N]\n",
@@ -687,6 +692,62 @@ static int build_acl_batch(const char *path, struct dppd_management_request *req
 
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
+    /** 新模式复用已有规则构造器，模板键和控制队列必须显式给出，不能猜测安装语义 */
+    if (argc >= 1 && (strcmp(argv[0], "flow-create") == 0 || strcmp(argv[0], "flow-update") == 0)) {
+        uint64_t table, queue;
+        struct dppd_management_request built;
+        if (argc < 7 || parse_u64(argv[1], 1, UINT64_MAX, &table) != 0 || parse_u64(argv[2], 0, 7, &queue) != 0 ||
+            (strcmp(argv[3], "apply-drop") != 0 && strcmp(argv[3], "apply-filter") != 0 &&
+                strcmp(argv[3], "apply-filter-drop") != 0 && strcmp(argv[3], "acl-set") != 0 &&
+                strcmp(argv[3], "acl6-set") != 0))
+            return -EINVAL;
+        int rc = build_request(argc - 3, argv + 3, &built);
+        if (rc != 0 || built.operation != DPPD_MANAGEMENT_RULE_APPLY ||
+            built.payload.apply.rule.fallback == DPPD_FALLBACK_REQUIRE_HARDWARE ||
+            built.payload.apply.expected_generation == DPPD_RULE_GENERATION_ANY ||
+            ((strcmp(argv[0], "flow-create") == 0) != (built.payload.apply.expected_generation == 0)))
+            return -EINVAL;
+        initialize_request(request,
+            strcmp(argv[0], "flow-create") == 0 ? DPPD_MANAGEMENT_FLOW_CREATE : DPPD_MANAGEMENT_FLOW_UPDATE);
+        request->payload.flow_change.count = 1;
+        request->payload.flow_change.queue = (uint32_t)queue;
+        request->payload.flow_change.expected[0] = built.payload.apply.expected_generation;
+        struct dppd_flow_state_rule *rule = &request->payload.flow_change.rules[0];
+        rule->table_key = table;
+        rule->queue = (uint32_t)queue;
+        rule->rule = built.payload.apply.rule;
+        rule->rule.install_port_id = built.payload.apply.install_port_id;
+        rule->rule.fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
+        return 0;
+    }
+    if (argc == 1 && (strcmp(argv[0], "flow-status") == 0 || strcmp(argv[0], "flow-retry") == 0)) {
+        initialize_request(request,
+            strcmp(argv[0], "flow-status") == 0 ? DPPD_MANAGEMENT_FLOW_STATUS : DPPD_MANAGEMENT_FLOW_RETRY);
+        return 0;
+    }
+    if (argc == 4 && strcmp(argv[0], "flow-remove") == 0) {
+        uint64_t queue;
+        initialize_request(request, DPPD_MANAGEMENT_FLOW_REMOVE);
+        request->payload.flow_remove.count = 1;
+        if (parse_u64(argv[1], 0, 7, &queue) != 0 ||
+            parse_u64(argv[2], 1, UINT64_MAX, &request->payload.flow_remove.rules[0].id) != 0 ||
+            parse_u64(argv[3], 1, UINT64_MAX - 1U, &request->payload.flow_remove.rules[0].generation) != 0)
+            return -EINVAL;
+        request->payload.flow_remove.queue = (uint32_t)queue;
+        return 0;
+    }
+    if (argc == 5 && (strcmp(argv[0], "flow-collect") == 0 || strcmp(argv[0], "flow-cancel") == 0)) {
+        initialize_request(request,
+            strcmp(argv[0], "flow-collect") == 0 ? DPPD_MANAGEMENT_FLOW_COLLECT : DPPD_MANAGEMENT_FLOW_CANCEL);
+        struct dppd_management_flow_token *token = &request->payload.flow_token;
+        uint64_t slot;
+        if (parse_u64(argv[1], 1, UINT64_MAX, &token->session) != 0 ||
+            parse_u64(argv[2], 1, UINT64_MAX, &token->job.owner) != 0 ||
+            parse_u64(argv[3], 1, UINT64_MAX, &token->job.serial) != 0 || parse_u64(argv[4], 0, UINT32_MAX, &slot) != 0)
+            return -EINVAL;
+        token->job.slot = (uint32_t)slot;
+        return 0;
+    }
     int shared_result = build_shared_request(argc, argv, request);
     if (shared_result != -ENOSYS)
         return shared_result;
@@ -1315,6 +1376,35 @@ static int print_response(const struct dppd_management_response *response)
         return 0;
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_FLOW_STATUS:
+    case DPPD_MANAGEMENT_FLOW_RETRY: {
+        const struct dppd_flow_store_status *status = &response->payload.flow_status.status;
+        printf("flow-mode=managed session=%" PRIu64 " ready=%s dirty=%s residual=%s closing=%s isolated=%s "
+               "revision=%" PRIu64 " durable=%" PRIu64 " rules=%u jobs=%u error=%d\n",
+            response->payload.flow_status.session, status->ready ? "yes" : "no", status->dirty ? "yes" : "no",
+            status->residual ? "yes" : "no", status->closing ? "yes" : "no", status->service.isolated ? "yes" : "no",
+            status->service.revision, status->durable_revision, status->service.rules, status->service.jobs,
+            status->last_error);
+        break;
+    }
+    case DPPD_MANAGEMENT_FLOW_CREATE:
+    case DPPD_MANAGEMENT_FLOW_UPDATE:
+    case DPPD_MANAGEMENT_FLOW_REMOVE: {
+        const struct dppd_management_flow_token *token = &response->payload.flow_token;
+        printf("accepted session=%" PRIu64 " owner=%" PRIu64 " serial=%" PRIu64 " slot=%u durable=no\n", token->session,
+            token->job.owner, token->job.serial, token->job.slot);
+        break;
+    }
+    case DPPD_MANAGEMENT_FLOW_COLLECT: {
+        const struct dppd_flow_job_result *result = &response->payload.flow_result;
+        if (result->count > 4)
+            return -EPROTO;
+        printf("completed status=%d applied=%s durable=%s count=%u\n", result->status, result->applied ? "yes" : "no",
+            result->status == 0 && result->applied ? "yes" : "no", result->count);
+        for (uint32_t i = 0; i < result->count; ++i)
+            printf("id=%" PRIu64 " generation=%" PRIu64 "\n", result->ids[i], result->generations[i]);
+        return result->status;
+    }
     case DPPD_MANAGEMENT_SHARED_COUNT_CREATE:
     case DPPD_MANAGEMENT_SHARED_COUNT_GET:
         print_shared_count(&response->payload.shared_count);
@@ -1693,6 +1783,14 @@ int main(int argc, char **argv)
 
         fprintf(stderr, "dppctl: request failed: %s (%d)\n",
             status < 0 && status >= -4095 ? strerror(-status) : "unknown error", status);
+        if (response.operation >= DPPD_MANAGEMENT_FLOW_STATUS && response.operation <= DPPD_MANAGEMENT_FLOW_RETRY) {
+            if (status == -EAGAIN)
+                fprintf(stderr, "dppctl: job remains pending; collect again using the same token\n");
+            else if (status == -EUCLEAN)
+                fprintf(stderr,
+                    "dppctl: inspect flow-status; repair storage then persistence-flush, or retry known cleanup with flow-retry\n");
+            return EXIT_FAILURE;
+        }
         if (response.operation == DPPD_MANAGEMENT_TRANSFER_PLAN || response.operation == DPPD_MANAGEMENT_TRANSFER_APPLY)
             fprintf(stderr, "dppctl: transfer: %.*s\n", DPPD_TRANSFER_MESSAGE_SIZE, response.payload.transfer.message);
         if (status == -EUCLEAN && response.operation >= DPPD_MANAGEMENT_ROUTING_STATUS &&

@@ -712,5 +712,16 @@ int main(void)
     assert(build_request(2, device, &request) == -EINVAL);
     device[1] = "-1";
     assert(build_request(2, device, &request) == -EINVAL);
+    /** 新管理命令必须显式区分新建与精确版本更新，不能借用 any 绕过冲突检查 */
+    char *flow[] = {"flow-create", "1", "0", "apply-drop", "123", "7", "0"};
+    assert(build_request(7, flow, &request) == 0 && request.operation == DPPD_MANAGEMENT_FLOW_CREATE);
+    assert(request.payload.flow_change.rules[0].table_key == 1);
+    assert(request.payload.flow_change.rules[0].rule.install_port_id == 7);
+    flow[0] = "flow-update";
+    assert(build_request(7, flow, &request) == -EINVAL);
+    flow[6] = "9";
+    assert(build_request(7, flow, &request) == 0 && request.payload.flow_change.expected[0] == 9);
+    flow[6] = "any";
+    assert(build_request(7, flow, &request) == -EINVAL);
     return 0;
 }
