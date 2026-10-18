@@ -34,7 +34,7 @@ test('bounded asynchronous flow lifecycle and completion identity', async_flow_t
 
 native_async_flow_test = executable('test_native_async_flow', 'test_native_async_flow.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_flow_async_create', '-Wl,--wrap=rte_flow_async_destroy',
-              '-Wl,--wrap=rte_flow_push', '-Wl,--wrap=rte_flow_pull'])
+              '-Wl,--wrap=rte_flow_push', '-Wl,--wrap=rte_flow_pull', '-Wl,--wrap=rte_flow_get_q_aged_flows'])
 test('native asynchronous enqueue push pull and retained storage', native_async_flow_test)
 
 # 混合增删改在满表下只发布一次，分配故障保留旧 COUNT，并由真实读线程检查中间状态
@@ -46,6 +46,10 @@ test('atomic software create replace delete and allocation failures', software_c
 flow_service_test = executable('test_flow_service', 'test_flow_service.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=calloc'])
 test('M4 asynchronous batch publication and exact restoration', flow_service_test)
+
+# 驱动通知可提前或迟到，自动维护不受未领取回执阻塞，删除失败保留通知并退避重试
+async_age_test = executable('test_async_age', 'test_async_age.c', dependencies: dppd_core_dep)
+test('M4 queue AGE identity quotas maintenance and retry', async_age_test)
 
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',

@@ -11,6 +11,7 @@ static const struct rte_flow_item *saved_pattern;
 static const struct rte_flow_action *saved_actions;
 static uintptr_t pending_tag;
 static bool create_error, destroy_error, completion_error;
+static bool aged_error;
 static unsigned int creates, destroys, pushes, pulls;
 static int flow_object, table_object;
 
@@ -21,6 +22,8 @@ int __wrap_rte_flow_async_destroy(uint16_t port, uint32_t queue, const struct rt
     struct rte_flow *flow, void *user_data, struct rte_flow_error *error);
 int __wrap_rte_flow_push(uint16_t port, uint32_t queue, struct rte_flow_error *error);
 int __wrap_rte_flow_pull(uint16_t port, uint32_t queue, struct rte_flow_op_result results[], uint16_t count,
+    struct rte_flow_error *error);
+int __wrap_rte_flow_get_q_aged_flows(uint16_t port, uint32_t queue, void **contexts, uint32_t count,
     struct rte_flow_error *error);
 
 struct rte_flow *__wrap_rte_flow_async_create(uint16_t port, uint32_t queue, const struct rte_flow_op_attr *attr,
@@ -62,7 +65,10 @@ static void check_storage(void)
     assert(((const struct rte_flow_item_ipv4 *)saved_pattern[1].mask)->hdr.src_addr == UINT32_MAX);
     assert(saved_actions[0].type == RTE_FLOW_ACTION_TYPE_MARK);
     assert(((const struct rte_flow_action_mark *)saved_actions[0].conf)->id == 42);
-    assert(saved_actions[1].type == RTE_FLOW_ACTION_TYPE_DROP && saved_actions[2].type == RTE_FLOW_ACTION_TYPE_END);
+    assert(saved_actions[1].type == RTE_FLOW_ACTION_TYPE_AGE);
+    const struct rte_flow_action_age *age = saved_actions[1].conf;
+    assert(age->timeout == 7 && age->context == (void *)(uintptr_t)9);
+    assert(saved_actions[2].type == RTE_FLOW_ACTION_TYPE_DROP && saved_actions[3].type == RTE_FLOW_ACTION_TYPE_END);
 }
 
 int __wrap_rte_flow_push(uint16_t port, uint32_t queue, struct rte_flow_error *error)
@@ -86,10 +92,22 @@ int __wrap_rte_flow_pull(uint16_t port, uint32_t queue, struct rte_flow_op_resul
     return 1;
 }
 
+int __wrap_rte_flow_get_q_aged_flows(uint16_t port, uint32_t queue, void **contexts, uint32_t count,
+    struct rte_flow_error *error)
+{
+    (void)error;
+    assert(port == 7 && queue == 3 && count == 2);
+    if (aged_error)
+        return -ENOMEM;
+    contexts[0] = (void *)(uintptr_t)9;
+    contexts[1] = (void *)UINTPTR_MAX;
+    return 2;
+}
+
 static void test_native(void)
 {
     struct dppd_async_flow_driver driver = dppd_native_async_flow_driver();
-    struct dppd_rule rule = {.id = 1, .generation = 1, .install_port_id = 7, .nb_matches = 2, .nb_actions = 2};
+    struct dppd_rule rule = {.id = 1, .generation = 1, .install_port_id = 7, .nb_matches = 2, .nb_actions = 3};
     struct dppd_async_driver_result result;
     void *object = NULL;
     rule.matches[0].type = DPPD_MATCH_ETH;
@@ -97,7 +115,8 @@ static void test_native(void)
     rule.matches[1].spec.ipv4.src_be = 123;
     rule.matches[1].spec.ipv4.src_mask_be = UINT32_MAX;
     rule.actions[0] = (struct dppd_action){.type = DPPD_ACTION_MARK, .conf.mark_id = 42};
-    rule.actions[1].type = DPPD_ACTION_DROP;
+    rule.actions[1] = (struct dppd_action){.type = DPPD_ACTION_AGE, .conf.age_timeout_seconds = 7};
+    rule.actions[2].type = DPPD_ACTION_DROP;
     assert(driver.create(NULL, 7, 3, NULL, &rule, 9, &object) == -EINVAL && object == NULL);
     create_error = true;
     assert(driver.create(NULL, 7, 3, &table_object, &rule, 9, &object) == -ENOSPC && object == NULL);
@@ -108,6 +127,11 @@ static void test_native(void)
     assert(driver.push(NULL, 7, 3) == 0);
     completion_error = true;
     assert(driver.pull(NULL, 7, 3, &result, 1) == 1 && result.tag == 9 && result.status == -EIO);
+    uintptr_t tags[2] = {77, 88};
+    aged_error = true;
+    assert(driver.aged(NULL, 7, 3, tags, 2) == -ENOMEM && tags[0] == 77 && tags[1] == 88);
+    aged_error = false;
+    assert(driver.aged(NULL, 7, 3, tags, 2) == 2 && tags[0] == 9 && tags[1] == UINTPTR_MAX);
     /** 创建失败完成也继续使用原始句柄，直到删除成功完成才释放包装存储 */
     destroy_error = true;
     assert(driver.destroy(NULL, 7, 3, object, 10) == -ENOSPC);
@@ -135,6 +159,8 @@ int main(void)
     assert(driver.destroy(NULL, 7, 0, NULL, 1) == -ENOTSUP);
     assert(driver.push(NULL, 7, 0) == -ENOTSUP);
     assert(driver.pull(NULL, 7, 0, &result, 1) == -ENOTSUP);
+    uintptr_t tag = 77;
+    assert(driver.aged(NULL, 7, 0, &tag, 1) == -ENOTSUP && tag == 77);
 #endif
     return 0;
 }

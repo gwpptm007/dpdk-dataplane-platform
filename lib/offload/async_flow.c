@@ -29,6 +29,10 @@ static int native_create(void *context, uint16_t port, uint32_t queue, void *tab
         return -ENOMEM;
     rc = dppd_compile_flow(rule, NULL, &object->compiled);
     if (rc == 0) {
+        /** 严格队列的 AGE 通知携带独立整数身份，不能借用 flow 指针或已释放的请求地址 */
+        for (uint16_t i = 0; i < rule->nb_actions; ++i)
+            if (rule->actions[i].type == DPPD_ACTION_AGE)
+                object->compiled.age[i].context = (void *)tag;
         object->flow = rte_flow_async_create(port, queue, &attr, table, object->compiled.pattern, 0,
             object->compiled.actions, 0, (void *)tag, &error);
         if (object->flow == NULL)
@@ -77,6 +81,20 @@ static int native_pull(void *context, uint16_t port, uint32_t queue, struct dppd
     }
     return rc;
 }
+static int native_aged(void *context, uint16_t port, uint32_t queue, uintptr_t *tags, uint32_t count)
+{
+    void *contexts[64];
+    struct rte_flow_error error = {0};
+    (void)context;
+    if (count == 0 || count > 64)
+        return -EINVAL;
+    int rc = rte_flow_get_q_aged_flows(port, queue, contexts, count, &error);
+    if (rc < 0 || rc > (int)count)
+        return rc;
+    for (int i = 0; i < rc; ++i)
+        tags[i] = (uintptr_t)contexts[i];
+    return rc;
+}
 #else
 static int native_create(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
     uintptr_t tag, void **output)
@@ -119,6 +137,15 @@ static int native_pull(void *context, uint16_t port, uint32_t queue, struct dppd
     (void)count;
     return -ENOTSUP;
 }
+static int native_aged(void *context, uint16_t port, uint32_t queue, uintptr_t *tags, uint32_t count)
+{
+    (void)context;
+    (void)port;
+    (void)queue;
+    (void)tags;
+    (void)count;
+    return -ENOTSUP;
+}
 #endif
 
 static void native_release(void *context, void *object)
@@ -133,5 +160,6 @@ struct dppd_async_flow_driver dppd_native_async_flow_driver(void)
         .destroy = native_destroy,
         .push = native_push,
         .pull = native_pull,
-        .release = native_release};
+        .release = native_release,
+        .aged = native_aged};
 }

@@ -43,7 +43,7 @@ struct flow_job {
     uint64_t serial, submitted_ns;
     uint32_t queue, waiting;
     enum job_state state;
-    bool cleanup_failed, publication_unknown;
+    bool cleanup_failed, publication_unknown, auto_collect;
 };
 
 /** 多个队列可各自积压有界请求，控制消费者按顺序提交一整批，避免版本与账本交叉发布 */
@@ -55,8 +55,9 @@ struct dppd_flow_service {
     struct service_rule *records;
     struct flow_job *jobs;
     struct dppd_flow_service_status status;
-    uint32_t job_capacity, active, weights[8];
+    uint32_t job_capacity, user_job_capacity, active, weights[8], age_queue_cursor;
     uint64_t owner, serial;
+    uint64_t age_next_poll_ns, process_ns;
 };
 
 static _Atomic uint64_t next_owner = 1;
@@ -119,7 +120,9 @@ int dppd_flow_service_create(const struct dppd_flow_service_config *config, stru
     service->config = *config;
     service->active = UINT32_MAX;
     service->serial = 1;
-    service->job_capacity = config->queue_count * config->depth;
+    service->user_job_capacity = config->queue_count * config->depth;
+    /** 每队列另留一个有界老化任务，应用停止领取回执时也不会挡住维护删除 */
+    service->job_capacity = service->user_job_capacity + config->queue_count;
     service->records = calloc(config->rule_capacity, sizeof(*service->records));
     service->jobs = calloc(service->job_capacity, sizeof(*service->jobs));
     rc = service->records == NULL || service->jobs == NULL ? -ENOMEM : 0;
@@ -183,18 +186,20 @@ int dppd_flow_service_close(struct dppd_flow_service **output)
 }
 
 /** 深度按规则数计费而非请求数，64 条批次需要 64 个位置，完成未领取仍占全部位置 */
-static int new_job(struct dppd_flow_service *service, uint32_t queue, uint32_t count, uint64_t now_ns,
+static int new_job(struct dppd_flow_service *service, uint32_t queue, uint32_t count, uint64_t now_ns, bool automatic,
     struct flow_job **output, uint32_t *slot)
 {
     if (service->status.isolated)
         return -EUCLEAN;
     if (queue >= service->config.queue_count || count == 0 || count > 64)
         return -EINVAL;
-    if (count > service->config.depth - service->weights[queue])
+    if (!automatic && count > service->config.depth - service->weights[queue])
         return -EAGAIN;
     if (service->serial == UINT64_MAX)
         return -EOVERFLOW;
-    for (*slot = 0; *slot < service->job_capacity; ++*slot)
+    uint32_t begin = automatic ? service->user_job_capacity + queue : 0;
+    uint32_t end = automatic ? begin + 1U : service->user_job_capacity;
+    for (*slot = begin; *slot < end; ++*slot)
         if (service->jobs[*slot].state == JOB_FREE) {
             *output = &service->jobs[*slot];
             memset(*output, 0, sizeof(**output));
@@ -202,6 +207,7 @@ static int new_job(struct dppd_flow_service *service, uint32_t queue, uint32_t c
             (*output)->submitted_ns = now_ns;
             (*output)->queue = queue;
             (*output)->result.count = count;
+            (*output)->auto_collect = automatic;
             return 0;
         }
     return -EAGAIN;
@@ -233,7 +239,7 @@ int dppd_flow_service_submit(struct dppd_flow_service *service, uint32_t queue,
     if (service == NULL || requests == NULL || id == NULL)
         return -EINVAL;
     pthread_mutex_lock(&service->lock);
-    rc = new_job(service, queue, count, now_ns, &job, &job_slot);
+    rc = new_job(service, queue, count, now_ns, false, &job, &job_slot);
     if (rc != 0)
         goto done;
     for (; prepared < count; ++prepared) {
@@ -288,8 +294,9 @@ done:
 }
 
 /** 先锁定每个精确旧版本，暂不删账本，后续相同 ID 的请求不能越过正在执行的批次 */
-int dppd_flow_service_remove(struct dppd_flow_service *service, uint32_t queue,
-    const struct dppd_flow_remove_request *requests, uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *id)
+static int submit_remove(struct dppd_flow_service *service, uint32_t queue,
+    const struct dppd_flow_remove_request *requests, uint32_t count, uint64_t now_ns, bool automatic,
+    struct dppd_flow_job_id *id)
 {
     struct flow_job *job;
     uint32_t job_slot, prepared = 0;
@@ -297,7 +304,7 @@ int dppd_flow_service_remove(struct dppd_flow_service *service, uint32_t queue,
     if (service == NULL || requests == NULL || id == NULL)
         return -EINVAL;
     pthread_mutex_lock(&service->lock);
-    rc = new_job(service, queue, count, now_ns, &job, &job_slot);
+    rc = new_job(service, queue, count, now_ns, automatic, &job, &job_slot);
     if (rc != 0)
         goto done;
     job->result.remove = true;
@@ -335,12 +342,51 @@ int dppd_flow_service_remove(struct dppd_flow_service *service, uint32_t queue,
         goto done;
     }
     job->state = JOB_NEW;
-    service->weights[queue] += count;
+    if (!automatic)
+        service->weights[queue] += count;
+    else
+        ++service->status.age_jobs;
     ++service->status.jobs;
     *id = (struct dppd_flow_job_id){service->owner, job->serial, job_slot};
 done:
     pthread_mutex_unlock(&service->lock);
     return rc;
+}
+
+int dppd_flow_service_remove(struct dppd_flow_service *service, uint32_t queue,
+    const struct dppd_flow_remove_request *requests, uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *id)
+{
+    return submit_remove(service, queue, requests, count, now_ns, false, id);
+}
+
+static bool rule_aging(const struct dppd_rule *rule)
+{
+    for (uint16_t i = 0; i < rule->nb_actions; ++i)
+        if (rule->actions[i].type == DPPD_ACTION_AGE)
+            return true;
+    return false;
+}
+
+static uint64_t after_ns(uint64_t now_ns, uint64_t delay)
+{
+    return UINT64_MAX - now_ns < delay ? UINT64_MAX : now_ns + delay;
+}
+
+/** 自动老化也走完整删除任务，只有终态才领取内部回执，不能无限积压无人领取的结果 */
+static void collect_age_job(struct dppd_flow_service *service, struct flow_job *job)
+{
+    if (job->result.applied) {
+        service->status.aged_deleted += job->result.count;
+        service->status.age_delete_error = 0;
+    } else {
+        ++service->status.age_delete_errors;
+        service->status.age_delete_error = job->result.status;
+        service->age_next_poll_ns = after_ns(service->process_ns, UINT64_C(1000000000));
+    }
+    --service->status.jobs;
+    --service->status.completed;
+    --service->status.age_jobs;
+    memset(job, 0, sizeof(*job));
 }
 
 static void complete_job(struct dppd_flow_service *service, struct flow_job *job, bool applied)
@@ -349,6 +395,8 @@ static void complete_job(struct dppd_flow_service *service, struct flow_job *job
     job->state = JOB_DONE;
     ++service->status.completed;
     service->active = UINT32_MAX;
+    if (job->auto_collect)
+        collect_age_job(service, job);
 }
 
 static int software_publish(struct dppd_flow_service *service, struct flow_job *job)
@@ -400,9 +448,13 @@ static int publish(struct dppd_flow_service *service, struct flow_job *job)
                 job->result.status = -EUCLEAN;
                 return -EUCLEAN;
             }
+            if (rule_aging(&rules[i]))
+                --service->status.aged_rules;
         } else {
             record->committed = true;
             record->busy = false;
+            if (rule_aging(&rules[i]))
+                ++service->status.aged_rules;
         }
     }
     complete_job(service, job, true);
@@ -630,7 +682,9 @@ int dppd_flow_service_process(struct dppd_flow_service *service, uint64_t now_ns
     int rc = 0;
     if (service == NULL || budget == 0 || budget > 64)
         return -EINVAL;
+    dppd_flow_service_age_poll(service, now_ns, budget);
     pthread_mutex_lock(&service->lock);
+    service->process_ns = now_ns;
     if (service->active == UINT32_MAX && !service->status.isolated) {
         for (uint32_t i = 0; i < service->job_capacity; ++i)
             if (service->jobs[i].state == JOB_NEW && service->jobs[i].serial < oldest) {
@@ -671,6 +725,8 @@ int dppd_flow_service_collect(struct dppd_flow_service *service, const struct dp
     job = lookup_job(service, id);
     if (job == NULL)
         rc = -ESTALE;
+    else if (job->auto_collect)
+        rc = -EPERM;
     else if (job->state != JOB_DONE)
         rc = job->state == JOB_RESIDUAL ? -EUCLEAN : -EAGAIN;
     else {
@@ -694,6 +750,8 @@ int dppd_flow_service_cancel(struct dppd_flow_service *service, const struct dpp
     job = lookup_job(service, id);
     if (job == NULL)
         rc = -ESTALE;
+    else if (job->auto_collect)
+        rc = -EPERM;
     else if (job->state != JOB_NEW)
         rc = -EBUSY;
     else {
@@ -773,4 +831,79 @@ int dppd_flow_service_status(struct dppd_flow_service *service, struct dppd_flow
     status->revision = service->rules.generation;
     pthread_mutex_unlock(&service->lock);
     return 0;
+}
+
+int dppd_flow_service_age_poll(struct dppd_flow_service *service, uint64_t now_ns, uint32_t budget)
+{
+    struct dppd_flow_remove_request removals[64];
+    struct dppd_async_aged_flow aged[64];
+    uint32_t queues[64], selected = 0;
+    int first_error = 0, accepted = 0;
+    if (service == NULL || budget == 0 || budget > 64)
+        return -EINVAL;
+    pthread_mutex_lock(&service->lock);
+    if (service->status.aged_rules == 0 || service->status.isolated || now_ns < service->age_next_poll_ns) {
+        pthread_mutex_unlock(&service->lock);
+        return 0;
+    }
+    service->age_next_poll_ns = after_ns(now_ns, UINT64_C(100000000));
+    uint32_t start_queue = service->age_queue_cursor;
+    for (uint32_t visited = 0; visited < service->config.queue_count && selected < budget; ++visited) {
+        uint32_t q = (start_queue + visited) % service->config.queue_count;
+        service->age_queue_cursor = (q + 1U) % service->config.queue_count;
+        uint32_t capacity = budget - selected;
+        if (capacity > service->config.depth)
+            capacity = service->config.depth;
+        int count = dppd_async_flow_aged(service->config.queues[q], aged, capacity);
+        ++service->status.age_queries;
+        if (count == -ENOTSUP)
+            continue;
+        if (count < 0) {
+            ++service->status.age_query_errors;
+            if (first_error == 0)
+                first_error = count;
+            continue;
+        }
+        for (int i = 0; i < count; ++i) {
+            uint32_t slot = dppd_slot_index_find(&service->owners, aged[i].id, 0);
+            struct dppd_rule rule;
+            if (slot == DPPD_SLOT_NONE)
+                continue;
+            struct service_rule *record = &service->records[slot];
+            if (!record->committed || record->busy || record->queue != q || record->flow.owner != aged[i].flow.owner ||
+                record->flow.serial != aged[i].flow.serial || record->flow.slot != aged[i].flow.slot ||
+                dppd_rule_repository_get(&service->rules, aged[i].id, &rule) != 0 ||
+                rule.generation != aged[i].generation || !rule_aging(&rule))
+                continue;
+            removals[selected] = (struct dppd_flow_remove_request){rule.id, rule.generation};
+            queues[selected++] = q;
+        }
+    }
+    service->status.age_query_error = first_error;
+    pthread_mutex_unlock(&service->lock);
+    /** 解锁后走同一个精确删除入口，其他请求抢先更新时由版本和 busy 再次拦截 */
+    for (uint32_t q = 0; q < service->config.queue_count; ++q) {
+        struct dppd_flow_remove_request batch[64];
+        uint32_t count = 0;
+        struct dppd_flow_job_id id;
+        for (uint32_t i = 0; i < selected; ++i)
+            if (queues[i] == q)
+                batch[count++] = removals[i];
+        if (count == 0)
+            continue;
+        int rc = submit_remove(service, q, batch, count, now_ns, true, &id);
+        pthread_mutex_lock(&service->lock);
+        if (rc == 0) {
+            accepted += (int)count;
+        } else if (rc == -EAGAIN || rc == -EBUSY) {
+            ++service->status.age_backpressure;
+        } else if (rc != -ESTALE && rc != -ENOENT) {
+            service->status.age_delete_error = rc;
+            ++service->status.age_delete_errors;
+            if (first_error == 0)
+                first_error = rc;
+        }
+        pthread_mutex_unlock(&service->lock);
+    }
+    return first_error != 0 ? first_error : accepted;
 }

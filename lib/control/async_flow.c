@@ -17,7 +17,8 @@ struct async_flow {
     void *object;
     uint64_t serial;
     enum dppd_async_flow_state state;
-    bool used;
+    uintptr_t age_tag;
+    bool used, aging, aged_pending;
 };
 
 struct async_operation {
@@ -41,6 +42,7 @@ struct dppd_async_flow_queue {
     uint64_t owner, serial;
     bool empty_pull;
     const void *consumer;
+    uint32_t age_cursor;
 };
 
 static _Atomic uint64_t next_owner = 1;
@@ -284,6 +286,8 @@ static int prepare_operation(struct dppd_async_flow_queue *queue, uint32_t slot,
     op->result.rule_id = flow->rule.id;
     op->result.generation = flow->rule.generation;
     op->result.destroy = destroy;
+    if (!destroy)
+        flow->age_tag = op->result.tag;
     ++queue->status.queued;
     *output = op;
     return 0;
@@ -310,8 +314,8 @@ static int prepare_flow(struct dppd_async_flow_queue *queue, const struct dppd_a
     uint32_t *slot)
 {
     struct async_flow *flow;
-    struct dppd_resource_demand demands[2] = {{queue->config.flow_resource, queue->config.port_id, 1},
-        {DPPD_RESOURCE_COUNTER, queue->config.port_id, 0}};
+    struct dppd_resource_demand demands[3] = {{queue->config.flow_resource, queue->config.port_id, 1}};
+    uint32_t demand_count = 1;
     int rc;
     uint16_t i;
     rc = dppd_slot_index_insert(&queue->index, request->rule.id, request->rule.generation, slot);
@@ -323,10 +327,21 @@ static int prepare_flow(struct dppd_async_flow_queue *queue, const struct dppd_a
     rc = dppd_flow_template_acquire(queue->config.templates, &request->table, &request->rule, &flow->lease);
     if (rc != 0)
         goto erase;
-    for (i = 0; i < request->rule.nb_actions; ++i)
+    for (i = 0; i < request->rule.nb_actions; ++i) {
         if (request->rule.actions[i].type == DPPD_ACTION_COUNT)
-            demands[1].amount = 1;
-    rc = dppd_admission_reserve(queue->config.admission, demands, demands[1].amount == 0 ? 1 : 2, &flow->ticket);
+            demands[demand_count++] = (struct dppd_resource_demand){DPPD_RESOURCE_COUNTER, queue->config.port_id, 1};
+        if (request->rule.actions[i].type == DPPD_ACTION_AGE) {
+            flow->aging = true;
+            demands[demand_count++] =
+                (struct dppd_resource_demand){DPPD_RESOURCE_AGING_OBJECT, queue->config.port_id, 1};
+        }
+    }
+    if (flow->aging && queue->config.driver.aged == NULL) {
+        dppd_flow_template_release(queue->config.templates, &flow->lease);
+        rc = -ENOTSUP;
+        goto erase;
+    }
+    rc = dppd_admission_reserve(queue->config.admission, demands, demand_count, &flow->ticket);
     if (rc != 0) {
         dppd_flow_template_release(queue->config.templates, &flow->lease);
         goto erase;
@@ -617,6 +632,54 @@ int dppd_async_flow_status(struct dppd_async_flow_queue *queue, struct dppd_asyn
     *status = queue->status;
     pthread_mutex_unlock(&queue->lock);
     return 0;
+}
+
+int dppd_async_flow_aged(struct dppd_async_flow_queue *queue, struct dppd_async_aged_flow *flows, uint32_t capacity)
+{
+    uintptr_t tags[64];
+    uint32_t copied = 0, visited = 0;
+    int count;
+    if (queue == NULL || flows == NULL || capacity == 0 || capacity > 64)
+        return -EINVAL;
+    pthread_mutex_lock(&queue->lock);
+    if (queue->config.driver.aged == NULL) {
+        pthread_mutex_unlock(&queue->lock);
+        return -ENOTSUP;
+    }
+    count = queue->config.driver.aged(queue->config.driver.context, queue->config.port_id, queue->config.queue_id, tags,
+        capacity);
+    if (count < 0 || count > (int)capacity) {
+        ++queue->status.aged_query_errors;
+        pthread_mutex_unlock(&queue->lock);
+        return count < 0 ? count : -EUCLEAN;
+    }
+    for (int i = 0; i < count; ++i) {
+        bool found = false;
+        for (uint32_t slot = 0; slot < queue->config.flow_capacity; ++slot) {
+            struct async_flow *flow = &queue->flows[slot];
+            if (!flow->used || !flow->aging || flow->age_tag != tags[i])
+                continue;
+            if (!flow->aged_pending)
+                ++queue->status.aged_notifications;
+            flow->aged_pending = true;
+            found = true;
+            break;
+        }
+        /** 已删除流的迟到通知属于过期消息，不可据此删除同 ID 的新版本或解引用任意指针 */
+        if (!found)
+            ++queue->status.aged_stale;
+    }
+    while (visited++ < queue->config.flow_capacity && copied < capacity) {
+        uint32_t slot = queue->age_cursor;
+        struct async_flow *flow = &queue->flows[slot];
+        queue->age_cursor = (slot + 1U) % queue->config.flow_capacity;
+        if (!flow->used || !flow->aging || !flow->aged_pending || flow->state != DPPD_ASYNC_FLOW_READY)
+            continue;
+        flows[copied++] =
+            (struct dppd_async_aged_flow){{queue->owner, flow->serial, slot}, flow->rule.id, flow->rule.generation};
+    }
+    pthread_mutex_unlock(&queue->lock);
+    return (int)copied;
 }
 
 int dppd_async_flow_resume(struct dppd_async_flow_queue *queue)

@@ -19,6 +19,7 @@
 配置不自动重启端口、不切换 mlx5 模式，也不改变现有 M3 同步路径。
 调用方须在 ethdev configure 之后、任何 flow 创建之前执行原生配置，并独占端口生命周期。
 队列最多 8、深度最多 256，计数与老化资源按驱动返回上限预检，超限拒绝。
+后续 [队列 AGE](m4_async_age.md) 已增加严格队列标志预检，配置成功后 AGE 通知只属于指定队列。
 
 原生编译复用现有同步编译器，避免两套方向、网络字节序和指针生命周期语义分叉。
 当前支持 ETH/IPv4/TCP/UDP/represented-port，以及 DROP、QUEUE、MARK、COUNT、AGE、represented-port。

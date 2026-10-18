@@ -38,7 +38,12 @@ int __wrap_rte_flow_info_get(uint16_t port, struct rte_flow_port_info *info, str
     assert(port == 7);
     if (fail_at == 9)
         return -ENOTSUP;
-    *info = (struct rte_flow_port_info){.max_nb_queues = 8, .max_nb_counters = 16384, .max_nb_aging_objects = 4096};
+    *info = (struct rte_flow_port_info){.max_nb_queues = 8,
+        .max_nb_counters = 16384,
+        .max_nb_aging_objects = 4096,
+        .supported_flags = RTE_FLOW_PORT_FLAG_STRICT_QUEUE};
+    if (fail_at == 10)
+        info->supported_flags = 0;
     queue->max_size = 256;
     return 0;
 }
@@ -48,6 +53,7 @@ int __wrap_rte_flow_configure(uint16_t port, const struct rte_flow_port_attr *at
 {
     (void)error;
     assert(port == 7 && queues == 8 && attr->nb_counters == 16384 && attr->nb_aging_objects == 4096);
+    assert(attr->flags == RTE_FLOW_PORT_FLAG_STRICT_QUEUE);
     for (unsigned int i = 0; i < queues; ++i)
         assert(attributes[i]->size == 256);
     ++configured;
@@ -158,6 +164,8 @@ static void test_native(void)
     assert(dppd_native_flow_configure(7, 8, 256, 16384, 4097) == -ENOSPC && configured == 1);
     assert(dppd_native_flow_configure(7, 0, 256, 0, 0) == -EINVAL);
     fail_at = 9;
+    assert(dppd_native_flow_configure(7, 8, 256, 16384, 4096) == -ENOTSUP && configured == 1);
+    fail_at = 10;
     assert(dppd_native_flow_configure(7, 8, 256, 16384, 4096) == -ENOTSUP && configured == 1);
     for (unsigned int failure = 0; failure <= 3; ++failure) {
         phase = destroyed = 0;

@@ -18,7 +18,9 @@ int dppd_native_flow_configure(uint16_t port_id, uint16_t queues, uint32_t depth
 {
     struct rte_flow_port_info port = {0};
     struct rte_flow_queue_info queue = {0};
-    struct rte_flow_port_attr attr = {.nb_counters = counters, .nb_aging_objects = aging};
+    struct rte_flow_port_attr attr = {.nb_counters = counters,
+        .nb_aging_objects = aging,
+        .flags = RTE_FLOW_PORT_FLAG_STRICT_QUEUE};
     struct rte_flow_queue_attr queue_attr = {.size = depth};
     const struct rte_flow_queue_attr *attributes[8];
     struct rte_flow_error error = {0};
@@ -30,6 +32,8 @@ int dppd_native_flow_configure(uint16_t port_id, uint16_t queues, uint32_t depth
     rc = rte_flow_info_get(port_id, &port, &queue, &error);
     if (rc != 0)
         return rc;
+    if ((port.supported_flags & RTE_FLOW_PORT_FLAG_STRICT_QUEUE) == 0)
+        return -ENOTSUP;
     if (queues > port.max_nb_queues || depth > queue.max_size || counters > port.max_nb_counters ||
         aging > port.max_nb_aging_objects)
         return -ENOSPC;

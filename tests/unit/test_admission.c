@@ -300,9 +300,10 @@ static void test_ticket_capacity_and_maximum_vector(void)
         limits.ports[port].port_id = (uint16_t)(port + 1U);
         for (unsigned int kind = 0; kind < DPPD_RESOURCE_KIND_COUNT; ++kind) {
             limits.ports[port].limits[kind] = 2;
-            requests[count++] = (struct dppd_resource_demand){.kind = (enum dppd_resource_kind)kind,
-                .port_id = limits.ports[port].port_id,
-                .amount = 1};
+            if (count < DPPD_ADMISSION_MAX_DEMANDS)
+                requests[count++] = (struct dppd_resource_demand){.kind = (enum dppd_resource_kind)kind,
+                    .port_id = limits.ports[port].port_id,
+                    .amount = 1};
         }
     }
     assert(count == DPPD_ADMISSION_MAX_DEMANDS && dppd_admission_create(&limits, &admission) == 0);
@@ -310,9 +311,13 @@ static void test_ticket_capacity_and_maximum_vector(void)
     assert(dppd_admission_commit(admission, &ticket) == 0);
     struct dppd_admission_snapshot value = snapshot(admission);
     for (unsigned int kind = 0; kind < DPPD_RESOURCE_KIND_COUNT; ++kind) {
-        assert(value.global.committed[kind] == 8);
-        for (uint32_t port = 0; port < value.port_count; ++port)
-            assert(value.ports[port].usage.committed[kind] == 1);
+        uint32_t expected_total = 0;
+        for (uint32_t port = 0; port < value.port_count; ++port) {
+            uint32_t expected = port * DPPD_RESOURCE_KIND_COUNT + kind < DPPD_ADMISSION_MAX_DEMANDS ? 1U : 0U;
+            assert(value.ports[port].usage.committed[kind] == expected);
+            expected_total += expected;
+        }
+        assert(value.global.committed[kind] == expected_total);
     }
     assert(dppd_admission_release(admission, &ticket) == 0);
     no_usage(admission);

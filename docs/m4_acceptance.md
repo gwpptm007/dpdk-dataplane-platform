@@ -13,7 +13,7 @@ aged flow 回收、shared action、背压和 admission control，不扩展 M5，
 | template table | 有限容量、模板形状与值分离、引用保护、真实 PMD 适配 | [生命周期与适配](m4_templates.md) 及批量服务联动已验收 |
 | async flow queue | 有界提交、push/pull、乱序完成、精确身份与超时保留 | [生命周期与适配](m4_async_queue.md) 及整批发布联动已验收 |
 | 批量操作与背压 | 受理与完成区分、全批发布/补偿、队满重试及取消 | [64 条创建/删除已联动验收](m4_flow_service.md)，队列指标通过，异步更新继续推进 |
-| aged flow 回收 | 驱动通知、队列预算、精确版本和共享引用释放 | 待实现 |
+| aged flow 回收 | 驱动通知、队列预算、精确版本和共享引用释放 | [严格队列自动回收已验收](m4_async_age.md)，共享引用联动待接 |
 | shared action | 复用、版本、引用、配额、更新/删除与驱动能力边界 | 待扩展现有共享 COUNT |
 | 联合验收 | 功能/异常/并发、性能门禁、原有 M2/M3 回归与源码对应 | [新 M4 worker 报文通过](m4_worker_traffic.md)，最终同源联合待验 |
 

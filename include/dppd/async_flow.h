@@ -22,6 +22,8 @@ struct dppd_async_flow_driver {
     int (*pull)(void *context, uint16_t port, uint32_t queue, struct dppd_async_driver_result *results, uint16_t count);
     /** 只能在 destroy 成功完成后释放应用侧包装内存，不在这里再次调用驱动删除 */
     void (*release)(void *context, void *object);
+    /** 返回不透明 AGE 标签，不支持时可以为空，查询失败不能被当作没有老化流 */
+    int (*aged)(void *context, uint16_t port, uint32_t queue, uintptr_t *tags, uint32_t count);
 };
 
 struct dppd_async_flow_config {
@@ -66,6 +68,12 @@ struct dppd_async_flow_status {
     bool fault, fatal;
     uint16_t port_id, queue_id;
     enum dppd_resource_kind flow_resource;
+    uint64_t aged_notifications, aged_stale, aged_query_errors;
+};
+
+struct dppd_async_aged_flow {
+    struct dppd_async_flow_id flow;
+    uint64_t id, generation;
 };
 
 struct dppd_async_flow_queue;
@@ -92,6 +100,8 @@ int dppd_async_flow_collect(struct dppd_async_flow_queue *queue, struct dppd_asy
 int dppd_async_flow_get(struct dppd_async_flow_queue *queue, const struct dppd_async_flow_id *flow,
     enum dppd_async_flow_state *state);
 int dppd_async_flow_status(struct dppd_async_flow_queue *queue, struct dppd_async_flow_status *status);
+/** 缓存有效通知直到精确 flow 删除，忙碌或尚未发布时可以下轮重试，不丢弃一次性通知 */
+int dppd_async_flow_aged(struct dppd_async_flow_queue *queue, struct dppd_async_aged_flow *flows, uint32_t capacity);
 /** 收齐完成并成功空拉取后，只允许保留已知 READY 流的暂态恢复，陌生完成不能自行解除 */
 int dppd_async_flow_resume(struct dppd_async_flow_queue *queue);
 struct dppd_async_flow_driver dppd_native_async_flow_driver(void);

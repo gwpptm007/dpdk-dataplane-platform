@@ -36,6 +36,9 @@ struct dppd_flow_service_status {
     uint64_t revision;
     int last_error;
     bool isolated;
+    uint32_t aged_rules, age_jobs;
+    uint64_t age_queries, aged_deleted, age_query_errors, age_delete_errors, age_backpressure;
+    int age_query_error, age_delete_error;
 };
 
 struct dppd_flow_service;
@@ -59,5 +62,7 @@ int dppd_flow_service_cancel(struct dppd_flow_service *service, const struct dpp
 int dppd_flow_service_retry(struct dppd_flow_service *service);
 int dppd_flow_service_get(struct dppd_flow_service *service, uint64_t id, struct dppd_rule *rule);
 int dppd_flow_service_status(struct dppd_flow_service *service, struct dppd_flow_service_status *status);
+/** process 自动按周期调用，也可由控制循环主动调用，通知只删除精确已发布版本 */
+int dppd_flow_service_age_poll(struct dppd_flow_service *service, uint64_t now_ns, uint32_t budget);
 
 #endif
