@@ -47,6 +47,12 @@ int dppd_rule_repository_list(const struct dppd_rule_repository *repository, uin
     uint64_t *repository_generation);
 int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const struct dppd_rule *rule,
     uint64_t expected_generation, struct dppd_rule_apply_result *result);
+/** M4 预先分配连续版本，全部校验并建立槽位索引后才发布整批，调用者须串行访问 */
+int dppd_rule_repository_create_batch(struct dppd_rule_repository *repository, const struct dppd_rule *rules,
+    uint32_t count);
+/** 输入为精确旧规则身份，全部预检后一次推进修订号，不调用后端也不分配内存 */
+int dppd_rule_repository_remove_batch(struct dppd_rule_repository *repository, const struct dppd_rule *rules,
+    uint32_t count);
 /**
  * 由单个控制线程整批更新规则账本，rules 与 expected_generations 按下标一一对应
  * 先确认全批规则合法且旧版本匹配，再执行不分配内存的替换，因此输入错误不产生部分写入

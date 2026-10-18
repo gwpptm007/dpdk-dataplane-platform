@@ -42,6 +42,11 @@ software_change_batch_test = executable('test_software_change_batch', 'test_soft
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=calloc'])
 test('atomic software create replace delete and allocation failures', software_change_batch_test)
 
+# 正式模板、配额、异步完成、账本和 classifier 连通，部分失败要完整补偿再产生终态
+flow_service_test = executable('test_flow_service', 'test_flow_service.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'])
+test('M4 asynchronous batch publication and exact restoration', flow_service_test)
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',

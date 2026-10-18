@@ -64,6 +64,8 @@ struct dppd_async_flow_status {
     uint64_t submitted, completions, timeouts;
     int last_error;
     bool fault, fatal;
+    uint16_t port_id, queue_id;
+    enum dppd_resource_kind flow_resource;
 };
 
 struct dppd_async_flow_queue;
@@ -72,6 +74,10 @@ struct dppd_async_flow_queue;
 int dppd_async_flow_queue_create(const struct dppd_async_flow_config *config, struct dppd_async_flow_queue **output);
 /** 调用者先停用所有线程，未完成、未领取结果或实际 flow 仍存在时拒绝关闭 */
 int dppd_async_flow_queue_close(struct dppd_async_flow_queue **queue);
+/** 协调器独占空队列，挂接期间调用方不得绕过协调器提交或领取完成 */
+int dppd_async_flow_attach(struct dppd_async_flow_queue *queue, const void *owner, struct dppd_admission *admission,
+    struct dppd_flow_templates *templates);
+int dppd_async_flow_detach(struct dppd_async_flow_queue *queue, const void *owner);
 /** 整批先取得槽位、配额和模板引用再受理，提交成功不代表安装或账本发布成功 */
 int dppd_async_flow_submit(struct dppd_async_flow_queue *queue, const struct dppd_async_flow_create_request *requests,
     uint32_t count, uint64_t now_ns, struct dppd_async_flow_id *flows);
@@ -86,8 +92,13 @@ int dppd_async_flow_collect(struct dppd_async_flow_queue *queue, struct dppd_asy
 int dppd_async_flow_get(struct dppd_async_flow_queue *queue, const struct dppd_async_flow_id *flow,
     enum dppd_async_flow_state *state);
 int dppd_async_flow_status(struct dppd_async_flow_queue *queue, struct dppd_async_flow_status *status);
-/** 只允许已收齐完成、清除全部 flow 且成功空拉取后的暂态故障恢复，陌生完成不能自行解除 */
+/** 收齐完成并成功空拉取后，只允许保留已知 READY 流的暂态恢复，陌生完成不能自行解除 */
 int dppd_async_flow_resume(struct dppd_async_flow_queue *queue);
 struct dppd_async_flow_driver dppd_native_async_flow_driver(void);
+
+struct dppd_software_async_flows;
+/** 软件驱动只准备有界对象和完成消息，classifier 的整批发布由 flow service 协调 */
+int dppd_software_async_flows_create(struct dppd_software_async_flows **output, struct dppd_async_flow_driver *driver);
+int dppd_software_async_flows_close(struct dppd_software_async_flows **flows);
 
 #endif

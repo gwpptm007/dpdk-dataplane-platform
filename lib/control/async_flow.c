@@ -40,6 +40,7 @@ struct dppd_async_flow_queue {
     struct dppd_async_flow_status status;
     uint64_t owner, serial;
     bool empty_pull;
+    const void *consumer;
 };
 
 static _Atomic uint64_t next_owner = 1;
@@ -182,6 +183,9 @@ int dppd_async_flow_queue_create(const struct dppd_async_flow_config *config, st
         return rc;
     }
     queue->status.depth = config->depth;
+    queue->status.port_id = config->port_id;
+    queue->status.queue_id = config->queue_id;
+    queue->status.flow_resource = config->flow_resource;
     queue->serial = 1;
     *output = queue;
     return 0;
@@ -195,8 +199,8 @@ int dppd_async_flow_queue_close(struct dppd_async_flow_queue **output)
         return -EINVAL;
     queue = *output;
     pthread_mutex_lock(&queue->lock);
-    if (queue->status.flows != 0 || queue->status.queued != 0 || queue->status.pending != 0 ||
-        queue->status.completed != 0 || queue->status.fatal) {
+    if (queue->consumer != NULL || queue->status.flows != 0 || queue->status.queued != 0 ||
+        queue->status.pending != 0 || queue->status.completed != 0 || queue->status.fatal) {
         pthread_mutex_unlock(&queue->lock);
         return -EBUSY;
     }
@@ -211,6 +215,41 @@ int dppd_async_flow_queue_close(struct dppd_async_flow_queue **output)
     free(queue);
     *output = NULL;
     return 0;
+}
+
+int dppd_async_flow_attach(struct dppd_async_flow_queue *queue, const void *owner, struct dppd_admission *admission,
+    struct dppd_flow_templates *templates)
+{
+    int rc = 0;
+    if (queue == NULL || owner == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&queue->lock);
+    if (queue->config.admission != admission || queue->config.templates != templates)
+        rc = -EINVAL;
+    else if (queue->consumer != NULL || queue->status.flows != 0 || queue->status.queued != 0 ||
+        queue->status.pending != 0 || queue->status.completed != 0 || queue->status.fault)
+        rc = -EBUSY;
+    else
+        queue->consumer = owner;
+    pthread_mutex_unlock(&queue->lock);
+    return rc;
+}
+
+int dppd_async_flow_detach(struct dppd_async_flow_queue *queue, const void *owner)
+{
+    int rc = 0;
+    if (queue == NULL || owner == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&queue->lock);
+    if (queue->consumer != owner)
+        rc = -ESTALE;
+    else if (queue->status.flows != 0 || queue->status.queued != 0 || queue->status.pending != 0 ||
+        queue->status.completed != 0 || queue->status.fault)
+        rc = -EBUSY;
+    else
+        queue->consumer = NULL;
+    pthread_mutex_unlock(&queue->lock);
+    return rc;
 }
 
 static struct async_operation *free_operation(struct dppd_async_flow_queue *queue)
@@ -586,10 +625,13 @@ int dppd_async_flow_resume(struct dppd_async_flow_queue *queue)
     if (queue == NULL)
         return -EINVAL;
     pthread_mutex_lock(&queue->lock);
-    if (queue->status.fatal || queue->status.flows != 0 || queue->status.queued != 0 || queue->status.pending != 0 ||
+    if (queue->status.fatal || queue->status.queued != 0 || queue->status.pending != 0 ||
         queue->status.completed != 0 || !queue->empty_pull)
         rc = -EUCLEAN;
-    else {
+    for (uint32_t i = 0; rc == 0 && i < queue->config.flow_capacity; ++i)
+        if (queue->flows[i].used && queue->flows[i].state != DPPD_ASYNC_FLOW_READY)
+            rc = -EUCLEAN;
+    if (rc == 0) {
         queue->status.fault = false;
         queue->status.last_error = 0;
     }
