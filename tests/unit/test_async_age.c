@@ -31,8 +31,9 @@ struct fixture {
 
 /** 只模拟驱动通知和完成，正式模板、队列、额度、版本与补偿由生产代码负责 */
 static int create(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
-    uintptr_t tag, void **object)
+    const struct dppd_flow_binding *binding, uintptr_t tag, void **object)
 {
+    (void)binding;
     struct model *model = context;
     assert(port == 7 && queue < 2 && table == &model->table && rule->id < 64);
     *object = malloc(1);
@@ -110,7 +111,9 @@ static int template_create(void *context, const struct dppd_flow_template_spec *
 {
     struct model *model = context;
     assert(spec->example.install_port_id == 7);
-    *parts = (struct dppd_flow_template_parts){&model->pattern, &model->actions, &model->table};
+    *parts = (struct dppd_flow_template_parts){.pattern = &model->pattern,
+        .actions = &model->actions,
+        .table = &model->table};
     return 0;
 }
 
@@ -140,7 +143,9 @@ static void setup(struct fixture *fixture)
     for (uint32_t kind = 0; kind < DPPD_RESOURCE_KIND_COUNT; ++kind)
         fixture->limits.limits[kind] = fixture->limits.ports[0].limits[kind] = 4;
     assert(dppd_admission_create(&fixture->limits, &fixture->admission) == 0);
-    struct dppd_flow_template_driver templates = {&fixture->model, template_create, template_destroy};
+    struct dppd_flow_template_driver templates = {.context = &fixture->model,
+        .create = template_create,
+        .destroy = template_destroy};
     assert(dppd_flow_templates_create(fixture->admission, 8, &templates, &fixture->templates) == 0);
     struct dppd_flow_template_spec shape = {.example = request(fixture, 1).rule, .capacity = 4};
     assert(dppd_flow_template_create(fixture->templates, &shape, &fixture->table) == 0);

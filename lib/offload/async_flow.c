@@ -1,6 +1,7 @@
 #define ALLOW_EXPERIMENTAL_API
 #include "dppd/async_flow.h"
 #include "compiled_flow.h"
+#include "native_flow_lock.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -15,7 +16,7 @@ struct native_async_flow {
 };
 
 static int native_create(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
-    uintptr_t tag, void **output)
+    const struct dppd_flow_binding *binding, uintptr_t tag, void **output)
 {
     struct native_async_flow *object;
     const struct rte_flow_op_attr attr = {.postpone = 1};
@@ -27,14 +28,16 @@ static int native_create(void *context, uint16_t port, uint32_t queue, void *tab
     object = calloc(1, sizeof(*object));
     if (object == NULL)
         return -ENOMEM;
-    rc = dppd_compile_flow(rule, NULL, &object->compiled);
+    rc = dppd_compile_flow(rule, binding, &object->compiled);
     if (rc == 0) {
         /** 严格队列的 AGE 通知携带独立整数身份，不能借用 flow 指针或已释放的请求地址 */
         for (uint16_t i = 0; i < rule->nb_actions; ++i)
             if (rule->actions[i].type == DPPD_ACTION_AGE)
                 object->compiled.age[i].context = (void *)tag;
+        dppd_native_flow_lock();
         object->flow = rte_flow_async_create(port, queue, &attr, table, object->compiled.pattern, 0,
             object->compiled.actions, 0, (void *)tag, &error);
+        dppd_native_flow_unlock();
         if (object->flow == NULL)
             rc = rte_errno > 0 ? -rte_errno : -EIO;
     }
@@ -52,14 +55,20 @@ static int native_destroy(void *context, uint16_t port, uint32_t queue, void *ha
     const struct rte_flow_op_attr attr = {.postpone = 1};
     struct rte_flow_error error = {0};
     (void)context;
-    return rte_flow_async_destroy(port, queue, &attr, object->flow, (void *)tag, &error);
+    dppd_native_flow_lock();
+    int rc = rte_flow_async_destroy(port, queue, &attr, object->flow, (void *)tag, &error);
+    dppd_native_flow_unlock();
+    return rc;
 }
 
 static int native_push(void *context, uint16_t port, uint32_t queue)
 {
     struct rte_flow_error error = {0};
     (void)context;
-    return rte_flow_push(port, queue, &error);
+    dppd_native_flow_lock();
+    int rc = rte_flow_push(port, queue, &error);
+    dppd_native_flow_unlock();
+    return rc;
 }
 
 static int native_pull(void *context, uint16_t port, uint32_t queue, struct dppd_async_driver_result *results,
@@ -71,7 +80,9 @@ static int native_pull(void *context, uint16_t port, uint32_t queue, struct dppd
     (void)context;
     if (count == 0 || count > DPPD_ASYNC_FLOW_BATCH)
         return -EINVAL;
+    dppd_native_flow_lock();
     rc = rte_flow_pull(port, queue, completed, count, &error);
+    dppd_native_flow_unlock();
     if (rc < 0 || rc > count)
         return rc;
     for (int i = 0; i < rc; ++i) {
@@ -88,7 +99,9 @@ static int native_aged(void *context, uint16_t port, uint32_t queue, uintptr_t *
     (void)context;
     if (count == 0 || count > 64)
         return -EINVAL;
+    dppd_native_flow_lock();
     int rc = rte_flow_get_q_aged_flows(port, queue, contexts, count, &error);
+    dppd_native_flow_unlock();
     if (rc < 0 || rc > (int)count)
         return rc;
     for (int i = 0; i < rc; ++i)
@@ -97,13 +110,14 @@ static int native_aged(void *context, uint16_t port, uint32_t queue, uintptr_t *
 }
 #else
 static int native_create(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
-    uintptr_t tag, void **output)
+    const struct dppd_flow_binding *binding, uintptr_t tag, void **output)
 {
     (void)context;
     (void)port;
     (void)queue;
     (void)table;
     (void)rule;
+    (void)binding;
     (void)tag;
     (void)output;
     return -ENOTSUP;

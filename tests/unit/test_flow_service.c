@@ -35,12 +35,12 @@ struct fixture {
 };
 
 static int create(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
-    uintptr_t tag, void **object)
+    const struct dppd_flow_binding *binding, uintptr_t tag, void **object)
 {
     struct faults *faults = context;
     if (++faults->creates == faults->fail_create_at)
         return -ENOMEM;
-    return faults->base.create(faults->base.context, port, queue, table, rule, tag, object);
+    return faults->base.create(faults->base.context, port, queue, table, rule, binding, tag, object);
 }
 
 static int destroy(void *context, uint16_t port, uint32_t queue, void *object, uintptr_t tag)

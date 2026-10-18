@@ -37,8 +37,9 @@ void *__wrap_calloc(size_t count, size_t size)
 }
 
 static int create(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
-    uintptr_t tag, void **object)
+    const struct dppd_flow_binding *binding, uintptr_t tag, void **object)
 {
+    (void)binding;
     struct driver_state *state = context;
     (void)table;
     assert(port == 7 && queue == 0 && rule->generation != 0 && tag != 0);

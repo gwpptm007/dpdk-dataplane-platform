@@ -2,8 +2,10 @@
 #define ALLOW_EXPERIMENTAL_API
 #include "dppd/flow_template.h"
 #include "compiled_flow.h"
+#include "native_flow_lock.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <rte_errno.h>
 #include <rte_version.h>
@@ -14,7 +16,7 @@ static int driver_error(void)
     return rte_errno > 0 ? -rte_errno : -EIO;
 }
 
-int dppd_native_flow_configure(uint16_t port_id, uint16_t queues, uint32_t depth, uint32_t counters, uint32_t aging)
+static int configure_unlocked(uint16_t port_id, uint16_t queues, uint32_t depth, uint32_t counters, uint32_t aging)
 {
     struct rte_flow_port_info port = {0};
     struct rte_flow_queue_info queue = {0};
@@ -42,6 +44,19 @@ int dppd_native_flow_configure(uint16_t port_id, uint16_t queues, uint32_t depth
     return rte_flow_configure(port_id, &attr, queues, attributes, &error);
 }
 
+int dppd_native_flow_configure(uint16_t port_id, uint16_t queues, uint32_t depth, uint32_t counters, uint32_t aging)
+{
+    dppd_native_flow_lock();
+    int rc = configure_unlocked(port_id, queues, depth, counters, aging);
+    dppd_native_flow_unlock();
+    return rc;
+}
+
+struct template_shared_owner {
+    struct dppd_flow_shared_counts *counts;
+    struct dppd_flow_shared_count_lease lease;
+};
+
 static int native_create(void *context, const struct dppd_flow_template_spec *spec,
     struct dppd_flow_template_parts *parts)
 {
@@ -52,14 +67,27 @@ static int native_create(void *context, const struct dppd_flow_template_spec *sp
     struct rte_flow_pattern_template *pattern;
     struct rte_flow_actions_template *actions;
     struct rte_flow_error error = {0};
+    struct dppd_flow_binding binding;
+    struct dppd_flow_shared_count_lease shared;
     const uint16_t port = spec->example.install_port_id;
     uint16_t i;
     int rc;
-    (void)context;
-
     if (spec->example.fallback == DPPD_FALLBACK_SOFTWARE_ONLY)
         return -ENOTSUP;
-    rc = dppd_compile_flow(&spec->example, NULL, &compiled);
+    /** 模板自身也保护示例共享对象，不能只依赖后来创建的 flow 引用 */
+    rc = dppd_flow_shared_counts_bind(context, &spec->example, &binding, &shared);
+    if (rc != 0)
+        return rc;
+    if (shared.owner != 0) {
+        struct template_shared_owner *owner = calloc(1, sizeof(*owner));
+        if (owner == NULL) {
+            dppd_flow_shared_counts_unbind(context, &shared);
+            return -ENOMEM;
+        }
+        *owner = (struct template_shared_owner){context, shared};
+        parts->private_data = owner;
+    }
+    rc = dppd_compile_flow(&spec->example, &binding, &compiled);
     if (rc != 0)
         return rc;
     /** 固定字段置全一掩码，可变字段保持零，COUNT 的每流身份始终由实际创建决定 */
@@ -79,6 +107,11 @@ static int native_create(void *context, const struct dppd_flow_template_spec *sp
         case DPPD_ACTION_COUNT:
             masks.actions[i].conf = &masks.count[i];
             break;
+        case DPPD_ACTION_SHARED_COUNT:
+            /** 间接动作的 mask 标明实际 COUNT 类型，身份约束由平台模板和精确引用控制 */
+            masks.actions[i].type = RTE_FLOW_ACTION_TYPE_COUNT;
+            masks.actions[i].conf = NULL;
+            break;
         case DPPD_ACTION_AGE:
             masks.age[i].timeout = dynamic ? 0 : 0xffffffU;
             masks.actions[i].conf = &masks.age[i];
@@ -97,16 +130,22 @@ static int native_create(void *context, const struct dppd_flow_template_spec *sp
     pattern_attr.ingress = actions_attr.ingress = compiled.attr.ingress;
     pattern_attr.egress = actions_attr.egress = compiled.attr.egress;
     pattern_attr.transfer = actions_attr.transfer = compiled.attr.transfer;
+    dppd_native_flow_lock();
     parts->pattern = rte_flow_pattern_template_create(port, &pattern_attr, compiled.pattern, &error);
+    dppd_native_flow_unlock();
     if (parts->pattern == NULL)
         return driver_error();
+    dppd_native_flow_lock();
     parts->actions = rte_flow_actions_template_create(port, &actions_attr, compiled.actions, masks.actions, &error);
+    dppd_native_flow_unlock();
     if (parts->actions == NULL)
         return driver_error();
     pattern = parts->pattern;
     actions = parts->actions;
     table_attr.flow_attr = compiled.attr;
+    dppd_native_flow_lock();
     parts->table = rte_flow_template_table_create(port, &table_attr, &pattern, 1, &actions, 1, &error);
+    dppd_native_flow_unlock();
     return parts->table == NULL ? driver_error() : 0;
 }
 
@@ -118,22 +157,36 @@ static int native_destroy(void *context, uint16_t port, struct dppd_flow_templat
 
     /** 只有上层句柄销毁已确认成功才拆下层，失败保持原指针供精确重试 */
     if (parts->table != NULL) {
+        dppd_native_flow_lock();
         rc = rte_flow_template_table_destroy(port, parts->table, &error);
+        dppd_native_flow_unlock();
         if (rc != 0)
             return rc;
         parts->table = NULL;
     }
     if (parts->actions != NULL) {
+        dppd_native_flow_lock();
         rc = rte_flow_actions_template_destroy(port, parts->actions, &error);
+        dppd_native_flow_unlock();
         if (rc != 0)
             return rc;
         parts->actions = NULL;
     }
     if (parts->pattern != NULL) {
+        dppd_native_flow_lock();
         rc = rte_flow_pattern_template_destroy(port, parts->pattern, &error);
+        dppd_native_flow_unlock();
         if (rc != 0)
             return rc;
         parts->pattern = NULL;
+    }
+    if (parts->private_data != NULL) {
+        struct template_shared_owner *owner = parts->private_data;
+        rc = dppd_flow_shared_counts_unbind(owner->counts, &owner->lease);
+        if (rc != 0)
+            return rc;
+        free(owner);
+        parts->private_data = NULL;
     }
     return 0;
 }
@@ -166,7 +219,27 @@ static int native_destroy(void *context, uint16_t port, struct dppd_flow_templat
 }
 #endif
 
+static int native_bind(void *context, const struct dppd_rule *rule, struct dppd_flow_binding *binding,
+    struct dppd_flow_shared_count_lease *lease)
+{
+    return dppd_flow_shared_counts_bind(context, rule, binding, lease);
+}
+
+static int native_unbind(void *context, const struct dppd_flow_shared_count_lease *lease)
+{
+    return dppd_flow_shared_counts_unbind(context, lease);
+}
+
+struct dppd_flow_template_driver dppd_native_flow_template_driver_shared(struct dppd_flow_shared_counts *counts)
+{
+    return (struct dppd_flow_template_driver){.context = counts,
+        .create = native_create,
+        .destroy = native_destroy,
+        .bind = native_bind,
+        .unbind = native_unbind};
+}
+
 struct dppd_flow_template_driver dppd_native_flow_template_driver(void)
 {
-    return (struct dppd_flow_template_driver){.create = native_create, .destroy = native_destroy};
+    return dppd_native_flow_template_driver_shared(NULL);
 }

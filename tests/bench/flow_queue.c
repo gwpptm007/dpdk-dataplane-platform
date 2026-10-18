@@ -24,8 +24,9 @@ struct memory_driver {
 
 /** 仅替换驱动，不替换正式队列、配额、模板、批次协调或期望账本，不作为 ASIC 吞吐 */
 static int create(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
-    uintptr_t tag, void **output)
+    const struct dppd_flow_binding *binding, uintptr_t tag, void **output)
 {
+    (void)binding;
     struct memory_driver *driver = context;
     assert(port == 5 && queue < 8 && table == &driver->table && rule->generation != 0);
     struct memory_queue *pending = &driver->queues[queue];
@@ -83,7 +84,9 @@ static int template_create(void *context, const struct dppd_flow_template_spec *
 {
     struct memory_driver *driver = context;
     assert(spec->example.install_port_id == 5);
-    *parts = (struct dppd_flow_template_parts){&driver->pattern, &driver->actions, &driver->table};
+    *parts = (struct dppd_flow_template_parts){.pattern = &driver->pattern,
+        .actions = &driver->actions,
+        .table = &driver->table};
     return 0;
 }
 
@@ -117,7 +120,9 @@ int main(int argc, char **argv)
     struct dppd_admission *admission = NULL;
     struct dppd_flow_templates *templates = NULL;
     struct dppd_flow_template_id table;
-    struct dppd_flow_template_driver template_driver = {&memory, template_create, template_destroy};
+    struct dppd_flow_template_driver template_driver = {.context = &memory,
+        .create = template_create,
+        .destroy = template_destroy};
     struct dppd_flow_template_spec shape = {.capacity = count};
     struct dppd_flow_service_config config = {.rule_capacity = count,
         .queue_count = 8,

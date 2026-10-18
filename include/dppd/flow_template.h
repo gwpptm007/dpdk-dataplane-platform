@@ -3,6 +3,7 @@
 
 #include "dppd/admission.h"
 #include "dppd/rule.h"
+#include "dppd/flow_shared_count.h"
 
 #define DPPD_FLOW_TEMPLATE_LIMIT 64U
 #define DPPD_FLOW_TEMPLATE_LEASE_LIMIT 65536U
@@ -16,12 +17,17 @@ struct dppd_flow_template_spec {
 /** 三种句柄分开保存，创建或逆序销毁失败时仍能定位已经存在的每个对象 */
 struct dppd_flow_template_parts {
     void *pattern, *actions, *table;
+    /** 适配器自有的引用保护，只能在三个实际句柄都清除后释放 */
+    void *private_data;
 };
 
 struct dppd_flow_template_driver {
     void *context;
     int (*create)(void *context, const struct dppd_flow_template_spec *spec, struct dppd_flow_template_parts *parts);
     int (*destroy)(void *context, uint16_t port_id, struct dppd_flow_template_parts *parts);
+    int (*bind)(void *context, const struct dppd_rule *rule, struct dppd_flow_binding *binding,
+        struct dppd_flow_shared_count_lease *lease);
+    int (*unbind)(void *context, const struct dppd_flow_shared_count_lease *lease);
 };
 
 struct dppd_flow_template_id {
@@ -61,11 +67,15 @@ int dppd_flow_template_acquire(struct dppd_flow_templates *templates, const stru
 int dppd_flow_template_pin(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id,
     const struct dppd_rule *rule, struct dppd_flow_template_lease *lease);
 int dppd_flow_template_release(struct dppd_flow_templates *templates, const struct dppd_flow_template_lease *lease);
+/** 输出只在借用期间有效，解析出的原生指针不能保存进规则或磁盘快照 */
+int dppd_flow_template_binding(struct dppd_flow_templates *templates, const struct dppd_flow_template_lease *lease,
+    struct dppd_flow_binding *binding);
 /** 比较语义字段，不比较结构体填充字节，也不把匹配值误当成模板掩码 */
 bool dppd_flow_template_matches(const struct dppd_flow_template_spec *spec, const struct dppd_rule *rule);
 
 /** 24.11 原生适配不自动改变端口模式，调用方须在 ethdev configure 后、任何 flow 创建前执行 */
 int dppd_native_flow_configure(uint16_t port_id, uint16_t queues, uint32_t depth, uint32_t counters, uint32_t aging);
 struct dppd_flow_template_driver dppd_native_flow_template_driver(void);
+struct dppd_flow_template_driver dppd_native_flow_template_driver_shared(struct dppd_flow_shared_counts *counts);
 
 #endif

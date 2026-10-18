@@ -117,11 +117,11 @@ static void test_native(void)
     rule.actions[0] = (struct dppd_action){.type = DPPD_ACTION_MARK, .conf.mark_id = 42};
     rule.actions[1] = (struct dppd_action){.type = DPPD_ACTION_AGE, .conf.age_timeout_seconds = 7};
     rule.actions[2].type = DPPD_ACTION_DROP;
-    assert(driver.create(NULL, 7, 3, NULL, &rule, 9, &object) == -EINVAL && object == NULL);
+    assert(driver.create(NULL, 7, 3, NULL, &rule, NULL, 9, &object) == -EINVAL && object == NULL);
     create_error = true;
-    assert(driver.create(NULL, 7, 3, &table_object, &rule, 9, &object) == -ENOSPC && object == NULL);
+    assert(driver.create(NULL, 7, 3, &table_object, &rule, NULL, 9, &object) == -ENOSPC && object == NULL);
     create_error = false;
-    assert(driver.create(NULL, 7, 3, &table_object, &rule, 9, &object) == 0 && object != NULL);
+    assert(driver.create(NULL, 7, 3, &table_object, &rule, NULL, 9, &object) == 0 && object != NULL);
     rule.matches[1].spec.ipv4.src_be = 456;
     rule.actions[0].conf.mark_id = 777;
     assert(driver.push(NULL, 7, 3) == 0);
@@ -155,7 +155,7 @@ int main(void)
     struct dppd_rule rule = {0};
     struct dppd_async_driver_result result;
     void *object = NULL;
-    assert(driver.create(NULL, 7, 0, NULL, &rule, 1, &object) == -ENOTSUP && object == NULL);
+    assert(driver.create(NULL, 7, 0, NULL, &rule, NULL, 1, &object) == -ENOTSUP && object == NULL);
     assert(driver.destroy(NULL, 7, 0, NULL, 1) == -ENOTSUP);
     assert(driver.push(NULL, 7, 0) == -ENOTSUP);
     assert(driver.pull(NULL, 7, 0, &result, 1) == -ENOTSUP);

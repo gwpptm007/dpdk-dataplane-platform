@@ -14,6 +14,8 @@ struct template_entry {
 };
 
 struct template_lease_entry {
+    struct dppd_flow_binding binding;
+    struct dppd_flow_shared_count_lease shared;
     uint64_t serial;
     uint32_t table, next;
     bool used, pin;
@@ -110,7 +112,9 @@ int dppd_flow_templates_create(struct dppd_admission *admission, uint32_t lease_
 
     if (admission == NULL || output == NULL || *output != NULL || lease_capacity == 0 ||
         lease_capacity > DPPD_FLOW_TEMPLATE_LEASE_LIMIT ||
-        (driver != NULL && (driver->create == NULL || driver->destroy == NULL)))
+        (driver != NULL &&
+            (driver->create == NULL || driver->destroy == NULL ||
+                ((driver->bind == NULL) != (driver->unbind == NULL)))))
         return -EINVAL;
     templates = calloc(1, sizeof(*templates));
     if (templates == NULL)
@@ -165,7 +169,7 @@ int dppd_flow_templates_close(struct dppd_flow_templates **output)
 
 static bool has_parts(const struct dppd_flow_template_parts *parts)
 {
-    return parts->pattern != NULL || parts->actions != NULL || parts->table != NULL;
+    return parts->pattern != NULL || parts->actions != NULL || parts->table != NULL || parts->private_data != NULL;
 }
 
 static struct template_entry *lookup(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id)
@@ -292,6 +296,8 @@ static int acquire(struct dppd_flow_templates *templates, const struct dppd_flow
 {
     struct template_entry *entry;
     struct template_lease_entry *held;
+    struct dppd_flow_binding binding = {0};
+    struct dppd_flow_shared_count_lease shared = {0};
     uint32_t slot;
     int rc = 0;
     if (templates == NULL || lease == NULL)
@@ -310,6 +316,16 @@ static int acquire(struct dppd_flow_templates *templates, const struct dppd_flow
     else if (templates->next_serial == UINT64_MAX)
         rc = -EOVERFLOW;
     if (rc == 0) {
+        if (templates->driver.bind != NULL)
+            rc = templates->driver.bind(templates->driver.context, rule, &binding, &shared);
+        else
+            for (uint16_t i = 0; i < rule->nb_actions; ++i)
+                if (rule->actions[i].type == DPPD_ACTION_SHARED_COUNT) {
+                    rc = -ENOTSUP;
+                    break;
+                }
+    }
+    if (rc == 0) {
         slot = templates->free_head;
         held = &templates->leases[slot];
         templates->free_head = held->next;
@@ -317,6 +333,8 @@ static int acquire(struct dppd_flow_templates *templates, const struct dppd_flow
         held->pin = pin;
         held->serial = templates->next_serial++;
         held->table = id->slot;
+        held->binding = binding;
+        held->shared = shared;
         ++entry->info.references;
         if (!pin)
             ++entry->info.flows;
@@ -358,6 +376,11 @@ int dppd_flow_template_release(struct dppd_flow_templates *templates, const stru
         rc = -EUCLEAN;
         goto done;
     }
+    if (templates->driver.unbind != NULL) {
+        rc = templates->driver.unbind(templates->driver.context, &held->shared);
+        if (rc != 0)
+            goto done;
+    }
     --templates->tables[held->table].info.references;
     if (!held->pin)
         --templates->tables[held->table].info.flows;
@@ -365,6 +388,22 @@ int dppd_flow_template_release(struct dppd_flow_templates *templates, const stru
     held->next = templates->free_head;
     templates->free_head = lease->slot;
 done:
+    pthread_mutex_unlock(&templates->lock);
+    return rc;
+}
+
+int dppd_flow_template_binding(struct dppd_flow_templates *templates, const struct dppd_flow_template_lease *lease,
+    struct dppd_flow_binding *binding)
+{
+    int rc = 0;
+    if (templates == NULL || lease == NULL || binding == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&templates->lock);
+    if (lease->owner != templates->owner || lease->slot >= templates->lease_capacity ||
+        !templates->leases[lease->slot].used || templates->leases[lease->slot].serial != lease->serial)
+        rc = -ESTALE;
+    else
+        *binding = templates->leases[lease->slot].binding;
     pthread_mutex_unlock(&templates->lock);
     return rc;
 }

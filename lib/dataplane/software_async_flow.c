@@ -24,11 +24,15 @@ struct software_flow_object {
 };
 
 static int software_create(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
-    uintptr_t tag, void **output)
+    const struct dppd_flow_binding *binding, uintptr_t tag, void **output)
 {
     struct dppd_software_async_flows *flows = context;
     struct software_flow_object *object;
     char error[128];
+    if (binding != NULL)
+        for (uint16_t i = 0; i < DPPD_RULE_MAX_ACTIONS; ++i)
+            if (binding->actions[i] != NULL)
+                return -ENOTSUP;
     if (flows == NULL || queue >= 8 || table != NULL || rule->fallback != DPPD_FALLBACK_SOFTWARE_ONLY ||
         dppd_rule_validate(rule, error, sizeof(error)) != 0 || !dppd_software_backend_rule_supported(rule))
         return -ENOTSUP;

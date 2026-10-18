@@ -507,6 +507,7 @@ static void dispatch(struct dppd_async_flow_queue *queue, struct async_operation
 {
     struct async_flow *flow = &queue->flows[op->slot];
     struct dppd_flow_template_info info;
+    struct dppd_flow_binding binding;
     int rc;
     if (op->result.destroy) {
         rc = queue->config.driver.destroy(queue->config.driver.context, queue->config.port_id, queue->config.queue_id,
@@ -514,8 +515,10 @@ static void dispatch(struct dppd_async_flow_queue *queue, struct async_operation
     } else {
         rc = dppd_flow_template_get(queue->config.templates, &flow->table, &info);
         if (rc == 0)
+            rc = dppd_flow_template_binding(queue->config.templates, &flow->lease, &binding);
+        if (rc == 0)
             rc = queue->config.driver.create(queue->config.driver.context, queue->config.port_id,
-                queue->config.queue_id, info.parts.table, &flow->rule, op->result.tag, &flow->object);
+                queue->config.queue_id, info.parts.table, &flow->rule, &binding, op->result.tag, &flow->object);
         if ((rc == 0 && flow->object == NULL) || (rc != 0 && flow->object != NULL)) {
             /** 不合约的结果不能推断是否入队，保留身份等待精确完成并阻止新建 */
             fault(queue, -EUCLEAN, true);

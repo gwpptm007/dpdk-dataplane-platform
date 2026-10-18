@@ -16,7 +16,7 @@ struct dppd_async_driver_result {
 struct dppd_async_flow_driver {
     void *context;
     int (*create)(void *context, uint16_t port, uint32_t queue, void *table, const struct dppd_rule *rule,
-        uintptr_t tag, void **object);
+        const struct dppd_flow_binding *binding, uintptr_t tag, void **object);
     int (*destroy)(void *context, uint16_t port, uint32_t queue, void *object, uintptr_t tag);
     int (*push)(void *context, uint16_t port, uint32_t queue);
     int (*pull)(void *context, uint16_t port, uint32_t queue, struct dppd_async_driver_result *results, uint16_t count);

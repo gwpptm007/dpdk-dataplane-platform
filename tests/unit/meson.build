@@ -51,6 +51,22 @@ test('M4 asynchronous batch publication and exact restoration', flow_service_tes
 async_age_test = executable('test_async_age', 'test_async_age.c', dependencies: dppd_core_dep)
 test('M4 queue AGE identity quotas maintenance and retry', async_age_test)
 
+# 共享对象和计数器一起扣额，完整引用凭据阻止跨实例、槽位复用及补偿期间误删
+flow_shared_count_test = executable('test_flow_shared_count', 'test_flow_shared_count.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'])
+test('M4 shared COUNT quota leases concurrency and residual cleanup', flow_shared_count_test)
+
+# 只替换 PMD 公共入口，生产原生适配贯通模板、动态 INDIRECT、64 流共享、AGE 和失败补偿
+native_shared_flow_test = executable('test_native_shared_flow', 'test_native_shared_flow.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_flow_action_handle_create', '-Wl,--wrap=rte_flow_action_handle_query',
+              '-Wl,--wrap=rte_flow_action_handle_destroy', '-Wl,--wrap=rte_flow_info_get', '-Wl,--wrap=rte_flow_configure',
+              '-Wl,--wrap=rte_flow_pattern_template_create', '-Wl,--wrap=rte_flow_actions_template_create',
+              '-Wl,--wrap=rte_flow_template_table_create', '-Wl,--wrap=rte_flow_template_table_destroy',
+              '-Wl,--wrap=rte_flow_actions_template_destroy', '-Wl,--wrap=rte_flow_pattern_template_destroy',
+              '-Wl,--wrap=rte_flow_async_create', '-Wl,--wrap=rte_flow_async_destroy',
+              '-Wl,--wrap=rte_flow_push', '-Wl,--wrap=rte_flow_pull', '-Wl,--wrap=rte_flow_get_q_aged_flows'])
+test('native shared COUNT template queue AGE and compensation contract', native_shared_flow_test)
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',
