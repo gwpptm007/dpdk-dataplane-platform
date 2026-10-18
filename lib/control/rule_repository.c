@@ -194,13 +194,13 @@ int dppd_rule_repository_create_batch(struct dppd_rule_repository *repository, c
 }
 
 /** 精确版本、重复编号及版本空间先整批检查，正常删除阶段没有分配或外部调用 */
-int dppd_rule_repository_remove_batch(struct dppd_rule_repository *repository, const struct dppd_rule *rules,
-    uint32_t count)
+static int remove_batch(struct dppd_rule_repository *repository, const struct dppd_rule *rules, uint32_t count,
+    bool advance)
 {
     uint32_t slots[64];
     if (repository == NULL || repository->records == NULL || rules == NULL || count == 0 || count > 64)
         return -EINVAL;
-    if (repository->generation >= UINT64_MAX - count)
+    if (advance && repository->generation >= UINT64_MAX - count)
         return -EOVERFLOW;
     for (uint32_t i = 0; i < count; ++i) {
         slots[i] = dppd_slot_index_find(&repository->index, rules[i].id, 0);
@@ -217,11 +217,59 @@ int dppd_rule_repository_remove_batch(struct dppd_rule_repository *repository, c
     for (uint32_t i = 0; i < count; ++i)
         memset(&repository->records[slots[i]], 0, sizeof(repository->records[slots[i]]));
     repository->count -= count;
-    repository->generation += count;
+    if (advance)
+        repository->generation += count;
     return 0;
 }
 
+int dppd_rule_repository_remove_batch(struct dppd_rule_repository *repository, const struct dppd_rule *rules,
+    uint32_t count)
+{
+    return remove_batch(repository, rules, count, true);
+}
+
+int dppd_rule_repository_forget_batch(struct dppd_rule_repository *repository, const struct dppd_rule *rules,
+    uint32_t count)
+{
+    return remove_batch(repository, rules, count, false);
+}
+
 /** 替换前完整校验，版本由同一控制线程连续分配，预检完成后不再分配内存 */
+int dppd_rule_repository_replay_batch(struct dppd_rule_repository *repository, const struct dppd_rule *rules,
+    uint32_t count)
+{
+    char error[128];
+    if (repository == NULL || repository->records == NULL || rules == NULL || count == 0 || count > 64 ||
+        count > repository->capacity - repository->count || repository->generation == UINT64_MAX)
+        return -EINVAL;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (rules[i].id == 0 || rules[i].id == UINT64_MAX || rules[i].generation == 0 ||
+            rules[i].generation > repository->generation || dppd_rule_validate(&rules[i], error, sizeof(error)) != 0)
+            return -EINVAL;
+        if (dppd_slot_index_find(&repository->index, rules[i].id, 0) != DPPD_SLOT_NONE)
+            return -EEXIST;
+        for (uint32_t j = 0; j < i; ++j)
+            if (rules[i].id == rules[j].id)
+                return -EEXIST;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t slot;
+        int rc = dppd_slot_index_insert(&repository->index, rules[i].id, 0, &slot);
+        if (rc != 0) {
+            for (uint32_t j = 0; j < i; ++j)
+                dppd_slot_index_erase(&repository->index, rules[j].id, 0);
+            return -EUCLEAN;
+        }
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t slot = dppd_slot_index_find(&repository->index, rules[i].id, 0);
+        repository->records[slot].occupied = true;
+        repository->records[slot].rule = rules[i];
+    }
+    repository->count += count;
+    return 0;
+}
+
 int dppd_rule_repository_update_batch(struct dppd_rule_repository *repository, const struct dppd_rule *rules,
     const uint64_t *expected_generations, uint32_t count)
 {

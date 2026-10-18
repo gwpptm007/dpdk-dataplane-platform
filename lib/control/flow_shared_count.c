@@ -119,8 +119,8 @@ int dppd_flow_shared_counts_close(struct dppd_flow_shared_counts **output)
 }
 
 /** 对象和物理计数器一起扣额，失败创建若留下句柄就保留凭据，不把部分失败当作未发生 */
-int dppd_flow_shared_counts_add(struct dppd_flow_shared_counts *counts, uint64_t id, uint16_t port,
-    enum dppd_rule_domain domain, struct dppd_flow_shared_count_info *info)
+static int add(struct dppd_flow_shared_counts *counts, uint64_t id, uint16_t port, enum dppd_rule_domain domain,
+    uint64_t restored_generation, struct dppd_flow_shared_count_info *info)
 {
     struct shared_object *object = NULL;
     struct dppd_resource_demand demands[2] = {{DPPD_RESOURCE_SHARED_ACTION, port, 1}, {DPPD_RESOURCE_COUNTER, port, 1}};
@@ -141,6 +141,10 @@ int dppd_flow_shared_counts_add(struct dppd_flow_shared_counts *counts, uint64_t
         rc = -EOVERFLOW;
         goto done;
     }
+    if (restored_generation != 0 && (restored_generation < counts->generation || restored_generation == UINT64_MAX)) {
+        rc = -ESTALE;
+        goto done;
+    }
     for (unsigned int i = 0; i < 64; ++i)
         if (!counts->objects[i].used) {
             object = &counts->objects[i];
@@ -153,7 +157,8 @@ int dppd_flow_shared_counts_add(struct dppd_flow_shared_counts *counts, uint64_t
     rc = dppd_admission_reserve(counts->admission, demands, 2, &object->ticket);
     if (rc != 0)
         goto done;
-    object->info.spec = (struct dppd_shared_count_spec){id, counts->generation, port, domain};
+    uint64_t generation = restored_generation == 0 ? counts->generation : restored_generation;
+    object->info.spec = (struct dppd_shared_count_spec){id, generation, port, domain};
     object->handle.spec = object->info.spec;
     rc = counts->driver.create(counts->driver.context, &object->info.spec, &object->handle);
     bool had_handle = object->handle.opaque != NULL, cleanup_confirmed = false;
@@ -169,7 +174,7 @@ int dppd_flow_shared_counts_add(struct dppd_flow_shared_counts *counts, uint64_t
         memset(object, 0, sizeof(*object));
         goto done;
     }
-    ++counts->generation;
+    counts->generation = generation + 1U;
     object->used = true;
     object->info.residual = rc != 0 || object->uncertain;
     if (!object->info.residual && dppd_admission_commit(counts->admission, &object->ticket) != 0)
@@ -181,6 +186,34 @@ int dppd_flow_shared_counts_add(struct dppd_flow_shared_counts *counts, uint64_t
     }
     *info = object->info;
 done:
+    pthread_mutex_unlock(&counts->lock);
+    return rc;
+}
+
+int dppd_flow_shared_counts_add(struct dppd_flow_shared_counts *counts, uint64_t id, uint16_t port,
+    enum dppd_rule_domain domain, struct dppd_flow_shared_count_info *info)
+{
+    return add(counts, id, port, domain, 0, info);
+}
+
+int dppd_flow_shared_counts_replay_add(struct dppd_flow_shared_counts *counts,
+    const struct dppd_shared_count_spec *spec, struct dppd_flow_shared_count_info *info)
+{
+    if (spec == NULL || spec->generation == 0)
+        return -EINVAL;
+    return add(counts, spec->id, spec->install_port_id, spec->domain, spec->generation, info);
+}
+
+int dppd_flow_shared_counts_seed(struct dppd_flow_shared_counts *counts, uint64_t next_generation)
+{
+    int rc = 0;
+    if (counts == NULL || next_generation == 0)
+        return -EINVAL;
+    pthread_mutex_lock(&counts->lock);
+    if (next_generation < counts->generation)
+        rc = -ESTALE;
+    else
+        counts->generation = next_generation;
     pthread_mutex_unlock(&counts->lock);
     return rc;
 }

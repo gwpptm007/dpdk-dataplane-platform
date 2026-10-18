@@ -48,6 +48,23 @@ struct dppd_flow_service_status {
 
 struct dppd_flow_service;
 
+struct dppd_flow_service_entry {
+    struct dppd_async_flow_create_request request;
+    uint32_t queue;
+};
+
+/** 启动重放期间不对外开放服务和 classifier，保留旧版本，结束前禁止普通增删改及 AGE */
+int dppd_flow_service_replay_begin(struct dppd_flow_service *service, uint64_t revision);
+int dppd_flow_service_replay_submit(struct dppd_flow_service *service, uint32_t queue,
+    const struct dppd_async_flow_create_request *requests, uint32_t count, uint64_t now_ns,
+    struct dppd_flow_job_id *job);
+int dppd_flow_service_replay_end(struct dppd_flow_service *service);
+/** 停机后只允许精确删除，回收不改变持久配置的修订号，也不会继续自动 AGE */
+int dppd_flow_service_shutdown_begin(struct dppd_flow_service *service);
+/** 在服务锁内复制已提交期望状态，不导出实际指针、进行中的批次或私有计数 */
+int dppd_flow_service_snapshot(struct dppd_flow_service *service, struct dppd_flow_service_entry *entries,
+    uint32_t capacity, uint32_t *count, uint64_t *revision);
+
 /** 借用空队列及空 classifier，之后独占它们的写入和完成领取，所有依赖晚于服务关闭 */
 int dppd_flow_service_create(const struct dppd_flow_service_config *config, struct dppd_flow_service **output);
 int dppd_flow_service_close(struct dppd_flow_service **service);

@@ -132,9 +132,42 @@ static void test_concurrent_publication(void)
     dppd_software_backend_fini(&backend);
 }
 
+static void test_cold_restore_and_shutdown(void)
+{
+    struct dppd_software_backend backend;
+    struct dppd_rule rules[2] = {rule(1, 9, 0, 10), rule(2, 42, 1, 20)};
+    assert(dppd_software_backend_init(&backend, 4) == 0);
+    for (unsigned int i = 1; i <= 4; ++i) {
+        fail_allocation = i;
+        assert(dppd_software_backend_restore(&backend, rules, 2) == -ENOMEM);
+        assert(dppd_software_backend_count(&backend) == 0);
+    }
+    assert(dppd_software_backend_restore(&backend, rules, 2) == 0 && dppd_software_backend_count(&backend) == 2);
+    assert(dppd_software_backend_restore(&backend, rules, 2) == -EBUSY);
+    struct dppd_packet packet = {.packet_len = 100};
+    struct dppd_software_decision decision;
+    assert(dppd_software_backend_worker_register(&backend, 0) == 0);
+    dppd_software_backend_decide(&backend, 7, &packet, &decision);
+    assert(decision.matched && decision.mark_id == 10);
+    dppd_software_backend_worker_quiescent(&backend, 0);
+    dppd_software_backend_worker_unregister(&backend, 0);
+    for (unsigned int i = 1; i <= 2; ++i) {
+        uint64_t hits, bytes;
+        fail_allocation = i;
+        assert(dppd_software_backend_clear(&backend) == -ENOMEM && dppd_software_backend_count(&backend) == 2);
+        assert(dppd_software_backend_query_count(&backend, 1, 9, &hits, &bytes) == 0 && hits == 1 && bytes == 100);
+    }
+    assert(dppd_software_backend_clear(&backend) == 0 && dppd_software_backend_count(&backend) == 0);
+    assert(dppd_software_backend_restore(&backend, rules, 2) == 0);
+    uint64_t hits, bytes;
+    assert(dppd_software_backend_query_count(&backend, 1, 9, &hits, &bytes) == 0 && hits == 0 && bytes == 0);
+    dppd_software_backend_fini(&backend);
+}
+
 int main(void)
 {
     test_failures_and_full_capacity();
     test_concurrent_publication();
+    test_cold_restore_and_shutdown();
     return 0;
 }

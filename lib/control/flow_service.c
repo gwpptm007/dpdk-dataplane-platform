@@ -27,7 +27,7 @@ struct service_rule {
     struct dppd_flow_template_lease pin;
     struct dppd_flow_template_id table;
     struct dppd_async_flow_id flow;
-    uint32_t queue, job, item;
+    uint32_t queue, committed_queue, job, item;
     bool committed, busy;
 };
 
@@ -53,7 +53,7 @@ struct flow_job {
     uint64_t serial, submitted_ns;
     uint32_t queue, waiting;
     enum job_state state;
-    bool cleanup_failed, publication_unknown, auto_collect, old_phase, restoring;
+    bool cleanup_failed, publication_unknown, auto_collect, old_phase, restoring, replay;
 };
 
 /** 多个队列可各自积压有界请求，控制消费者按顺序提交一整批，避免版本与账本交叉发布 */
@@ -68,6 +68,7 @@ struct dppd_flow_service {
     uint32_t job_capacity, user_job_capacity, active, weights[8], age_queue_cursor;
     uint64_t owner, serial;
     uint64_t age_next_poll_ns, process_ns;
+    bool replaying, shutting_down;
 };
 
 static _Atomic uint64_t next_owner = 1;
@@ -197,8 +198,10 @@ int dppd_flow_service_close(struct dppd_flow_service **output)
 
 /** 深度按规则数计费而非请求数，64 条批次需要 64 个位置，完成未领取仍占全部位置 */
 static int new_job(struct dppd_flow_service *service, uint32_t queue, uint32_t count, uint64_t now_ns, bool automatic,
-    struct flow_job **output, uint32_t *slot)
+    bool replay, struct flow_job **output, uint32_t *slot)
 {
+    if (service->replaying != replay)
+        return -EBUSY;
     if (service->status.isolated)
         return -EUCLEAN;
     if (queue >= service->config.queue_count || count == 0 || count > 64)
@@ -240,8 +243,9 @@ static int release_record(struct dppd_flow_service *service, uint64_t id, uint32
 }
 
 /** 受理阶段只复制输入并预留逻辑额度和配置保护，真正调用驱动前还有实际额度的整批预检 */
-int dppd_flow_service_submit(struct dppd_flow_service *service, uint32_t queue,
-    const struct dppd_async_flow_create_request *requests, uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *id)
+static int submit(struct dppd_flow_service *service, uint32_t queue,
+    const struct dppd_async_flow_create_request *requests, uint32_t count, uint64_t now_ns, bool replay,
+    struct dppd_flow_job_id *id)
 {
     struct flow_job *job;
     uint32_t job_slot, prepared = 0;
@@ -249,7 +253,11 @@ int dppd_flow_service_submit(struct dppd_flow_service *service, uint32_t queue,
     if (service == NULL || requests == NULL || id == NULL)
         return -EINVAL;
     pthread_mutex_lock(&service->lock);
-    rc = new_job(service, queue, count, now_ns, false, &job, &job_slot);
+    if (service->shutting_down) {
+        rc = -ESHUTDOWN;
+        goto done;
+    }
+    rc = new_job(service, queue, count, now_ns, false, replay, &job, &job_slot);
     if (rc != 0)
         goto done;
     for (; prepared < count; ++prepared) {
@@ -257,7 +265,8 @@ int dppd_flow_service_submit(struct dppd_flow_service *service, uint32_t queue,
         const struct dppd_rule *rule = &requests[prepared].rule;
         struct dppd_resource_demand demand = {DPPD_RESOURCE_RULE, service->config.port_id, 1};
         uint32_t slot;
-        if (rule->id == 0 || rule->id == UINT64_MAX || rule->generation != 0 ||
+        if (rule->id == 0 || rule->id == UINT64_MAX ||
+            (replay ? rule->generation == 0 || rule->generation > service->rules.generation : rule->generation != 0) ||
             rule->install_port_id != service->config.port_id ||
             (service->config.software != NULL && rule->fallback != DPPD_FALLBACK_SOFTWARE_ONLY) ||
             (service->config.software == NULL && rule->fallback == DPPD_FALLBACK_SOFTWARE_ONLY)) {
@@ -295,12 +304,25 @@ int dppd_flow_service_submit(struct dppd_flow_service *service, uint32_t queue,
         goto done;
     }
     job->state = JOB_NEW;
+    job->replay = replay;
     service->weights[queue] += count;
     ++service->status.jobs;
     *id = (struct dppd_flow_job_id){service->owner, job->serial, job_slot};
 done:
     pthread_mutex_unlock(&service->lock);
     return rc;
+}
+
+int dppd_flow_service_submit(struct dppd_flow_service *service, uint32_t queue,
+    const struct dppd_async_flow_create_request *requests, uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *id)
+{
+    return submit(service, queue, requests, count, now_ns, false, id);
+}
+
+int dppd_flow_service_replay_submit(struct dppd_flow_service *service, uint32_t queue,
+    const struct dppd_async_flow_create_request *requests, uint32_t count, uint64_t now_ns, struct dppd_flow_job_id *id)
+{
+    return submit(service, queue, requests, count, now_ns, true, id);
 }
 
 /** 先锁定每个精确旧版本，暂不删账本，后续相同 ID 的请求不能越过正在执行的批次 */
@@ -314,7 +336,7 @@ static int submit_remove(struct dppd_flow_service *service, uint32_t queue,
     if (service == NULL || requests == NULL || id == NULL)
         return -EINVAL;
     pthread_mutex_lock(&service->lock);
-    rc = new_job(service, queue, count, now_ns, automatic, &job, &job_slot);
+    rc = new_job(service, queue, count, now_ns, automatic, false, &job, &job_slot);
     if (rc != 0)
         goto done;
     job->result.remove = true;
@@ -379,7 +401,11 @@ int dppd_flow_service_update(struct dppd_flow_service *service, uint32_t queue,
     if (service == NULL || requests == NULL || id == NULL)
         return -EINVAL;
     pthread_mutex_lock(&service->lock);
-    rc = new_job(service, queue, count, now_ns, false, &job, &job_slot);
+    if (service->shutting_down) {
+        rc = -ESHUTDOWN;
+        goto done;
+    }
+    rc = new_job(service, queue, count, now_ns, false, false, &job, &job_slot);
     if (rc != 0)
         goto done;
     job->updates = calloc(count, sizeof(*job->updates));
@@ -530,7 +556,7 @@ static void complete_job(struct dppd_flow_service *service, struct flow_job *job
 static int software_publish(struct dppd_flow_service *service, struct flow_job *job)
 {
     struct dppd_software_change changes[64];
-    if (service->config.software == NULL)
+    if (service->config.software == NULL || job->replay || service->shutting_down)
         return 0;
     for (uint32_t i = 0; i < job->result.count; ++i)
         changes[i] = (struct dppd_software_change){job->requests[i].rule.id,
@@ -561,9 +587,12 @@ static int publish(struct dppd_flow_service *service, struct flow_job *job)
     rc = software_publish(service, job);
     if (rc != 0)
         return rc;
-    rc = job->result.update  ? dppd_rule_repository_update_batch(&service->rules, rules, expected, count)
-        : job->result.remove ? dppd_rule_repository_remove_batch(&service->rules, rules, count)
-                             : dppd_rule_repository_create_batch(&service->rules, rules, count);
+    rc = job->replay         ? dppd_rule_repository_replay_batch(&service->rules, rules, count)
+        : job->result.update ? dppd_rule_repository_update_batch(&service->rules, rules, expected, count)
+        : job->result.remove
+        ? (service->shutting_down ? dppd_rule_repository_forget_batch(&service->rules, rules, count)
+                                  : dppd_rule_repository_remove_batch(&service->rules, rules, count))
+        : dppd_rule_repository_create_batch(&service->rules, rules, count);
     if (rc != 0) {
         isolate(service, -EUCLEAN);
         job->state = JOB_RESIDUAL;
@@ -573,7 +602,7 @@ static int publish(struct dppd_flow_service *service, struct flow_job *job)
     }
     for (uint32_t i = 0; i < count; ++i) {
         struct service_rule *record = &service->records[job->items[i].slot];
-        job->result.generations[i] = base + i + 1U;
+        job->result.generations[i] = job->replay || service->shutting_down ? rules[i].generation : base + i + 1U;
         if (job->result.remove) {
             if (release_record(service, rules[i].id, job->items[i].slot) != 0) {
                 job->state = JOB_RESIDUAL;
@@ -600,6 +629,7 @@ static int publish(struct dppd_flow_service *service, struct flow_job *job)
                     --service->status.aged_rules;
             }
             record->committed = true;
+            record->committed_queue = record->queue;
             record->busy = false;
             if (rule_aging(&rules[i]))
                 ++service->status.aged_rules;
@@ -642,7 +672,7 @@ static void activate(struct dppd_flow_service *service, struct flow_job *job, ui
         }
         return;
     }
-    if (service->rules.generation >= UINT64_MAX - count) {
+    if (!job->replay && !service->shutting_down && service->rules.generation >= UINT64_MAX - count) {
         job->result.status = -EOVERFLOW;
         if (job->result.remove) {
             for (uint32_t i = 0; i < count; ++i)
@@ -657,8 +687,9 @@ static void activate(struct dppd_flow_service *service, struct flow_job *job, ui
         delete_originals(service, job, now_ns);
         return;
     }
-    for (uint32_t i = 0; i < count; ++i)
-        job->requests[i].rule.generation = service->rules.generation + i + 1U;
+    if (!job->replay)
+        for (uint32_t i = 0; i < count; ++i)
+            job->requests[i].rule.generation = service->rules.generation + i + 1U;
     rc = dppd_async_flow_submit(service->config.queues[job->queue], job->requests, count, now_ns, flows);
     if (rc != 0) {
         job->result.status = rc;
@@ -1001,6 +1032,118 @@ int dppd_flow_service_status(struct dppd_flow_service *service, struct dppd_flow
     return 0;
 }
 
+int dppd_flow_service_replay_begin(struct dppd_flow_service *service, uint64_t revision)
+{
+    int rc = 0;
+    if (service == NULL || revision == UINT64_MAX)
+        return -EINVAL;
+    pthread_mutex_lock(&service->lock);
+    if (service->replaying || service->shutting_down || service->owners.count != 0 || service->rules.generation != 0 ||
+        service->status.jobs != 0 || service->status.isolated)
+        rc = -EBUSY;
+    else {
+        service->rules.generation = revision;
+        service->replaying = true;
+    }
+    pthread_mutex_unlock(&service->lock);
+    return rc;
+}
+
+int dppd_flow_service_replay_end(struct dppd_flow_service *service)
+{
+    int rc = 0;
+    if (service == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&service->lock);
+    if (service->status.jobs != 0 || service->status.isolated)
+        rc = -EBUSY;
+    else if (service->replaying && service->config.software == NULL) {
+        service->replaying = false;
+    } else if (service->replaying) {
+        uint32_t count = service->rules.count;
+        struct dppd_rule *rules = count == 0 ? NULL : calloc(count, sizeof(*rules));
+        if (count != 0 && rules == NULL) {
+            rc = -ENOMEM;
+        } else {
+            if (count != 0) {
+                uint32_t listed;
+                uint64_t revision;
+                bool more;
+                rc = dppd_rule_repository_list(&service->rules, 0, service->rules.generation, rules, count, &listed,
+                    &more, &revision);
+                if (rc == 0 && (listed != count || more))
+                    rc = -EUCLEAN;
+            }
+            if (rc == 0 && service->config.software != NULL)
+                rc = dppd_software_backend_restore(service->config.software, rules, count);
+            if (rc == 0)
+                service->replaying = false;
+            free(rules);
+        }
+    }
+    pthread_mutex_unlock(&service->lock);
+    return rc;
+}
+
+int dppd_flow_service_shutdown_begin(struct dppd_flow_service *service)
+{
+    int rc = 0;
+    if (service == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&service->lock);
+    if (service->status.jobs != 0 || service->status.isolated)
+        rc = -EBUSY;
+    else {
+        if (service->config.software != NULL)
+            rc = dppd_software_backend_clear(service->config.software);
+        if (rc == 0) {
+            service->shutting_down = true;
+            service->replaying = false;
+        }
+    }
+    pthread_mutex_unlock(&service->lock);
+    return rc;
+}
+
+int dppd_flow_service_snapshot(struct dppd_flow_service *service, struct dppd_flow_service_entry *entries,
+    uint32_t capacity, uint32_t *count, uint64_t *revision)
+{
+    struct dppd_rule page[64];
+    uint64_t after = 0, generation;
+    uint32_t copied = 0;
+    bool more = true;
+    int rc = 0;
+    if (service == NULL || count == NULL || revision == NULL || (capacity != 0 && entries == NULL))
+        return -EINVAL;
+    pthread_mutex_lock(&service->lock);
+    if (service->rules.count > capacity) {
+        rc = -ENOSPC;
+        goto done;
+    }
+    while (more && copied < service->rules.count) {
+        uint32_t listed;
+        rc = dppd_rule_repository_list(&service->rules, after, service->rules.generation, page, 64, &listed, &more,
+            &generation);
+        if (rc != 0)
+            goto done;
+        for (uint32_t i = 0; i < listed; ++i) {
+            uint32_t slot = dppd_slot_index_find(&service->owners, page[i].id, 0);
+            if (slot == DPPD_SLOT_NONE) {
+                rc = -EUCLEAN;
+                goto done;
+            }
+            entries[copied++] = (struct dppd_flow_service_entry){{service->records[slot].table, page[i]},
+                service->records[slot].committed_queue};
+            after = page[i].id;
+        }
+    }
+    *count = copied;
+    *revision = service->rules.generation;
+done:
+    pthread_mutex_unlock(&service->lock);
+    return rc;
+}
+
 int dppd_flow_service_age_poll(struct dppd_flow_service *service, uint64_t now_ns, uint32_t budget)
 {
     struct dppd_flow_remove_request removals[64];
@@ -1010,7 +1153,8 @@ int dppd_flow_service_age_poll(struct dppd_flow_service *service, uint64_t now_n
     if (service == NULL || budget == 0 || budget > 64)
         return -EINVAL;
     pthread_mutex_lock(&service->lock);
-    if (service->status.aged_rules == 0 || service->status.isolated || now_ns < service->age_next_poll_ns) {
+    if (service->replaying || service->shutting_down || service->status.aged_rules == 0 || service->status.isolated ||
+        now_ns < service->age_next_poll_ns) {
         pthread_mutex_unlock(&service->lock);
         return 0;
     }

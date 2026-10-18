@@ -91,6 +91,11 @@ struct dppd_software_change {
 int dppd_software_backend_change_batch(struct dppd_software_backend *backend,
     const struct dppd_software_change *changes, uint32_t count);
 
+/** 冷启动只允许向空 classifier 一次发布完整旧版本，按 ID 升序输入，失败时仍为空表 */
+int dppd_software_backend_restore(struct dppd_software_backend *backend, const struct dppd_rule *rules, uint32_t count);
+/** 停机一次发布空表，失败时原规则和 COUNT 完整保留，实际对象由上层继续精确回收 */
+int dppd_software_backend_clear(struct dppd_software_backend *backend);
+
 /**
  * 创建空 classifier 和 QSBR 回收器；调用时不要求 EAL 已初始化，便于控制面单测
  * 成功后必须在所有 worker 已退出并注销后调用 fini；capacity 同时限定软件规则数

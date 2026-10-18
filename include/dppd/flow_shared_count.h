@@ -32,6 +32,10 @@ int dppd_flow_shared_counts_close(struct dppd_flow_shared_counts **counts);
 /** generation 由本库分配，删除重建不复用旧版本，部分创建残留返回 EUCLEAN 及可清理身份 */
 int dppd_flow_shared_counts_add(struct dppd_flow_shared_counts *counts, uint64_t id, uint16_t port,
     enum dppd_rule_domain domain, struct dppd_flow_shared_count_info *info);
+/** 启动时按旧版本升序重建，seed 保留已删除对象使用过的版本，防止重启后旧引用复活 */
+int dppd_flow_shared_counts_replay_add(struct dppd_flow_shared_counts *counts,
+    const struct dppd_shared_count_spec *spec, struct dppd_flow_shared_count_info *info);
+int dppd_flow_shared_counts_seed(struct dppd_flow_shared_counts *counts, uint64_t next_generation);
 int dppd_flow_shared_counts_get(struct dppd_flow_shared_counts *counts, uint64_t id, uint64_t generation,
     struct dppd_flow_shared_count_info *info);
 int dppd_flow_shared_counts_query(struct dppd_flow_shared_counts *counts, uint64_t id, uint64_t generation,

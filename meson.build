@@ -43,6 +43,8 @@ dppd_sources = files(
   'lib/control/async_flow.c',
   'lib/control/flow_service.c',
   'lib/control/flow_shared_count.c',
+  'lib/control/flow_state.c',
+  'lib/control/flow_store.c',
   'lib/control/age.c',
   'lib/control/reset.c',
   'lib/management/server.c',
@@ -106,6 +108,8 @@ executable(
   include_directories: dppd_inc,
   install: false,
 )
+
+flow_state_cli = executable('dppd-flow-state', 'app/dppd-flow-state/main.c', dependencies: dppd_core_dep, install: false)
 
 executable(
   'dppd-snapshot-migrate',

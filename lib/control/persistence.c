@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "dppd/persistence.h"
+#include "persistence_codec.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -741,6 +742,20 @@ static int decode_rule_v5(const uint8_t *input, struct dppd_rule *rule)
 {
     return decode_rule_layout(input, rule, DPPD_SNAPSHOT_V2_RULE_HEADER_SIZE, true, DPPD_SNAPSHOT_V3_MATCH_SIZE, true,
         DPPD_SNAPSHOT_V5_ACTION_SIZE);
+}
+
+int dppd_persistence_rule_encode(const struct dppd_rule *rule, uint8_t *output)
+{
+    if (rule == NULL || output == NULL)
+        return -EINVAL;
+    return encode_rule(rule, output, DPPD_SNAPSHOT_V3_MATCH_SIZE, DPPD_SNAPSHOT_V5_ACTION_SIZE);
+}
+
+int dppd_persistence_rule_decode(const uint8_t *input, struct dppd_rule *rule)
+{
+    if (input == NULL || rule == NULL)
+        return -EINVAL;
+    return decode_rule_v5(input, rule);
 }
 
 static int decode_rule_v1(const uint8_t *input, struct dppd_rule *rule)

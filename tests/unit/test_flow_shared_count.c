@@ -265,11 +265,36 @@ static void test_concurrent_leases(void)
     pthread_barrier_destroy(&finish);
 }
 
+static void test_replay_generation_seed(void)
+{
+    struct model model = {0};
+    struct dppd_admission *quota = admission();
+    struct dppd_flow_shared_count_driver driver = {&model, create, query, destroy};
+    struct dppd_flow_shared_counts *counts = NULL;
+    struct dppd_flow_shared_count_info info, unchanged = {.spec.id = 999};
+    struct dppd_shared_count_spec restored = {42, 9, 7, DPPD_RULE_DOMAIN_INGRESS};
+    assert(dppd_flow_shared_counts_create(quota, 8, &driver, &counts) == 0);
+    assert(dppd_flow_shared_counts_replay_add(counts, &restored, &info) == 0 && info.spec.generation == 9);
+    restored.id = 43;
+    restored.generation = 3;
+    assert(dppd_flow_shared_counts_replay_add(counts, &restored, &unchanged) == -ESTALE && unchanged.spec.id == 999);
+    assert(model.created == 1 && dppd_flow_shared_counts_seed(counts, 20) == 0);
+    assert(
+        dppd_flow_shared_counts_add(counts, 43, 7, DPPD_RULE_DOMAIN_INGRESS, &info) == 0 && info.spec.generation == 20);
+    assert(dppd_flow_shared_counts_seed(counts, 20) == -ESTALE);
+    assert(dppd_flow_shared_counts_seed(counts, UINT64_MAX) == 0);
+    assert(dppd_flow_shared_counts_add(counts, 44, 7, DPPD_RULE_DOMAIN_INGRESS, &unchanged) == -EOVERFLOW);
+    assert(model.created == 2 && dppd_flow_shared_counts_remove(counts, 42, 9) == 0);
+    assert(dppd_flow_shared_counts_remove(counts, 43, 20) == 0);
+    assert(dppd_flow_shared_counts_close(&counts) == 0 && dppd_admission_close(&quota) == 0);
+}
+
 int main(void)
 {
     test_lease_identity_and_counter();
     test_partial_creation_and_residuals();
     test_sixty_four_objects();
     test_concurrent_leases();
+    test_replay_generation_seed();
     return 0;
 }

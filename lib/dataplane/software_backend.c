@@ -617,7 +617,8 @@ int dppd_software_backend_change_batch(struct dppd_software_backend *backend,
         }
         if (rule != NULL) {
             if (rule->id != change->id || rule->generation == UINT64_MAX ||
-                rule->generation <= change->expected_generation || dppd_rule_validate(rule, error, sizeof(error)) != 0) {
+                rule->generation <= change->expected_generation ||
+                dppd_rule_validate(rule, error, sizeof(error)) != 0) {
                 rc = -EINVAL;
                 goto done;
             }
@@ -688,6 +689,84 @@ done:
     snapshot_destroy(next, backend->capacity);
     pthread_mutex_unlock(&backend->writer_lock);
     return rc;
+}
+
+/** 恢复先准备完整副本，退出先准备空副本，都只编译并发布一次，避免按小批重复编译大表 */
+static int replace_snapshot(struct dppd_software_backend *backend, const struct dppd_rule *rules, uint32_t count,
+    bool require_empty)
+{
+    struct dppd_software_classifier_snapshot *next = NULL;
+    struct dppd_install_timer timer;
+    int rc = 0;
+    if (backend == NULL || !backend->lock_initialized || count > backend->capacity || (count != 0 && rules == NULL))
+        return -EINVAL;
+    pthread_mutex_lock(&backend->writer_lock);
+    struct dppd_software_classifier_snapshot *active = atomic_load_explicit(&backend->active, memory_order_acquire);
+    if (require_empty && active->count != 0) {
+        rc = -EBUSY;
+        goto done;
+    }
+    if (count == 0 && active->count == 0)
+        goto done;
+    for (uint32_t i = 0; i < count; ++i) {
+        char error[128];
+        if (rules[i].id == 0 || rules[i].id == UINT64_MAX || rules[i].generation == 0 ||
+            rules[i].generation == UINT64_MAX || (i != 0 && rules[i - 1U].id >= rules[i].id) ||
+            dppd_rule_validate(&rules[i], error, sizeof(error)) != 0) {
+            rc = -EINVAL;
+            goto done;
+        }
+        if (!dppd_software_backend_rule_supported(&rules[i])) {
+            rc = -ENOTSUP;
+            goto done;
+        }
+    }
+    dppd_install_timer_start(&timer);
+    next = snapshot_clone(NULL, backend->capacity);
+    if (next == NULL) {
+        rc = -ENOMEM;
+        goto done;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        struct dppd_software_rule_metrics *metrics = calloc(1, sizeof(*metrics));
+        if (metrics == NULL) {
+            rc = -ENOMEM;
+            goto done;
+        }
+        atomic_init(&metrics->references, 1);
+        atomic_init(&metrics->hits, 0);
+        atomic_init(&metrics->bytes, 0);
+        next->objects[i] = (struct dppd_software_rule_object){rules[i], metrics};
+        ++next->count;
+    }
+    rc = publish_locked(backend, next);
+    if (rc == 0) {
+        uint64_t duration = 0;
+        bool available = dppd_install_timer_finish(&timer, &duration);
+        if (count != 0) {
+            dppd_rule_latency_record(&backend->latency_batch, available, duration, count);
+            for (uint32_t i = 0; i < count; ++i) {
+                next->objects[i].metrics->install_duration_ns = duration;
+                next->objects[i].metrics->timing_available = available;
+                next->objects[i].metrics->commit_rule_count = count;
+            }
+        }
+        next = NULL;
+    }
+done:
+    snapshot_destroy(next, backend->capacity);
+    pthread_mutex_unlock(&backend->writer_lock);
+    return rc;
+}
+
+int dppd_software_backend_restore(struct dppd_software_backend *backend, const struct dppd_rule *rules, uint32_t count)
+{
+    return replace_snapshot(backend, rules, count, true);
+}
+
+int dppd_software_backend_clear(struct dppd_software_backend *backend)
+{
+    return replace_snapshot(backend, NULL, 0, false);
 }
 
 /** 只复制历史计数，和已有控制面写者串行，逐包读者无需参与此锁 */

@@ -2,11 +2,13 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <rte_byteorder.h>
 #include <rte_flow.h>
 #include <rte_version.h>
 #include "dppd/flow_service.h"
+#include "dppd/flow_state.h"
 
 struct model_counter {
     uint64_t hits, bytes;
@@ -77,6 +79,7 @@ static unsigned int flow_count, completion_count, ready;
 static bool emit_age, fail_create_completion, fail_destroy_completion, fail_table_destroy;
 static int pattern_object, actions_object, table_object;
 static struct model_counter *expected_counter;
+static bool restoring_store, deny_empty;
 
 int __wrap_rte_flow_info_get(uint16_t port, struct rte_flow_port_info *info, struct rte_flow_queue_info *queue,
     struct rte_flow_error *error);
@@ -147,6 +150,8 @@ struct rte_flow_actions_template *__wrap_rte_flow_actions_template_create(uint16
 {
     (void)error;
     assert(port == 7 && attr->ingress);
+    if (restoring_store)
+        expected_counter = last_counter;
     /** mask 必须写真实 COUNT 类型，句柄位置可变，不能把逻辑 ID 或临时指针地址作为 INDIRECT conf */
     assert(actions[0].type == RTE_FLOW_ACTION_TYPE_INDIRECT && actions[0].conf == expected_counter);
     assert(masks[0].type == RTE_FLOW_ACTION_TYPE_COUNT && masks[0].conf == NULL);
@@ -281,6 +286,108 @@ static struct dppd_flow_job_result finish(struct dppd_flow_service *service, con
     }
     assert(!"incomplete native batch");
     return result;
+}
+
+static int verify_empty(void *context, uint16_t port)
+{
+    (void)context;
+    assert(port == 7);
+    return deny_empty || counter_live != 0 || flow_count != 0 ? -EUCLEAN : 0;
+}
+
+/** 正式原生工厂按旧代次重建共享对象和模板，AGE 删除后配置也必须落盘，不能只清内存 */
+static void test_native_store_restart(void)
+{
+    char directory[] = "/tmp/dppd-native-store-XXXXXX", path[256], lock[270];
+    assert(mkdtemp(directory) != NULL);
+    snprintf(path, sizeof(path), "%s/state", directory);
+    snprintf(lock, sizeof(lock), "%s.lock", path);
+    struct dppd_flow_state *state = calloc(1, sizeof(*state)), *loaded = NULL;
+    assert(state != NULL);
+    state->config = (struct dppd_flow_state_config){.mode = DPPD_FLOW_STATE_NATIVE,
+        .port_id = 7,
+        .rule_capacity = 64,
+        .queue_count = 1,
+        .depth = 64,
+        .queue_capacity = {128},
+        .template_leases = 256,
+        .shared_leases = 512,
+        .native_counters = 2,
+        .native_aging = 128,
+        .timeout_ns = UINT64_C(1000000000)};
+    state->config.admission = (struct dppd_admission_config){.ticket_capacity = 320, .port_count = 1};
+    state->config.admission.ports[0].port_id = 7;
+    for (unsigned int k = 0; k < DPPD_RESOURCE_KIND_COUNT; ++k)
+        state->config.admission.limits[k] = state->config.admission.ports[0].limits[k] = 128;
+    state->config.admission.limits[DPPD_RESOURCE_COUNTER] =
+        state->config.admission.ports[0].limits[DPPD_RESOURCE_COUNTER] = 2;
+    state->shared_count = 2;
+    state->counts[0] = (struct dppd_shared_count_spec){700, 9, 7, DPPD_RULE_DOMAIN_INGRESS};
+    state->counts[1] = (struct dppd_shared_count_spec){800, 3, 7, DPPD_RULE_DOMAIN_INGRESS};
+    state->shared_next_generation = 20;
+    state->table_count = 1;
+    state->tables[0].key = 100;
+    state->tables[0].spec.capacity = 128;
+    state->tables[0].spec.dynamic_actions = 1;
+    struct dppd_rule *example = &state->tables[0].spec.example;
+    *example = (struct dppd_rule){.id = 1, .install_port_id = 7, .group = 1, .nb_matches = 2, .nb_actions = 3};
+    example->matches[0].type = DPPD_MATCH_ETH;
+    example->matches[1].type = DPPD_MATCH_IPV4;
+    example->matches[1].spec.ipv4.src_mask_be = UINT32_MAX;
+    example->actions[0] = (struct dppd_action){.type = DPPD_ACTION_SHARED_COUNT, .conf.shared_count = {700, 9}};
+    example->actions[1] = (struct dppd_action){.type = DPPD_ACTION_AGE, .conf.age_timeout_seconds = 1};
+    example->actions[2].type = DPPD_ACTION_DROP;
+    state->rule_count = 2;
+    state->revision = 100;
+    state->rules = calloc(2, sizeof(*state->rules));
+    assert(state->rules != NULL);
+    for (unsigned int i = 0; i < 2; ++i) {
+        state->rules[i] = (struct dppd_flow_state_rule){100, 0, *example};
+        state->rules[i].rule.id = i + 11U;
+        state->rules[i].rule.generation = i == 0 ? 42 : 71;
+    }
+    assert(dppd_flow_state_save(path, state) == 0);
+    struct dppd_flow_store_runtime runtime = {.verify_empty = verify_empty};
+    struct dppd_flow_store *store = NULL, *other = NULL;
+    uint64_t hits, bytes;
+    restoring_store = true;
+    assert(dppd_flow_store_open(path, NULL, &store) == -ENOTSUP && store == NULL && counter_live == 0);
+    deny_empty = true;
+    assert(dppd_flow_store_open(path, &runtime, &store) == -EUCLEAN && store == NULL && counter_live == 0);
+    deny_empty = false;
+    assert(dppd_flow_store_open(path, &runtime, &store) == 0 && flow_count == 2 && counter_live == 2);
+    assert(dppd_flow_store_query_shared(store, 700, 9, &hits, &bytes) == 0 && hits == 0 && bytes == 0);
+    assert(dppd_flow_store_query_shared(store, 700, 3, &hits, &bytes) == -ESTALE);
+    for (unsigned int i = 0; i < flow_count; ++i) {
+        flows[i]->counter->hits += 2;
+        flows[i]->counter->bytes += 128;
+    }
+    assert(dppd_flow_store_query_shared(store, 700, 9, &hits, &bytes) == 0 && hits == 4 && bytes == 256);
+    assert(dppd_flow_store_close(&store) == 0 && counter_live == 0 && flow_count == 0);
+    assert(dppd_flow_store_open(path, &runtime, &store) == 0 && flow_count == 2);
+    assert(dppd_flow_store_query_shared(store, 700, 9, &hits, &bytes) == 0 && hits == 0 && bytes == 0);
+    emit_age = true;
+    for (unsigned int i = 0; i < 16; ++i)
+        assert(dppd_flow_store_process(store, UINT64_C(200000000), 64) == 0);
+    assert(flow_count == 0);
+    assert(dppd_flow_state_load(path, &loaded) == 0 && loaded->rule_count == 0 && loaded->revision == 102);
+    assert(
+        loaded->shared_next_generation == 20 && loaded->counts[0].generation == 9 && loaded->counts[1].generation == 3);
+    dppd_flow_state_free(&loaded);
+    assert(dppd_flow_store_close(&store) == 0 && counter_live == 0);
+    assert(dppd_flow_state_save(path, state) == 0);
+    fail_create_completion = fail_table_destroy = true;
+    assert(dppd_flow_store_open(path, &runtime, &store) == -EUCLEAN && store != NULL && flow_count == 0 &&
+        counter_live == 2);
+    assert(dppd_flow_store_open(path, &runtime, &other) == -EBUSY && other == NULL);
+    fail_table_destroy = false;
+    assert(dppd_flow_store_close(&store) == 0 && counter_live == 0);
+    assert(dppd_flow_store_open(path, &runtime, &store) == 0 && dppd_flow_store_close(&store) == 0);
+    restoring_store = false;
+    dppd_flow_state_free(&state);
+    unlink(path);
+    unlink(lock);
+    assert(rmdir(directory) == 0);
 }
 #endif
 
@@ -436,5 +543,8 @@ int main(void)
     assert(dppd_flow_shared_counts_remove(counts, b.spec.id, b.spec.generation) == 0);
     assert(dppd_flow_shared_counts_close(&counts) == 0 && counter_live == 0);
     assert(dppd_admission_close(&admission) == 0);
+#if RTE_VERSION >= RTE_VERSION_NUM(24, 11, 0, 0)
+    test_native_store_restart();
+#endif
     return 0;
 }

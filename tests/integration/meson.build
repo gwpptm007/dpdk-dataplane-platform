@@ -79,6 +79,7 @@ ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', required: false)
 executable('test_ipv4_store_window', '../../app/dppd/main.c', 'ipv4_store_window.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'], install: false)
 if ring_pmd.found()
+  executable('test_m5_flow_restart', 'm5_flow_restart.c', dependencies: [dppd_core_dep, ring_pmd], install: false)
   executable('test_m4_flow_traffic', 'm4_flow_traffic.c', dependencies: [dppd_core_dep, ring_pmd],
     link_args: ['-Wl,--wrap=calloc'], install: false)
   executable('test_ipv4_traffic', 'ipv4_traffic.c', dependencies: [dppd_core_dep, ring_pmd], install: false)

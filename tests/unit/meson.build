@@ -71,6 +71,19 @@ test('native shared COUNT template queue AGE and compensation contract', native_
 test('M4 joint acceptance evidence gates', find_program('python3'),
   args: [files('test_m4_acceptance.py')])
 
+# 配置文件不能保存指针，损坏、版本错配和写盘各阶段故障都有独立结果
+flow_state_test = executable('test_flow_state', 'test_flow_state.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=write', '-Wl,--wrap=fsync', '-Wl,--wrap=rename'])
+test('M5 M4 configuration codec integrity and atomic persistence', flow_state_test)
+
+# 真正的 SIGKILL 与 exec 重启，不沿用旧地址空间，写盘失败不能领取成功回执
+flow_store_test = executable('test_flow_store', 'test_flow_store.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=fsync', '-Wl,--wrap=calloc', '-Wl,--wrap=dppd_flow_service_status'])
+test('M5 M4 durable receipts crash replay and residual cleanup', flow_store_test, timeout: 120)
+test('M5 16384 rule configuration replay and exact teardown', flow_store_test, args: ['--scale'], timeout: 120)
+test('M5 configuration CLI create check and software replay', find_program('python3'),
+  args: [files('test_flow_state_cli.py'), flow_state_cli], timeout: 60)
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',
