@@ -564,6 +564,132 @@ out:
     return rc;
 }
 
+/** 先修改私有副本中的整个批次，任何分配或编译失败都不会改变活跃规则及计数 */
+int dppd_software_backend_change_batch(struct dppd_software_backend *backend,
+    const struct dppd_software_change *changes, uint32_t count)
+{
+    struct dppd_software_classifier_snapshot *active, *next = NULL;
+    struct dppd_install_timer timer;
+    uint64_t final_count;
+    int slots[DPPD_SOFTWARE_CHANGE_BATCH_MAX];
+    uint32_t i;
+    int rc = 0;
+
+    if (backend == NULL || !backend->lock_initialized || changes == NULL || count == 0 ||
+        count > DPPD_SOFTWARE_CHANGE_BATCH_MAX)
+        return -EINVAL;
+    pthread_mutex_lock(&backend->writer_lock);
+    active = atomic_load_explicit(&backend->active, memory_order_acquire);
+    final_count = active->count;
+    for (i = 0; i < count; ++i) {
+        const struct dppd_software_change *change = &changes[i];
+        const struct dppd_rule *rule = change->replacement;
+        char error[128];
+        unsigned int found = 0;
+        slots[i] = -1;
+        if (change->id == 0 || change->id == UINT64_MAX || change->expected_generation == UINT64_MAX ||
+            (rule == NULL && change->expected_generation == 0)) {
+            rc = -EINVAL;
+            goto done;
+        }
+        for (uint32_t previous = 0; previous < i; ++previous)
+            if (changes[previous].id == change->id) {
+                rc = -EEXIST;
+                goto done;
+            }
+        for (uint32_t slot = 0; slot < backend->capacity; ++slot)
+            if (active->objects[slot].metrics != NULL && active->objects[slot].rule.id == change->id) {
+                ++found;
+                slots[i] = (int)slot;
+            }
+        if (found > 1) {
+            rc = -EUCLEAN;
+            goto done;
+        }
+        if (change->expected_generation == 0 && found != 0) {
+            rc = -EEXIST;
+            goto done;
+        }
+        if (change->expected_generation != 0 &&
+            (found == 0 || active->objects[slots[i]].rule.generation != change->expected_generation)) {
+            rc = -ESTALE;
+            goto done;
+        }
+        if (rule != NULL) {
+            if (rule->id != change->id || rule->generation == UINT64_MAX ||
+                rule->generation <= change->expected_generation || dppd_rule_validate(rule, error, sizeof(error)) != 0) {
+                rc = -EINVAL;
+                goto done;
+            }
+            if (!dppd_software_backend_rule_supported(rule)) {
+                rc = -ENOTSUP;
+                goto done;
+            }
+        }
+        if (change->expected_generation == 0)
+            ++final_count;
+        else if (rule == NULL)
+            --final_count;
+    }
+    if (final_count > backend->capacity) {
+        rc = -ENOSPC;
+        goto done;
+    }
+    dppd_install_timer_start(&timer);
+    next = snapshot_clone(active, backend->capacity);
+    if (next == NULL) {
+        rc = -ENOMEM;
+        goto done;
+    }
+    /** 先在副本清除所有被替换或删除的槽位，满表也能用本批腾出的槽位创建其他 ID */
+    for (i = 0; i < count; ++i)
+        if (slots[i] >= 0) {
+            struct dppd_software_rule_object *object = &next->objects[slots[i]];
+            metrics_put(object->metrics);
+            memset(object, 0, sizeof(*object));
+            --next->count;
+        }
+    for (i = 0; i < count; ++i) {
+        struct dppd_software_rule_metrics *metrics;
+        if (changes[i].replacement == NULL)
+            continue;
+        metrics = calloc(1, sizeof(*metrics));
+        if (metrics == NULL) {
+            rc = -ENOMEM;
+            goto done;
+        }
+        atomic_init(&metrics->references, 1);
+        atomic_init(&metrics->hits, 0);
+        atomic_init(&metrics->bytes, 0);
+        for (uint32_t slot = 0; slot < backend->capacity; ++slot)
+            if (next->objects[slot].metrics == NULL) {
+                next->objects[slot].rule = *changes[i].replacement;
+                next->objects[slot].metrics = metrics;
+                slots[i] = (int)slot;
+                ++next->count;
+                break;
+            }
+    }
+    rc = publish_locked(backend, next);
+    if (rc == 0) {
+        uint64_t duration = 0;
+        bool available = dppd_install_timer_finish(&timer, &duration);
+        dppd_rule_latency_record(&backend->latency_batch, available, duration, count);
+        for (i = 0; i < count; ++i)
+            if (changes[i].replacement != NULL) {
+                struct dppd_software_rule_metrics *metrics = next->objects[slots[i]].metrics;
+                metrics->install_duration_ns = duration;
+                metrics->timing_available = available;
+                metrics->commit_rule_count = count;
+            }
+        next = NULL;
+    }
+done:
+    snapshot_destroy(next, backend->capacity);
+    pthread_mutex_unlock(&backend->writer_lock);
+    return rc;
+}
+
 /** 只复制历史计数，和已有控制面写者串行，逐包读者无需参与此锁 */
 void dppd_software_backend_latency(const struct dppd_software_backend *backend,
     struct dppd_rule_latency_histogram *single, struct dppd_rule_latency_histogram *batch)

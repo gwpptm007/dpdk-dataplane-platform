@@ -16,7 +16,7 @@ struct template_entry {
 struct template_lease_entry {
     uint64_t serial;
     uint32_t table, next;
-    bool used;
+    bool used, pin;
 };
 
 struct dppd_flow_templates {
@@ -287,8 +287,8 @@ done:
     return rc;
 }
 
-int dppd_flow_template_acquire(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id,
-    const struct dppd_rule *rule, struct dppd_flow_template_lease *lease)
+static int acquire(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id,
+    const struct dppd_rule *rule, bool pin, struct dppd_flow_template_lease *lease)
 {
     struct template_entry *entry;
     struct template_lease_entry *held;
@@ -304,7 +304,8 @@ int dppd_flow_template_acquire(struct dppd_flow_templates *templates, const stru
         rc = -EUCLEAN;
     else if (!dppd_flow_template_matches(&entry->info.spec, rule))
         rc = -EINVAL;
-    else if (entry->info.references == entry->info.spec.capacity || templates->free_head == templates->lease_capacity)
+    else if ((!pin && entry->info.flows == entry->info.spec.capacity) ||
+        templates->free_head == templates->lease_capacity)
         rc = -ENOSPC;
     else if (templates->next_serial == UINT64_MAX)
         rc = -EOVERFLOW;
@@ -313,13 +314,28 @@ int dppd_flow_template_acquire(struct dppd_flow_templates *templates, const stru
         held = &templates->leases[slot];
         templates->free_head = held->next;
         held->used = true;
+        held->pin = pin;
         held->serial = templates->next_serial++;
         held->table = id->slot;
         ++entry->info.references;
+        if (!pin)
+            ++entry->info.flows;
         *lease = (struct dppd_flow_template_lease){templates->owner, held->serial, slot};
     }
     pthread_mutex_unlock(&templates->lock);
     return rc;
+}
+
+int dppd_flow_template_acquire(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id,
+    const struct dppd_rule *rule, struct dppd_flow_template_lease *lease)
+{
+    return acquire(templates, id, rule, false, lease);
+}
+
+int dppd_flow_template_pin(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id,
+    const struct dppd_rule *rule, struct dppd_flow_template_lease *lease)
+{
+    return acquire(templates, id, rule, true, lease);
 }
 
 int dppd_flow_template_release(struct dppd_flow_templates *templates, const struct dppd_flow_template_lease *lease)
@@ -343,6 +359,8 @@ int dppd_flow_template_release(struct dppd_flow_templates *templates, const stru
         goto done;
     }
     --templates->tables[held->table].info.references;
+    if (!held->pin)
+        --templates->tables[held->table].info.flows;
     held->used = false;
     held->next = templates->free_head;
     templates->free_head = lease->slot;

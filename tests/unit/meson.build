@@ -37,6 +37,11 @@ native_async_flow_test = executable('test_native_async_flow', 'test_native_async
               '-Wl,--wrap=rte_flow_push', '-Wl,--wrap=rte_flow_pull'])
 test('native asynchronous enqueue push pull and retained storage', native_async_flow_test)
 
+# 混合增删改在满表下只发布一次，分配故障保留旧 COUNT，并由真实读线程检查中间状态
+software_change_batch_test = executable('test_software_change_batch', 'test_software_change_batch.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=calloc'])
+test('atomic software create replace delete and allocation failures', software_change_batch_test)
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',

@@ -79,6 +79,18 @@ struct dppd_software_decision {
     uint32_t mark_id;
 };
 
+#define DPPD_SOFTWARE_CHANGE_BATCH_MAX 64U
+
+/** expected 为零时新建，否则精确替换旧版本，replacement 为空时删除旧版本 */
+struct dppd_software_change {
+    uint64_t id, expected_generation;
+    const struct dppd_rule *replacement;
+};
+
+/** 混合增删改先完成全部预检与分配，再只发布一次快照，失败保留旧规则和 COUNT */
+int dppd_software_backend_change_batch(struct dppd_software_backend *backend,
+    const struct dppd_software_change *changes, uint32_t count);
+
 /**
  * 创建空 classifier 和 QSBR 回收器；调用时不要求 EAL 已初始化，便于控制面单测
  * 成功后必须在所有 worker 已退出并注销后调用 fini；capacity 同时限定软件规则数

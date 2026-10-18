@@ -214,5 +214,28 @@ int main(void)
     test_shape();
     test_lease_and_capacity();
     test_partial_failures();
+    /** 逻辑保护不挤占实际流容量，实际流删除后仍不能销毁协调器正在使用的模板 */
+    struct dppd_admission *quota = admission();
+    struct dppd_flow_templates *tables = NULL;
+    struct dppd_flow_template_spec shape = spec();
+    struct dppd_flow_template_id id;
+    struct dppd_flow_template_lease pin, flow;
+    struct dppd_flow_template_info info;
+    shape.capacity = 1;
+    assert(dppd_flow_templates_create(quota, 3, NULL, &tables) == 0);
+    assert(dppd_flow_template_create(tables, &shape, &id) == 0);
+    assert(dppd_flow_template_pin(tables, &id, &shape.example, &pin) == 0);
+    assert(dppd_flow_template_acquire(tables, &id, &shape.example, &flow) == 0);
+    assert(dppd_flow_template_get(tables, &id, &info) == 0 && info.references == 2 && info.flows == 1);
+    assert(dppd_flow_template_release(tables, &flow) == 0);
+    assert(dppd_flow_template_destroy(tables, &id) == -EBUSY);
+    assert(dppd_flow_template_get(tables, &id, &info) == 0 && info.references == 1 && info.flows == 0);
+    assert(dppd_flow_template_acquire(tables, &id, &shape.example, &flow) == 0);
+    assert(dppd_flow_template_release(tables, &pin) == 0);
+    assert(dppd_flow_template_release(tables, &pin) == -ESTALE);
+    assert(dppd_flow_template_release(tables, &flow) == 0);
+    assert(dppd_flow_template_destroy(tables, &id) == 0);
+    assert(dppd_flow_templates_close(&tables) == 0);
+    assert(dppd_admission_close(&quota) == 0);
     return 0;
 }

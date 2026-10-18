@@ -38,7 +38,7 @@ struct dppd_flow_template_lease {
 struct dppd_flow_template_info {
     struct dppd_flow_template_spec spec;
     struct dppd_flow_template_parts parts;
-    uint32_t references;
+    uint32_t references, flows;
     bool residual;
 };
 
@@ -56,6 +56,9 @@ int dppd_flow_template_get(struct dppd_flow_templates *templates, const struct d
 /** 有引用时拒绝删除，残留模板只允许重试销毁，不允许继续借用 */
 int dppd_flow_template_destroy(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id);
 int dppd_flow_template_acquire(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id,
+    const struct dppd_rule *rule, struct dppd_flow_template_lease *lease);
+/** 协调器准备和补偿期间保护模板身份，不占实际 flow 容量，仍占有界借用池 */
+int dppd_flow_template_pin(struct dppd_flow_templates *templates, const struct dppd_flow_template_id *id,
     const struct dppd_rule *rule, struct dppd_flow_template_lease *lease);
 int dppd_flow_template_release(struct dppd_flow_templates *templates, const struct dppd_flow_template_lease *lease);
 /** 比较语义字段，不比较结构体填充字节，也不把匹配值误当成模板掩码 */
