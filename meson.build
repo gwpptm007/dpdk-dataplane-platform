@@ -37,6 +37,7 @@ dppd_sources = files(
   'lib/control/transfer.c',
   'lib/control/transaction.c',
   'lib/control/control.c',
+  'lib/control/admission.c',
   'lib/control/age.c',
   'lib/control/reset.c',
   'lib/management/server.c',

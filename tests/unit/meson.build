@@ -5,6 +5,11 @@ packet_test = executable(
 )
 test('packet parser', packet_test)
 
+# 真实多线程同时争抢额度，覆盖整批拒绝、残留保留、旧凭据和动态缩额
+admission_test = executable('test_admission', 'test_admission.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'])
+test('atomic global and per-port resource admission', admission_test)
+
 topology_test = executable('test_topology', 'test_topology.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',
