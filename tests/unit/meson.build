@@ -9,7 +9,7 @@ topology_test = executable('test_topology', 'test_topology.c', dependencies: dpp
   link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_name', '-Wl,--wrap=socket',
               '-Wl,--wrap=setsockopt', '-Wl,--wrap=sendto', '-Wl,--wrap=recvmsg', '-Wl,--wrap=close',
               '-Wl,--wrap=open', '-Wl,--wrap=open64', '-Wl,--wrap=read', '-Wl,--wrap=realpath',
-              '-Wl,--wrap=if_nametoindex'])
+              '-Wl,--wrap=if_nametoindex', '-Wl,--wrap=__realpath_chk'])
 test('verified endpoint roles and bounded topology discovery', topology_test)
 
 flow_contract_test = executable('test_flow_contract', 'test_flow_contract.c', dependencies: dppd_core_dep,

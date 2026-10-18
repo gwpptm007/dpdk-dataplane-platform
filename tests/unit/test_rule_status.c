@@ -15,7 +15,9 @@
  * 两个预设样本分别代表提交开始和结束，便于稳定验证跨秒、时钟失败和重启后的重新计时
  */
 static struct timespec clock_samples[2];
-static unsigned int clock_index, clock_limit;
+/** 时钟包装会推进游标，重复预设时的重置必须保留，不能被当成多余赋值 */
+static volatile unsigned int clock_index;
+static unsigned int clock_limit;
 static int clock_failure = -1;
 static unsigned int driver_calls;
 static bool validation_unsupported;

@@ -95,7 +95,7 @@ static void drain_round(struct fixture *fixture)
 
         for (port = 0; port < 2; ++port) {
             for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
-                void *object;
+                void *object = NULL;
 
                 while (rte_ring_dequeue(fixture->tx[port][queue], &object) == 0) {
                     struct rte_mbuf *mbuf = object;
@@ -324,7 +324,7 @@ static void verify_drop_reasons(struct fixture *fixture)
         if (scenario == 4)
             atomic_store(&fixture->runtime.devices.ports[1].link_state, DPPD_LINK_UP);
         if (scenario == 3) {
-            void *object;
+            void *object = NULL;
             while (rte_ring_dequeue(fixture->tx[1][0], &object) == 0)
                 rte_pktmbuf_free(object);
         }

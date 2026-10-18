@@ -323,6 +323,7 @@ int __wrap_open(const char *path, int flags, ...);
 int __wrap_open64(const char *path, int flags, ...);
 ssize_t __wrap_read(int fd, void *buffer, size_t count);
 char *__wrap_realpath(const char *path, char *resolved);
+char *__wrap___realpath_chk(const char *path, char *resolved, size_t capacity);
 unsigned int __wrap_if_nametoindex(const char *name);
 
 int __wrap_socket(int domain, int type, int protocol)
@@ -538,6 +539,16 @@ char *__wrap_realpath(const char *path, char *resolved)
     }
     memcpy(resolved, target, strlen(target) + 1U);
     return resolved;
+}
+
+/** 优化构建会调用带长度检查的 libc 入口，必须继续使用同一份模拟内核身份 */
+char *__wrap___realpath_chk(const char *path, char *resolved, size_t capacity)
+{
+    if (capacity < sizeof("/sys/devices/pci0000:00/0000:03:00.0")) {
+        errno = ERANGE;
+        return NULL;
+    }
+    return __wrap_realpath(path, resolved);
 }
 
 unsigned int __wrap_if_nametoindex(const char *name)

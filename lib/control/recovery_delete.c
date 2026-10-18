@@ -16,8 +16,9 @@
 static int milliseconds(uint64_t *value)
 {
     struct timespec now;
+    /** 时钟失败必须返回非零错误，不能让未写入的时间被当成成功结果 */
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-        return -errno;
+        return errno != 0 ? -errno : -EIO;
     *value = (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
     return 0;
 }

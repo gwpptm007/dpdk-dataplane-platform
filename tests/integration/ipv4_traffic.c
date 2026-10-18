@@ -194,7 +194,7 @@ static void matrix(struct fixture *fixture, uint16_t ingress)
     for (;;) {
         for (uint16_t port = 0; port < PORTS; ++port) {
             for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
-                void *object;
+                void *object = NULL;
                 while (rte_ring_dequeue(fixture->tx[port][queue], &object) == 0) {
                     struct rte_mbuf *mbuf = object;
                     unsigned int tag;
@@ -265,7 +265,7 @@ static void hot_updates(struct fixture *fixture)
         while (received < fixture->queues) {
             for (uint16_t port = 0; port < PORTS; ++port) {
                 for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
-                    void *object;
+                    void *object = NULL;
                     while (rte_ring_dequeue(fixture->tx[port][queue], &object) == 0) {
                         assert(port == 1 || port == 2);
                         verify_output(fixture, object, port, 1, round, true);
@@ -377,7 +377,7 @@ static void acl_allow_path(struct fixture *fixture)
     uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
     for (uint16_t queue = 0; queue < fixture->queues; ++queue) {
         for (unsigned int i = 0; i < 2; ++i) {
-            void *object;
+            void *object = NULL;
             while (rte_ring_dequeue(fixture->tx[1][queue], &object) != 0) {
                 assert(rte_get_timer_cycles() < deadline);
                 rte_pause();
@@ -488,7 +488,7 @@ static void dnat_queues(struct fixture *fixture, const struct dppd_dnat_rule *dn
             rte_mbuf_refcnt_update(mbuf, 1);
             assert(rte_ring_enqueue(fixture->rx[ingress][queue], mbuf) == 0);
             fixture->sent++;
-            void *object;
+            void *object = NULL;
             while (rte_ring_dequeue(fixture->tx[egress][queue], &object) != 0) {
                 assert(rte_get_timer_cycles() < deadline);
                 rte_pause();
@@ -543,7 +543,7 @@ static void stateful_queues(struct fixture *fixture)
         struct rte_mbuf *mbuf = make_packet(fixture, 13, queue, 991);
         assert(rte_ring_enqueue(fixture->rx[0][queue], mbuf) == 0);
         fixture->sent++;
-        void *object;
+        void *object = NULL;
         while (rte_ring_dequeue(fixture->tx[1][queue], &object) != 0) {
             assert(rte_get_timer_cycles() < deadline);
             rte_pause();
@@ -604,7 +604,7 @@ static void stateful_queues(struct fixture *fixture)
         memcpy(rte_pktmbuf_append(mbuf, FRAME_SIZE), wire, FRAME_SIZE);
         assert(rte_ring_enqueue(fixture->rx[1][queue], mbuf) == 0);
         fixture->sent++;
-        void *object;
+        void *object = NULL;
         while (rte_ring_dequeue(fixture->tx[0][queue], &object) != 0) {
             assert(rte_get_timer_cycles() < deadline);
             rte_pause();
@@ -703,12 +703,14 @@ static void ipv6_queues(struct fixture *fixture)
         rte_mbuf_refcnt_update(tail, 1);
         assert(rte_ring_enqueue(fixture->rx[0][queue], original) == 0);
         fixture->sent++;
-        void *object;
+        void *object = NULL;
         uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
         while (rte_ring_dequeue(fixture->tx[egress][queue], &object) != 0) {
             assert(rte_get_timer_cycles() < deadline);
             rte_pause();
         }
+        /** 成功出队还要取得有效报文，不能把未填写的输出交给后面的字节核对 */
+        assert(object != NULL);
         assert(memcmp(rte_pktmbuf_read(object, 0, FRAME_SIZE, buffer), expected, FRAME_SIZE) == 0);
         assert(((struct rte_mbuf *)object)->hash.fdir.hi == 0x600d);
         assert(memcmp(rte_pktmbuf_read(original, 0, FRAME_SIZE, buffer), wire, FRAME_SIZE) == 0);
@@ -845,7 +847,7 @@ static void nat66_queues(struct fixture *fixture)
                 rte_mbuf_refcnt_update(tail, 1);
                 assert(rte_ring_enqueue(fixture->rx[ingress][queue], original) == 0);
                 fixture->sent++;
-                void *object;
+                void *object = NULL;
                 uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
                 while (rte_ring_dequeue(fixture->tx[egress][queue], &object) != 0) {
                     assert(rte_get_timer_cycles() < deadline);
@@ -927,7 +929,7 @@ static void nd6_queues(struct fixture *fixture)
         assert(rte_ring_enqueue(fixture->rx[0][queue], retained[queue]) == 0);
         fixture->sent++;
     }
-    void *object;
+    void *object = NULL;
     uint64_t deadline = rte_get_timer_cycles() + 5 * rte_get_timer_hz();
     while (rte_ring_dequeue(fixture->tx[1][0], &object) != 0) {
         assert(rte_get_timer_cycles() < deadline);

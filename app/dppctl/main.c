@@ -567,9 +567,12 @@ static int build_acl_request(int argc, char **argv, struct dppd_management_reque
     bool ipv6 = strcmp(argv[0], "acl6-set") == 0;
     ip->type = ipv6 ? DPPD_MATCH_IPV6 : DPPD_MATCH_IPV4;
     if (ipv6) {
-        if (parse_ipv6_cidr(argv[6], ip->spec.ipv6.src, ip->spec.ipv6.src_mask) != 0 ||
-            parse_ipv6_cidr(argv[7], ip->spec.ipv6.dst, ip->spec.ipv6.dst_mask) != 0)
+        /** 先完整解析两个地址，再写入共用的规则字段，失败时不发布半份地址 */
+        struct dppd_match_ipv6 addresses = {0};
+        if (parse_ipv6_cidr(argv[6], addresses.src, addresses.src_mask) != 0 ||
+            parse_ipv6_cidr(argv[7], addresses.dst, addresses.dst_mask) != 0)
             return -EINVAL;
+        ip->spec.ipv6 = addresses;
     } else if (parse_ipv4_cidr(argv[6], &ip->spec.ipv4.src_be, &ip->spec.ipv4.src_mask_be) != 0 ||
         parse_ipv4_cidr(argv[7], &ip->spec.ipv4.dst_be, &ip->spec.ipv4.dst_mask_be) != 0)
         return -EINVAL;

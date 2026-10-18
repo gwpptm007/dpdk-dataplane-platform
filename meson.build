@@ -120,6 +120,7 @@ if get_option('tests')
              '-DDPPD_SCOPE_BUSINESS_PROGRAM="tests/integration/test_scope_business_window"'], install: false)
   subdir('tests/unit')
   subdir('tests/integration')
+  subdir('tests/bench')
 endif
 
 summary({

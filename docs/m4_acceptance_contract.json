@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "scope": "M4 software implementation and executable acceptance",
+  "hardware_acceptance": "not_run",
+  "benchmark_environment": {
+    "host": "135 VMware validation host",
+    "dpdk": "21.11.9",
+    "compiler": "GCC 11",
+    "buildtype": "debugoptimized",
+    "tests": true,
+    "werror": true,
+    "b_ndebug": "false",
+    "cpu_affinity": "0-3",
+    "repetitions": 5,
+    "aggregation": "median of all five runs; failed runs may not be discarded"
+  },
+  "limits": {
+    "logical_rules": 16384,
+    "template_tables": 64,
+    "flow_queues": 8,
+    "queue_depth": 256,
+    "batch_size": 64,
+    "shared_actions": 64
+  },
+  "performance_gates": {
+    "memory_driver_4096_single_min_rules_per_second": 70000,
+    "memory_driver_16384_single_min_rules_per_second": 100000,
+    "memory_driver_16384_single_max_request_p99_ns": 500000,
+    "software_1024_single_min_rules_per_second": 4000,
+    "software_1024_single_max_request_p99_ns": 1000000,
+    "queue_4096_batch64_max_completion_p99_ns": 100000000,
+    "inprocess_residual_cleanup_max_ns": 50000000,
+    "snapshot_replay_16384_max_ns": 5000000000
+  },
+  "invariants": [
+    "Admission reserves all resources before driver side effects and never overcommits",
+    "Pending and residual handles retain quota and shared/template references",
+    "No batch publishes a successful prefix when another member fails",
+    "Failed compensation enters isolation and preserves actual residual identities",
+    "Async completion identity is checked independently of completion order",
+    "A timed out operation is not assumed absent or safe to destroy before completion",
+    "Aged notifications delete only the exact installed rule generation",
+    "Unsupported PMD and old DPDK APIs are explicitly rejected",
+    "All existing functional tests pass without skips or sanitizer errors"
+  ],
+  "out_of_scope_evidence": [
+    "ASIC rule installation throughput and capacity",
+    "Physical packet offload and CPU bypass",
+    "Physical device reset recovery time"
+  ]
+}
