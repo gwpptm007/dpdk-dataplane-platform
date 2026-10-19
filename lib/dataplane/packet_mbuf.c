@@ -9,7 +9,10 @@
  */
 #define DPPD_HEADER_SCRATCH 1024U
 
-/** 将可能分散在多个内存段的报文头交给连续缓冲区解析器，保持原始 mbuf 的布局不变 */
+/**
+ * 提取单段或多段报文的头部字段，写入 packet 并返回解析状态
+ * packet 不持有原始报文内存，解析不修改或释放 mbuf
+ */
 int dppd_packet_parse_mbuf(const struct rte_mbuf *mbuf, struct dppd_packet *packet)
 {
     uint8_t scratch[DPPD_HEADER_SCRATCH];

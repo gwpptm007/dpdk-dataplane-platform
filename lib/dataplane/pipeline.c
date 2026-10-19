@@ -5,33 +5,33 @@
 #include <errno.h>
 
 /**
- * 把解析结果、软件策略和静态端口配对合成为处理决定，不在这里发送或释放报文
- * 畸形报文最先丢弃；不支持解析的协议并不等于畸形，仍可按已有字段匹配或查路由
+ * 判断报文应丢弃还是转发，将原因或出口写入 decision，实际收发由 worker 执行
+ * 判定顺序为畸形检查、软件策略、三层路由或端口配对，UNSUPPORTED 不等同于畸形
  */
 void dppd_pipeline_decide_counted(const struct dppd_forwarding_snapshot *snapshot,
     struct dppd_software_backend *software_backend, struct dppd_ipv4_router *router, uint16_t ingress_port,
     int parse_status, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision,
     struct dppd_software_count_batch *counts)
 {
+    /** 默认丢弃，后续检查通过才设为转发 */
     memset(decision, 0, sizeof(*decision));
 
-    /**
-     * 解析失败的 mbuf 没有可靠 L3/L4 字段，绝不能交给软件 classifier 继续解释；否则
-     * 掩码比较可能把未初始化或截断字段误判为命中。这一分支优先于所有规则和路由
-     */
+    /** 畸形报文字段不可信，直接判定丢弃，禁止继续匹配规则 */
     if (parse_status == DPPD_PARSE_MALFORMED) {
         decision->action = DPPD_PACKET_DROP;
         decision->drop_reason = DPPD_DROP_MALFORMED;
         return;
     }
+    /** 软件后端存在时检查规则动作，后端为空则继续后面的出口选择 */
     if (software_backend != NULL && packet != NULL) {
         struct dppd_software_decision software_decision;
 
         /**
-         * classifier 只给出策略结论，不负责决定 egress。DROP 立即返回，保证软件规则
-         * 不会因后续路由查找失败而被重写为 NO_ROUTE；MARK 则随正常转发结果向下传递
+         * software_backend.c 的 dppd_software_backend_decide_counted 匹配当前软件规则
+         * software_decision 只记录规则动作，decision 还要结合后续路由或端口配对得到处理决定
+         * 命中 DROP 时立即返回，保留策略丢弃原因，其余情况继续选择出口并携带 MARK
          */
-        /** COUNT 在规则命中时已累计，因此后续无路由或发送失败也不会撤销这次计数 */
+        /** COUNT 按规则命中累计或归并，后续无路由或发送失败不撤销本次命中 */
         dppd_software_backend_decide_counted(software_backend, ingress_port, packet, &software_decision, counts);
         if (software_decision.drop) {
             decision->action = DPPD_PACKET_DROP;
@@ -41,6 +41,10 @@ void dppd_pipeline_decide_counted(const struct dppd_forwarding_snapshot *snapsho
         decision->has_mark = software_decision.has_mark;
         decision->mark_id = software_decision.mark_id;
     }
+    /**
+     * 启用三层路由时按目的 IP 查询路由和邻居，成功或失败都在本分支返回
+     * router 为空时跳过本分支，继续查询下面的静态端口配对
+     */
     if (router != NULL) {
         if (packet == NULL || (packet->l3_type != DPPD_L3_IPV4 && packet->l3_type != DPPD_L3_IPV6)) {
             decision->drop_reason = DPPD_DROP_IPV4_UNSUPPORTED;
@@ -61,7 +65,10 @@ void dppd_pipeline_decide_counted(const struct dppd_forwarding_snapshot *snapsho
         decision->routed = true;
         return;
     }
-    /** 没有启用路由时保留固定 peer 查表，不能把三层查询失败混入这条兼容路径 */
+    /**
+     * 未启用三层路由时按端口配对选择出口，路由失败不回退到端口配对
+     * snapshot.c 的 dppd_snapshot_lookup_peer 查到时写入出口并返回零
+     */
     if (dppd_snapshot_lookup_peer(snapshot, ingress_port, &decision->egress_port) != 0) {
         decision->action = DPPD_PACKET_DROP;
         decision->drop_reason = DPPD_DROP_NO_ROUTE;

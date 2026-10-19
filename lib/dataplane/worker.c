@@ -78,10 +78,17 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
     return 0;
 }
 
-/** 先执行原有 ACL 和静态查表，只有缺少静态邻居时才查询动态缓存 */
+/**
+ * 生成报文处理决定，IPv6 缺少静态邻居时尝试动态解析，并检查出口 DAD 就绪状态
+ * 结果写入 decision，实际收发由 process_batch 执行
+ */
 static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int parsed, const struct dppd_packet *packet,
     struct dppd_pipeline_decision *decision, struct dppd_software_count_batch *counts)
 {
+    /**
+     * 进入 lib/dataplane/pipeline.c 的 dppd_pipeline_decide_counted
+     * 根据报文和配置判定丢弃或选择转发出口，结果写入 decision
+     */
     dppd_pipeline_decide_counted(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,
         packet, decision, counts);
     if (runtime->nd6 == NULL || packet->l3_type != DPPD_L3_IPV6)
@@ -189,7 +196,10 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
     }
 }
 
-/** 同一入口批次按实际出口分组，三层路由可以同时选择多个出口，报文始终只交付一次 */
+/**
+ * 逐包解析并生成处理决定，随后发送、暂存或释放报文
+ * 同一入口批次按实际出口分组，确保每个报文只交付一次
+ */
 static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,
     uint16_t received, bool retry, uint64_t expires)
 {
@@ -210,11 +220,13 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
     const struct dppd_port *paired =
         runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;
     for (uint16_t i = 0; i < received; ++i) {
+        /** packet 保存解析字段，decision 保存处理决定，rx[i] 指向原始报文 */
         struct dppd_pipeline_decision decision;
         struct dppd_packet packet = {0};
         uint32_t length = rte_pktmbuf_pkt_len(rx[i]);
         if (!retry)
             delta.rx_bytes += length;
+        /** 进入 packet_mbuf.c 提取报文头字段 */
         int parsed = dppd_packet_parse_mbuf(rx[i], &packet);
         packet.neighbor_retry = retry;
         /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */
@@ -241,7 +253,10 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             rte_pktmbuf_free(rx[i]);
             continue;
         }
-        /** 两种地址族都经过状态 ACL 和会话提交，失败候选不能占用 NAT 端口或刷新超时 */
+        /**
+         * 启用连接跟踪时处理状态 ACL 和会话，否则进入本文件的 routed_decide
+         * 失败候选不能占用 NAT 端口或刷新会话超时
+         */
         if (runtime->conntrack != NULL)
             stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);
         else
@@ -258,6 +273,10 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             }
             delta.nd6_queue_drops++;
         }
+        /**
+         * 决定函数只填写结果，worker 在这里执行丢弃并按原因更新统计
+         * 释放当前报文后继续处理本批下一个包，不影响其他报文
+         */
         if (decision.action != DPPD_PACKET_FORWARD) {
             if (decision.drop_reason != DPPD_DROP_MALFORMED)
                 delta.policy_drops++;
@@ -299,6 +318,7 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
                     delta.ipv4_rewrite_drops++;
             } else if (decision.drop_reason == DPPD_DROP_EGRESS)
                 delta.egress_drops++;
+            /** 归还当前 mbuf，再进入逐包循环的下一轮 */
             rte_pktmbuf_free(rx[i]);
             continue;
         }
@@ -367,11 +387,15 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
     dppd_stats_add(&worker->stats, &delta);
 }
 
+/**
+ * 从入口端口的当前 worker 队列收包，再交给本文件的 process_batch 处理
+ */
 static void process_ingress(struct dppd_worker *worker, const struct dppd_port *ingress)
 {
     if (worker_io_quiesced(worker) || atomic_load_explicit(&ingress->removed, memory_order_acquire))
         return;
     struct rte_mbuf *packets[DPPD_MAX_BURST];
+    /** 最多接收 burst_size 个包，不等待凑满 */
     uint16_t count = rte_eth_rx_burst(ingress->port_id, worker->queue_id, packets, worker->runtime->config.burst_size);
     process_batch(worker, ingress, packets, count, false, 0);
 }
