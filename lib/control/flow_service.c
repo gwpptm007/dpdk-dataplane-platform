@@ -546,6 +546,7 @@ static void collect_age_job(struct dppd_flow_service *service, struct flow_job *
 static void complete_job(struct dppd_flow_service *service, struct flow_job *job, bool applied)
 {
     job->result.applied = applied;
+    job->result.revision = service->rules.generation;
     job->state = JOB_DONE;
     ++service->status.completed;
     service->active = UINT32_MAX;
@@ -961,6 +962,7 @@ int dppd_flow_service_cancel(struct dppd_flow_service *service, const struct dpp
                 rc = -EUCLEAN;
         if (rc == 0) {
             job->result.status = -ECANCELED;
+            job->result.revision = service->rules.generation;
             /** 未激活的取消不能清除另一笔正在处理的 active 身份 */
             job->state = JOB_DONE;
             ++service->status.completed;

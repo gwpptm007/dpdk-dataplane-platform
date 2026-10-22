@@ -11,6 +11,7 @@
 #include "dppd/transfer.h"
 #include "dppd/device_recovery.h"
 #include "dppd/flow_state.h"
+#include "dppd/flow_request.h"
 
 /*
  * 管理协议版本在请求和响应中显式传递。当前实现不做版本协商：版本不一致时
@@ -28,7 +29,8 @@
 /** v27 增加正式设备事件状态与精确代次的完整端口组主动复位 */
 /** v28 增加独占 M4 配置模式，受理凭据与持久完成回执分开查询 */
 /** v29 增加在线模板与共享定义的整批配置事务和精确修订号分页 */
-#define DPPD_MANAGEMENT_VERSION 29U
+/** v30 增加持久客户端请求键，回执与策略一起原子保存，重启后仍可查询 */
+#define DPPD_MANAGEMENT_VERSION 30U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -123,6 +125,8 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_FLOW_RETRY,
     DPPD_MANAGEMENT_FLOW_CONFIG_GET,
     DPPD_MANAGEMENT_FLOW_CONFIG_APPLY,
+    DPPD_MANAGEMENT_REQUEST_SUBMIT,
+    DPPD_MANAGEMENT_REQUEST_GET,
 };
 
 /** 随机启动标识阻止重启前的任务凭据误领本次进程的新任务 */
@@ -143,6 +147,8 @@ struct dppd_management_request {
     uint32_t size;       /* 必须等于发送方 sizeof(*request) */
     uint64_t request_id; /* 客户端生成；响应原样回显，用于请求/响应配对 */
     union {
+        struct dppd_flow_request durable_request;
+        struct dppd_flow_request_key request_key;
         struct {
             uint64_t expected, after_table, after_count;
         } flow_config_get;
@@ -435,6 +441,7 @@ struct dppd_management_response {
         } flow_status;
         struct dppd_management_flow_token flow_token;
         struct dppd_flow_job_result flow_result;
+        struct dppd_flow_request_result durable_result;
         struct dppd_conntrack_status conntrack;
         struct dppd_nd6_status nd6;
         struct dppd_nd6_page dynamic_neighbors;

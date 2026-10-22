@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "flow_state_io.h"
+#include "flow_request_io.h"
 #include "persistence_codec.h"
 
 #include <errno.h>
@@ -137,7 +138,7 @@ int dppd_flow_state_validate(const struct dppd_flow_state *state)
         (required[DPPD_RESOURCE_COUNTER] > c->native_counters ||
             required[DPPD_RESOURCE_AGING_OBJECT] > c->native_aging))
         return -ENOSPC;
-    return 0;
+    return dppd_flow_request_ledger_validate(state->requests, state->revision);
 }
 
 struct codec {
@@ -190,11 +191,82 @@ static int wire_rule(struct codec *c, struct dppd_rule *rule, bool writing)
     return rc;
 }
 
+/** 请求记录逐个编码，只写有效项，客户端水位保留已回收回执的防重放边界 */
+static int wire_requests(struct codec *c, struct dppd_flow_request_ledger *ledger, bool writing)
+{
+    if (writing)
+        put(c, ledger->cursor);
+    else
+        ledger->cursor = get(c);
+    for (uint32_t i = 0; i < DPPD_REQUEST_CLIENTS; ++i) {
+        if (writing) {
+            put(c, ledger->clients[i].client);
+            put(c, ledger->clients[i].sequence);
+        } else {
+            ledger->clients[i].client = get(c);
+            ledger->clients[i].sequence = get(c);
+        }
+    }
+    for (uint32_t i = 0; i < DPPD_REQUEST_RECEIPTS; ++i) {
+        struct dppd_flow_request_record *record = &ledger->receipts[i];
+        struct dppd_flow_request_result *r = &record->result;
+        if (writing)
+            put(c, r->key.client);
+        else
+            r->key.client = get(c);
+        if (r->key.client == 0)
+            continue;
+        if (writing) {
+            put(c, r->key.sequence);
+            put(c, r->operation);
+            put(c, r->phase);
+            put(c, (uint64_t)(-r->status));
+            put(c, r->count);
+            put(c, r->applied);
+            put(c, r->revision);
+            for (uint32_t j = 0; j < 8; ++j) {
+                put(c, r->ids[j]);
+                put(c, r->generations[j]);
+            }
+            put(c, record->length);
+        } else {
+            r->key.sequence = get(c);
+            r->operation = get(c);
+            r->phase = get(c);
+            uint64_t error = get(c);
+            if (error > 4095)
+                return -EBADMSG;
+            r->status = -(int)error;
+            r->count = get(c);
+            r->applied = get(c);
+            r->revision = get(c);
+            for (uint32_t j = 0; j < 8; ++j) {
+                r->ids[j] = get(c);
+                r->generations[j] = get(c);
+            }
+            uint64_t length = get(c);
+            if (length > DPPD_REQUEST_BYTES)
+                return -EBADMSG;
+            record->length = (uint32_t)length;
+        }
+        if (c->offset > c->size || record->length > c->size - c->offset)
+            return -EBADMSG;
+        if (writing)
+            memcpy(c->data + c->offset, record->contents, record->length);
+        else
+            memcpy(record->contents, c->data + c->offset, record->length);
+        c->offset += record->length;
+    }
+    return c->error;
+}
+
 /** 所有数字显式编码为小端，模板示例允许零代次，单独保存后再复用已提交规则的规范编码 */
 static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *size)
 {
     size_t capacity = 4096U + DPPD_MAX_PORTS * 80U + s->shared_count * 32U +
         s->table_count * (48U + DPPD_PERSISTENCE_RULE_BYTES) + s->rule_count * (16U + DPPD_PERSISTENCE_RULE_BYTES);
+    if (s->requests != NULL)
+        capacity += 4096U + DPPD_REQUEST_RECEIPTS * (256U + DPPD_REQUEST_BYTES);
     struct codec w = {.data = calloc(1, capacity), .size = capacity, .offset = 32};
     if (w.data == NULL)
         return -ENOMEM;
@@ -255,6 +327,8 @@ static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *siz
             return rc;
         }
     }
+    if (s->requests != NULL)
+        w.error = wire_requests(&w, s->requests, true);
     if (w.error != 0) {
         free(w.data);
         return w.error;
@@ -262,7 +336,7 @@ static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *siz
     *size = w.offset;
     memcpy(w.data, "DPPM4CFG", 8);
     w.offset = 8;
-    put(&w, 1);
+    put(&w, s->requests == NULL ? 1 : 2);
     put(&w, *size);
     put(&w, checksum(w.data, *size));
     *output = w.data;
@@ -274,7 +348,8 @@ static int decode(uint8_t *data, size_t size, struct dppd_flow_state **output)
     struct codec r = {data, size, 8, 0};
     if (size < 32 || memcmp(data, "DPPM4CFG", 8) != 0)
         return -EBADMSG;
-    if (get(&r) != 1)
+    uint64_t version = get(&r);
+    if (version != 1 && version != 2)
         return -EPROTONOSUPPORT;
     if (get(&r) != size || get(&r) != checksum(data, size))
         return -EBADMSG;
@@ -351,6 +426,15 @@ static int decode(uint8_t *data, size_t size, struct dppd_flow_state **output)
         if (wire_rule(&r, &s->rules[i].rule, false) != 0)
             goto fail;
     }
+    if (version == 2) {
+        s->requests = calloc(1, sizeof(*s->requests));
+        if (s->requests == NULL) {
+            rc = -ENOMEM;
+            goto fail;
+        }
+        if (wire_requests(&r, s->requests, false) != 0)
+            goto fail;
+    }
     if (r.error != 0 || r.offset != size)
         goto fail;
     rc = dppd_flow_state_validate(s);
@@ -382,6 +466,7 @@ void dppd_flow_state_free(struct dppd_flow_state **state)
 {
     if (state != NULL && *state != NULL) {
         free((*state)->rules);
+        free((*state)->requests);
         free(*state);
         *state = NULL;
     }

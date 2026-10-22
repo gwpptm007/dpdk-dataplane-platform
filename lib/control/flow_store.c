@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "flow_state_io.h"
+#include "flow_request_io.h"
 #include "dppd/software_shared.h"
 
 #include <errno.h>
@@ -32,7 +33,35 @@ struct dppd_flow_store {
     struct dppd_flow_template_id retired_tables[64];
     struct dppd_shared_count_spec retired_counts[64];
     bool configuration_residual;
+    struct dppd_flow_job_id request_jobs[DPPD_REQUEST_RECEIPTS];
+    bool requests_dirty;
 };
+
+/** 在保存配置前收齐持久任务的完整结果，避免策略已经落盘而回执仍停留在受理态 */
+static bool collect_requests(struct dppd_flow_store *s)
+{
+    if (s->state->requests == NULL)
+        return false;
+    for (uint32_t i = 0; i < DPPD_REQUEST_RECEIPTS; ++i) {
+        if (s->request_jobs[i].owner == 0)
+            continue;
+        struct dppd_flow_job_result result;
+        if (dppd_flow_service_collect(s->service, &s->request_jobs[i], &result) != 0)
+            continue;
+        struct dppd_flow_request_result *receipt = &s->state->requests->receipts[i].result;
+        receipt->phase = DPPD_FLOW_REQUEST_DONE;
+        receipt->status = result.status;
+        receipt->applied = result.applied;
+        receipt->revision = result.revision;
+        for (uint32_t j = 0; j < result.count && j < 8; ++j) {
+            receipt->ids[j] = result.ids[j];
+            receipt->generations[j] = result.generations[j];
+        }
+        memset(&s->request_jobs[i], 0, sizeof(s->request_jobs[i]));
+        s->requests_dirty = true;
+    }
+    return s->requests_dirty;
+}
 
 static int cleanup_configuration(struct dppd_flow_store *s)
 {
@@ -96,6 +125,13 @@ static int available(struct dppd_flow_store *s)
     return s->status.closing ? -ESHUTDOWN : !s->status.ready || s->status.dirty || s->status.residual ? -EUCLEAN : 0;
 }
 
+/** 回执尚未保存时也封闭新写入，process 和显式修复仍可完成已经受理的工作 */
+static int writable(struct dppd_flow_store *s)
+{
+    int rc = available(s);
+    return rc != 0 ? rc : s->requests_dirty ? -EUCLEAN : 0;
+}
+
 /** 创建和删除都要收齐实际完成，超时只保留任务，不能据此推断驱动没有留下对象 */
 static int wait_internal(struct dppd_flow_store *s, bool retry, struct dppd_flow_job_result *result)
 {
@@ -152,6 +188,7 @@ static int snapshot(struct dppd_flow_store *s)
 
 static int flush(struct dppd_flow_store *s)
 {
+    (void)collect_requests(s);
     struct dppd_flow_service_status status;
     dppd_flow_service_status(s->service, &status);
     if (status.isolated) {
@@ -167,8 +204,10 @@ static int flush(struct dppd_flow_store *s)
         rc = dppd_flow_state_write(s->path, s->guard, s->state);
     s->status.dirty = rc != 0;
     s->status.last_error = rc;
-    if (rc == 0)
+    if (rc == 0) {
         s->status.durable_revision = s->state->revision;
+        s->requests_dirty = false;
+    }
     if (rc == 0)
         rc = cleanup_configuration(s);
     return rc;
@@ -459,6 +498,21 @@ int dppd_flow_store_open(const char *path, const struct dppd_flow_store_runtime 
         return -rc;
     }
     rc = build(s, runtime);
+    if (rc == 0 && state->requests != NULL) {
+        /** 文件中未完成的请求没有已提交策略结果，重启后明确中止，旧键不能重新执行 */
+        bool changed = false;
+        for (uint32_t i = 0; i < DPPD_REQUEST_RECEIPTS; ++i) {
+            struct dppd_flow_request_result *receipt = &state->requests->receipts[i].result;
+            if (receipt->key.client != 0 && receipt->phase == DPPD_FLOW_REQUEST_PENDING) {
+                receipt->phase = DPPD_FLOW_REQUEST_DONE;
+                receipt->status = -ECANCELED;
+                receipt->revision = state->revision;
+                changed = true;
+            }
+        }
+        if (changed)
+            rc = dppd_flow_state_write(s->path, s->guard, s->state);
+    }
     if (rc != 0) {
         int cleanup = teardown(s);
         if (cleanup == 0) {
@@ -483,7 +537,7 @@ int dppd_flow_store_close(struct dppd_flow_store **output)
     struct dppd_flow_store *s = *output;
     pthread_mutex_lock(&s->lock);
     struct dppd_flow_service_status status;
-    if (s->status.dirty) {
+    if (s->status.dirty || s->requests_dirty) {
         pthread_mutex_unlock(&s->lock);
         return -EUCLEAN;
     }
@@ -511,6 +565,7 @@ int dppd_flow_store_status(struct dppd_flow_store *s, struct dppd_flow_store_sta
         return -EINVAL;
     pthread_mutex_lock(&s->lock);
     *status = s->status;
+    status->dirty |= s->requests_dirty;
     status->ready &= !status->dirty && !status->residual && !status->closing;
     if (s->service != NULL) {
         dppd_flow_service_status(s->service, &status->service);
@@ -620,7 +675,7 @@ int dppd_flow_store_submit(struct dppd_flow_store *s, uint32_t queue, const stru
     if (s == NULL || job == NULL)
         return -EINVAL;
     pthread_mutex_lock(&s->lock);
-    int rc = available(s);
+    int rc = writable(s);
     if (rc == 0)
         rc = resolve(s, queue, rules, count, requests);
     if (rc == 0)
@@ -637,7 +692,7 @@ int dppd_flow_store_update(struct dppd_flow_store *s, uint32_t queue, const stru
     if (s == NULL || job == NULL || expected == NULL)
         return -EINVAL;
     pthread_mutex_lock(&s->lock);
-    int rc = available(s);
+    int rc = writable(s);
     if (rc == 0)
         rc = resolve(s, queue, rules, count, requests);
     if (rc == 0) {
@@ -655,7 +710,7 @@ int dppd_flow_store_remove(struct dppd_flow_store *s, uint32_t queue, const stru
     if (s == NULL || job == NULL)
         return -EINVAL;
     pthread_mutex_lock(&s->lock);
-    int rc = available(s);
+    int rc = writable(s);
     if (rc == 0)
         rc = dppd_flow_service_remove(s->service, queue, rules, count, now, job);
     pthread_mutex_unlock(&s->lock);
@@ -670,9 +725,10 @@ int dppd_flow_store_process(struct dppd_flow_store *s, uint64_t now, uint32_t bu
     int rc = available(s);
     if (rc == 0) {
         rc = dppd_flow_service_process(s->service, now, budget);
+        (void)collect_requests(s);
         struct dppd_flow_service_status status;
         dppd_flow_service_status(s->service, &status);
-        if (status.revision != s->status.durable_revision) {
+        if (status.revision != s->status.durable_revision || s->requests_dirty) {
             int saved = flush(s);
             if (saved != 0)
                 rc = saved;
@@ -879,16 +935,15 @@ static int prepare_configuration(struct dppd_flow_store *s, struct dppd_flow_sta
     return dppd_flow_state_validate(next);
 }
 
-int dppd_flow_store_configure(struct dppd_flow_store *s, uint64_t expected,
-    const struct dppd_flow_config_change *changes, uint32_t count, struct dppd_flow_config_result *result)
+static int configure_locked(struct dppd_flow_store *s, uint64_t expected, const struct dppd_flow_config_change *changes,
+    uint32_t count, struct dppd_flow_config_result *result, struct dppd_flow_request_record *receipt)
 {
     if (s == NULL || changes == NULL || result == NULL || count == 0 || count > DPPD_FLOW_CONFIG_OPERATIONS)
         return -EINVAL;
     memset(result, 0, sizeof(*result));
-    pthread_mutex_lock(&s->lock);
     struct dppd_flow_service_status status;
     dppd_flow_service_status(s->service, &status);
-    int rc = available(s);
+    int rc = writable(s);
     struct dppd_flow_state *next = NULL;
     struct dppd_flow_template_id prepared[64] = {{0}};
     struct dppd_shared_count_spec created[64] = {{0}};
@@ -965,17 +1020,217 @@ int dppd_flow_store_configure(struct dppd_flow_store *s, uint64_t expected,
         s->shared_created[i] = true;
     *s->state = *next;
     result->applied = true;
+    if (receipt != NULL) {
+        receipt->result.phase = DPPD_FLOW_REQUEST_DONE;
+        receipt->result.applied = true;
+        receipt->result.revision = s->state->revision;
+        memcpy(receipt->result.generations, result->generations, sizeof(result->generations));
+        s->requests_dirty = true;
+    }
     /** 失败不撤回已经采用的期望配置，保留旧对象与新对象，显式 flush 成功后再回收 */
     rc = flush(s);
     if (rc != 0)
         rc = -EUCLEAN;
 done:
+    if (receipt != NULL && receipt->result.phase == DPPD_FLOW_REQUEST_PENDING) {
+        receipt->result.phase = DPPD_FLOW_REQUEST_DONE;
+        receipt->result.status = rc;
+        receipt->result.revision = s->state->revision;
+        memcpy(receipt->result.generations, result->generations, sizeof(result->generations));
+        s->requests_dirty = true;
+        if (s->status.dirty || flush(s) != 0)
+            rc = -EUCLEAN;
+    }
     result->revision = s->state->revision;
     result->durable_revision = s->status.durable_revision;
     result->durable = result->applied && !s->status.dirty && result->revision == result->durable_revision;
     free(next);
+    return rc;
+}
+
+int dppd_flow_store_configure(struct dppd_flow_store *s, uint64_t expected,
+    const struct dppd_flow_config_change *changes, uint32_t count, struct dppd_flow_config_result *result)
+{
+    if (s == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = configure_locked(s, expected, changes, count, result, NULL);
     pthread_mutex_unlock(&s->lock);
     return rc;
+}
+
+static int request_slot(struct dppd_flow_store *s, struct dppd_flow_request_key key)
+{
+    if (s->state->requests != NULL)
+        for (uint32_t i = 0; i < DPPD_REQUEST_RECEIPTS; ++i) {
+            struct dppd_flow_request_key saved = s->state->requests->receipts[i].result.key;
+            if (saved.client == key.client && saved.sequence == key.sequence)
+                return (int)i;
+        }
+    return -1;
+}
+
+static int request_result(struct dppd_flow_store *s, uint32_t slot, struct dppd_flow_request_result *result)
+{
+    *result = s->state->requests->receipts[slot].result;
+    result->durable = !s->status.dirty && !s->requests_dirty;
+    struct dppd_flow_service_status status;
+    dppd_flow_service_status(s->service, &status);
+    return s->status.dirty || s->requests_dirty || s->status.residual || status.isolated ? -EUCLEAN : 0;
+}
+
+int dppd_flow_store_request_get(struct dppd_flow_store *s, struct dppd_flow_request_key key,
+    struct dppd_flow_request_result *result)
+{
+    if (s == NULL || result == NULL || key.client == 0 || key.sequence == 0)
+        return -EINVAL;
+    memset(result, 0, sizeof(*result));
+    pthread_mutex_lock(&s->lock);
+    int slot = request_slot(s, key), rc = -ENOENT;
+    if (slot >= 0)
+        rc = request_result(s, (uint32_t)slot, result);
+    else if (s->state->requests != NULL)
+        for (uint32_t c = 0; c < DPPD_REQUEST_CLIENTS; ++c)
+            if (s->state->requests->clients[c].client == key.client &&
+                s->state->requests->clients[c].sequence >= key.sequence)
+                rc = -ESTALE;
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+/** 持久受理在进入异步队列前完成，掉电后最多保留明确中止，不能重复执行原键 */
+int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_request *request, uint64_t now,
+    struct dppd_flow_request_result *result)
+{
+    uint8_t contents[DPPD_REQUEST_BYTES];
+    uint32_t length;
+    if (s == NULL || result == NULL)
+        return -EINVAL;
+    memset(result, 0, sizeof(*result));
+    int rc = dppd_flow_request_encode(request, contents, &length);
+    if (rc != 0)
+        return rc;
+    pthread_mutex_lock(&s->lock);
+    int slot = request_slot(s, request->key);
+    if (slot >= 0) {
+        struct dppd_flow_request_record *old = &s->state->requests->receipts[slot];
+        rc = old->length != length || memcmp(old->contents, contents, length) != 0
+            ? -EEXIST
+            : request_result(s, (uint32_t)slot, result);
+        goto done;
+    }
+    rc = writable(s);
+    if (rc == 0 && s->state->config.mode != DPPD_FLOW_STATE_SOFTWARE)
+        rc = -ENOTSUP;
+    if (rc != 0)
+        goto done;
+    if (s->state->requests == NULL) {
+        s->state->requests = calloc(1, sizeof(*s->state->requests));
+        if (s->state->requests == NULL) {
+            rc = -ENOMEM;
+            goto done;
+        }
+    }
+    struct dppd_flow_request_ledger *ledger = s->state->requests;
+    int client = -1, empty = -1;
+    for (uint32_t c = 0; c < DPPD_REQUEST_CLIENTS; ++c) {
+        if (ledger->clients[c].client == request->key.client)
+            client = (int)c;
+        if (ledger->clients[c].client == 0 && empty < 0)
+            empty = (int)c;
+    }
+    if (client >= 0 && request->key.sequence <= ledger->clients[client].sequence) {
+        rc = -ESTALE;
+        goto done;
+    }
+    if (client < 0)
+        client = empty;
+    if (client < 0) {
+        rc = -ENOSPC;
+        goto done;
+    }
+    for (uint32_t i = 0; i < DPPD_REQUEST_RECEIPTS; ++i) {
+        uint32_t candidate = (ledger->cursor + i) % DPPD_REQUEST_RECEIPTS;
+        if (ledger->receipts[candidate].result.key.client == 0 ||
+            ledger->receipts[candidate].result.phase == DPPD_FLOW_REQUEST_DONE) {
+            slot = (int)candidate;
+            break;
+        }
+    }
+    if (slot < 0) {
+        rc = -ENOSPC;
+        goto done;
+    }
+    struct dppd_flow_request_record *record = &ledger->receipts[slot];
+    memset(record, 0, sizeof(*record));
+    record->length = length;
+    memcpy(record->contents, contents, length);
+    record->result = (struct dppd_flow_request_result){.key = request->key,
+        .operation = request->operation,
+        .phase = DPPD_FLOW_REQUEST_PENDING,
+        .count = request->count,
+        .revision = s->state->revision};
+    ledger->clients[client] = request->key;
+    ledger->cursor = ((uint32_t)slot + 1U) % DPPD_REQUEST_RECEIPTS;
+    s->requests_dirty = true;
+    rc = flush(s);
+    if (rc != 0) {
+        /** 受理写盘失败时绝不入队，修复保存后也只保留失败结果 */
+        record->result.phase = DPPD_FLOW_REQUEST_DONE;
+        record->result.status = rc;
+        s->requests_dirty = true;
+        rc = request_result(s, (uint32_t)slot, result);
+        goto done;
+    }
+    if (request->operation == DPPD_FLOW_REQUEST_CONFIGURE) {
+        for (uint32_t i = 0; i < request->count; ++i)
+            record->result.ids[i] = request->payload.configuration[i].key;
+        struct dppd_flow_config_result configured;
+        (void)configure_locked(s, request->expected_revision, request->payload.configuration, request->count,
+            &configured, record);
+    } else {
+        struct dppd_async_flow_create_request creates[4];
+        struct dppd_flow_update_request updates[4];
+        if (request->operation == DPPD_FLOW_REQUEST_REMOVE) {
+            rc = dppd_flow_service_remove(s->service, request->queue, request->payload.remove, request->count, now,
+                &s->request_jobs[slot]);
+        } else {
+            rc = resolve(s, request->queue, request->payload.change.rules, request->count, creates);
+            for (uint32_t i = 0; i < request->count && rc == 0; ++i) {
+                updates[i] = (struct dppd_flow_update_request){request->payload.change.expected[i], creates[i]};
+                if (request->operation == DPPD_FLOW_REQUEST_CREATE && request->payload.change.expected[i] != 0)
+                    rc = -EINVAL;
+            }
+            if (rc == 0)
+                rc = request->operation == DPPD_FLOW_REQUEST_CREATE
+                    ? dppd_flow_service_submit(s->service, request->queue, creates, request->count, now,
+                          &s->request_jobs[slot])
+                    : dppd_flow_service_update(s->service, request->queue, updates, request->count, now,
+                          &s->request_jobs[slot]);
+        }
+        if (rc != 0) {
+            record->result.phase = DPPD_FLOW_REQUEST_DONE;
+            record->result.status = rc;
+            s->requests_dirty = true;
+            (void)flush(s);
+        }
+    }
+    rc = request_result(s, (uint32_t)slot, result);
+done:
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_requests_cancel(struct dppd_flow_store *s)
+{
+    if (s == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    for (uint32_t i = 0; i < DPPD_REQUEST_RECEIPTS; ++i)
+        if (s->request_jobs[i].owner != 0)
+            (void)dppd_flow_service_cancel(s->service, &s->request_jobs[i]);
+    pthread_mutex_unlock(&s->lock);
+    return 0;
 }
 
 int dppd_flow_store_shared_get(struct dppd_flow_store *s, uint64_t id, uint64_t generation,

@@ -21,6 +21,10 @@
 static void print_usage(const char *program)
 {
     fprintf(stderr, "usage:\n");
+    fprintf(stderr,
+        "  %s [--socket PATH] request-submit CLIENT SEQUENCE flow-create|flow-update|flow-remove|flow-config-apply ...\n",
+        program);
+    fprintf(stderr, "  %s [--socket PATH] request-get CLIENT SEQUENCE\n", program);
     fprintf(stderr, "  %s [--socket PATH] flow-config-get [REVISION [AFTER_TABLE AFTER_COUNT]]\n", program);
     fprintf(stderr, "  %s [--socket PATH] flow-config-apply EXACT_REVISION FILE\n", program);
     fprintf(stderr, "  managed rule constructors accept a final shared:ID:GENERATION modifier\n");
@@ -820,6 +824,48 @@ static int build_managed_rule(int argc, char **argv, struct dppd_management_requ
  */
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
+    /** 持久键包住已有规则和定义命令，解析一次后保存规范内容，重试不能换参数 */
+    if (argc >= 1 && strcmp(argv[0], "request-submit") == 0) {
+        struct dppd_flow_request_key key;
+        if (argc < 4 || parse_u64(argv[1], 1, UINT64_MAX, &key.client) != 0 ||
+            parse_u64(argv[2], 1, UINT64_MAX, &key.sequence) != 0 ||
+            (strcmp(argv[3], "flow-create") != 0 && strcmp(argv[3], "flow-update") != 0 &&
+                strcmp(argv[3], "flow-remove") != 0 && strcmp(argv[3], "flow-config-apply") != 0))
+            return -EINVAL;
+        struct dppd_management_request inner;
+        int rc = build_request(argc - 3, argv + 3, &inner);
+        if (rc != 0)
+            return rc;
+        initialize_request(request, DPPD_MANAGEMENT_REQUEST_SUBMIT);
+        struct dppd_flow_request *r = &request->payload.durable_request;
+        r->key = key;
+        if (inner.operation == DPPD_MANAGEMENT_FLOW_CONFIG_APPLY) {
+            r->operation = DPPD_FLOW_REQUEST_CONFIGURE;
+            r->expected_revision = inner.payload.flow_config_apply.expected;
+            r->count = inner.payload.flow_config_apply.count;
+            memcpy(r->payload.configuration, inner.payload.flow_config_apply.changes, sizeof(r->payload.configuration));
+        } else if (inner.operation == DPPD_MANAGEMENT_FLOW_REMOVE) {
+            r->operation = DPPD_FLOW_REQUEST_REMOVE;
+            r->queue = inner.payload.flow_remove.queue;
+            r->count = inner.payload.flow_remove.count;
+            memcpy(r->payload.remove, inner.payload.flow_remove.rules, sizeof(r->payload.remove));
+        } else {
+            r->operation =
+                inner.operation == DPPD_MANAGEMENT_FLOW_CREATE ? DPPD_FLOW_REQUEST_CREATE : DPPD_FLOW_REQUEST_UPDATE;
+            r->queue = inner.payload.flow_change.queue;
+            r->count = inner.payload.flow_change.count;
+            memcpy(r->payload.change.rules, inner.payload.flow_change.rules, sizeof(r->payload.change.rules));
+            memcpy(r->payload.change.expected, inner.payload.flow_change.expected, sizeof(r->payload.change.expected));
+        }
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[0], "request-get") == 0) {
+        initialize_request(request, DPPD_MANAGEMENT_REQUEST_GET);
+        return parse_u64(argv[1], 1, UINT64_MAX, &request->payload.request_key.client) != 0 ||
+                parse_u64(argv[2], 1, UINT64_MAX, &request->payload.request_key.sequence) != 0
+            ? -EINVAL
+            : 0;
+    }
     int configured = dppctl_config_build(argc, argv, request, build_managed_rule, initialize_request);
     if (configured != -ENOSYS)
         return configured;
@@ -1510,6 +1556,19 @@ static int print_response(const struct dppd_management_response *response)
         return 0;
     /* 仅在 main 完成协议头和 status 校验后进入这里，union 成员才可安全解释 */
     switch (response->operation) {
+    case DPPD_MANAGEMENT_REQUEST_SUBMIT:
+    case DPPD_MANAGEMENT_REQUEST_GET: {
+        const struct dppd_flow_request_result *r = &response->payload.durable_result;
+        if (r->count > 8)
+            return -EPROTO;
+        printf("request client=%" PRIu64 " sequence=%" PRIu64
+               " phase=%s status=%d applied=%s durable=%s revision=%" PRIu64 "\n",
+            r->key.client, r->key.sequence, r->phase == DPPD_FLOW_REQUEST_DONE ? "done" : "pending", r->status,
+            r->applied ? "yes" : "no", r->durable ? "yes" : "no", r->revision);
+        for (uint32_t i = 0; i < r->count; ++i)
+            printf("id=%" PRIu64 " generation=%" PRIu64 "\n", r->ids[i], r->generations[i]);
+        return r->status;
+    }
     case DPPD_MANAGEMENT_FLOW_STATUS:
     case DPPD_MANAGEMENT_FLOW_RETRY: {
         const struct dppd_flow_store_status *status = &response->payload.flow_status.status;
@@ -1961,6 +2020,11 @@ int main(int argc, char **argv)
     /* transport 错误与 daemon 业务错误分开报告，便于脚本区分连接和规则失败 */
     if (response.status != 0) {
         int status = response.status;
+
+        if ((response.operation == DPPD_MANAGEMENT_REQUEST_SUBMIT ||
+                response.operation == DPPD_MANAGEMENT_REQUEST_GET) &&
+            response.payload.durable_result.key.client != 0)
+            (void)print_response(&response);
 
         fprintf(stderr, "dppctl: request failed: %s (%d)\n",
             status < 0 && status >= -4095 ? strerror(-status) : "unknown error", status);

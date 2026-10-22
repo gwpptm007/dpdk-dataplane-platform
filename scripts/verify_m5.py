@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""验收 M5 首个交付的 M4 配置持久化与重启恢复，不把本项成功写成整个 M5 完成"""
+"""验收 M5 配置与持久请求闭环，完整生产化仍需额外联合验收"""
 
 import argparse
 from datetime import datetime, timezone
@@ -23,6 +23,7 @@ def main():
               "m4_configuration_recovery_validated": False, "complete_m5_validation": False,
               "m4_daemon_protocol_validated": False,
               "online_definitions_validated": False,
+              "durable_requests_validated": False,
               "hardware_acceptance": "not_run", "source_sha256": source_digest(root), "steps": [],
               "started_utc": datetime.now(timezone.utc).isoformat()}
     output = destination / "report.json"
@@ -35,6 +36,8 @@ def main():
                                       "--report-dir", str(destination / "restart")], 180, destination / "restart/report.json"),
             ("formal_daemon", [sys.executable, "tests/integration/m5_daemon.py", "--build-dir", str(build),
                                "--report-dir", str(destination / "daemon")], 180, destination / "daemon/report.json"),
+            ("durable_requests", [sys.executable, "tests/integration/m5_requests.py", "--build-dir", str(build),
+                                  "--report-dir", str(destination / "requests")], 180, destination / "requests/report.json"),
         )
         for name, command, timeout, path in commands:
             path.unlink(missing_ok=True)
@@ -66,6 +69,7 @@ def main():
                     "M5 configuration CLI create check and software replay")
         required += ("M5 managed protocol durable receipts and session boundaries",)
         required += ("M5 online definition transactions shared counting and durable recovery",)
+        required += ("M5 persistent request idempotency crash receipts and stale key protection",)
         for name in required:
             if not any(test["name"] == name and test["result"] == "OK" and test["returncode"] == 0 for test in tests):
                 raise ValueError("缺少配置恢复验收：" + name)
@@ -74,6 +78,7 @@ def main():
         report["success"] = report["m4_configuration_recovery_validated"] = True
         report["m4_daemon_protocol_validated"] = True
         report["online_definitions_validated"] = True
+        report["durable_requests_validated"] = True
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
         report["error"] = str(error)
         print(str(error), file=sys.stderr)

@@ -109,6 +109,13 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
         return 0;
     }
     switch (request->operation) {
+    case DPPD_MANAGEMENT_REQUEST_SUBMIT:
+        rc = dppd_flow_store_request(flows->store, &request->payload.durable_request,
+            dppd_monotonic_ms() * UINT64_C(1000000), &response->payload.durable_result);
+        break;
+    case DPPD_MANAGEMENT_REQUEST_GET:
+        rc = dppd_flow_store_request_get(flows->store, request->payload.request_key, &response->payload.durable_result);
+        break;
     case DPPD_MANAGEMENT_FLOW_CONFIG_GET:
         rc = dppd_flow_store_configuration(flows->store, request->payload.flow_config_get.expected,
             request->payload.flow_config_get.after_table, request->payload.flow_config_get.after_count,
@@ -294,6 +301,7 @@ int dppd_flow_management_drain(struct dppd_flow_management *flows)
 {
     if (flows == NULL || flows->store == NULL)
         return -EINVAL;
+    (void)dppd_flow_store_requests_cancel(flows->store);
     for (uint32_t i = 0; i < 2048; ++i)
         if (flows->jobs[i].owner != 0)
             (void)dppd_flow_store_cancel(flows->store, &flows->jobs[i]);
@@ -314,7 +322,9 @@ int dppd_flow_management_drain(struct dppd_flow_management *flows)
             else
                 return rc;
         }
-        if (!pending)
+        struct dppd_flow_store_status status;
+        dppd_flow_store_status(flows->store, &status);
+        if (!pending && status.service.jobs == 0)
             return 0;
     }
     return -EBUSY;

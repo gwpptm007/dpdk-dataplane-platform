@@ -136,7 +136,7 @@ int main(void)
             repair_crc(mutated, size);
         }
         if (mutation == 2)
-            mutated[8] = 2;
+            mutated[8] = 3;
         write_file(path, mutated, mutation == 3 ? size - 1U : size);
         assert(dppd_flow_state_load(path, &loaded) == (mutation == 2 ? -EPROTONOSUPPORT : -EBADMSG));
         assert(loaded == NULL);

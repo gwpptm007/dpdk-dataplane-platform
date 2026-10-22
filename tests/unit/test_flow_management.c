@@ -155,6 +155,21 @@ int main(void)
     assert(exchange(flows, &request).status == 0);
     /** 客户端放弃领取也必须能关闭，未执行删除取消后保留可靠的旧配置 */
     assert(dppd_flow_management_drain(flows) == 0);
+    /** 持久入口不依赖随机进程 token，停机取消也要留下可重复查询的终态 */
+    request.operation = DPPD_MANAGEMENT_REQUEST_SUBMIT;
+    memset(&request.payload, 0, sizeof(request.payload));
+    request.payload.durable_request =
+        (struct dppd_flow_request){.key = {81, 1}, .operation = DPPD_FLOW_REQUEST_REMOVE, .count = 1};
+    request.payload.durable_request.payload.remove[0] = (struct dppd_flow_remove_request){10, installed.generation};
+    response = exchange(flows, &request);
+    assert(response.status == 0 && response.payload.durable_result.phase == DPPD_FLOW_REQUEST_PENDING);
+    assert(dppd_flow_management_drain(flows) == 0);
+    request.operation = DPPD_MANAGEMENT_REQUEST_GET;
+    request.payload.request_key = (struct dppd_flow_request_key){81, 1};
+    response = exchange(flows, &request);
+    assert(response.status == 0 && response.payload.durable_result.phase == DPPD_FLOW_REQUEST_DONE);
+    assert(response.payload.durable_result.status == -ECANCELED && response.payload.durable_result.durable);
+    assert(exchange(flows, &request).status == 0);
     assert(dppd_flow_store_close(&store) == 0);
     free(flows);
     dppd_flow_state_free(&state);

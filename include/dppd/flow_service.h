@@ -33,6 +33,8 @@ struct dppd_flow_job_result {
     uint32_t count;
     int status;
     bool applied, remove, update;
+    /** 任务进入终态时的准确账本版本，不用稍后查询到的新版本替代 */
+    uint64_t revision;
     uint64_t ids[64], generations[64];
 };
 

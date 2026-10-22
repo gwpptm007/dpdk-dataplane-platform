@@ -33,6 +33,8 @@ struct dppd_flow_state {
     uint32_t table_count, shared_count, rule_count;
     uint64_t revision, shared_next_generation;
     struct dppd_flow_state_rule *rules;
+    /** 请求历史与期望配置放在同一个原子文件，旧配置没有历史时保持空指针 */
+    struct dppd_flow_request_ledger *requests;
 };
 
 /** 独立版本的完整配置文件，规则使用既有 v5 编码，不保存任何实际句柄和运行时计数 */
