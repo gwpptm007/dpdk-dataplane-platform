@@ -358,6 +358,12 @@ static void build_rule_summary(const struct dppd_rule *rule, struct dppd_managem
         summary->action_mask |= 1U << rule->actions[i].type;
 }
 
+/**
+ * 校验已接收管理请求的协议头，按 operation 调用控制层，并将业务结果写入 response
+ * control 提供规则管理，devices 和 runtime 供设备相关操作使用，request/response 是请求与输出区
+ * 普通 RULE_APPLY：management_poll → 本函数 → control.c/dppd_control_apply → control_apply_impl
+ * 返回 0 表示已形成响应，业务成功与否读取 response->status；必要指针无效返回 -EINVAL
+ */
 int dppd_management_handle(struct dppd_control_service *control, const struct dppd_device_set *devices,
     struct dppd_runtime *runtime, const struct dppd_management_request *request,
     struct dppd_management_response *response)
@@ -481,9 +487,10 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         rc = 0;
         break;
     case DPPD_MANAGEMENT_RULE_APPLY:
-        /*
-         * apply 的原子边界由 control service 保证：硬件事务成功后才发布
-         * repository generation，失败时 response.status 直接携带底层 -errno
+        /**
+         * CLI 已将参数转成 request 中的安装端口、完整规则和预期版本，这里传给控制层
+         * dppd_control_apply → control_apply_impl → 规划、事务安装、内存记录更新和保存
+         * 此分支只分发请求，rc 在本函数末尾写入 response->status，交回 poll 发送给客户端
          */
         rc = dppd_control_apply(control, request->payload.apply.install_port_id, &request->payload.apply.rule,
             request->payload.apply.expected_generation, &response->payload.apply);
@@ -800,6 +807,13 @@ int dppd_management_start_flow(struct dppd_management_server *server, struct dpp
     return runtime == NULL ? -EINVAL : start_server(server, NULL, flows, &runtime->devices, runtime, socket_path);
 }
 
+/**
+ * 由 dppd 主循环调用，在本机 Unix socket 上受理有预算的请求并发送响应
+ * server 必须已经启动，成功返回 0，参数或连接处理错误返回负错误码
+ * dppctl/exchange 发送请求 → accept4 接受连接 → recv 读取固定结构体
+ *   → 普通控制模式调用 management_handle → send 响应 → 关闭本次连接
+ * 若 server->flows 非空则走 flow_management_handle，属于另一种配置模式
+ */
 int dppd_management_poll(struct dppd_management_server *server)
 {
     uint32_t handled = 0;

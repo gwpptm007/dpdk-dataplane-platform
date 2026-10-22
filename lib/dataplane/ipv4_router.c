@@ -16,27 +16,48 @@
 #include <rte_rcu_qsbr.h>
 #pragma GCC diagnostic pop
 
-/** 零表示没有子节点或匹配项，路由索引加一保存，根节点始终为零号节点 */
+/** IPv4/IPv6 共用的二叉前缀树节点，每层按地址的一位选择分支 */
 struct route_node {
-    uint32_t child[2], route;
+    /** 下一位为 0 或 1 时的子节点下标，0 表示无子节点；保存实际下标，不加一 */
+    uint32_t child[2];
+    /** 对应地址族路由数组的下标加一，0 表示此前缀未配置路由 */
+    uint32_t route;
 };
 
+/** 一次发布的双栈路由和邻居配置及其查询树，发布后查询内容保持不变 */
 struct routing_snapshot {
+    /** 当前版本的 IPv4/IPv6 路由和静态邻居，邻居已按出口和 IP 排序供二分查询 */
     struct dppd_ipv4_configuration configuration;
+    /** 旧版本等待回收时的链表后继，由控制面维护 */
     struct routing_snapshot *retired_next;
+    /** 此版本退役时取得的 QSBR 宽限期标记，用于确认旧版本读者已离开 */
     uint64_t retired_token;
-    uint32_t node_count, root6;
+    /** nodes 中已使用的节点数，建树时也用作下一个可分配节点的下标 */
+    uint32_t node_count;
+    /** IPv6 根节点在 nodes 中的下标，IPv4 根节点固定为 nodes[0] */
+    uint32_t root6;
+    /** 随快照一并分配的变长节点数组，两种地址族共用存储但分别从各自根节点查询 */
     struct route_node nodes[];
 };
 
+/** 双栈路由器，统一管理当前快照、控制面更新和旧版本的安全回收 */
 struct dppd_ipv4_router {
+    /** 当前查询快照的原子指针，控制面完整构建新版本后替换，报文线程读取时不加写锁 */
     _Atomic(struct routing_snapshot *) active;
+    /** 已被替换、仍可能被读者使用的旧快照链表，等待安全回收 */
     struct routing_snapshot *retired;
+    /** QSBR 读者静默状态，用于判断旧快照是否已不再被任何读者使用 */
     struct rte_rcu_qsbr *qsbr;
+    /** 串行化控制面的配置查询、替换及回收，不参与逐包路由查询 */
     pthread_mutex_t writer;
+    /** 已注册读者的位图，第 reader 位为 1 表示已注册；不是读者数量 */
     atomic_uint_fast64_t readers;
+    /** retired 链表中的快照数量，用于限制等待回收的版本积压 */
     uint32_t retired_count;
-    uint16_t port_count, ports[DPPD_MAX_PORTS];
+    /** ports 中有效网口 ID 的数量，创建后保持不变 */
+    uint16_t port_count;
+    /** 路由器允许使用的实际网口 ID，校验路由出口和邻居所属网口时查询 */
+    uint16_t ports[DPPD_MAX_PORTS];
 };
 
 static bool port_present(const struct dppd_ipv4_router *router, uint16_t port)
@@ -79,6 +100,7 @@ static int compare_route6(const void *left, const void *right)
     return address != 0 ? address : (int)a->depth - b->depth;
 }
 
+/** 先比较出口，再比较 16 字节 IPv6 地址，均相等返回 0，供邻居排序和二分查询共用 */
 static int compare_neighbor6(const void *left, const void *right)
 {
     const struct dppd_ipv6_neighbor *a = left, *b = right;
@@ -277,16 +299,61 @@ int dppd_ipv4_router_destroy(struct dppd_ipv4_router *router)
     return 0;
 }
 
-int dppd_ipv6_router_lookup(struct dppd_ipv4_router *router, const uint8_t destination[16],
-    struct dppd_ipv4_forward *forward)
+/**
+ * 查询 IPv6 最长前缀路由及下一跳邻居，生成单包转发结果
+ * 目的 IP → 最长前缀路由 → 出口和下一跳 → 目的 MAC
+ *
+ * 入参：
+ *   router       双栈路由器
+ *   destination  16 字节目的 IPv6 地址，按报文字节顺序保存，只读
+ *
+ * 出参：
+ *   forward      配置版本、出口、下一跳 IPv6 地址和目的 MAC
+ *
+ * 返回：
+ *   0              查询成功，结果完整
+ *   -EINVAL        参数指针为空
+ *   -EAFNOSUPPORT  目的地址不在支持范围内
+ *   -ENOENT        没有匹配路由
+ *   -EHOSTUNREACH  缺少静态邻居，仍输出版本、出口和下一跳，供 ND 解析
+ *
+ * 调用线程须已注册为 QSBR 读者，并在查询期间保持在线
+ */
+int dppd_ipv6_router_lookup(struct dppd_ipv4_router *router, const uint8_t destination[16], struct dppd_ipv4_forward *forward)
 {
     if (router == NULL || destination == NULL || forward == NULL)
         return -EINVAL;
     memset(forward, 0, sizeof(*forward));
+
+    /** 拒绝未指定、回环、组播、IPv4 映射和链路本地目的地址 */
     if (!dppd_ipv6_unicast(destination, false))
         return -EAFNOSUPPORT;
+
+    /**
+     * active：原子变量，保存 struct routing_snapshot * 类型的快照地址
+     * &router->active：要读取的原子变量的地址
+     * atomic_load_explicit：<stdatomic.h> 的原子读取操作，此处返回 struct routing_snapshot *
+     * snapshot：以 const 指针接收，通过它只读访问快照，不复制整张表
+     *
+     * acquire 与发布端 release 配对，读到新指针时，发布前构建的内容也已可见
+     * QSBR 保护本次持有的快照，防止旧版本在查询期间被释放
+     * router->active → snapshot → configuration（路由和邻居）、nodes（前缀树）
+     */
     const struct routing_snapshot *snapshot = atomic_load_explicit(&router->active, memory_order_acquire);
     const struct dppd_ipv4_configuration *configuration = &snapshot->configuration;
+
+    /**
+     * 根节点可保存 /0 默认路由，selected 始终保留路径上最近命中的路由编号
+     * node 保存当前树节点的数组下标；selected 保存路由下标加一，0 表示尚未匹配
+     * 按地址从高位到低位沿 child[0/1] 查询，越深的命中前缀越长
+     * bit / 8 选字节，当前读取地址的第几个字节
+     * 7 - bit % 8 选该字节中的位 把这个字节中的目标位移到最低位，需要右移多少位
+     * & 1U  只保留最低位，得到 0 或 1
+     *
+     * 示例：2001:db8:1::1234 的首字节为 0x20，二进制为 0010 0000
+     * bit = 0、1、2 时依次取到 0、0、1，每次在当前节点选择 child[0]、child[0]、child[1]
+     * bit = 8 时转到 destination[1]，继续从该字节最高位读取
+     */
     uint32_t node = snapshot->root6, selected = snapshot->nodes[node].route;
     for (unsigned int bit = 0; bit < 128; ++bit) {
         node = snapshot->nodes[node].child[(destination[bit / 8] >> (7U - bit % 8)) & 1U];
@@ -297,18 +364,67 @@ int dppd_ipv6_router_lookup(struct dppd_ipv4_router *router, const uint8_t desti
     }
     if (selected == 0)
         return -ENOENT;
+
+    /**
+     * 路由编号减一得到数组下标，例如 selected = 3 → routes6[2]
+     * 下一跳选择：
+     *   网关全 0 → 直连，使用报文目的地址
+     *   网关非 0 → 经网关，使用配置的网关地址
+     * 示例：目的 2001:db8:1::1234、网关 fe80::1 → key.address 保存 fe80::1
+     */
     const struct dppd_ipv6_route *route = &configuration->routes6[selected - 1];
-    struct dppd_ipv6_neighbor key = {.port_id = route->port_id};
+    struct dppd_ipv6_neighbor key = {
+        .port_id = route->port_id
+    };
+    // 把出口填进去，再确定下一跳 IP
     const uint8_t zero[16] = {0};
+    /**
+     * 网关地址的 16 个字节是否全为零
+     * 全为零：表示直连，下一跳就是报文目的地址
+     * 非零：下一跳使用路由里配置的网关地址
+     *  | 路由配置的网关 | 最终邻居查询条件 |
+     *  | `::`，即全零 | 网口 `1` + `2001:db8:1::1234` |
+     *  | `fe80::1`   | 网口 `1` + `fe80::1` |
+     */
     memcpy(key.address, memcmp(route->gateway, zero, 16) == 0 ? destination : route->gateway, 16);
+
+    /**
+     * bsearch 在已排序的 neighbors6 中查找，命中返回邻居条目地址，否则返回 NULL
+     * neighbor6_count 为有效条目数，sizeof(key) 为每项大小，按 compare_neighbor6 比较
+     * 比较顺序为出口 → 16 字节 IPv6 地址，两者都相等才命中，与建表排序方式一致
+     * 示例：key 为出口 1、fe80::1，命中后可从 neighbor->mac 取得该下一跳的 MAC
+     */
+
+     /**
+      * | 参数 | 作用 |
+        |---|---|
+        | `&key` | 要查的条件：出口和下一跳 IP |
+        | `neighbors6` | 静态邻居数组 |
+        | `neighbor6_count` | 数组中有效条目的数量 |
+        | `sizeof(key)` | 每条邻居记录占多少字节 |
+        | `compare_neighbor6` | 判断查询条件与条目是否相等 |
+      */
     const struct dppd_ipv6_neighbor *neighbor =
         bsearch(&key, configuration->neighbors6, configuration->neighbor6_count, sizeof(key), compare_neighbor6);
+
+    /**
+     * forward 指向 pipeline.c 中的 decision->ipv4，下面直接写入调用方的结果区
+     * 示例：路由出口为 1、下一跳为 fe80::1，但静态邻居表中没有对应记录
+     *   generation      = 本次配置版本
+     *   port_id         = 1
+     *   next_hop6       = fe80::1
+     *   destination_mac = 全 0，尚未取得下一跳 MAC
+     *
+     * 返回 -EHOSTUNREACH → pipeline 写入 DROP / NO_NEIGHBOR → 返回 worker.c/routed_decide
+     * routed_decide 若已启用 ND，再用出口 1 和 fe80::1 查动态邻居表
+     * 因此缺少静态 MAC 时也必须写出出口和下一跳，不能直接丢掉这些查询结果
+     */
     forward->generation = configuration->generation;
     forward->port_id = route->port_id;
     memcpy(forward->next_hop6, key.address, 16);
-    /** 缺少静态邻居时仍返回已匹配的出口和下一跳，供独立 ND 缓存继续解析 */
     if (neighbor == NULL)
         return -EHOSTUNREACH;
+
     memcpy(forward->destination_mac, neighbor->mac, 6);
     return 0;
 }
@@ -386,6 +502,11 @@ void dppd_ipv4_router_reader_unregister(struct dppd_ipv4_router *router, unsigne
     atomic_fetch_and_explicit(&router->readers, ~(UINT64_C(1) << reader), memory_order_release);
 }
 
+/**
+ * 按 IPv4 目的地址执行最长前缀匹配，再按出口和下一跳 IP 查询静态邻居
+ * 成功将配置版本、出口、下一跳 IP 和目的 MAC 写入 forward，返回 0
+ * 无路由返回 -ENOENT，无邻居返回 -EHOSTUNREACH，无效参数或地址返回相应负错误码
+ */
 int dppd_ipv4_router_lookup(struct dppd_ipv4_router *router, uint32_t destination_be, struct dppd_ipv4_forward *forward)
 {
     if (router == NULL || forward == NULL)

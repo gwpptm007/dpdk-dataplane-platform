@@ -46,18 +46,47 @@ struct dppd_software_rule_object {
 };
 
 /**
- * 一次发布对应一个完整规则视图。objects 是按 backend capacity 固定分配的柔性数组；
- * 数组后面紧接精确匹配表和编译 ACL，匹配项和动作、计数器随同一指针一次发布
+ * snapshot 表示内存中的一整版软件规则表，让 worker 读取完整、一致的规则，同时允许控制面更新
+ *
+ * snapshot
+ * ├── 有效规则数量 count
+ * ├── 规则数组 objects
+ * │   ├── 匹配条件、动作等规则内容
+ * │   └── metrics 指针 → COUNT 计数器
+ * ├── 精确匹配表
+ * └── ACL 匹配表
+ *
+ * 内存布局：[count][capacity 个 objects 槽位][精确匹配表][ACL]，尾部两张表通过辅助函数定位
+ * worker 读取 active 取得一个快照，再用同一快照完成候选匹配、动作选择和计数器定位
+ *
+ * 旧快照 A：worker 正在读取，active 指向 A
+ *      │
+ *      └── 复制成 B → 修改 B → 重建 B 的匹配表
+ *                                  │
+ *                         完成后将 active 切换到 B
+ *                                  ↓
+ *                         后续查询使用新快照 B
+ *
+ * active 是当前已发布快照的指针，retired 链表保存暂时不能释放的旧快照
+ * 已经取得 A 的 worker 继续使用 A，QSBR 确认旧表无人再用后，控制面才回收 A
+ * 这样不会在原表上交错修改匹配条件和动作，worker 不会读到更新一半的规则表
+ * 发布后的规则内容和匹配索引不再原地修改，metrics 指向的 COUNT 计数器仍可持续更新
+ * 此结构保存运行时规则版本，不保存原始报文，也不负责磁盘持久化
  */
 struct dppd_software_classifier_snapshot {
+    /** 当前有效规则数，槽位容量由 backend->capacity 决定，有效规则不一定连续排列 */
     uint32_t count;
+    /** 柔性数组，分配时预留 capacity 个槽位，每项保存规则内容及 metrics 指针 */
     struct dppd_software_rule_object objects[];
 };
 
+/** 一个待回收的旧规则表，仍可能被 worker 读取，因此从 active 摘下后先保留 */
 struct dppd_software_retired_snapshot {
-    /** token 在 active 指针切换后取得；check 成功才允许销毁 snapshot */
+    /** 旧规则表地址，例如 active 已切换到 B，这里保存之前的 A */
     struct dppd_software_classifier_snapshot *snapshot;
+    /** 切换 active 后取得的 QSBR 进度标记，用于检查读者是否已结束对旧表的使用 */
     uint64_t token;
+    /** 下一个待回收节点，多次更新可能同时留下多份尚不能释放的旧表 */
     struct dppd_software_retired_snapshot *next;
 };
 
@@ -86,9 +115,14 @@ static struct dppd_acl *snapshot_acl(struct dppd_software_classifier_snapshot *s
     return (struct dppd_acl *)((uint8_t *)snapshot_exact(snapshot, capacity) + dppd_exact_size(capacity));
 }
 
+/** 归还一个快照持有的计数器引用，最后一个引用归还时解除共享计数绑定并释放对象，NULL 无操作 */
 static void metrics_put(struct dppd_software_rule_metrics *metrics)
 {
-    /** 最后一个 snapshot 消失才释放统计对象，确保 retired reader 仍可安全累加 COUNT */
+    /**
+     * references 统计持有该对象的快照数量，atomic_fetch_sub 返回减之前的值
+     * 例：新旧表 A、B 共用计数器，销毁 A 时 2 → 1，返回 2，不进入释放分支
+     * 最后销毁 B 时 1 → 0，返回 1，才释放；这里减的是引用数，不是规则命中次数
+     */
     if (metrics != NULL && atomic_fetch_sub_explicit(&metrics->references, 1, memory_order_acq_rel) == 1) {
         if (metrics->shared_lease.owner != 0)
             (void)dppd_flow_shared_counts_unbind(metrics->counts, &metrics->shared_lease);
@@ -96,25 +130,30 @@ static void metrics_put(struct dppd_software_rule_metrics *metrics)
     }
 }
 
+/**
+ * 销毁 snapshot：逐槽归还计数器引用，再释放包含规则、精确匹配表和 ACL 的整块快照内存
+ * capacity 是分配的槽位数，有效规则可能分散其中，因此不能只遍历 count 个槽位
+ * 未发布副本可直接销毁；已发布快照须由调用方先通过 QSBR 检查，或等待所有 worker 退出
+ * 本函数不等待 worker，也不强制释放仍被其他快照引用的计数器；snapshot 为 NULL 时直接返回
+ */
 static void snapshot_destroy(struct dppd_software_classifier_snapshot *snapshot, uint32_t capacity)
 {
     uint32_t i;
 
-    /**
-     * 未发布的私有副本可以直接销毁；已经发布过的快照必须先确认没有读者使用
-     * 后者由 QSBR 安全点保证，或由关闭流程等待所有工作线程退出后保证
-     */
     if (snapshot == NULL)
         return;
+    /** 只归还当前表持有的引用，计数器仍被新表使用时保留原来的 hits 和 bytes */
     for (i = 0; i < capacity; ++i)
         metrics_put(snapshot->objects[i].metrics);
     free(snapshot);
 }
 
 /**
- * 复制规则数组，并为其中保留的规则版本增加计数器引用，避免复制操作清空统计
- * source 为空时创建空表；否则只复制规则内容，计数器由新旧快照共同持有
- * 返回的副本仍归控制面独占，发布成功之后才允许工作线程读取
+ * 创建供控制面修改的新规则快照，复制已有规则并共享其计数器，保持未变规则的 COUNT 连续
+ * source 为源快照，NULL 表示创建空表；capacity 为槽位容量，复制已有表时须与其容量一致
+ * 成功返回尚未发布的副本，分配失败返回 NULL；此处不修改 backend->active
+ * ACL 和精确匹配表只初始化为空，调用方完成规则修改后，由 publish_locked 重新构建并发布
+ * 副本从创建时就持有计数器引用，后续操作失败也必须通过 snapshot_destroy 归还
  */
 static struct dppd_software_classifier_snapshot *snapshot_clone(const struct dppd_software_classifier_snapshot *source,
     uint32_t capacity)
@@ -122,6 +161,7 @@ static struct dppd_software_classifier_snapshot *snapshot_clone(const struct dpp
     struct dppd_software_classifier_snapshot *copy;
     uint32_t i;
 
+    /** 一次分配快照头、规则槽位、精确匹配表和 ACL 的空间，初始全部清零 */
     copy = calloc(1, snapshot_size(capacity));
     if (copy == NULL)
         return NULL;
@@ -131,7 +171,20 @@ static struct dppd_software_classifier_snapshot *snapshot_clone(const struct dpp
         return copy;
     copy->count = source->count;
     for (i = 0; i < capacity; ++i) {
+        /**
+         * 结构体赋值复制 rule 内容和 metrics 指针，不复制指针指向的计数器对象
+         * 例：A.objects[i].metrics 和新表 B.objects[i].metrics 都指向同一个 M
+         * 
+         * 旧表 A.objects[i]                 新表 B.objects[i]
+            ┌──────────────┐                 ┌──────────────┐
+            │ rule 内容    │ ──复制内容─────→ │ rule 内容    │
+            │ metrics 指针 │                 │ metrics 指针 │
+            └──────┬───────┘                 └──────┬───────┘
+                    └──────────→ M ←─────────────────┘
+                            同一个计数器
+         */
         copy->objects[i] = source->objects[i];
+        /** B 也持有 M，引用数例如从 1 增为 2；hits 和 bytes 不清零，也不随复制增加 */
         if (copy->objects[i].metrics != NULL)
             atomic_fetch_add_explicit(&copy->objects[i].metrics->references, 1, memory_order_relaxed);
     }
@@ -153,41 +206,58 @@ static int snapshot_find(const struct dppd_software_classifier_snapshot *snapsho
 }
 
 /**
- * 尝试回收已经被新 snapshot 替换的旧数组
+ * 检查 retired 链表，销毁已通过 QSBR 安全检查的旧规则表及其链表节点
  *
- * 本函数绝不等待 worker；若任一 reader 尚未经过对应 QSBR token，就保留旧数组到
- * 下一次控制面操作再检查。这保证规则更新的管理请求不会被慢速数据面卡住
+ * backend 提供待回收链表和读者进度，调用方必须持有 writer_lock，防止控制面同时修改链表
+ * check 返回 0 → 保留该旧表，继续检查下一个节点；返回非零 → 从链表摘下并销毁
+ * false 表示不等待读者，尚不安全的旧表留待后续发布、查询或显式回收时再检查
+ * 无返回值，不修改 active 指向的新表，也不处理报文 mbuf
  */
 static void reclaim_locked(struct dppd_software_backend *backend)
 {
-    /** 保存指向当前链表节点的指针地址，删除首节点和中间节点就能使用同一种写法 */
+    /**
+     * link 指向保存当前节点地址的位置，*link 才是当前节点指针
+     * 初始指向 backend->retired；若保留某节点，再改为指向该节点的 next 字段
+     * 因此给 *link 赋值，可以直接修改链表头或前一个节点的 next
+     */
     struct dppd_software_retired_snapshot **link = &backend->retired;
 
     while (*link != NULL) {
         struct dppd_software_retired_snapshot *retired = *link;
 
-        /** 控制面不等待 worker；下次规则更新或查询时再尝试回收即可 */
+        /** token 标识此旧表的回收进度，返回 0 表示仍有相关在线读者未通过对应安全点 */
         if (rte_rcu_qsbr_check(backend->qsbr, retired->token, false) == 0) {
+            /** 当前节点继续留在链上，转而检查它的后继，不在这里等读者 */
             link = &retired->next;
             continue;
         }
+        /**
+         * 安全后让前面的指针绕过当前节点，例如 链表头 → A → Z 改为 链表头 → Z
+         * link 所指的位置仍然有效，下一轮从这个位置检查后继，不能再访问即将释放的 A
+         */
         *link = retired->next;
+        /** 销毁旧规则表并归还它持有的计数器引用，再释放保存 snapshot/token/next 的链表节点 */
         snapshot_destroy(retired->snapshot, backend->capacity);
         free(retired);
     }
 }
 
 /**
- * 原子切换活跃 classifier，并将旧数组挂入 QSBR 等待队列
- * 调用者持有 writer_lock；发布顺序遵循“先改数据，后推进 token”，使读侧看到
- * 新指针或在静默点之后安全离开旧指针，二者不会交叉造成悬空访问
+ * 为 next 中的最终规则构建匹配表，发布新快照，并将旧快照交给 QSBR 回收流程
+ * backend 提供容量、active 和回收链表，next 是调用方准备好的私有副本，调用者须持有 writer_lock
+ * 返回 0 表示发布成功；负错误码表示发布前失败，active 保持原指向，副本由调用方销毁
+ *
+ * 副本 B 的规则内容已准备好
+ *   → 清空 B 的 ACL / exact 索引 → 遍历有效规则，逐条加入合适的匹配表
+ *   → 预先分配旧表回收节点 → active 从 A 切换到 B
+ *   → 保存 A 和新取得的 QSBR token → 尝试回收已安全的旧表
  */
 static int publish_locked(struct dppd_software_backend *backend, struct dppd_software_classifier_snapshot *next)
 {
     struct dppd_software_classifier_snapshot *previous;
     struct dppd_software_retired_snapshot *retired;
 
-    /** 发布前完成匹配编译，失败时旧 ACL、动作和 COUNT 全部保持原样 */
+    /** 重建的是 B 内部的匹配表，旧表 A 仍供 worker 使用；索引须反映调用方增删改后的最终规则 */
     struct dppd_acl *acl = dppd_acl_init(snapshot_acl(next, backend->capacity), backend->capacity);
     struct dppd_exact *exact = dppd_exact_init(snapshot_exact(next, backend->capacity), backend->capacity);
     for (uint32_t i = 0; i < backend->capacity; ++i) {
@@ -210,6 +280,19 @@ static int publish_locked(struct dppd_software_backend *backend, struct dppd_sof
                 break;
             }
         }
+        /**
+         * 每条有效规则先尝试精确匹配表：
+         *   exact_add → 0        → 已加入 exact，处理下一条规则
+         *             -ENOTSUP → 改用 acl_add，支持掩码、端口范围等匹配条件
+         *             其他错误  → 返回错误，终止本次发布
+         *   acl_add   → 0        → 已加入 ACL，处理下一条规则
+         *             非 0      → 返回错误，终止本次发布
+         * 这是安装规则时的分类，worker 收包时使用 classify 查表，不逐包重新添加规则
+         *
+         * i + 1 是规则槽位的 tag，0 留给未命中；tag 不是规则 ID，也不是匹配表内部行号
+         * 例：B.objects[2] → 加入 exact 或 ACL 时保存 tag = 3
+         *     报文匹配返回 3 → B.objects[3 - 1] → 取得该规则的动作和计数器
+         */
         int rc = dppd_exact_add(exact, &next->objects[i].rule, i + 1);
         if (rc == -ENOTSUP)
             rc = dppd_acl_add(acl, &next->objects[i].rule, i + 1);
@@ -221,15 +304,47 @@ static int publish_locked(struct dppd_software_backend *backend, struct dppd_sof
         /** 在发布前保证能够记录旧 snapshot，避免内存紧张时丢失回收所有权 */
         return -ENOMEM;
     }
+    /**
+     * 原子交换 active 指针：写入 next，同时把交换前的指针返回给 previous
+     * 交换前：backend->active → A，next → B，B 的规则和匹配表均已准备好
+     * 交换后：backend->active → B，previous → A，next 仍指向 B
+     * 本操作只换指针，不复制快照，也不释放 A
+     *
+     * release 与 worker 读取 active 时的 acquire 配合，使读到 B 的 worker 能看到 B 的初始化结果
+     * 已持有 A 的 worker → 继续使用 A → 报告安全点 → QSBR 确认后才能释放 A
+     * 从 active 取得 B 的 worker → 使用 B 的规则和匹配表
+     */
     previous = atomic_exchange_explicit(&backend->active, next, memory_order_release);
     if (previous == NULL) {
+        /** 没有旧快照需要回收，只释放预分配的回收节点，新快照 B 已经发布 */
         free(retired);
         return 0;
     }
+    /**
+     * 用回收节点 R 保存旧快照 A 的地址，A 本身仍留在内存中供已有读者使用
+     * R.snapshot → A；backend->active → B，两者分别管理待回收旧表和当前规则表
+     */
     retired->snapshot = previous;
+    /**
+     * A 退出 active 后再取得 QSBR 回收标记，后续据此确认相关读者已结束此前的访问
+     * token 是 QSBR 进度标记，不是时间戳或规则版本；start 不等待，也不释放 A
+     */
     retired->token = rte_rcu_qsbr_start(backend->qsbr);
+    /**
+     * 将回收节点 R 插到链表头，假设原链头为旧节点 X
+     * 插入前：backend->retired → X → ...；R.snapshot → A
+     * 第一句：R.next → X，接住原来的回收链
+     * 第二句：backend->retired → R → X → ...，R 成为新链头
+     * 原链为空时 R.next 为 NULL；节点的 next 串起回收记录，snapshot 指向各自的旧快照
+     */
     retired->next = backend->retired;
     backend->retired = retired;
+    /**
+     * 检查整条回收链，各节点分别用自己的 token 判断是否安全，不在这里等待读者
+     * 以 R 为例：检查未通过 → 保留 R 和 A，留待以后再检查
+     *            检查通过   → 摘下 R → 销毁 A、归还计数器引用 → 释放 R
+     * 无论本次是否回收 A，B 都已发布成功，下面返回 0
+     */
     reclaim_locked(backend);
     return 0;
 }
@@ -392,8 +507,12 @@ static int transaction_prepare(void *context, const struct dppd_transaction_item
 }
 
 /**
- * 在私有快照副本中加入一个精确版本，然后一次切换 active 指针让它可见
+ * 控制面提交一条准备好的软件规则：复查当前表，复制快照，加入规则及独立计数器，再发布新表
+ * context 是软件后端，token 是 prepare 返回的 pending 地址，规则内容从 pending->rule 取得
+ * 此处 token 是事务准备记录，不是 QSBR 回收进度标记；item 在本实现中不再读取
+ * 成功返回 0 并设置 pending->published，失败返回负错误码；此函数不会释放 pending
  * 本次切换只发布这一条规则的安装结果，不代表整个跨规则事务同时对报文生效
+ * 本函数在安装规则时调用，worker 逐包匹配只读取已发布结果，不会每包复制规则表
  */
 static int transaction_commit(void *context, const struct dppd_transaction_item *item, uintptr_t token)
 {
@@ -417,22 +536,38 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
         return -EEXIST;
     }
     dppd_install_timer_start(&timer);
-    /** 永不修改 active；即使只有一条规则变更也复制整张表，换取 worker 无锁读取 */
+    /**
+     * 例：旧表只有 R1，本次准备新增 R2，先复制整张表，不修改已发布的 A
+     *
+     * 复制前：backend->active → A：[R1]，pending->rule 保存 R2
+     * 复制后：backend->active → A：[R1]
+     *         next            → B：[R1]    尚未发布，供控制面修改
+     */
     next = snapshot_clone(active, backend->capacity);
     if (next == NULL) {
         (void)pthread_mutex_unlock(&backend->writer_lock);
         return -ENOMEM;
     }
-    /** 新安装版本使用独立计数器，从零开始累计，不继承同 ID 旧版本的计数 */
+    /**
+     * 例：A 原有 R1，副本 B 已与 A 共享 R1 的计数器；本次新增 R2，需要另建计数器
+     * 新安装版本从 hits = 0、bytes = 0 开始，不继承同 ID 旧版本的统计
+     */
     metrics = calloc(1, sizeof(*metrics));
     if (metrics == NULL) {
         snapshot_destroy(next, backend->capacity);
         (void)pthread_mutex_unlock(&backend->writer_lock);
         return -ENOMEM;
     }
+    /**
+     * R2 新计数器的初始状态：
+     *   references = 1 → 只有副本 B 持有，不表示已经命中一个包
+     *   hits       = 0 → 尚未匹配过报文
+     *   bytes      = 0 → 尚未累计报文字节
+     */
     atomic_init(&metrics->references, 1);
     atomic_init(&metrics->hits, 0);
     atomic_init(&metrics->bytes, 0);
+    /** metrics 为 NULL 表示空槽位，将 R2 内容和新计数器一同放入 B，再增加有效规则数 */
     for (i = 0; i < backend->capacity; ++i) {
         if (next->objects[i].metrics == NULL) {
             next->objects[i].rule = pending->rule;
@@ -441,6 +576,23 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
             break;
         }
     }
+    /**
+     * 加入 R2 后，规则与计数器的关系：
+     *
+     * A：[R1] ────────────→ R1 原计数器
+     *                          ↑
+     * B：[R1] ─────────────────┘
+     *    [R2] ────────────→ R2 新计数器
+     *
+     * 此时 R1 的计数器由 A、B 共同持有，引用数为 2；R2 的计数器只由 B 持有，引用数为 1
+     * 发布前：backend->active → A，worker 还看不到 B 中新增的 R2
+     * publish_locked 返回
+     *   非 0 → active 仍指向 A → 销毁未发布的 B → 解锁 → 返回发布错误
+     *          R1 计数器引用 2 → 1，A 继续使用；R2 计数器引用 1 → 0，随之释放
+     *   为 0 → active 已指向 B，A 已交给 QSBR 回收流程
+     *        → 记录安装耗时 → 标记 pending 已发布 → 解锁 → 返回成功
+     * 失败时 B 从未交给 worker，可直接销毁；成功时 B 已由 active 持有，不能在此销毁
+     */
     int publish_error = publish_locked(backend, next);
     if (publish_error != 0) {
         snapshot_destroy(next, backend->capacity);
@@ -455,15 +607,24 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
     metrics->commit_rule_count = 1;
     /** 历史在已有控制面锁内更新，零纳秒是有效测量，时钟未知单独计数 */
     dppd_rule_latency_record(&backend->latency_single, metrics->timing_available, metrics->install_duration_ns, 1);
+    /**
+     * published 记录本条规则已经安装，供后续回滚判断是否需要删除该规则版本
+     * 真正发布发生在前面的 active 指针交换，此标志不负责让 worker 切换规则
+     * pending 留给事务的 finalize 或 rollback 释放，本函数只解锁并返回
+     */
     pending->published = true;
     (void)pthread_mutex_unlock(&backend->writer_lock);
     return 0;
 }
 
 /**
- * 尚未发布时只释放准备记录；已经发布时还要删除对应的规则版本
- * 删除需要创建快照，也可能因内存不足失败，返回值必须交给上层处理
- * 无论删除是否成功都会释放准备记录，残留规则由上层恢复隔离流程接管
+ * 撤销一条软件规则的安装，token 是 prepare 创建的 pending 地址，返回删除结果或参数错误
+ * pending->published
+ *   false → 规则未发布 → 只释放 pending → 返回 0
+ *   true  → 按 id + generation 删除已发布版本 → 释放 pending → 返回删除结果
+ * commit_was_attempted 只说明调用过 commit，不能说明发布成功，本后端以 published 为准
+ * 删除也要创建并发布新快照，可能因内存不足失败；即使删除失败也会释放 pending
+ * 上层须检查返回值，不能把准备记录已释放当作规则已撤回
  */
 static int transaction_rollback(void *context, const struct dppd_transaction_item *item, uintptr_t token,
     bool commit_was_attempted)
@@ -485,6 +646,9 @@ static int transaction_rollback(void *context, const struct dppd_transaction_ite
 
 /**
  * 释放事务准备记录，不修改已经发布的规则，也不释放规则的计数器
+ * prepare 创建 pending → commit 将规则内容复制进快照 → finalize 释放 pending
+ * 此后 active → 已发布快照 → 规则和计数器仍在，worker 继续使用
+ * 上层 dppd_transaction_finalize 随后清零条目 token，并将事务标记为 FINALIZED
  * 正常提交完成后使用此入口；进入隔离并放弃继续回滚时也可用它清理准备记录
  * 因此调用 finalize 本身不能作为业务事务成功的判断依据
  */
@@ -495,9 +659,21 @@ static void transaction_finalize(void *context, const struct dppd_transaction_it
     free((struct dppd_software_pending_rule *)token);
 }
 
+/**
+ * 返回软件后端的事务回调表，context 保存后端地址，供上层调用各阶段函数时传回
+ * transaction.c：backend->commit(context, item, token) → 本文件 transaction_commit
+ * 同样通过 prepare、rollback、finalize 回调完成准备、撤销和临时资源清理
+ */
 struct dppd_transaction_backend dppd_software_transaction_backend(struct dppd_software_backend *backend)
 {
     const struct dppd_transaction_backend operations = {
+        /**
+         * .成员名 = 初始值 是 C 的指定初始化语法，左侧名称来自 dppd_transaction_backend 的定义
+         * .context = backend          → 将后端对象指针存入 operations.context
+         * .commit = transaction_commit → 将函数地址存入 operations.commit，此处不会执行函数
+         * 调用 operations.commit(...) 时，才会执行 transaction_commit(...)
+         * 按成员名指定初值，无须依照结构体成员顺序；未指定的成员按零初始化规则处理
+         */
         .context = backend,
         .validate = transaction_validate,
         .prepare = transaction_prepare,
@@ -826,7 +1002,16 @@ void dppd_software_backend_latency(const struct dppd_software_backend *backend,
     (void)pthread_mutex_unlock((pthread_mutex_t *)&backend->writer_lock);
 }
 
-/** 按 ID 和 generation 精确删除；新表不再包含该版本，旧读者可继续使用退役快照 */
+/**
+ * 按 rule_id 和 generation 删除一个规则版本，返回 0 表示新快照发布成功，负值表示失败
+ * backend 提供当前快照和写锁；版本必须同时匹配，避免删除同 ID 的其他版本
+ *
+ * 例：当前 B 含 R1、R2，本次撤销 R2
+ * B：[R1, R2] → 复制出 C：[R1, R2] → 清空 C 中 R2 的槽位并归还其计数器引用
+ * 发布成功：active → C：[R1]，旧 B 交给 QSBR，已有读者仍可完成对 B 的访问
+ * 发布失败：销毁 C，active 仍指向 B：[R1, R2]，调用方收到删除错误
+ * 回滚通过发布新版本撤销规则，不把 active 直接切回某个历史快照
+ */
 int dppd_software_backend_remove_version(struct dppd_software_backend *backend, uint64_t rule_id, uint64_t generation)
 {
     struct dppd_software_classifier_snapshot *active;
@@ -994,6 +1179,7 @@ int dppd_software_backend_worker_register(struct dppd_software_backend *backend,
 /**
  * 工作线程确认不再使用先前读取的规则指针后报告安全点，允许控制面推进回收
  * 此函数只报告进度，不直接释放快照；即使本轮没有收到报文也应报告
+ * backend->qsbr 跟踪本后端的读者，worker_id 指定本次报告者；完整 A/B 示例见 software_backend.h
  */
 void dppd_software_backend_worker_quiescent(struct dppd_software_backend *backend, unsigned int worker_id)
 {
@@ -1010,7 +1196,11 @@ void dppd_software_backend_worker_unregister(struct dppd_software_backend *backe
     (void)rte_rcu_qsbr_thread_unregister(backend->qsbr, worker_id);
 }
 
-/** 两个独立匹配阶段共享 IR 排序，精确匹配不能越过优先级更高的通配 ACL */
+/**
+ * 比较候选规则优先顺序，返回 true 表示 a 排在 b 前面
+ * group → priority → id → tag：前项相等才比较下一项，数值小的优先
+ * 精确规则与 ACL 规则使用同一排序，匹配方式不决定优先级
+ */
 static bool rule_before(const struct dppd_rule *a, uint32_t a_tag, const struct dppd_rule *b, uint32_t b_tag)
 {
     if (a->group != b->group)
@@ -1022,6 +1212,7 @@ static bool rule_before(const struct dppd_rule *a, uint32_t a_tag, const struct 
     return a_tag < b_tag;
 }
 
+/** 将批次中的次数和字节增量原子加到各规则统计，清空有效项数供后续复用 */
 void dppd_software_count_batch_flush(struct dppd_software_count_batch *batch)
 {
     if (batch == NULL)
@@ -1033,7 +1224,12 @@ void dppd_software_count_batch_flush(struct dppd_software_count_batch *batch)
     batch->count = 0;
 }
 
-/** 对象身份包含规则版本，不能只按规则 ID 合并新旧版本的命中 */
+/**
+ * 记录一次规则命中和本包字节数，无返回值
+ * batch 为空时直接原子累加，否则按 metrics 对象合并到批次，减少共享统计写入
+ * metrics 指针区分规则版本，避免把相同 ID 的新旧版本统计混在一起
+ * 示例：同一对象先后命中 60 和 100 字节 → 有效项 1，hits 为 2，bytes 为 160
+ */
 static void count_packet(struct dppd_software_rule_metrics *metrics, uint32_t bytes,
     struct dppd_software_count_batch *batch)
 {
@@ -1042,12 +1238,14 @@ static void count_packet(struct dppd_software_rule_metrics *metrics, uint32_t by
         atomic_fetch_add_explicit(&metrics->bytes, bytes, memory_order_relaxed);
         return;
     }
+    /** count 是批次内有效统计对象数，同一对象重复命中只增加该项的次数和字节数 */
     for (uint16_t i = 0; i < batch->count; ++i)
         if (batch->entries[i].metrics == metrics) {
             batch->entries[i].hits++;
             batch->entries[i].bytes += bytes;
             return;
         }
+    /** 新增对象前若没有空位则先提交，32 是对象容量，不要求凑满 32 个包 */
     if (batch->count == DPPD_SOFTWARE_COUNT_BATCH_SIZE)
         dppd_software_count_batch_flush(batch);
     batch->entries[batch->count].metrics = metrics;
@@ -1055,6 +1253,12 @@ static void count_packet(struct dppd_software_rule_metrics *metrics, uint32_t by
     batch->entries[batch->count++].bytes = bytes;
 }
 
+/**
+ * 匹配当前报文，生成软件规则结果并按需累计 COUNT 统计
+ * 读取规则表 → ACL/精确匹配 → 选定一条规则
+ *   未命中 → matched = false，返回
+ *     命中 → DROP/MARK 写入 decision，COUNT 累计命中次数和字节数
+ */
 void dppd_software_backend_decide_counted(struct dppd_software_backend *backend, uint16_t ingress_port,
     const struct dppd_packet *packet, struct dppd_software_decision *decision, struct dppd_software_count_batch *batch)
 {
@@ -1064,13 +1268,31 @@ void dppd_software_backend_decide_counted(struct dppd_software_backend *backend,
     if (backend == NULL || packet == NULL)
         return;
     /**
-     * 调用线程必须已经注册并上线，QSBR 在读取期间保护旧快照不被回收
-     * 每个报文只读取一次 active，后续遍历使用同一张表，不获取控制面写锁
-     * acquire 与发布端的 release 配合，保证读到新指针时也能读到完整规则内容
+     * backend->active → 本包的规则快照 active → ACL/精确匹配各自返回候选，0 表示未命中
+     *
+     * 读到这里可继续追查：active 中的规则是谁提前准备并发布进去的
+     * 报文处理：process_batch → routed_decide → pipeline → 本函数读取 active，匹配当前包
+     * 规则配置：control.c/dppd_control_apply → control_apply_impl → transaction_run
+     *           → 软件 transaction_commit → publish_locked 构建匹配表并更新 backend->active
+     * 两条流程通过同一个 backend->active 衔接；转去读配置入口是在追查规则来源，并非本函数调用它
+     * 回到本函数后，继续用取得的同一快照查询下面的 ACL 和 exact 表
+     *
+     * 每包只取一次 active，两类匹配共用同一版本，不获取控制面写锁
+     * 调用线程须已注册上线 QSBR，防止读取期间旧规则表被回收
+     * acquire 与发布端 release 配对，保证读到新指针时规则内容也已可见
      */
     active = atomic_load_explicit(&backend->active, memory_order_acquire);
+    /**
+     * ACL 支持掩码、端口范围等条件；exact 对完整地址和端口组合做哈希查找
+     * 各自返回本表优先命中的规则 tag，0 表示未命中，选定候选后再执行动作
+     */
     uint32_t tag = dppd_acl_classify(snapshot_acl(active, backend->capacity), ingress_port, packet);
     uint32_t exact_tag = dppd_exact_classify(snapshot_exact(active, backend->capacity), ingress_port, packet);
+    /**
+     * ACL tag + exact_tag → 选定一个 tag
+     * 单个命中 → 直接选用；两个都命中 → 按 rule_before 排序
+     * tag = 0 → 无规则；tag > 0 → active->objects[tag - 1]，数组下标从 0 开始
+     */
     if (exact_tag != 0 &&
         (tag == 0 || rule_before(&active->objects[exact_tag - 1].rule, exact_tag, &active->objects[tag - 1].rule, tag)))
         tag = exact_tag;
@@ -1080,9 +1302,9 @@ void dppd_software_backend_decide_counted(struct dppd_software_backend *backend,
         uint16_t action;
 
         /**
-         * 只执行最终选中的规则，不把所有命中规则的动作叠加
-         * DROP 只设置结果标志，不提前退出动作循环，所以同一规则的 COUNT 仍会累计
-         * 实际释放报文或写入 MARK 由外层工作线程完成
+         * 只执行选中规则的动作，DROP/MARK 写入软件决策，COUNT 累计命中统计
+         * R1 示例：[DROP, COUNT] → matched = true、drop = true，并累计本包次数和字节数
+         * DROP 不退出循环，也不释放报文；释放由 worker.c/process_batch 按最终决策执行
          */
         decision->matched = true;
         for (action = 0; action < selected->rule.nb_actions; ++action) {

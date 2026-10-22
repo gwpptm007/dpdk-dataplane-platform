@@ -98,6 +98,18 @@ int dppd_rule_repository_list(const struct dppd_rule_repository *repository, uin
     return 0;
 }
 
+/**
+ * 将 rule 新增或更新到内存账本，检查预期版本并分配新版本，不安装后端规则或写文件
+ * expected_generation 是调用方预期的旧版本，0 用于期望新建，ANY 表示跳过版本冲突检查
+ * 成功返回 0，result 给出 CREATED、UPDATED 或 UNCHANGED 及规则版本；失败返回负错误码
+ * 调用方须串行访问账本，本函数不加锁
+ *
+ * 按 rule.id 查找记录
+ *   已存在 → 内容相同 → UNCHANGED，返回已有版本，不检查 expected_generation
+ *          → 内容不同 → 检查预期旧版本 → 覆盖内容并分配新版本 → UPDATED
+ *   不存在 → 预期为 0 或 ANY → 分配槽位、写入内容及新版本 → CREATED
+ *          → 预期为其他版本 → -ESTALE，调用方预期的记录已不存在
+ */
 int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const struct dppd_rule *rule,
     uint64_t expected_generation, struct dppd_rule_apply_result *result)
 {
@@ -111,17 +123,27 @@ int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const st
 
     record = find_record(repository, rule->id);
     if (record != NULL) {
+        /** equal 比较规则内容，不比较规则自身的 generation；相同内容重复提交不推进版本 */
         if (dppd_rule_equal(&record->rule, rule)) {
             result->status = DPPD_RULE_UNCHANGED;
             result->generation = record->rule.generation;
             return 0;
         }
+        /**
+         * 例：调用方读到 R1 版本 7，其他请求已将其改成版本 9
+         * 本次携带 expected_generation = 7 且内容不同 → -ESTALE，拒绝覆盖版本 9
+         * 比较的是 R1 当前版本，不是整个仓库的 generation；ANY 明确跳过此检查
+         */
         if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)
             return -ESTALE;
         if (repository->generation >= UINT64_MAX - 1U)
             return -EOVERFLOW;
         record->rule = *rule;
-        /* generation 只由 repository 分配，调用者携带的值不会直接发布 */
+        /**
+         * 新版本取仓库递增序列，不采用输入 rule->generation，也不是旧规则版本加 1
+         * 例：仓库版本 12，R1 版本 7 → 用预期版本 7 更新成功 → 仓库和 R1 均变为 13
+         * 其他规则保留各自的版本，更新已有记录不增加 count
+         */
         record->rule.generation = ++repository->generation;
         result->status = DPPD_RULE_UPDATED;
         result->generation = record->rule.generation;
@@ -133,13 +155,14 @@ int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const st
     if (repository->generation >= UINT64_MAX - 1U)
         return -EOVERFLOW;
     uint32_t slot;
+    /** 索引记录 (rule.id, 0) → 槽位，真正的规则版本保存在 record->rule.generation */
     int rc = dppd_slot_index_insert(&repository->index, rule->id, 0, &slot);
     if (rc != 0)
         return rc;
     record = &repository->records[slot];
     record->occupied = true;
     record->rule = *rule;
-    /* create 与 update 共用同一条全局 desired-state 修订序列 */
+    /** 新建也从仓库序列分配版本，例如仓库 13 → 新建 R2 → 仓库和 R2 均为 14，R1 仍为 13 */
     record->rule.generation = ++repository->generation;
     repository->count++;
     result->status = DPPD_RULE_CREATED;
@@ -319,6 +342,12 @@ int dppd_rule_repository_update_batch(struct dppd_rule_repository *repository, c
     return 0;
 }
 
+/**
+ * 删除内存账本中的规则，校验预期版本后撤销索引、清空记录并推进仓库修订号
+ * 成功返回 0，removed 表示是否实际删除，generation 返回操作后的仓库版本；失败返回负错误码
+ * 后端规则须由控制层先删除，本函数不操作 worker 快照或硬件对象
+ * rule_id → 找到 record → slot_index_erase 归还索引槽位 → 清空 record → count 减 1
+ */
 int dppd_rule_repository_remove(struct dppd_rule_repository *repository, uint64_t rule_id, uint64_t expected_generation,
     bool *removed, uint64_t *generation)
 {

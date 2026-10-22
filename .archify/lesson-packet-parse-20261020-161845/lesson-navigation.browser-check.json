@@ -1,0 +1,17 @@
+{
+  "page": "E:\\GitHub-Study\\dpdk-dataplane-platform\\.archify\\lesson-packet-parse-20261020-161845\\packet-parse-learning.html",
+  "checks": [
+    "deep link opens parent step 2",
+    "parent step opens parsing lesson",
+    "return restores parent step 2",
+    "lesson end offers next lesson",
+    "lesson end opens parsing lesson",
+    "course breadcrumb returns to parent",
+    "parent header opens next lesson",
+    "no horizontal overflow",
+    "no runtime exceptions"
+  ],
+  "runtimeErrors": [],
+  "passed": true,
+  "screenshot": "E:\\GitHub-Study\\dpdk-dataplane-platform\\.archify\\lesson-packet-parse-20261020-161845\\lesson-navigation.desktop.png"
+}

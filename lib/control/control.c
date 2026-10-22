@@ -86,6 +86,10 @@ static int save_current_snapshot(struct dppd_control_service *service)
  * 把当前完整规则账本写入快照，未配置保存路径时直接成功返回
  * 保存发生在规则生效之后，写磁盘失败不能被解释为已经回滚规则
  * 此时设置 dirty 并返回 EUCLEAN，后续修改必须先补写成功，避免磁盘与内存越差越远
+ * 后端规则已生效 + 内存账本已更新 → 尝试写文件
+ *   未配置路径 → 跳过保存，返回 0
+ *   保存成功   → 清除 dirty，更新 persisted_generation，返回 0
+ *   保存失败   → 保留已生效规则和内存账本，设置 dirty，返回 -EUCLEAN
  */
 static int persist_current_repository(struct dppd_control_service *service)
 {
@@ -753,6 +757,21 @@ static int control_reconcile_impl(struct dppd_control_service *service)
     return 0;
 }
 
+/**
+ * 创建或更新一条规则，依次完成版本检查、后端安装、内存账本更新和配置保存
+ * rule 提供规则内容，install_port_id 指定安装端口，expected_generation 用于检查版本冲突
+ * result 返回执行计划、事务编号及规则状态和版本；返回 0 表示本次请求成功，负值表示错误
+ *
+ * 新增软件规则的成功路径，假设规划结果选中软件后端：
+ * candidate → item.rule，执行计划 → item.plan
+ *   → dppd_transaction_run → 软件 prepare / commit → active 已发布新规则
+ *   → dppd_rule_repository_apply → service->rules 登记规则内容和版本
+ *   → dppd_transaction_finalize → 释放 pending 准备记录，保留已安装规则
+ *   → persist_current_repository → 配置了路径时保存当前账本
+ *
+ * worker 查软件后端的 active 快照；控制面用 service->rules 查询、管理和保存规则
+ * 后端安装成功不等于账本已更新或文件已保存，保存失败也不会撤回已生效规则
+ */
 static int control_apply_impl(struct dppd_control_service *service, uint16_t install_port_id,
     const struct dppd_rule *rule, uint64_t expected_generation, struct dppd_control_apply_result *result)
 {
@@ -871,6 +890,12 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
         }
     }
 
+    /**
+     * 到这里后端已安装新版本，更新操作也已删除旧版本，现在登记控制面的内存账本
+     * 软件 active 快照 → 供 worker 匹配报文
+     * service->rules   → 记录受管理规则的内容和版本，供控制面查询及持久化
+     * repository_apply 本身不安装规则；此处若失败则账本与实际后端不一致，进入恢复隔离
+     */
     observe_rule(service, DPPD_RULE_STAGE_PUBLISH, &candidate, install_port_id, &result->plan);
     rc = dppd_rule_repository_apply(&service->rules, &candidate, updating ? existing.generation : expected_generation,
         &repository_result);
@@ -1492,6 +1517,12 @@ isolate:
     return -EUCLEAN;
 }
 
+/**
+ * 按 ID 和预期版本删除规则，removed 和 generation 返回账本删除结果及仓库版本
+ * 查账本确定版本 → 删除实际后端对象 → 删除内存账本及索引 → 保存当前配置
+ * 后端删除失败时保留账本；后端已删但账本更新失败时进入恢复隔离
+ * 返回 0 表示成功，负值表示错误；保存失败不会撤销已完成的删除
+ */
 static int control_remove_impl(struct dppd_control_service *service, uint64_t rule_id, uint64_t expected_generation,
     bool *removed, uint64_t *generation)
 {
@@ -1651,7 +1682,39 @@ static int finish_observed(struct dppd_control_service *service, bool observed, 
     return result;
 }
 
-/** 单条 apply 的计数涵盖新建、更新和幂等重放，不改变内部事务的成功条件 */
+/**
+ * 接收单条规则的创建或更新请求，执行安装、内存记录更新和保存，并汇总本次操作的观测结果
+ * service 提供各模块，port_id 指定安装端口，rule 提供完整规则，expected 检查预期旧版本
+ * result 返回执行计划、事务编号、操作状态和版本；返回 0 表示成功，负值表示错误
+ *
+ * 普通 RULE_APPLY 请求的完整入口路径：
+ * 用户执行 dppctl 命令
+ * │
+ * │  客户端进程：app/dppctl/main.c
+ * ├─ main
+ * │   → build_request       把命令参数填成 request
+ * │   → exchange
+ * │       → send            通过本机 Unix socket 发送 request
+ * │
+ * │  服务端进程：dppd
+ * └─ app/dppd/main.c 的主循环
+ *     → dppd_management_poll
+ *         → recv            接收 request
+ *         → dppd_management_handle
+ *             → 根据 request->operation 分发
+ *             → RULE_APPLY 分支
+ *                 → dppd_control_apply
+ *                     → control_apply_impl
+ *
+ * CLI 与 daemon 是两个进程，中间通过 socket 通信，不是跨进程直接调用函数
+ * 处理结果经管理响应返回 dppctl，这条路径不经过网卡收包队列
+ *
+ * 报文入口：worker.c/process_batch → routed_decide → pipeline → 软件规则匹配 → 读取 active
+ * 规则配置入口：本函数 → control_apply_impl → transaction_run → 软件 commit → publish_locked
+ * 联系点是软件后端的 active：配置路径提前发布规则，报文路径读取已发布结果
+ * 从报文匹配转来阅读本函数，是追查规则来源，不是 process_batch 调用了规则配置入口
+ * 单条 apply 的计数涵盖新建、更新和幂等重放，保存失败时已生效规则仍可能保留
+ */
 int dppd_control_apply(struct dppd_control_service *service, uint16_t port_id, const struct dppd_rule *rule,
     uint64_t expected, struct dppd_control_apply_result *result)
 {

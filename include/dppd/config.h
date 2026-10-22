@@ -15,8 +15,14 @@
 
 /** 同一端口使用同一组 VLAN，可配置多个本机地址，启用前逐个执行重复地址检测 */
 struct dppd_nd6_local {
-    uint16_t port_id, vlan[2];
-    uint8_t address[16], vlan_depth;
+    /** 本机 IPv6 地址所属的 DPDK 网口编号 */
+    uint16_t port_id;
+    /** VLAN ID，双层标签时依次为外层、内层，仅前 vlan_depth 项有效 */
+    uint16_t vlan[2];
+    /** 本机 IPv6 地址的 16 个网络字节，用作 ND 请求源地址并执行重复地址检测 */
+    uint8_t address[16];
+    /** VLAN 标签层数：0 无标签，1 单层，2 双层 */
+    uint8_t vlan_depth;
 };
 
 /** 出站 SNAT 配置在启动时确定，不修改内核接口地址，也不把易失会话写进规则快照 */

@@ -6,6 +6,7 @@
 #include "dppd/rule.h"
 #include "dppd/slot_index.h"
 
+/** 不限制预期版本，调用方明确跳过版本冲突检查；该值不分配给实际规则版本 */
 #define DPPD_RULE_GENERATION_ANY UINT64_MAX
 
 enum dppd_rule_apply_status {
@@ -15,18 +16,24 @@ enum dppd_rule_apply_status {
 };
 
 struct dppd_rule_apply_result {
+    /** 本次操作新增、更新或内容未变，函数返回 0 后读取 */
     enum dppd_rule_apply_status status;
+    /** 操作完成后该条规则的版本，内容未变时返回原版本 */
     uint64_t generation;
 };
 
 struct dppd_rule_record;
 
 struct dppd_rule_repository {
+    /** 保存完整规则的槽位数组，容量为 capacity，空槽位可复用 */
     struct dppd_rule_record *records;
     /** 只移动紧凑槽位编号，查找和分页不再反复扫描完整规则数组 */
     struct dppd_slot_index index;
+    /** 可容纳的最大规则数 */
     uint32_t capacity;
+    /** 当前有效规则数，新增时增加，更新已有规则时不变 */
     uint32_t count;
+    /** 仓库全局修订号，修改后推进；各规则保留各自最后一次创建或更新时分配的版本 */
     uint64_t generation;
 };
 

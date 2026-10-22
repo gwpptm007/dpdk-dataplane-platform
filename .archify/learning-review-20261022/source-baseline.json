@@ -1,0 +1,601 @@
+{
+  "files": {
+    "app/dppctl/config_cli.c": {
+      "sha256": "dac9b10710332edccb3bba2fc4e3953e485554d67853f251e0d0e9ce8c73e16f",
+      "tokens": "e23ec6546ecd42802308752140479bf7cb78a5123dbcc51aaaf9a18a260dcf75"
+    },
+    "app/dppctl/config_cli.h": {
+      "sha256": "3ef442fea58b16c77c2d2571c6e1b51fc6220502f5f4c956e822a9cba01c5256",
+      "tokens": "8719dab0a29a3eab206d6e168f393d69f35b7be862a367a8d65335a9a9ea2f3e"
+    },
+    "app/dppctl/conntrack_cli.c": {
+      "sha256": "3b3a867af47e772beb4df4d0b4b6b378f0542c72035ba28a2c68a3a313413744",
+      "tokens": "4557b0a7497d37d30ba8f32eda5e369f532a33d9f6623577cedeed06e240c8a7"
+    },
+    "app/dppctl/conntrack_cli.h": {
+      "sha256": "d30b100138eb5deb68e6b3cae67c5e2dc312036b7d91c9c25a7899029c7c11bf",
+      "tokens": "1d740a82de69fe3537ec7d688e884afde53c167fba4baadd5e37fb4a69c4a6b2"
+    },
+    "app/dppctl/main.c": {
+      "sha256": "313512b46bd1e949a1e5e8f58b1ef36abf3d0acdeba39194a0c01cdb54619064",
+      "tokens": "43b14a4052c0e5b6d922a133205c4afb301b5e516ef00d2f368bd24fd1619118"
+    },
+    "app/dppctl/routing_cli.c": {
+      "sha256": "dfb34256d6754d53d91af042f49492184ab3765c4737f1986f4fb33bb80bbf25",
+      "tokens": "0e5c32d374e8bfa9e9057d37d4daf5da559ff101f143eb7e466636307643ad0f"
+    },
+    "app/dppctl/routing_cli.h": {
+      "sha256": "34145c1509f8d022d2143509d151b2a47d02e195acc27a0e3f326bf91e1c9aef",
+      "tokens": "f5d88d6e4912c7b427fbe459111203261206c6fa852ae54e618a2d77054c47a8"
+    },
+    "app/dppctl/transfer_cli.c": {
+      "sha256": "329f09206ae3b76dfeb9d8b0671c221263dbfebd8c926102e60d1b57ef1bfbc8",
+      "tokens": "4a554392da6c81b45292bc95e977ec1995b1e0ae085cd8c85ef38da03587f8b6"
+    },
+    "app/dppctl/transfer_cli.h": {
+      "sha256": "74b6aeab2fc3b6b7a134c4b04608da6a0cd339558597fb7f7da872b2660f02e9",
+      "tokens": "6cfd029caafc892d7e880db395bdd5f2ba49bf89f4b639adee683097d352ee74"
+    },
+    "app/dppd/main.c": {
+      "sha256": "1facd302759ec5900a757276df7ca96d58bbd2faba81332f5a86057f59d1185e",
+      "tokens": "d14d36457b3b8d1d72dbf3e9fe71900da1d1069f60da84a1997cc3d3495b58cb"
+    },
+    "app/dppd-flow-state/main.c": {
+      "sha256": "41a14c51cb86d5545105c44ef7d4f886dc2b5d102f153e3c5b485e73c051f635",
+      "tokens": "9868935174c8e7f2cf5b1acc5b461eb34172bf52251bea2b153d7706c676818c"
+    },
+    "app/dppd_monitor/main.c": {
+      "sha256": "aabb7e7f012190bdbaf1b7f158c00c68e10bb0274ff00d90519a2eb1e5bcf918",
+      "tokens": "8086b3f7858f6ddf676b5ef8ada0dd0a6c3274df6092727fb9bfe17b5660e8b9"
+    },
+    "app/dppd_recovery/main.c": {
+      "sha256": "fa9bc8c91d80b94d6ff8f900645976b15940b26f850020d6faf4364627beb2df",
+      "tokens": "07afa82bcc7d5faa40163def9def5000e62bae441c59d2ec038b3a5585eb956a"
+    },
+    "app/dppd_scope/main.c": {
+      "sha256": "347c3f076f320b6ca79c8ed72eef8ffe03095a188c4fd1eca8b594bce15acaf7",
+      "tokens": "c25b95c54d042bc4dd7df53c28f7243e54bca63378d223f6332ef6f5b4954026"
+    },
+    "app/dppd_snapshot_migrate/main.c": {
+      "sha256": "a55534cdbd21bfc62e1827ad0f6e843d7f0c8eb8b9d59826416773e173f9c0ac",
+      "tokens": "cda16f3a9fc68416889b498dd24a35b9dd1030d6a6753829cbedbe18650445ef"
+    },
+    "include/dppd/acl.h": {
+      "sha256": "0a33f8eec9d71772470c470480a09f52e9bbb8477b12082748a27b1f23e144c9",
+      "tokens": "05bacabc4e129ae665dd912c849da03e3c51c48418a8fde41cd0bca37c00ada8"
+    },
+    "include/dppd/admission.h": {
+      "sha256": "b209c7b3d5c58b39a9d748c8ff177a1b81457585112fff1be9d474f5905405f7",
+      "tokens": "fa8131329676099ee4e0a79a482fb274b9ebc2b25081bfaf049d7e60d82ec395"
+    },
+    "include/dppd/age.h": {
+      "sha256": "0ff636a93da1e3c4a3a9f137377d537fa08b2bbeda2891ac145d0d7470d75601",
+      "tokens": "602148d205db9bb80971f3867763d8e395d140553589149e8ebc71eb55360135"
+    },
+    "include/dppd/async_flow.h": {
+      "sha256": "1a57f3919244065212db5bbfda9aa12c675739db4e8e7fd0d2fa2a92a639fbcb",
+      "tokens": "460aa34310c49c61da6cbe1b22c44eadb2be496aa212a228ce9fc032657c3571"
+    },
+    "include/dppd/capability.h": {
+      "sha256": "d652ac1f51dc19157a6b2101e325104807c0ce6c9f23e75c3b13173937380625",
+      "tokens": "9c17ef1da4827f5101568feb273b8cc6095a484d2482d7e4f4083cbeaa73be0c"
+    },
+    "include/dppd/cleanup_journal.h": {
+      "sha256": "f05fb5c0c3fd5d3e104317e87d083d4d3d49b7e26f9577e2144e6a5259281b90",
+      "tokens": "dd19e7f72a9ac2545e93ed879a56f101242737ca86afabaaaf0138d67f2f28e9"
+    },
+    "include/dppd/config.h": {
+      "sha256": "07394f5ad6e7978feabbbae5f51f5c39a2fd516b7b0d3bdaabac0de608818424",
+      "tokens": "7c591c5cf1372128ca4334a5cb2324ceb9dce9f22646e8533ed813b1db6d3d18"
+    },
+    "include/dppd/conntrack.h": {
+      "sha256": "e08ab611f33e7059b23f5f9c5a99f8f21629f5ada474671478f71031c09f8796",
+      "tokens": "76651e634c1043619e98770b79a3052a7b7ea1fbf680ce994d87c866685fc8d1"
+    },
+    "include/dppd/control.h": {
+      "sha256": "e4150bb9dc4f6df9f7827a6c0bf6e79d1a2a5d06bcf879a973aebd554fb745f5",
+      "tokens": "3872a8176b068ebec65e72f76205fbefd4c53ecc52d5a77b98652826e4ee0a8a"
+    },
+    "include/dppd/device.h": {
+      "sha256": "567307833728ca5ebbb3c254e444b03ffd8557c881e9a0dfefeb42812409f786",
+      "tokens": "1113b5b3babfb231becbdcf83704fe32a3e7a2c2c1b5060ce204689fdbdab007"
+    },
+    "include/dppd/device_recovery.h": {
+      "sha256": "2bd13462b22dd33c0398ee420c2976938303c56493cefb1582321c6673e85149",
+      "tokens": "00a17535b378aa61a64bf1d8152d2c6c4b04a1e989f6181721d86deb91be516e"
+    },
+    "include/dppd/device_safety.h": {
+      "sha256": "140cef98ef6b43f6fa5dccfafd8f3e6cc7d32a1d04799548ee632e28b5afd203",
+      "tokens": "1be61399b2281ceab1920a7c5acd7df61133a8ce007761a4a6ec5199d3e1550c"
+    },
+    "include/dppd/exact.h": {
+      "sha256": "eb78438eb11915900282b559b17804b43e498bdf89a2e4082c1b4593106f8b95",
+      "tokens": "c91a9571f0d6e0e1eb0e482c7335ae77cbb3c35f36c4cba997068de07f852d3e"
+    },
+    "include/dppd/flow_management.h": {
+      "sha256": "35c8856ba1eed31786b8bce984fb428b9d521b92b898dd61109f25ca5d229606",
+      "tokens": "2f6d2415b5772eb3c1ccba4b5a6bc13ce3b1e745042fab55178e9332459b34e1"
+    },
+    "include/dppd/flow_service.h": {
+      "sha256": "69105cd684c07ad156d298fc7502e7a82ffad96a3ffab1406e7d213f6161b673",
+      "tokens": "a358c99a8c26216f8011b6f00968f36262cb0c6da50a1f7be7a6e917d874dfd0"
+    },
+    "include/dppd/flow_shared_count.h": {
+      "sha256": "79690b5f7dc26f5994f517b7355418632f34472ca2c6e223778644b41daf3975",
+      "tokens": "2004e35aaefa7cd3c92cc581b85d77b3f37c218d8c28d591eb3b0bb0aebd63a9"
+    },
+    "include/dppd/flow_state.h": {
+      "sha256": "d95da1d20a4623352838df936b8b038c557c7b939a77676b239337218137c3ad",
+      "tokens": "d19d401e6a25103cf15cce7fae5db39a7116dcb073c9a427f3326c56ebed6691"
+    },
+    "include/dppd/flow_template.h": {
+      "sha256": "85fc4d0caffd0ce0a748c7d78e67ebbd2642f206b479f5e2424fa9b9ec93ed23",
+      "tokens": "d361f4f08de9d8cb2a03e5a2a0eb3521f9fb75d715f0164401f50844887939da"
+    },
+    "include/dppd/install_info.h": {
+      "sha256": "d947774061efe371f3e17b6a70f9a0088129557122709017e1700d4ce6689ec7",
+      "tokens": "e2ce02ef216899d3232bc0262faa4ba4825ddeff1fe74d33843c74cc0107816d"
+    },
+    "include/dppd/install_time.h": {
+      "sha256": "110b92ff3c155b45c391176da01e6816a0b2bb853d202735801c4edf8de3767d",
+      "tokens": "01f5f02e68cc167478da180b8801c7589334d1de8da9da57be21532480b87fd9"
+    },
+    "include/dppd/ipv4_rewrite.h": {
+      "sha256": "457fca01bee5fc34f6626312ab09ca2601b9bdb60ff5d33073b0771740eff12d",
+      "tokens": "689ba78e7789960cdaec98b42ca509c2032312fb91a373c4b475a484ab818c50"
+    },
+    "include/dppd/ipv4_router.h": {
+      "sha256": "206521c8e31c54d9d20da188cee8422e763e1893624055ab2ab06e25b3887384",
+      "tokens": "d5c00bf59631b7ba817978d6aff17fa1ba6a57e76388b1f9bc0ccef0a59ab600"
+    },
+    "include/dppd/ipv6.h": {
+      "sha256": "3f2a4a022e0d86ac0323d02aed170dffe07f7a1e9b2ca91eb7bee89d2bf2710c",
+      "tokens": "06c44afb2eace9ce8d8cd7a193cc882ac27b2e2db9d8f52a20e3bc8ec0d7e287"
+    },
+    "include/dppd/link.h": {
+      "sha256": "9a491aab09d11f3683333f2d9e7426f1e9b4de31c775165b6722224f96463c19",
+      "tokens": "99ae2e1889fa660f70c83c265808fd98465f1a52d7a7bcd3ce97990ab7838d36"
+    },
+    "include/dppd/managed.h": {
+      "sha256": "481f7b960028d1dbc018282f7bdfdc1cb386ce1d7a6ef8c5edde68a067a831f3",
+      "tokens": "87d8976499c92bcd07b21998e8448bffe2087ba77f062d4f2a58b4c6898d21bf"
+    },
+    "include/dppd/management.h": {
+      "sha256": "6e56da5f192c7fe72cbd0c9d8c4de1fc22161fc8836946fc4a20e8b8ef0fe432",
+      "tokens": "6ced52778789b447818c3da2004a087146e6db43be315a9d77f5d4c0566d7237"
+    },
+    "include/dppd/monitor_channel.h": {
+      "sha256": "bad76d23f430045bd87dc85ba70b1eb437d9cdde9c5e79d3f7dde643f5d00ee2",
+      "tokens": "38cd9ed9c3c1ea7160346ad859b350e309d8c239840cf47f62914de7e66093c5"
+    },
+    "include/dppd/nd6.h": {
+      "sha256": "2eb1b00c5494ede6f4deea2148cfeaa384f5580380abdd67c4a328be7c980319",
+      "tokens": "a7b138bf7047762d510d9b78bf7964e23be706cb27f23d7cf9e908968463a4a5"
+    },
+    "include/dppd/offload.h": {
+      "sha256": "97abf1ce5bb92b12d5e3461c6d2d02eb039b56301a7569225a53ff84cdacaad1",
+      "tokens": "15075c590218df9e480444f5a23caec09590a9117d6761b8bd78ee8f149fa7a5"
+    },
+    "include/dppd/packet.h": {
+      "sha256": "b455f494b2e03a8ca19c50bbffcec5e86f2aff7b7fb74abec1978bedaa2e14f1",
+      "tokens": "e744020e1c227ea2d2ce202f423551b983052317b92ec51badce9717c10bf8aa"
+    },
+    "include/dppd/persistence.h": {
+      "sha256": "3552b76a75b86f783c23cb6134bde22cd6d6d0e52f1635ed8a43fb95923d830b",
+      "tokens": "4b54a19e050fa97571ddbce87bb685218c74c73b6d87bdf2089bdc5f48c6263e"
+    },
+    "include/dppd/pipeline.h": {
+      "sha256": "34d4032b25ad067f3ffd7626b7fc8885094355733a36e829defc6393bef4f117",
+      "tokens": "ca239fd3bf4fc146d4ab1f7e32871236b2c43522e5eaa48e4121f851e755b49a"
+    },
+    "include/dppd/planner.h": {
+      "sha256": "e2bcbfde465d6c8e0e18caf16f5b3e463f270d0c481c76b92d17e6536c832386",
+      "tokens": "76f1005903a9be832dec64e5b8bf0aa8dd2707dde0b0cbade2593bf6a74ea347"
+    },
+    "include/dppd/recovery_cleanup.h": {
+      "sha256": "47c5be5638ad1362e554bf25ce04082bd23ad8530580aa1698407dd7532f2476",
+      "tokens": "e078f4378f866ba23a02aa111c6f9d595ebd549eb00f13a78ffa9a22bee3e8cd"
+    },
+    "include/dppd/recovery_guard.h": {
+      "sha256": "1f9950f3b7bc0f5fe1df7806dbea276b5d566a491c93b5b527fa3ae22416c072",
+      "tokens": "1edebc97e8750b3480cf638f0c90d737f55b3be7240997d7e4683740195c97d8"
+    },
+    "include/dppd/recovery_inspect.h": {
+      "sha256": "b2596516fde09b97b9c0c5e5126cbe92e28605e75aa0b0bf262e2a99419e232d",
+      "tokens": "7e18225b280999a24afcfa3c98e2cd402cca68bd3b7e963bc4bfba9f0c48c4a5"
+    },
+    "include/dppd/recovery_monitor.h": {
+      "sha256": "c96318004e3afd618b26c23ea17cef21d585f9e7ef0d3f33a0735ec4058bb0da",
+      "tokens": "b7d463c4633757611b2ba17a38041e96b892ff0f5bf890e1f31b49561beaee80"
+    },
+    "include/dppd/recovery_plan.h": {
+      "sha256": "2caba36939404982d177e1e207c2ce0dfd785054e141fc43abe522b0c5ceac00",
+      "tokens": "7a758fbeea34c4a0cf92e86f1a5437c8e3859d08538123b3be1cdd0742e50649"
+    },
+    "include/dppd/recovery_scope.h": {
+      "sha256": "2294224e0bf8e0657293a0afa2791dd4d4c55029e9e0c72d55f93047cf10de25",
+      "tokens": "84d0d59a4395d539aed1157eefb4d3aeb53597a365b5eb3eb2bee3d89ed9c852"
+    },
+    "include/dppd/recovery_watch.h": {
+      "sha256": "1a52c3a334f1557c959e7a04d2a69baab29b1aa6b8eac27345193425e2342108",
+      "tokens": "39bc89dd2c6bdf5b8439bb65d6c59cd4374c4e64e52e43e3c31dd6eba9080039"
+    },
+    "include/dppd/reset.h": {
+      "sha256": "1d324e5ca7c7ae089a22f0703bdfd3782f9429b48a63fb885ab416edc1db3eb4",
+      "tokens": "5faecdfbff7a412fe17447296263a1150156bc6bf5cadc4ccd73765823f3ba14"
+    },
+    "include/dppd/routing.h": {
+      "sha256": "d41ecc511bbd010efa8579eaccde9f7c9f9b6f9f943aec22490456ce4daf342c",
+      "tokens": "142cae1dd875e7256b21a33ded04fd1ec60c105e27ef4e9f1268f7ec58380f5f"
+    },
+    "include/dppd/rte_flow_backend.h": {
+      "sha256": "9db03afff1d3c8cbca57f1f08d8b96b5357de00300d96412ba1b1f6633a08c65",
+      "tokens": "d5c5c04c35b25d0c57c85b103fbc4c6774544299ce006ba76f813f2d33ca99d1"
+    },
+    "include/dppd/rule.h": {
+      "sha256": "5dd93d78532b3c17514beb6120b1196ed25d4f1b022b3068f0e8caecc219ee4a",
+      "tokens": "670803fadd04d22df3025eb3fe5feee63c77b1f06a1c81672bece58dfad9bf10"
+    },
+    "include/dppd/rule_latency.h": {
+      "sha256": "8553870ddb27032581daa43479ff94f1834aba81c491a75f0391a2be29ca44a3",
+      "tokens": "c581e388767c84a56827e6d4b6b88172759fe08953ff840fff88ad90bb69337e"
+    },
+    "include/dppd/rule_observation.h": {
+      "sha256": "c4ecf89d097c8b82766ce7c4d0bade3f70589f5d55ac42a29cabb5ff9b334e22",
+      "tokens": "6719a57967f8aefd108d05c6d8e067fded242b69a4387f09bee3dda08f8de8fa"
+    },
+    "include/dppd/rule_repository.h": {
+      "sha256": "522aa25f219ec8481eff797d3bd46d789fa7c23d8e90d2102ddfbc029e47efe9",
+      "tokens": "d26127a20d4f8286255312529017663272083505ecc6684e71b6f823d7d1dd58"
+    },
+    "include/dppd/runtime.h": {
+      "sha256": "24cee4aac58225eb6b0b8f41f7e3ae5976beb36f4d8a195fd25440edb74a8acb",
+      "tokens": "e99a90bbffd6e131c487d179666415d8db8d2991e7b43785c4d3462acdb72788"
+    },
+    "include/dppd/shared_count.h": {
+      "sha256": "887c462a45a9f803e598e2f0b894fa59ef8f1ae97bedae8e794cc04bc680f63e",
+      "tokens": "203e9bcc556ffb131b17b63f16d1f0b2b6911c5ce88e149c4abd58ff111ed6f9"
+    },
+    "include/dppd/slot_index.h": {
+      "sha256": "c0a2b2c5389658473d0089aea81ef3ca5fe894baf0ca54b9ef069f803b176ddf",
+      "tokens": "a22bf7e770af7ce6674d5c0d02858bcfad310110cb2632d7680e806bd2ae2c64"
+    },
+    "include/dppd/software_backend.h": {
+      "sha256": "dc40e20c9e5c3f1a960c7ed5027db2eea6363e3128d15b11e15765d4b2f7cc48",
+      "tokens": "40dad9568003e2ed11b67bca93b7102c3bbe29fd6c46ee1955e7e80ecc37329b"
+    },
+    "include/dppd/software_shared.h": {
+      "sha256": "b86b4e5329eb7c0c6d42e3a9538990df4d5e7b69d433984e3b3e6ae9146459ca",
+      "tokens": "809b1936497ffefb90998088c446033b0c617fbcbaf8e4fe8d1dd1863d0f1d0a"
+    },
+    "include/dppd/stats.h": {
+      "sha256": "3ad6e64b68de9aa305e0e6a1d75d0ca184e415f398be2e8e3b58ab5950f78695",
+      "tokens": "777e359640d6586a6812ca0dd9558d13003195267b1620dbb17b6145585fd7ab"
+    },
+    "include/dppd/stats_values.h": {
+      "sha256": "942c826330fdf06e46477be559116a67c04a6f6bcd5a01f37f8e78710e4bfc87",
+      "tokens": "cde24466a2cf6a11c8a9c71d14ba1e85608a26ac7a00ac363055020d81e2e66b"
+    },
+    "include/dppd/tap_content.h": {
+      "sha256": "b382bb29c8854a280e9d927e509d804dff7db97b9f9ee354be585ce997287d6c",
+      "tokens": "33a60cfd78154766493da055571604fc513dfd41597b18e5bb57f57440db62aa"
+    },
+    "include/dppd/tap_owner.h": {
+      "sha256": "303bb7a3c09a631c32bcbeb35c95c02555ff0d561051f4ebc2563bd993e7f492",
+      "tokens": "1acd2381f125f6bbe7de306be70b1ea56abb081ec1d300e01494c1ede163f70c"
+    },
+    "include/dppd/telemetry.h": {
+      "sha256": "b6e4f03a832c7a6a50d9af37d98e5f6c6ae1c0b731769294363ecba1a8e10ebc",
+      "tokens": "75007b86562a4a0ef4511d4918f4ab0a97a08df7fa0a504b8a27de6955ed20f9"
+    },
+    "include/dppd/topology.h": {
+      "sha256": "946ec792b043ae2f1037d148600bab4e99eccbe1596d9b9481d982a4d4859737",
+      "tokens": "42ee8555aeb5dfea6c45163f1cab31bf640f2e4b16cdcf8f7911eee626ad52fe"
+    },
+    "include/dppd/transaction.h": {
+      "sha256": "5b46856d7da74f476dc4e7d6d4d55bf9c0bb002c19d51b969af9fd3022437153",
+      "tokens": "c3b2e822607bcd86b362918a863f1092c26737eca07e22a3eb175492e891522f"
+    },
+    "include/dppd/transfer.h": {
+      "sha256": "7dafbd565d5743b8bd3caf4965c0dadc6ba9edf682a27106b3554cc22a04cd5c",
+      "tokens": "100e29caf31c370a1c4eaf26010bee18df842618f9d052799321cb71db9e7ec0"
+    },
+    "include/dppd/tunnel.h": {
+      "sha256": "63b4c701d6a38c7676c6a1158cd8cd3246e0a6470bcff2a21f7fbfb616b16978",
+      "tokens": "a95544e07458d0adfc4eb345a169c15dbe0fa3c7ef7b9476b883eec6a8a8b06a"
+    },
+    "lib/control/admission.c": {
+      "sha256": "5bbb5ffcd9f2a53037336b7fb09f8768e710f8090291eef6d5602ef61a69ff02",
+      "tokens": "ad97c8c86f6addc33c426bce14977ea16497e2cf4926bf26e42cea9bbc862061"
+    },
+    "lib/control/age.c": {
+      "sha256": "f647ef7eebafe6910b603225c8deef4cb5dd2ef4e604f7ca2f9b8966168c08bf",
+      "tokens": "13da9b2609fdd7eeae617a5453af9a616c9dc7d15472f4aa158e55ca780a60b6"
+    },
+    "lib/control/async_flow.c": {
+      "sha256": "4aa8f4e6178bce6c01d6d91e93ddbec7b891aa8e8b19627ba263310d512a4378",
+      "tokens": "7a4f24672e5f57d448677562dba147503d5eb94462fb5b55facf5d14d9d07944"
+    },
+    "lib/control/cleanup_journal.c": {
+      "sha256": "471407f56df5d84367eabdf432b690fa2cbef89346849557dfa71194fe18a6c2",
+      "tokens": "1265ac3e0728b5dd1e2c79a80ec1e17e4b12d9255507c2328f0d16bb06d2e86b"
+    },
+    "lib/control/control.c": {
+      "sha256": "65bc55be5572c39cd9253c9a4df46cf4d4b55a75ee1c85e86e6e91a7540589ed",
+      "tokens": "647bd78be7fa907cebbf440e2f12eb131e68913d0d6eeace5ad10a707c376742"
+    },
+    "lib/control/flow_service.c": {
+      "sha256": "e6036200bdf690985f1b6a497e1f40164b829d30907e3422c3ce2c64bae938ea",
+      "tokens": "6c0623bd96968f9ff669fc70cd13da0f60dead2fd0ca69216f1b2a4b74dd7dc7"
+    },
+    "lib/control/flow_shared_count.c": {
+      "sha256": "dc90fb351e877a0536cd3aee31c5ad1ed3a8ab4175bbc67f00d471ce30aeafc9",
+      "tokens": "fba751384944187a2ced48b2f0272279cd820c625977bb767d335b1b70184663"
+    },
+    "lib/control/flow_state.c": {
+      "sha256": "57ae8f6f408a423cf68d3f8ba5d30947dd5cc83976329fbfe160ee8445cb0eaf",
+      "tokens": "596d9859c52cfc087c96796b602fc3cc84656f01d779c688dec1eed8bb8520bc"
+    },
+    "lib/control/flow_state_io.h": {
+      "sha256": "dbb708263cc08848a251e74938d062111f1b2611a9afa3e1fa86d2e62abeaf81",
+      "tokens": "e256aa1530ee2a8f099dfce91ffaa4defaa87605fbcbc17b85e7f7e85410eeda"
+    },
+    "lib/control/flow_store.c": {
+      "sha256": "6b09d8940cdf29aea93642b2e99283b05172d169604b12ea37ebe3c2d3f7e4a3",
+      "tokens": "a6a67bda9e5c6f54570cb2e33f835f00866371c549a5813de039fe9cf425d7ae"
+    },
+    "lib/control/flow_template.c": {
+      "sha256": "c9993cbccf953686c028d0e883567bdcb473bc18e1548639a1625ed0937785db",
+      "tokens": "fdb30fb8551ce18e6e39730963c35126841047434bc8cedbb6a161647f4a00b0"
+    },
+    "lib/control/monitor_channel.c": {
+      "sha256": "5d6a0321302b1fd5af79b9632fd90dc282637b36a6af096173ea0b4b9b73d983",
+      "tokens": "040fc22199ebf2ce9ffce32617999f0e8283f5341013f10fcd5b762d26ddc237"
+    },
+    "lib/control/persistence.c": {
+      "sha256": "a2dc7caaa63874f33233fd6e7964c146d82ab1835f20a9ea89355d6cee5d9830",
+      "tokens": "6bc05587e178131e68b4944a138027ce245e4785bfb090fb14908b3ac7dc687d"
+    },
+    "lib/control/persistence_codec.h": {
+      "sha256": "3c0af61d96b8dd3a2b1acd1a565a3a28a99f11636997ddfda5b1ef1bcfbb3e0b",
+      "tokens": "5be3e63c086a5200ec78518fd36db4d3dce2820937733b27be229a5cdcdf3cf5"
+    },
+    "lib/control/planner.c": {
+      "sha256": "4fc72b37b049bd541c78043a5595d8bce4f04a693ef307b1657fbe17e11a3848",
+      "tokens": "1e9408de7395361ae5719dd4761f50f1f27820afe60da2987001d38fafa3e100"
+    },
+    "lib/control/recovery_cleanup.c": {
+      "sha256": "c5f090425cab1370e289e4a73b1b7d2867695cf8fb1790c4ad4cb9b5b9fba5b2",
+      "tokens": "5649453ee3e82428e45361db4be40ebad1dc8b83fe1050c0b007ce6c63065767"
+    },
+    "lib/control/recovery_delete.c": {
+      "sha256": "7c9e191e16ef4a8db4a33029d78ffedb47ea6ca74a1623d5d1395fbe3fa998b6",
+      "tokens": "b6e3dae73f7d7f3bdf9e70f3bb1999ded5ca95e6236dab70140fa7d04df665ae"
+    },
+    "lib/control/recovery_guard.c": {
+      "sha256": "163fd4f1a87d8a428129ecc4930ef75e4e66b867e8ecec2745244a6df9dbe910",
+      "tokens": "f327b7519ee871fdb69718f704f3b262dfd89d3568a2ea4a35f53f3544e6a71e"
+    },
+    "lib/control/recovery_inspect.c": {
+      "sha256": "04e746b86984b591c8fc1a3b030f97c208bc6b633ef823146ba828e1db78e45b",
+      "tokens": "2023ff5c50e3165b933246a9bd100b88fccc49336a1d13f849687f1321398bc9"
+    },
+    "lib/control/recovery_monitor.c": {
+      "sha256": "b1f509208cfffaf2320c36cef9afbaef806b6042d5fbd847bff746e678318487",
+      "tokens": "0d746dd5251b75c88b3349477a6a2044030dd7cb1ddd3ea659a049607c377828"
+    },
+    "lib/control/recovery_plan.c": {
+      "sha256": "efcd87078e75e42c40779522bd0fdb47d12878a7b95762262495fdec3a02cefc",
+      "tokens": "371927c89c13c3294fb11dc0e903a38adef676e558c676634de6f38213f53850"
+    },
+    "lib/control/recovery_scope.c": {
+      "sha256": "d05b7917956285168d0d41bdef447c4376c826f12e5603b2d284399661244cf3",
+      "tokens": "22c78adc21f573053077833474a9586ecd0b1d7041b083f7991280592b769dc5"
+    },
+    "lib/control/recovery_watch.c": {
+      "sha256": "d12b335617231687355f7902155c33226b79b4e16b444746c7141db833e3adbe",
+      "tokens": "1858d54da09724726b6c7044e04ca28f783418918080d43ecb8f1471499e058e"
+    },
+    "lib/control/reset.c": {
+      "sha256": "0e906dfe1263dda82c5a3764b598494e4df7845a6e9738cc04761b95d509324b",
+      "tokens": "810b8b008e97f5177b17fe1503e85256188d089c5db3ad693cd945cc1c8e575a"
+    },
+    "lib/control/reset_internal.h": {
+      "sha256": "9da3f4da5634cf23b291eb38fe78a7c0e02da33bcc256f61d9f0805ca7b9f59d",
+      "tokens": "3e6f0aefa74bc030b7d8223ada15d128af365d4150a3c0dcbc73a9719652d5fc"
+    },
+    "lib/control/routing.c": {
+      "sha256": "c1136abfa1ed6771539d6d9a9c9522e5203b7137d52277ff75302f8575ca3e62",
+      "tokens": "39b129fde7af2a8c7339cbf0d3db250c5e9fa9b39e6208fe194f7b1c188caa89"
+    },
+    "lib/control/rule.c": {
+      "sha256": "8a1c13edbfcbe7f202e318c8e4e92256ccf43a298fa9360ffec90676d22d5f08",
+      "tokens": "1656295f32a0f0798a0d8f54717e7bfef0cb34ed32566668f8511f2d27ee5722"
+    },
+    "lib/control/rule_repository.c": {
+      "sha256": "c01b707107dc10c8279c2b215d10eecd4304556fb89eadba16925640f4472b88",
+      "tokens": "7dbbd2c61eb77b3a5f67cfc0668a3d069ab07bff35ebebf913985c98ca79cd25"
+    },
+    "lib/control/slot_index.c": {
+      "sha256": "1a69dc24d7159ded4195e188aad61ec57ff02ab7ba77de689eca8b3ad5ad57ac",
+      "tokens": "274162b94b54e51a330bfae6a13d94009309c563e3258cf1358738cc11cbfc39"
+    },
+    "lib/control/snapshot.c": {
+      "sha256": "47694d8e1160e4fdfd5cf7bdc4c7f17062b354ca2189dd816e9544d61c2d7417",
+      "tokens": "1c28e8b75b845a390f89346b1b366e4bbaa7801c26d33e54c143d4a3a3bcb432"
+    },
+    "lib/control/tap_content.c": {
+      "sha256": "1cf3dcf7871dba443517014d026848f071db1d54c6cb78ae8988b3c7471a878d",
+      "tokens": "10cb258ad74ffdf00d5f7bf78bc8af250acb43ad7029a2df6195a9168bd53b0e"
+    },
+    "lib/control/transaction.c": {
+      "sha256": "7613aa6b9d7e18031b85a6a686cee3b954ebbcd98d47ee5da4e7baf21fd57e54",
+      "tokens": "05953ad57d7ce138fcc84f3d3092eac3c13c77720b79510ce2fd9b226c2c58b5"
+    },
+    "lib/control/transfer.c": {
+      "sha256": "ebc7e53b5800becef9e186b2defd2f93a5eaad9c9e8975a8503104217b7e0703",
+      "tokens": "438dca9f33d47436b6c266d3bcf5f0e7b10eabaa542df24be8fabe94ccde411e"
+    },
+    "lib/dataplane/acl.c": {
+      "sha256": "4a5d8a93d5d2616ba13e88781d3121264d460e4f92cdfc44dc0238ee93f54b83",
+      "tokens": "c621dd46d1ed2db80aea669614630d4aa1e42ae53697def69885d91d7e50755c"
+    },
+    "lib/dataplane/conntrack.c": {
+      "sha256": "2e7925f30f3b11451dfa03d6153dea9572897db39704cb5463c3cb1dc5d3f86d",
+      "tokens": "df49452f5962a564a36a711557f26670b76b995fd9058e7863497e6dec5655bb"
+    },
+    "lib/dataplane/exact.c": {
+      "sha256": "27b361f6ef14057da074b958779177a4b5ed4cd23b01e371fddc425f04f889b7",
+      "tokens": "6f75fa16c1cf69bfd63c53bd834f3f802c3bee04570d7c9015aef2185069cd5d"
+    },
+    "lib/dataplane/ipv4_rewrite.c": {
+      "sha256": "14c7ff626fcfc65ea686604cdc488b3000c63b6f564c0dbd7b20a1070cc22065",
+      "tokens": "710e97238b9b8543442025affd3eb8b5e8f45b9dc59a6c0413281bafc0ef3223"
+    },
+    "lib/dataplane/ipv4_router.c": {
+      "sha256": "1f4f616da59fe39a7a667bebe876a4e7983b88c5f4bc5a201a1c4870d0bfbb1d",
+      "tokens": "a2816e9101715a4bb65cd2a65bf2cc62e73afdcbf23dba60d984e337ed2a96be"
+    },
+    "lib/dataplane/ipv6.c": {
+      "sha256": "bb87964c3c125fe3c61b9926ca1e4939ca2941e69d1ad861d802110b85f39973",
+      "tokens": "464819946f73344c440b1c8ea9f09397b77f106b231fa34b9800da8606ae907b"
+    },
+    "lib/dataplane/ipv6_rewrite.c": {
+      "sha256": "0d0b831b449b1c152057cbaf09f3e48661b4ab5593d8de454951fc371d1a9e99",
+      "tokens": "82dfc962bbc40611e17930dbf18e28548ad177393bf1f838663b15c353468089"
+    },
+    "lib/dataplane/nd6.c": {
+      "sha256": "b372e5f1eddbe62bba8b8e27663258e6846a69b1b6685d652ca9b53f0328969a",
+      "tokens": "d32ac54a1dcc20da0afb74281a29398c9c692fc08bdb5619566a371bb445b34f"
+    },
+    "lib/dataplane/packet.c": {
+      "sha256": "63d99a3272b6ccab8b8d1e2d2850fac59aea68fc2c99fe0e7c52acf8fc277331",
+      "tokens": "2e56066ac06053365129ad7d3ab60a145f4a58a9804b223815647b11f409c929"
+    },
+    "lib/dataplane/packet_mbuf.c": {
+      "sha256": "fa6b566361adc4612d18f8387182dbf87ab6948c6980ca2dc835e5330ff4f6c8",
+      "tokens": "27f94ea85706512354f1ecd102257472115b11b6959d57367eb27dfde60e36e7"
+    },
+    "lib/dataplane/pipeline.c": {
+      "sha256": "50b124bfb35064021ff5a7b688ffec425a733026aa783c0e74d1085e74f00dab",
+      "tokens": "5991c671c69c8db0536bd11dd0ae41064c25824b8e1b6aeb709dd97c81216d90"
+    },
+    "lib/dataplane/software_async_flow.c": {
+      "sha256": "673ea73ce6f90edc9efb71f451b1d3343be2050d8441eea0f5d28b0eebb2b615",
+      "tokens": "1d432aaaf2e3fa5194cdb4a22e579bb6d46e711079bfd35fc803b61033147205"
+    },
+    "lib/dataplane/software_backend.c": {
+      "sha256": "610df8565dcb13dbd5ee43ce6bf99b0a6b383cad4a03190a52c3af3e05eb0896",
+      "tokens": "105e6c11181415b1476b385a18e5e3344e5ef549a3e8749f041cf482e0fb84f3"
+    },
+    "lib/dataplane/software_shared.c": {
+      "sha256": "f47c2ab9265fc6332a2339ee699d066a8ed2dbd11a7f3db0da644581c39bfa0c",
+      "tokens": "f6983f5c29706baf8b527d2818bd0d798df89351ff291589a7c137a36338adcb"
+    },
+    "lib/dataplane/transport.c": {
+      "sha256": "380d01afe0f4c0c326145847dd632ae6c193884565b4a626645cfc4608cd44d0",
+      "tokens": "c24a1202738fbd9bcf32ba2fee5e5e9f0f3126c520d21ea97388434be0643a10"
+    },
+    "lib/dataplane/tunnel.c": {
+      "sha256": "1a1a77ed8579ef7f660b115443ce0304cecf0d70b0bb98045696178265512395",
+      "tokens": "b114fc1ba6244ac83ed6964f77f4f3a1da37f20421d16534fb1687e5d5dadd51"
+    },
+    "lib/dataplane/worker.c": {
+      "sha256": "433fad46da1b83f72adfd3f6c0b404b8b152280539c959450a1cbc148a630395",
+      "tokens": "cec7ca3965714a6ff1ef960d9c7a94074a4c9609505db1f1871976f477b534d3"
+    },
+    "lib/device/device.c": {
+      "sha256": "d90dabe4d5eebad6e140e82d144f81bdeefec6dd47dbcd37bd10c5ac97185930",
+      "tokens": "9114f4c8a401273bfbf8a1b1c55542ec1f7c70fd86143099b530c20091bf2765"
+    },
+    "lib/device/safety.c": {
+      "sha256": "4cf507ebadd543b121ebd360af288e4c25c522eaa9c17eb38515e05c5b092984",
+      "tokens": "ab0ff29867594b4e76dc8534444e9bc56f7ff6171dbeef1877cdcfbe6551dba2"
+    },
+    "lib/device/topology.c": {
+      "sha256": "01fce55e986873e49f68492de10fffe58e7aa59bf72acfad931c905301a5b536",
+      "tokens": "d2d8526498af83e99e19ee21c4afbaaba3586728304bd091fcf5df5226590975"
+    },
+    "lib/management/flow_management.c": {
+      "sha256": "8cc92e2fa2c26a7c126660a7feffa553ebd05bb238dacb3196cd0af28cd625e8",
+      "tokens": "86ab9247fb5e6213f8615bfc729eb977ac7b68cca85bcc73564848f898d4aa4e"
+    },
+    "lib/management/server.c": {
+      "sha256": "d45ec7c3561bb0b25c3c6dfafaeb21384d57a420506ee535e6bafb666583d850",
+      "tokens": "c430bc0e374f0e0250f618d6b29d731709b27fd382242bbdb9a324bad6278de2"
+    },
+    "lib/observability/rule_latency.c": {
+      "sha256": "b5ada6b28e152502cacf29f0df7f112a08d5ba7c1dd5de1c8a00267d45a43cd6",
+      "tokens": "17d72f8ef953513b2cdc437966bc7f96890d999b39447c99b9946ab33b75ba4c"
+    },
+    "lib/observability/rule_observation.c": {
+      "sha256": "9ffabd2f65e8bbbe95fa62c79625989ee9139984f5dc4cf7b5ef6e50b0c394e2",
+      "tokens": "c56f000385cf53e0f18a563d2e265698211a16ba8db9417e7026a87e8d7f3043"
+    },
+    "lib/observability/stats.c": {
+      "sha256": "4df89a4725bf7e47d56b3622c2c4a0604dc6882b9d18e828e3ffd61a369d38d2",
+      "tokens": "20f374654b5b0ca59bb4067cd84f1eb36e3deee5380d4fbdeb5628a80f59be47"
+    },
+    "lib/observability/telemetry.c": {
+      "sha256": "2e9288d62f1a3212475936a0289e976a315c5b59eec6504a85e841e4bea3db19",
+      "tokens": "44c8668106df5c7bea6e8efbb692f23d86cc0561c95a24bbc607dbd87b01a6bc"
+    },
+    "lib/offload/async_flow.c": {
+      "sha256": "f4f897c870324e6c8bb5d773646c324aeeb82c7af48d51df4a9490724252832b",
+      "tokens": "a0e43bc4f56021a0912535cff659781a61a1478f9190a8926a4a95c789ea455b"
+    },
+    "lib/offload/capability.c": {
+      "sha256": "58c443fdda890183d1d443e056fed65583c8716e55308c0f937609429d505713",
+      "tokens": "90fcf8a52ee1a7a15c92d3b76e357fbf7766623bd08c9a51c346346872f9637a"
+    },
+    "lib/offload/compiled_flow.h": {
+      "sha256": "b79eeba50d9ab000ccdc0fa7382252a11bf9535c4d8dfb94607b0e674ee50a5c",
+      "tokens": "4bd2ffcfea5312e9ba2a3062a72e29421ed287f50f32163eba630ac6ea36cdc0"
+    },
+    "lib/offload/flow_shared_count.c": {
+      "sha256": "7fe5bfba8067e2dfc20bfd4ea3b1d0305f01b358e5f6790da66650f146244a7a",
+      "tokens": "e22de34ac842841b1b35ee689c15c17cfada3bb50529950b11f109b1c08f448f"
+    },
+    "lib/offload/flow_template.c": {
+      "sha256": "e007ea4b9aa9f0fb95a98c7f0ff8082a9a5ee425dc26e7a637f4dda61d69bd3c",
+      "tokens": "764713e98fea2f5427a0c240fb7f71acddfc608b13dc051b743c660dbec0309a"
+    },
+    "lib/offload/native_flow_lock.c": {
+      "sha256": "6c2c80b23acfc6ac6cfc291d3489880c0e9b4cbc97934af5fbae8f3f0703ea3b",
+      "tokens": "7e3fb53498d185cc1672cd74d196f26aeda265c06a20d785350241a4da584e10"
+    },
+    "lib/offload/native_flow_lock.h": {
+      "sha256": "fd1c963389686fe1d16273a9dbdb4204cbc7b6eb20471d6ed860a59c3f522c1d",
+      "tokens": "f248ff04d7f7218212883b768cf2d0181b3eb3b92a53e00192331c3029bc5c88"
+    },
+    "lib/offload/rte_flow.c": {
+      "sha256": "3e81b07e6cb0668da83f3356d8aa689307f61d3d5a00528285da2112a9c99e67",
+      "tokens": "f90f06aed89fb52a9d8cfa1aace929a44015b039d90ada71ba83014f3e10b040"
+    },
+    "lib/offload/rte_flow_backend.c": {
+      "sha256": "461bc638cc9818df1960bcdcf48f4005f9372fdb6654d7ab2ce9ff837836e63c",
+      "tokens": "c2dbce84d13ba36ed74b10580be5427756976f989248fa04bdd237a5cc6dbed7"
+    },
+    "lib/offload/shared_count.c": {
+      "sha256": "4421fc60abd9600420bb19f5354ab188c7d46c06d526bdff18cc73ad945003e9",
+      "tokens": "273a027951b58ea18795e6b22e186a2da7a7bd85709da465388f0d104d119899"
+    },
+    "lib/runtime/config.c": {
+      "sha256": "a2ae87f17e9ff0cd51f6a8c0565ab34b3c456499adbae33d34e33b1a15d63365",
+      "tokens": "9cb43934268e5196baadc9d4b32dd4861b2ffe6c22a14654259779477176cbf2"
+    },
+    "lib/runtime/device_recovery.c": {
+      "sha256": "7a9d1fbf79e82df9ac55d17b9612c05fd093f23f6be04a2c799e1ebfc6c9944e",
+      "tokens": "335b0986f9e8f09b346c3516ce42fcfd162a2ffd4152e6934c3c682725c58a95"
+    },
+    "lib/runtime/managed.c": {
+      "sha256": "ec44f262aa66899fb17faf90a1e10f87aa370ca3987829f51e6cba94fa8da1d8",
+      "tokens": "34a7835010a5d6f267a7a00cb81398eb611f1bfd22ab18f04183d479b453bd25"
+    },
+    "lib/runtime/runtime.c": {
+      "sha256": "cef9e76c699ed2078b42cf58dba8facbddbf2fa4865f07b7187cc0c56ba0d79a",
+      "tokens": "1be5535322c8c1d2d1bdb61e6af10b72df992a52eca33c1f5faf56484942916b"
+    }
+  },
+  "git_status": " M include/dppd/config.h\n M include/dppd/ipv4_router.h\n M include/dppd/ipv6.h\n M include/dppd/nd6.h\n M include/dppd/rule_repository.h\n M include/dppd/slot_index.h\n M include/dppd/software_backend.h\n M lib/control/control.c\n M lib/control/rule_repository.c\n M lib/control/slot_index.c\n M lib/control/snapshot.c\n M lib/control/transaction.c\n M lib/dataplane/acl.c\n M lib/dataplane/exact.c\n M lib/dataplane/ipv4_router.c\n M lib/dataplane/ipv6_rewrite.c\n M lib/dataplane/nd6.c\n M lib/dataplane/packet.c\n M lib/dataplane/packet_mbuf.c\n M lib/dataplane/pipeline.c\n M lib/dataplane/software_backend.c\n M lib/dataplane/worker.c\n M lib/observability/stats.c\n?? .archify/learning-review-20261022/\n?? .archify/lesson-packet-parse-20261020-161845/\n?? .archify/lesson-software-rules-20261020-184904/\n?? .archify/workflow-software-packet-path-20261020-143318/\n?? .vscode/\n?? docs/architecture_analysis/\n"
+}

@@ -1,0 +1,117 @@
+{
+  "complete": true,
+  "requirements": [
+    {
+      "requirement": "索引删除与复用，同一具体例子及源码 plain text 注释",
+      "evidence": [
+        "lib/control/slot_index.c:dppd_slot_index_erase",
+        "section-2.3.html#step-6"
+      ],
+      "result": "verified"
+    },
+    {
+      "requirement": "报文主线连贯覆盖收包、解析、规则、路由/ND、改写、发送释放",
+      "evidence": [
+        "1.1–1.3 existing pages",
+        "section-1.4.html",
+        "section-1.5.html",
+        "manifest.json"
+      ],
+      "result": "verified by current source inspection and referenced excerpts"
+    },
+    {
+      "requirement": "规则主线覆盖控制请求、事务、匹配表、发布、账本、finalize、保存入口、删除回滚和QSBR",
+      "evidence": [
+        "section-2.1.html",
+        "section-2.2.html",
+        "section-2.3.html",
+        "section-2.4.html"
+      ],
+      "result": "verified by current source inspection and referenced excerpts"
+    },
+    {
+      "requirement": "检查关键源码注释，补齐作用与原因，合并重复说明",
+      "evidence": [
+        "source-check.json changed_files",
+        "nd6 resolve purpose/return comment",
+        "control remove call sequence",
+        "pipeline and exact duplicate explanations consolidated"
+      ],
+      "result": "verified"
+    },
+    {
+      "requirement": "沿用现有学习形式，前后可点击进入，输入输出代码状态下一步可见",
+      "evidence": [
+        "browser-check.json",
+        "slot-reuse.desktop.png",
+        "rewrite-send.desktop.png",
+        "learning-index.desktop.png"
+      ],
+      "result": "verified; nine linked pages, all declared steps checked, existing sent and port controls preserved"
+    },
+    {
+      "requirement": "区分此前讲过、本次补充及后续待学，区分运行快照与磁盘文件",
+      "evidence": [
+        "index.html",
+        "section-2.3.html",
+        "section-2.4.html",
+        "review.html"
+      ],
+      "result": "verified"
+    },
+    {
+      "requirement": "源码引用与本地打开效果核实",
+      "evidence": [
+        "manifest.json exact source spans",
+        "browser-check.json source anchors, chapter navigation, file URLs and 1440/800/390 widths"
+      ],
+      "result": "verified; three representative screenshots visually inspected"
+    },
+    {
+      "requirement": "只改源码注释，保留任务开始时已有修改，不提交或push",
+      "evidence": [
+        "source-baseline.json",
+        "source-check.json"
+      ],
+      "result": "verified against Goal-start workspace; no commit/push executed"
+    },
+    {
+      "requirement": "发现的问题留证据并保持范围，交付入口与下一阶段建议",
+      "evidence": [
+        "review.html static update-failure cleanup observation",
+        "index.html follow-up list"
+      ],
+      "result": "verified; static concern recorded without runtime claim or fix"
+    }
+  ],
+  "source_files_compared": 149,
+  "modified_source_files": [
+    "app/dppctl/main.c",
+    "lib/control/control.c",
+    "lib/control/rule_repository.c",
+    "lib/control/slot_index.c",
+    "lib/dataplane/exact.c",
+    "lib/dataplane/ipv6_rewrite.c",
+    "lib/dataplane/nd6.c",
+    "lib/dataplane/pipeline.c",
+    "lib/dataplane/software_backend.c",
+    "lib/management/server.c"
+  ],
+  "pages": 9,
+  "steps": 63,
+  "new_steps": 46,
+  "source_views": 19,
+  "visual_review": [
+    "learning-index.desktop.png",
+    "slot-reuse.desktop.png",
+    "rewrite-send.desktop.png",
+    "install-overview.desktop.png",
+    "install-publish.desktop.png"
+  ],
+  "limitations": [
+    "No DPDK runtime or packet delivery validation",
+    "Existing pre-Goal whitespace warnings were preserved",
+    "Generated learning material does not establish learner mastery",
+    "One static cleanup concern recorded for separate fault-injection investigation"
+  ]
+}

@@ -30,6 +30,13 @@ static int backend_valid(const struct dppd_transaction_backend *backend)
  * 尽力撤销本次事务已经占用的资源，不能因为某一条撤销失败就放弃其余条目
  * commit_attempts 表示有多少条规则已经调用过 commit，包括调用了但返回错误的那一条
  * 这个信息帮助后端区分“只预留了资源”和“可能已经产生安装副作用”
+ *
+ * 软件规则示例：R1、R2、R3 均已 prepare，R1 提交成功，R2 提交失败，R3 尚未提交
+ * 逆序清理：R3 → published 为 false → 释放准备记录
+ *           R2 → published 为 false → 释放准备记录，失败的 commit 已清理未发布副本
+ *           R1 → published 为 true  → 删除已安装版本，再释放准备记录
+ * 本例 commit_attempts = 2，R1、R2 的 commit_was_attempted 为 true，R3 为 false
+ * 任一回滚失败仍继续清理其余条目，首个回滚错误保存在 rollback_code
  */
 static void rollback_items(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends,
     uint32_t commit_attempts)
@@ -103,6 +110,14 @@ int dppd_transaction_init(struct dppd_transaction *transaction, uint64_t transac
  * 校验阶段失败直接结束，准备或提交失败则自动回滚已占用的资源
  * 返回值说明原操作为什么失败，rollback_code 另行说明清理是否也失败
  * 返回成功仅表示后端对象已安装，规则账本发布和快照保存仍由控制层负责
+ *
+ * validate 全部成功 → prepare 全部成功 → commit 逐条成功 → COMMITTED
+ * validate 失败 → 尚未占用后端资源，直接返回错误
+ * prepare / commit 失败 → rollback_items 逆序清理 → 返回原始错误
+ *   rollback_code = 0   → 清理全部成功，事务为 ROLLED_BACK
+ *   rollback_code 非 0  → 至少一项清理失败，事务为 FAILED，上层继续处理
+ * 软件 commit 每条都会发布快照，整批尚未完成时，先提交的规则也可能已被 worker 使用
+ * 全部提交成功后，由控制层决定 finalize 收尾，或调用 rollback_committed 撤销
  */
 int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends)
 {

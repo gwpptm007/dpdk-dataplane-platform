@@ -22,9 +22,12 @@ struct dppd_flow_shared_counts;
 /** 每批先合并相同规则版本的 COUNT，满 32 个不同对象时先提交再继续接收 */
 #define DPPD_SOFTWARE_COUNT_BATCH_SIZE 32U
 struct dppd_software_count_batch {
+    /** entries 中的有效项数，每项对应一个规则版本的统计对象 */
     uint16_t count;
     struct {
+        /** 增量所属的规则统计对象，合并时按指针身份判断 */
         struct dppd_software_rule_metrics *metrics;
+        /** 尚未提交的命中次数和字节增量 */
         uint64_t hits, bytes;
     } entries[DPPD_SOFTWARE_COUNT_BATCH_SIZE];
 };
@@ -36,11 +39,20 @@ void dppd_software_backend_decide_counted(struct dppd_software_backend *backend,
     const struct dppd_packet *packet, struct dppd_software_decision *decision, struct dppd_software_count_batch *batch);
 
 /**
- * 软件 classifier 的活跃规则集采用不可变 snapshot：worker 只原子读取 active
- * 不获取控制面锁；更新线程复制、修改并发布一个新 snapshot。旧 snapshot 交给
- * DPDK QSBR，在所有 worker 都经过一个安全静默点后才释放，因此不会出现 UAF
+ * 软件规则后端通过发布新快照更新规则，worker 从 active 取得规则表进行匹配
  *
- * writer_lock 只串行化控制面发布、查询和回收；它不在报文路径上使用
+ * QSBR = Quiescent State Based Reclamation，基于静默状态的内存回收
+ * 用途：控制面替换规则表时，避免释放 worker 仍在读取的旧表
+ * 例：worker 0、1 已取得表 A 的指针，控制面把 active 改为 B，两个 worker 手里的 A 指针仍然存在
+ *   发布 B → 将 A 放入 retired 链表，并记录本次回收的进度标记 token
+ *   worker 0 用完旧表并报告 → worker 1 还可能读 A，暂时不能释放
+ *   worker 1 也用完并报告 → 控制面 check 确认相关在线读者都满足此 token 后，才销毁 A
+ *
+ * 静默点表示该线程已不再使用先前借用的表，不是休眠，也不要求所有线程同时停下来
+ * 本项目在一轮端口扫描结束且 COUNT 已提交后报告，线程随即继续处理下一轮
+ * QSBR 记录读者进度，不自动发现指针是否仍被使用，也不自动 free，实际释放由回收函数执行
+ * 此处保护的是规则快照，报文 mbuf 仍按发送、ND 等待和释放路径管理
+ * writer_lock 串行化控制面的发布、查询和回收，worker 匹配规则时不获取这个锁
  */
 struct dppd_software_backend {
     /**
@@ -54,8 +66,8 @@ struct dppd_software_backend {
      */
     struct dppd_software_retired_snapshot *retired;
     /**
-     * 每个 worker 以 queue_id 注册为一个 reader。writer 用它判断所有 reader 是否
-     * 都越过了发布旧 snapshot 时的安全边界
+     * 保存已注册读者的进度，worker 以 queue_id 登记，报告静默点时更新自己的进度
+     * 控制面用旧表对应的 token 检查能否回收，不把它当作规则版本号或时间戳
      */
     struct rte_rcu_qsbr *qsbr;
     /** 把发布、查询和回收串行化；严禁在报文热路径获取此锁 */

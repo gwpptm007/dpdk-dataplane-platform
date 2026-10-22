@@ -1,0 +1,759 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "软件转发学习图：端口配对路径",
+    "locale": "zh-CN",
+    "output": ".archify/workflow-software-packet-path-20261020-143318/software-packet-path.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/gwpptm007/dpdk-dataplane-platform.git",
+      "revision": "f94829fa9c251036bb0e9a3d35289b51db503413",
+      "provider": "github",
+      "link_mode": "web"
+    },
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "backend": {
+          "label": "软件处理"
+        },
+        "security": {
+          "label": "检查与丢弃"
+        },
+        "messagebus": {
+          "label": "批量收发"
+        },
+        "database": {
+          "label": "待发送批次"
+        },
+        "external": {
+          "label": "驱动持有"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "receive",
+      "label": "同一 worker｜批量收包入口"
+    },
+    {
+      "id": "decisions",
+      "label": "每个 rx[i]｜解析与软件规则判定"
+    },
+    {
+      "id": "execution",
+      "label": "每个 rx[i]｜端口配对、出口检查与分组"
+    },
+    {
+      "id": "sending",
+      "label": "同一 worker｜逐出口批量提交与 mbuf 归属"
+    }
+  ],
+  "groups": [],
+  "nodes": [
+    {
+      "id": "receive",
+      "lane": "receive",
+      "col": 1,
+      "yOffset": -100,
+      "type": "messagebus",
+      "label": "① 批量收包",
+      "sublabel": "worker.c · process_ingress() → rte_eth_rx_burst()",
+      "tag": "worker.c｜count 是实际收到数量",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 393,
+          "end_line": 400,
+          "label": "从当前 RX 队列批量取包"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "batch",
+      "lane": "receive",
+      "col": 1,
+      "yOffset": 100,
+      "type": "backend",
+      "label": "② 开始处理这一批",
+      "sublabel": "worker.c · process_batch()",
+      "tag": "worker.c｜for (i < received)",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 203,
+          "end_line": 230,
+          "label": "逐个处理收到的 mbuf"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "parse",
+      "lane": "decisions",
+      "col": 1,
+      "yOffset": -200,
+      "type": "backend",
+      "label": "③ 每个包解析报文头",
+      "sublabel": "packet_mbuf.c · dppd_packet_parse_mbuf()",
+      "tag": "packet_mbuf.c → packet.c",
+      "sources": [
+        {
+          "path": "lib/dataplane/packet_mbuf.c",
+          "line": 16,
+          "end_line": 38,
+          "label": "读取头部并交给字节解析器"
+        },
+        {
+          "path": "lib/dataplane/packet.c",
+          "line": 48,
+          "end_line": 159,
+          "label": "逐层检查并提取协议字段"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "decide",
+      "lane": "decisions",
+      "col": 1,
+      "yOffset": 0,
+      "type": "security",
+      "label": "④ 生成处理决定并检查畸形",
+      "sublabel": "pipeline.c · dppd_pipeline_decide_counted()",
+      "tag": "worker.c 的 routed_decide() 调入",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 85,
+          "end_line": 95,
+          "label": "调用 pipeline 决定函数"
+        },
+        {
+          "path": "lib/dataplane/pipeline.c",
+          "line": 11,
+          "end_line": 24,
+          "label": "初始化决定并拒绝畸形包"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "rules",
+      "lane": "decisions",
+      "col": 1,
+      "yOffset": 200,
+      "type": "security",
+      "label": "⑤ 匹配预先配置的软件规则",
+      "sublabel": "software_backend.c · dppd_software_backend_decide_counted()",
+      "tag": "software_backend.c｜DROP / MARK / COUNT",
+      "sources": [
+        {
+          "path": "lib/dataplane/pipeline.c",
+          "line": 25,
+          "end_line": 43,
+          "label": "有软件后端时逐包检查规则"
+        },
+        {
+          "path": "lib/dataplane/software_backend.c",
+          "line": 1058,
+          "end_line": 1103,
+          "label": "匹配规则并执行选定动作"
+        }
+      ],
+      "width": 400,
+      "height": 84
+    },
+    {
+      "id": "pair",
+      "lane": "execution",
+      "col": 1,
+      "yOffset": -300,
+      "type": "backend",
+      "label": "⑥ 未启用路由：按入口选出口",
+      "sublabel": "snapshot.c · dppd_snapshot_lookup_peer()",
+      "tag": "snapshot.c｜示例：端口 0 → 端口 1",
+      "sources": [
+        {
+          "path": "lib/dataplane/pipeline.c",
+          "line": 48,
+          "end_line": 79,
+          "label": "路由器为空时查端口配对"
+        },
+        {
+          "path": "lib/control/snapshot.c",
+          "line": 30,
+          "end_line": 44,
+          "label": "查找入口对应的出口"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "available",
+      "lane": "execution",
+      "col": 1,
+      "yOffset": -100,
+      "type": "security",
+      "label": "⑦ worker 检查决定和出口",
+      "sublabel": "worker.c · process_batch() 检查出口",
+      "tag": "worker.c / device.h｜存在、编号一致、可发送",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 280,
+          "end_line": 331,
+          "label": "执行决定并检查实际出口"
+        },
+        {
+          "path": "include/dppd/device.h",
+          "line": 150,
+          "end_line": 155,
+          "label": "出口移除与链路状态检查"
+        }
+      ],
+      "width": 400,
+      "height": 84
+    },
+    {
+      "id": "drop",
+      "lane": "execution",
+      "col": 3,
+      "yOffset": -100,
+      "type": "security",
+      "label": "丢弃当前包，继续下一个",
+      "sublabel": "worker.c · rte_pktmbuf_free(rx[i])",
+      "tag": "worker.c｜按原因统计后 continue",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 280,
+          "end_line": 331,
+          "label": "释放当前 mbuf 并继续循环"
+        }
+      ],
+      "width": 300,
+      "height": 84
+    },
+    {
+      "id": "group",
+      "lane": "execution",
+      "col": 1,
+      "yOffset": 100,
+      "type": "database",
+      "label": "⑧ 只暂存指针，尚未发送",
+      "sublabel": "worker.c · tx[index][counts[index]++] = rx[i]",
+      "tag": "worker.c｜index 是出口对象的数组下标",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 364,
+          "end_line": 375,
+          "label": "按出口分组并保存长度"
+        }
+      ],
+      "width": 400,
+      "height": 84
+    },
+    {
+      "id": "more",
+      "lane": "execution",
+      "col": 1,
+      "yOffset": 300,
+      "type": "backend",
+      "label": "本批还有报文？",
+      "sublabel": "worker.c · process_batch() 的逐包循环",
+      "tag": "worker.c｜全部处理完才提交发送",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 222,
+          "end_line": 230,
+          "label": "进入逐包循环"
+        },
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 372,
+          "end_line": 379,
+          "label": "循环结束后按出口提交"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "flush",
+      "lane": "sending",
+      "col": 1,
+      "yOffset": -300,
+      "type": "messagebus",
+      "label": "⑨ 按出口提交待发送批次",
+      "sublabel": "worker.c · flush_egress()",
+      "tag": "worker.c｜再次检查停止状态和出口",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 376,
+          "end_line": 380,
+          "label": "循环结束后逐出口调用"
+        },
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 28,
+          "end_line": 39,
+          "label": "无包返回，出口失效释放整批"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "flush_drop",
+      "lane": "sending",
+      "col": 3,
+      "yOffset": -300,
+      "type": "security",
+      "label": "提交前失效：释放该出口整批",
+      "sublabel": "worker.c · free_packets(packets, count)",
+      "tag": "worker.c｜不进入驱动发送",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 31,
+          "end_line": 37,
+          "label": "发送前失效时释放所有待发送包"
+        }
+      ],
+      "width": 300,
+      "height": 84
+    },
+    {
+      "id": "transmit",
+      "lane": "sending",
+      "col": 1,
+      "yOffset": -100,
+      "type": "messagebus",
+      "label": "⑩ 交给 PMD 的发送队列",
+      "sublabel": "worker.c · rte_eth_tx_burst()",
+      "tag": "worker.c｜返回 sent，允许部分接收",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 39,
+          "end_line": 46,
+          "label": "提交本出口批次并处理返回值"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "owned",
+      "lane": "sending",
+      "col": 1,
+      "yOffset": 100,
+      "type": "external",
+      "label": "前 sent 个由驱动管理",
+      "sublabel": "前 sent 个 mbuf · PMD 管理",
+      "tag": "worker 不再访问或释放这些 mbuf",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 11,
+          "end_line": 17,
+          "label": "仅释放仍归 worker 的报文"
+        },
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 39,
+          "end_line": 46,
+          "label": "未接收尾部由 worker 清理"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "unsent",
+      "lane": "sending",
+      "col": 3,
+      "yOffset": 100,
+      "type": "security",
+      "label": "未接收的尾部由 worker 释放",
+      "sublabel": "worker.c · free_packets(packets + sent, count - sent)",
+      "tag": "worker.c｜当前策略丢弃，不重试",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 43,
+          "end_line": 46,
+          "label": "释放驱动未接收的尾部"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    },
+    {
+      "id": "next",
+      "lane": "sending",
+      "col": 1,
+      "yOffset": 300,
+      "type": "backend",
+      "label": "处理其他出口，继续轮询收包",
+      "sublabel": "worker.c · dppd_worker_main()",
+      "tag": "worker.c｜直到停止或设备事件要求退出",
+      "sources": [
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 378,
+          "end_line": 387,
+          "label": "逐出口提交与统计"
+        },
+        {
+          "path": "lib/dataplane/worker.c",
+          "line": 453,
+          "end_line": 472,
+          "label": "worker 持续扫描端口"
+        }
+      ],
+      "width": 360,
+      "height": 84
+    }
+  ],
+  "edges": [
+    {
+      "id": "rx_batch",
+      "from": "receive",
+      "to": "batch",
+      "label": "传入本批",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "batch_parse",
+      "from": "batch",
+      "to": "parse",
+      "label": "逐包",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "parse_decide",
+      "from": "parse",
+      "to": "decide",
+      "label": "字段与状态",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "valid_rules",
+      "from": "decide",
+      "to": "rules",
+      "label": "非畸形且有后端",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "no_backend",
+      "from": "decide",
+      "to": "pair",
+      "label": "无后端",
+      "variant": "dashed",
+      "role": "branch",
+      "fromSide": "left",
+      "toSide": "left"
+    },
+    {
+      "id": "malformed_drop",
+      "from": "decide",
+      "to": "drop",
+      "label": "畸形",
+      "variant": "security",
+      "role": "error",
+      "fromSide": "right",
+      "toSide": "right",
+      "route": "outside-right"
+    },
+    {
+      "id": "rules_pair",
+      "from": "rules",
+      "to": "pair",
+      "label": "未要求丢弃",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "rule_drop",
+      "from": "rules",
+      "to": "drop",
+      "label": "规则 DROP",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "pair_available",
+      "from": "pair",
+      "to": "available",
+      "label": "找到出口",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "no_pair",
+      "from": "pair",
+      "to": "drop",
+      "label": "无配对",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "available_group",
+      "from": "available",
+      "to": "group",
+      "label": "可发送",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "bad_egress",
+      "from": "available",
+      "to": "drop",
+      "label": "出口不可用",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "group_more",
+      "from": "group",
+      "to": "more",
+      "label": "已分组",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "drop_more",
+      "from": "drop",
+      "to": "more",
+      "label": "continue",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "id": "loop_packet",
+      "from": "more",
+      "to": "batch",
+      "label": "有",
+      "variant": "dashed",
+      "role": "return",
+      "fromSide": "left",
+      "toSide": "left"
+    },
+    {
+      "id": "done_packets",
+      "from": "more",
+      "to": "flush",
+      "label": "无",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "empty_exit",
+      "from": "flush",
+      "to": "next",
+      "label": "空批次",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "flush_tx",
+      "from": "flush",
+      "to": "transmit",
+      "label": "非空且可发送",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "stopped_exit",
+      "from": "flush",
+      "to": "flush_drop",
+      "label": "停止或出口失效",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "release_next",
+      "from": "flush_drop",
+      "to": "next",
+      "label": "本出口结束",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "id": "accepted_driver",
+      "from": "transmit",
+      "to": "owned",
+      "label": "sent > 0",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "tail_release",
+      "from": "transmit",
+      "to": "unsent",
+      "label": "sent < count",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "driver_next",
+      "from": "owned",
+      "to": "next",
+      "label": "完成提交",
+      "variant": "default",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "tail_next",
+      "from": "unsent",
+      "to": "next",
+      "label": "释放尾部",
+      "variant": "dashed",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "本图范围与读法",
+      "items": [
+        "已学的普通 IPv4 软件端口配对路径：未启用连接跟踪、NAT、动态 ND，示例使用单段包且不设置 MARK",
+        "箭头表示处理顺序与条件分支，不等同于每条箭头都是一次函数调用",
+        "源码依据固定为 f94829f；工作区另有学习注释，链接行号以该提交为准",
+        "图未表示硬件 rte_flow 旁路，也不代表完成了实际收发测试"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "解析：每个包都做，主要读取报文头",
+      "items": [
+        "worker.c 的 process_batch() 逐个调用 dppd_packet_parse_mbuf()",
+        "packet_mbuf.c：获取可读的头部范围，连续时借用指针，跨段时借助 scratch",
+        "packet.c：dppd_packet_parse_buffer() → dppd_packet_parse_headers()",
+        "按 Ethernet / IP / UDP / TCP 格式和长度提取字段，packet 不拥有原始 mbuf"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "软件规则：重复匹配同一份配置",
+      "items": [
+        "software_backend.c 读取已发布规则表，按当前包的字段进行匹配",
+        "示例条件：入口 0、UDP 目的端口 8080；动作：DROP",
+        "未命中 DROP 继续选择出口，规则函数不负责释放原始报文",
+        "模板、持久化和控制面配置来源属于后续学习"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "生成决定不等于执行收发",
+      "items": [
+        "调用关系：worker.c 的 process_batch() → routed_decide()",
+        "routed_decide() → pipeline.c 的 dppd_pipeline_decide_counted()",
+        "pipeline 填写 decision；worker 根据结果实际释放或暂存 mbuf",
+        "若启用三层路由，则改用 dppd_ipv4_router_lookup() / dppd_ipv6_router_lookup()，路由失败不会回退端口配对"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "TX 返回值与 mbuf 归属",
+      "items": [
+        "count 是本次提交数量；sent 是 PMD 接收的前多少个包",
+        "前 sent 个归驱动；从 packets[sent] 开始的尾部归 worker 释放",
+        "例如 count = 3、sent = 2：worker 只释放 packets[2]",
+        "发送队列接收不保证物理发送已经完成，也不保证对端收到",
+        "两条 TX 出边分别表示不同包子集，部分接收时两条都适用"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "批量收发，逐包处理",
+      "items": [
+        "RX burst：一次取得一批 mbuf 指针，不等待凑满 burst_size",
+        "每个包：解析 → 软件规则判定 → 选择出口 → 检查出口",
+        "按出口保存 tx、tx_lengths、counts，尚未交给驱动",
+        "整批处理结束后：先提交 COUNT，再逐出口 flush_egress()"
+      ]
+    }
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "receive"
+    ],
+    "allowedTerminals": [
+      "next"
+    ],
+    "requiredEdges": [
+      {
+        "from": "receive",
+        "to": "batch"
+      },
+      {
+        "from": "batch",
+        "to": "parse"
+      },
+      {
+        "from": "flush",
+        "to": "transmit"
+      },
+      {
+        "from": "transmit",
+        "to": "unsent"
+      }
+    ],
+    "requiredPaths": [
+      {
+        "from": "receive",
+        "to": "next"
+      },
+      {
+        "from": "rules",
+        "to": "drop"
+      },
+      {
+        "from": "drop",
+        "to": "flush"
+      }
+    ]
+  }
+}

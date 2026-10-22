@@ -11,51 +11,114 @@
 
 struct dppd_ipv4_router;
 
-/** 地址保持网络字节序，depth 表示前缀长度，gateway 为零时直接查目的地址的静态邻居 */
+/**
+ * 一条 IPv4 路由，按目的地址前缀确定出口和下一跳
+ * 字段使用无符号整数：uint32_t 占 4 字节，uint16_t 占 2 字节，uint8_t 占 1 字节
+ *
+ * 示例：目的网段 192.168.1.0/24 → 出口网口 1 → 下一跳 192.168.1.1
+ *   prefix_be  = htonl(0xC0A80100U)
+ *   gateway_be = htonl(0xC0A80101U)
+ *   port_id    = 1
+ *   depth      = 24
+ *   reserved   = 0
+ *
+ * IPv4 地址四段各占 1 字节：192.168.1.0 → C0 A8 01 00，共 4 字节
+ * htonl 将整数转换为网络字节序，保证内存中的地址字节与报文顺序一致
+ */
 struct dppd_ipv4_route {
-    uint32_t prefix_be, gateway_be;
+    /** 网络前缀，按网络字节序保存，前缀长度之外的位必须为 0 */
+    uint32_t prefix_be;
+    /** 下一跳网关的 IPv4 地址，网络字节序；为 0 时直连，使用报文目的 IP 查邻居 */
+    uint32_t gateway_be;
+    /** 出口网口的实际 ID，须属于路由器创建时指定的网口集合 */
     uint16_t port_id;
-    uint8_t depth, reserved;
+    /** 前缀长度，单位为位，范围 0～32；0 表示默认路由 */
+    uint8_t depth;
+    /** 保留字段，配置时必须为 0 */
+    uint8_t reserved;
 };
 
-/** 同一 IP 可以出现在不同出口，邻居由出口端口和下一跳 IP 共同定位 */
+/**
+ * 保存下一跳 IP 与 MAC 的对应关系，由出口网口和下一跳 IP 共同定位
+ * address_be 使用 4 字节无符号整数，port_id 使用 2 字节无符号整数，mac 保存 6 个字节
+ *
+ * 承接上述路由：在出口网口 1 上，192.168.1.1 对应 MAC 02:11:22:33:44:55
+ *   address_be = htonl(0xC0A80101U)
+ *   port_id    = 1
+ *   mac        = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55}
+ *
+ * 路由确定出口和下一跳 IP，邻居提供发往该下一跳时使用的以太网目的 MAC
+ * 同一 IP 在不同出口可对应不同邻居，因此查询时必须同时匹配 port_id
+ */
 struct dppd_ipv4_neighbor {
+    /** 邻居 IPv4 地址，网络字节序，与 port_id 共同作为查询键 */
     uint32_t address_be;
+    /** 邻居所在的出口网口 ID，同一 IP 在不同出口可对应不同邻居 */
     uint16_t port_id;
+    /** 邻居的 6 字节单播 MAC，用于填写发出报文的以太网目的地址 */
     uint8_t mac[6];
 };
 
 /** IPv6 地址按字节保存，下一跳全零表示直连，链路本地下一跳由 port_id 区分作用域 */
 struct dppd_ipv6_route {
-    uint8_t prefix[16], gateway[16];
+    /** 16 字节网络前缀，按报文字节顺序保存，前缀长度之外的位必须为 0 */
+    uint8_t prefix[16];
+    /** 16 字节下一跳地址，全 0 时直连，使用报文目的 IPv6 地址查邻居 */
+    uint8_t gateway[16];
+    /** 出口网口 ID，也用于区分链路本地下一跳所属的链路 */
     uint16_t port_id;
-    uint8_t depth, reserved;
+    /** 前缀长度，单位为位，范围 0～128；0 表示默认路由 */
+    uint8_t depth;
+    /** 保留字段，配置时必须为 0 */
+    uint8_t reserved;
 };
 
+/** 一条静态 IPv6 邻居，由出口网口和邻居地址共同定位 */
 struct dppd_ipv6_neighbor {
+    /** 邻居 IPv6 地址，按报文字节顺序保存，占 16 字节 */
     uint8_t address[16];
+    /** 邻居所在的出口网口 ID，与 address 共同作为查询键 */
     uint16_t port_id;
+    /** 邻居的 6 字节单播 MAC，用于填写发出报文的以太网目的地址 */
     uint8_t mac[6];
 };
 
 /** 路由和邻居共用版本，未使用的数组元素由实现清零，不直接作为磁盘格式 */
 struct dppd_ipv4_configuration {
+    /** 双栈路由和邻居共用的配置版本，替换发布时递增 */
     uint64_t generation;
-    uint32_t route_count, neighbor_count;
+    /** routes 中有效 IPv4 路由的条数 */
+    uint32_t route_count;
+    /** neighbors 中有效 IPv4 静态邻居的条数 */
+    uint32_t neighbor_count;
+    /** IPv4 路由数组，仅前 route_count 项有效 */
     struct dppd_ipv4_route routes[DPPD_IPV4_ROUTE_LIMIT];
+    /** IPv4 静态邻居数组，仅前 neighbor_count 项有效 */
     struct dppd_ipv4_neighbor neighbors[DPPD_IPV4_NEIGHBOR_LIMIT];
-    /** 两个地址族共用一次发布和版本，不能让工作线程读到半次双栈更新 */
-    uint32_t route6_count, neighbor6_count;
+    /** routes6 中有效 IPv6 路由的条数，与 IPv4 配置一起发布 */
+    uint32_t route6_count;
+    /** neighbors6 中有效 IPv6 静态邻居的条数 */
+    uint32_t neighbor6_count;
+    /** IPv6 路由数组，仅前 route6_count 项有效 */
     struct dppd_ipv6_route routes6[DPPD_IPV4_ROUTE_LIMIT];
+    /** IPv6 静态邻居数组，仅前 neighbor6_count 项有效 */
     struct dppd_ipv6_neighbor neighbors6[DPPD_IPV4_NEIGHBOR_LIMIT];
 };
 
-/** 只复制单个报文需要的结果，不把快照内部指针交给后续报文改写步骤 */
+/**
+ * IPv4/IPv6 共用的单包路由结果，复制所需字段供后续改写，不持有快照内部指针
+ * IPv6 缺少静态邻居时仍保留出口和下一跳，供 ND 继续解析，目的 MAC 尚待补齐
+ */
 struct dppd_ipv4_forward {
+    /** 本次查询使用的路由和邻居配置版本 */
     uint64_t generation;
+    /** IPv4 下一跳地址，网络字节序；经网关时为网关 IP，直连时为报文目的 IP */
     uint32_t next_hop_be;
+    /** 查询选出的实际出口网口 ID，IPv4/IPv6 共用 */
     uint16_t port_id;
+    /** 下一跳的目的 MAC，由静态邻居或 ND 解析取得，后续写入以太网目的地址 */
     uint8_t destination_mac[6];
+    /** IPv6 下一跳地址，占 16 字节；IPv4 查询不使用此字段 */
     uint8_t next_hop6[16];
 };
 

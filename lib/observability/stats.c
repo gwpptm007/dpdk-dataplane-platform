@@ -11,6 +11,7 @@ void dppd_stats_init(struct dppd_worker_stats *stats)
     DPPD_STATS_FIELDS(STORE_ZERO)
 }
 
+/** 将本批 delta 的各项增量原子累加到指定网口或 worker 的累计计数器，不清空 delta */
 void dppd_stats_add(struct dppd_worker_stats *stats, const struct dppd_stats_values *delta)
 {
     DPPD_STATS_FIELDS(ADD_FIELD)
@@ -22,6 +23,7 @@ void dppd_stats_read(const struct dppd_worker_stats *stats, struct dppd_stats_va
     DPPD_STATS_FIELDS(READ_FIELD)
 }
 
+/** 将 values 合并到本线程的临时汇总 total，供稍后统一提交，不直接更新累计计数器 */
 void dppd_stats_accumulate(struct dppd_stats_values *total, const struct dppd_stats_values *values)
 {
     DPPD_STATS_FIELDS(ACCUMULATE_FIELD)

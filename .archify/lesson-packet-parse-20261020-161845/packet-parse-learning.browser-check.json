@@ -1,0 +1,35 @@
+{
+  "page": "E:\\GitHub-Study\\dpdk-dataplane-platform\\.archify\\lesson-packet-parse-20261020-161845\\packet-parse-learning.html",
+  "checks": [
+    "six teaching steps loaded",
+    "initial step is first",
+    "step 1 updates code, explanation and preview",
+    "step 2 updates code, explanation and preview",
+    "step 3 updates code, explanation and preview",
+    "Ethernet leads to offset 14",
+    "step 4 updates code, explanation and preview",
+    "IPv4 leads to offset 34",
+    "step 5 updates code, explanation and preview",
+    "UDP preview includes destination port 9000",
+    "step 6 updates code, explanation and preview",
+    "port switch updates bytes, input and extracted field",
+    "earlier steps do not prematurely show extracted port",
+    "final return value is documented",
+    "previous navigation works",
+    "next navigation works",
+    "end navigation disabled correctly",
+    "start navigation disabled correctly",
+    "previous lesson backlink resolves",
+    "desktop has no horizontal overflow",
+    "narrow viewport has no horizontal overflow",
+    "step click works at narrow viewport",
+    "no runtime exceptions"
+  ],
+  "runtimeErrors": [],
+  "screenshot": "E:\\GitHub-Study\\dpdk-dataplane-platform\\.archify\\lesson-packet-parse-20261020-161845\\packet-parse-learning.desktop.png",
+  "viewport": {
+    "width": 1440,
+    "height": 1050
+  },
+  "passed": true
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "3214985b-bf8f-48ff-996d-2479a9ea6eeb",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "E:\\GitHub-Study\\dpdk-dataplane-platform\\.archify\\workflow-software-packet-path-20261020-143318\\candidate.json",
+  "output": "E:\\GitHub-Study\\dpdk-dataplane-platform\\.archify\\workflow-software-packet-path-20261020-143318\\software-packet-path.html",
+  "specification": {
+    "sha256": "2bfc97378d70c3b1903e18f69772827b2863266ed43747a6219f9b332d35e8a1",
+    "bytes": 20422
+  },
+  "artifact": {
+    "sha256": "862f3e416a57815d84c3e2f55e2a161eb596e3b9c1751863d569a03fc903f4a6",
+    "bytes": 795984
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "page": "E:\\GitHub-Study\\dpdk-dataplane-platform\\.archify\\workflow-software-packet-path-20261020-143318\\software-packet-learning.html",
+  "checks": [
+    "page loaded and UTF-8 intact",
+    "sent visible without clicking",
+    "step 1 updates explanation and code",
+    "step 2 updates explanation and code",
+    "step 3 updates explanation and code",
+    "step 4 updates explanation and code",
+    "step 5 updates explanation and code",
+    "sent 0 produces correct ownership",
+    "sent 1 produces correct ownership",
+    "sent 2 produces correct ownership",
+    "next navigation works",
+    "previous navigation works",
+    "desktop has no horizontal overflow",
+    "narrow viewport has no horizontal overflow",
+    "step click works at narrow viewport",
+    "no runtime exceptions"
+  ],
+  "runtimeErrors": [],
+  "screenshot": "E:\\GitHub-Study\\dpdk-dataplane-platform\\.archify\\workflow-software-packet-path-20261020-143318\\software-packet-learning.desktop.png",
+  "viewport": {
+    "width": 1440,
+    "height": 1050
+  },
+  "passed": true
+}

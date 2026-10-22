@@ -352,10 +352,24 @@ static int parse_connection_states(const char *text, uint32_t *mask)
     return 0;
 }
 
-/*
- * apply-filter 的 action 使用紧凑 token，而不是依赖参数位置：
- * fate 必须首先给出 drop 或 queue:N；其后 modifier 可任意排序但不可重复
- * 最终始终按 MARK → COUNT → fate 生成 canonical action 顺序，确保幂等比较稳定
+/**
+ * 从 argv[first] 解析去向动作及后续选项，将动作数组和数量写入 rule
+ * argc 为参数总数，first 为动作起点；成功返回 0，缺少动作、选项无效或重复时返回 -EINVAL
+ * 通用选项也可设置优先级、执行策略，或通过 state: 追加连接状态匹配条件
+ *
+ * 本例由 build_acl_request 传入 first = 10，命令末尾是 drop count
+ *   argv[10] = drop  → fate_type = DROP，先保存去向动作类型
+ *   argv[11] = count → has_count = true，先记录需要计数
+ *   参数解析完成后 → 按 MARK（若有）、COUNT（若有）、去向动作的顺序填写 actions
+ *
+ * 本例写入过程：
+ *   nb_actions = 0
+ *     → 无 MARK，跳过
+ *     → actions[0] = COUNT，nb_actions 从 0 变为 1
+ *     → actions[1] = DROP， nb_actions 从 1 变为 2
+ *   最终有效数组：[COUNT, DROP]，顺序由构造代码确定，不直接照抄命令中的先后顺序
+ *
+ * 本函数只构造请求中的动作描述；安装后报文命中规则时，worker 路径才计数、设置丢弃结果并释放包
  */
 static int build_filter_actions(int argc, char **argv, int first, struct dppd_rule *rule)
 {
@@ -453,6 +467,12 @@ static void initialize_request(struct dppd_management_request *request, enum dpp
     request->request_id = ((uint64_t)(uint32_t)getpid() << 32) ^ (uint64_t)now.tv_nsec;
 }
 
+/**
+ * 连接 socket_path 指定的本机管理 socket，发送一个完整 request 并接收、核对 response
+ * 返回 0 表示传输和响应头校验成功，业务结果仍由调用方检查 response->status；失败返回负错误码
+ * 客户端 main → 本函数 send → daemon management_poll / management_handle → 本函数 recv
+ * socket 传递的是管理请求结构体，不是 worker 经网卡接收的业务报文
+ */
 static int exchange(const char *socket_path, const struct dppd_management_request *request,
     struct dppd_management_response *response)
 {
@@ -526,7 +546,20 @@ static int parse_acl_range(const char *text, uint16_t *first, uint16_t *last)
     return 0;
 }
 
-/** 按位生成完整的一百二十八位掩码，不能用四个主机整数拼接后误换字节序 */
+/**
+ * 解析 IPv6 地址和前缀长度，写入 16 字节地址与掩码，并将地址的主机位清零
+ * 成功返回 0，地址或前缀格式无效返回 -EINVAL
+ * 掩码从地址最高位开始：前缀范围内填 1，其余位填 0
+ *
+ * 例：2001:db8:1::1234/64
+ *   掩码：ff ff ff ff ff ff ff ff | 00 00 00 00 00 00 00 00
+ *         └──── 前 64 位为 1 ────┘ └──── 后 64 位为 0 ────┘
+ *   地址与掩码按位相与 → 保存为 2001:db8:1::，末尾主机部分 1234 被清零
+ *
+ * /65 比 /64 多保留一位：第 9 字节由 0000 0000 变成 1000 0000，即 0x80
+ *   掩码：ff ff ff ff ff ff ff ff | 80 00 00 00 00 00 00 00
+ * /0 掩码全 0，地址不限；/128 掩码全 ff，完整匹配一个 IPv6 地址
+ */
 static int parse_ipv6_cidr(const char *text, uint8_t address[16], uint8_t mask[16])
 {
     if (strcmp(text, "any") == 0) {
@@ -554,12 +587,37 @@ static int parse_ipv6_cidr(const char *text, uint8_t address[16], uint8_t mask[1
     return 0;
 }
 
-/** 复用正式规则请求和版本保护，ACL 固定使用软件执行，允许后继续原有二层或三层转发 */
+/**
+ * 将 acl-set / acl6-set 参数构造成单条 RULE_APPLY 请求，固定选择软件执行
+ * argc/argv 从命令名开始，request 为输出区；返回 0 表示构造成功，参数无效返回负错误码
+ *
+ * 例：dppctl acl-set 20 0 0 100 udp any any any 9000 drop count
+ * argv 下标   0        1   2   3   4    5    6    7    8    9     10   11
+ * 参数        acl-set  20  0   0   100  udp  any  any  any  9000  drop count
+ * 含义        命令     ID  入口 预期 优先 协议 源IP 目的IP 源端口 目的端口 动作 计数
+ * expected = 0 表示要求新建，规则的实际 generation 由服务端控制层分配
+ *
+ * main → build_request 按命令名分发 → 本函数
+ *   → 初始化请求头 → 填 ID、入口、预期版本及优先级 → 填地址和端口条件 → 填动作
+ *   → 返回 main → exchange 才发送；本函数只填结构体，不安装规则
+ * request.payload.apply.rule 保存完整规则，源/目的 any 表示对应条件不限
+ * 本例 UDP 使用端口范围条件，目的 9000 对应闭区间 [9000, 9000]，动作为 DROP 和 COUNT
+ */
 static int build_acl_request(int argc, char **argv, struct dppd_management_request *request)
 {
     if (argc < 11 || argc > 14)
         return -EINVAL;
     initialize_request(request, DPPD_MANAGEMENT_RULE_APPLY);
+    /**
+     * 本例的输出直接写进 request，rule 指针只是定位其中的完整规则，不另建副本
+     * request
+     * ├─ operation = RULE_APPLY，告诉服务端这是规则创建或更新请求
+     * └─ payload.apply
+     *    ├─ install_port_id       → 安装入口，本例为 0
+     *    ├─ expected_generation   → 预期旧版本，本例为 0，要求新建
+     *    └─ rule ← 下方 rule 指针 → ID、优先级、匹配条件和动作
+     * 请求头标识如何解释数据，payload 保存该操作的具体输入
+     */
     struct dppd_rule *rule = &request->payload.apply.rule;
     uint64_t port, priority, protocol;
     if (parse_u64(argv[1], 1, UINT64_MAX, &rule->id) != 0 || parse_u64(argv[2], 0, UINT16_MAX - 1U, &port) != 0 ||
@@ -570,6 +628,19 @@ static int build_acl_request(int argc, char **argv, struct dppd_management_reque
     rule->domain = DPPD_RULE_DOMAIN_INGRESS;
     rule->fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
     rule->priority = (uint32_t)priority;
+    /**
+     * matches 保存规则的匹配条件，各项须同时满足；这里构造条件，不读取实际报文
+     * 本例 udp any any any 9000 最终组成：
+     *   matches[0]：ETH       → 以太网层条件，不指定 MAC 地址
+     *   matches[1]：IPv4      → 源、目的地址不限，两侧地址及掩码均为 0
+     *   matches[2]：UDP_RANGE → UDP，源端口 [0, 65535]，目的端口 [9000, 9000]
+     *   nb_matches = 3        → 只处理前 3 项，不遍历整个预分配数组
+     *
+     * 初始 nb_matches = 2 → 先计入 ETH 和 IP
+     * ip → matches[1]，transport → matches[2]，两个指针直接填写对应数组元素
+     * UDP/TCP 条件填写成功后 nb_matches++ → 2 变为 3
+     * 仅提前取得 matches[2] 的地址不代表它已有效，是否计入由具体协议分支决定
+     */
     rule->nb_matches = 2;
     rule->matches[0].type = DPPD_MATCH_ETH;
     struct dppd_match *ip = &rule->matches[1], *transport = &rule->matches[2];
@@ -741,6 +812,12 @@ static int build_managed_rule(int argc, char **argv, struct dppd_management_requ
     return 0;
 }
 
+/**
+ * 将命令参数解析成管理请求，argc/argv 为去掉程序名及全局选项后的参数，request 为输出区
+ * apply-drop、apply-filter 等分支填写 RULE_APPLY 以及规则、安装端口和预期版本
+ * main → 本函数构造 request → exchange 发送；本函数不连接 daemon 或安装规则
+ * 返回 0 表示构造成功，不支持的命令或参数无效返回负错误码
+ */
 static int build_request(int argc, char **argv, struct dppd_management_request *request)
 {
     int configured = dppctl_config_build(argc, argv, request, build_managed_rule, initialize_request);
@@ -1808,8 +1885,39 @@ static int print_response(const struct dppd_management_response *response)
     return 0;
 }
 
+/**
+ * example:
+ *   dppctl acl-set 20 0 0 100 udp any any any 9000 drop count
+ *
+ * dppctl 是管理客户端；acl-set 创建或更新一条由软件执行的规则
+ *
+ * 规则身份与安装信息：
+ *   acl-set 20 0 0 100
+ *           │  │ │ └─ 优先级：100
+ *           │  │ └─ 预期旧版本：0，表示要求新建
+ *           │  └─ 安装入口：端口 0
+ *           └─ 规则 ID：20
+ *
+ * 匹配条件与动作：
+ *   udp any any any 9000 drop count
+ *   │   │   │   │   │    │    └─ 统计：累计命中次数和字节数
+ *   │   │   │   │   │    └─ 动作：丢弃命中的报文
+ *   │   │   │   │   └─ 目的端口：9000，范围为 [9000, 9000]
+ *   │   │   │   └─ 源端口：不限，范围为 0～65535
+ *   │   │   └─ 目的 IP：不限
+ *   │   └─ 源 IP：不限
+ *   └─ 协议：IPv4 / UDP，acl6-set 才使用 IPv6
+ *
+ * 本例：新建 ID 20，在入口 0 匹配目的端口 9000 的 IPv4/UDP 包，执行 DROP 和 COUNT
+ * 规则实际版本由服务端分配；count 记录规则命中，不要求报文最终发送成功
+ */
 int main(int argc, char **argv)
 {
+    /**
+     * socket_path: 指定与 dppd 通信的 Unix socket 路径，默认为 DPPD_MANAGEMENT_DEFAULT_SOCKET
+     * request: 保存将要发给 dppd 的配置请求
+     * response: 保存 dppd 返回的处理结果
+     */
     const char *socket_path = DPPD_MANAGEMENT_DEFAULT_SOCKET;
     struct dppd_management_request request;
     struct dppd_management_response response;
@@ -1822,6 +1930,22 @@ int main(int argc, char **argv)
         socket_path = argv[2];
         argument = 3;
     }
+    /**
+     * 跳过程序名和已处理的全局选项，将剩余命令参数构造成管理请求
+     *
+     * 未带 --socket，argument = 1
+     *   原参数：[dppctl] [acl-set] [20] ...
+     *          跳过 1 项 ──→ [acl-set] [20] ...
+     *
+     * 带 --socket，argument = 3
+     *   原参数：[dppctl] [--socket] [PATH] [acl-set] [20] ...
+     *          跳过 3 项 ──────────────→ [acl-set] [20] ...
+     *
+     * argv + argument  → 剩余参数的起点，构造器的 argv[0] 就是命令名
+     * argc - argument  → 剩余参数的数量，只改变读取范围，不复制字符串
+     *
+     * [acl-set] [20] ... → build_request → 填写 request → exchange 发送给 dppd
+     */
     rc = build_request(argc - argument, argv + argument, &request);
     if (rc != 0) {
         print_usage(argv[0]);

@@ -4,13 +4,14 @@
 #include <rte_mbuf.h>
 
 /**
- * 只准备固定大小的报文头缓冲区，不复制整包负载
- * 可容纳双 VLAN、IPv6 固定头、有界扩展头链和最长 TCP 头，不复制整个数据负载
+ * 为报文头解析预留固定大小的备用缓冲区，限制一次请求读取的范围
+ * 小包的读取范围可能覆盖整包，大包最多读取前 1024 字节，后续只解析所需字段
  */
 #define DPPD_HEADER_SCRATCH 1024U
 
 /**
  * 提取单段或多段报文的头部字段，写入 packet 并返回解析状态
+ * packet.c 根据以太网类型和 IP 协议等字段逐层定位报文头，检查长度后提取地址和端口
  * packet 不持有原始报文内存，解析不修改或释放 mbuf
  */
 int dppd_packet_parse_mbuf(const struct rte_mbuf *mbuf, struct dppd_packet *packet)
@@ -23,12 +24,14 @@ int dppd_packet_parse_mbuf(const struct rte_mbuf *mbuf, struct dppd_packet *pack
     if (mbuf == NULL || packet == NULL)
         return DPPD_PARSE_MALFORMED;
 
-    /** 获取整条 mbuf 链的总长度，不使用仅代表首段长度的字段 */
+    /** packet_len 是整条 mbuf 链的总长度，read_len 取总长度与缓冲区上限中的较小值 */
     packet_len = rte_pktmbuf_pkt_len(mbuf);
     read_len = packet_len < sizeof(scratch) ? packet_len : sizeof(scratch);
     /**
-     * 请求范围在一段内连续时直接借用原始指针，跨段时由 DPDK 复制到 scratch
-     * 两种情况都使用返回的 data，不能假定 scratch 一定已写入数据
+     * 用于安全、连续地读取网络报文数据（mbuf）的核心函数
+     * 连续时返回mbuf原始报文数据指针，零拷贝且不写 scratch
+     * 跨段时将 read_len 个字节复制到 scratch，再返回其数据指针，发生拷贝
+     * 返回值指向报文字节而非 struct rte_mbuf 管理结构，实际读取位置统一以 data 为准
      */
     data = rte_pktmbuf_read(mbuf, 0, read_len, scratch);
     if (data == NULL)

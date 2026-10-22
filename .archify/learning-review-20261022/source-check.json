@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "scope": "Compared with start of this Goal; pre-existing changes preserved",
+  "changed_files": [
+    "app/dppctl/main.c",
+    "lib/control/control.c",
+    "lib/control/rule_repository.c",
+    "lib/control/slot_index.c",
+    "lib/dataplane/exact.c",
+    "lib/dataplane/ipv6_rewrite.c",
+    "lib/dataplane/nd6.c",
+    "lib/dataplane/pipeline.c",
+    "lib/dataplane/software_backend.c",
+    "lib/management/server.c"
+  ],
+  "noncomment_changes": [],
+  "source_count": 149
+}

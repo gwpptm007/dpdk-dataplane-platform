@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ · DPDK 源码学习</title><style>
+__STYLE__
+.stage-nav{display:flex;flex-wrap:wrap;gap:8px 15px;margin:16px 0;font-size:14px}.stage-nav a[aria-current=page]{font-weight:bold;text-decoration:underline}.learning-status{font-size:13px;color:var(--green);margin-top:8px}.journey{grid-template-columns:1fr 1.2fr 1fr}.journey pre{font-size:13px;margin-bottom:0;padding:12px}.journey p{font-size:14px;white-space:pre-line}.state{white-space:pre-line;font:14px/1.7 Consolas,"Microsoft YaHei",monospace}.links{display:flex;gap:8px;flex-wrap:wrap}.links a{font-size:13px;overflow-wrap:anywhere}.detail .explain{white-space:pre-line}.section-pager{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;margin:22px 0}.full-step{margin:18px 0}.full-step p{white-space:pre-line}.toggle-all{border:1px solid var(--blue);border-radius:7px;background:white;color:var(--blue);padding:7px 14px;margin-top:14px}.workspace>nav{min-width:0}pre{tab-size:4}.scope strong{color:var(--blue)}footer{margin-top:22px}.card .kicker{margin-bottom:9px}
+@media(max-width:900px){.journey{grid-template-columns:1fr}.workspace{grid-template-columns:1fr}.step-list{display:grid;grid-template-columns:1fr 1fr}}
+@media(max-width:520px){main{padding:16px}.step-list,.io{grid-template-columns:1fr}header{display:block}.detail{padding:16px}}
+@media print{.workspace,button,.section-pager{display:none!important}#all-steps{display:block!important}.full-step{break-inside:avoid}pre{white-space:pre-wrap}a{color:black}}
+</style></head><body><main>
+<header><div><div class="eyebrow">__CHAPTER__</div><h1>__TITLE__</h1><p class="sub">沿真实调用读代码 · 用具体状态复习 · 示例不运行 DPDK</p></div><a href="index.html">返回学习目录</a></header>
+__NAV__
+<p class="learning-status">__STATUS__</p>
+<div class="scope"><strong>本节边界：</strong>__SCOPE__</div>
+<section class="journey" aria-label="始终可见的示例、主线和当前状态">
+<div class="card"><div class="kicker">固定示例</div><p>__EXAMPLE__</p></div>
+<div class="card"><div class="kicker">本节完整路径</div><pre>__FLOW__</pre></div>
+<div class="card"><div class="kicker">当前步骤完成后的状态</div><div class="state" id="fields" aria-live="polite"></div></div>
+</section>
+<button class="toggle-all" id="show-all" aria-expanded="false" aria-controls="all-steps">展开本节全部步骤，连续阅读</button>
+<section class="workspace"><nav aria-label="学习步骤"><div class="kicker">按顺序阅读，也可以回看任意一步</div><div id="steps" class="step-list"></div></nav>
+<article class="card detail"><h2 id="detail-title"></h2><div class="location" id="detail-location"></div><div class="links" id="source-links"></div>
+<p class="explain" id="detail-explain"></p><div class="io"><div><b>进入这一步</b><p id="detail-input"></p></div><div><b>完成这一步</b><p id="detail-output"></p></div></div>
+<div class="kicker">当前源码节选 · 上下文可点击源码链接查看</div><pre><code id="detail-code"></code></pre><div class="note" id="detail-note"></div><p id="handoff" class="explain"></p>
+<div class="pager"><button id="previous">← 上一步</button><button id="next">下一步 →</button><span id="progress"></span></div></article></section>
+<section id="all-steps" hidden aria-label="本节全部步骤"></section>
+<nav class="section-pager" aria-label="前后章节">__PREVIOUS____NEXT__</nav>
+<footer>源码依据当前工作区生成；示例值用于解释，不代表运行配置或流量验证。运行时快照、控制面账本和磁盘文件各有用途。<a href="review.html">范围与验证记录</a></footer>
+</main><script>
+'use strict';
+const steps=__STEPS__;
+const get=id=>document.getElementById(id);
+let selected=0;
+function sourceLinks(parent,step){
+ for(const ref of [step,...(step.related||[])]){const a=document.createElement('a');a.href=ref.sourceHref;a.textContent='源码：'+ref.file+' · '+ref.fn+' · L'+ref.line;a.target='_blank';a.rel='noopener';parent.append(a);}
+}
+steps.forEach((s,i)=>{
+ const b=document.createElement('button');b.className='step';b.dataset.step=i;
+ const num=document.createElement('span');num.className='num';num.textContent=i+1;
+ const label=document.createElement('span');label.textContent=s.title;
+ const small=document.createElement('small');small.textContent=s.fn;label.append(small);b.append(num,label);
+ b.onclick=()=>select(i);get('steps').append(b);
+ const article=document.createElement('article');article.className='card full-step';article.id='read-'+(i+1);
+ const title=document.createElement('h2');title.textContent=(i+1)+' · '+s.title;article.append(title);
+ sourceLinks(article,s);
+ for(const [label,key] of [['说明','explain'],['输入','input'],['输出','output'],['状态变化','state']]){
+  const p=document.createElement('p');const strong=document.createElement('strong');strong.textContent=label+'：';p.append(strong,document.createTextNode(s[key]));article.append(p);
+ }
+ const pre=document.createElement('pre');pre.textContent=s.code;article.append(pre);
+ const p=document.createElement('p');p.textContent=s.note+'\n下一步：'+s.handoff;article.append(p);get('all-steps').append(article);
+});
+function render(){
+ const s=steps[selected];get('detail-title').textContent=(selected+1)+' · '+s.title;
+ get('detail-location').textContent=s.file+' · '+s.fn+' · L'+s.line+'–'+s.endLine;
+ get('source-links').replaceChildren();sourceLinks(get('source-links'),s);
+ for(const key of ['explain','input','output','code','note'])get('detail-'+key).textContent=s[key];
+ get('fields').textContent=s.state;get('handoff').textContent='接下来：'+s.handoff;
+ document.querySelectorAll('[data-step]').forEach(b=>{if(+b.dataset.step===selected)b.setAttribute('aria-current','step');else b.removeAttribute('aria-current');});
+ get('previous').disabled=selected===0;get('next').disabled=selected===steps.length-1;get('progress').textContent=(selected+1)+' / '+steps.length;
+}
+function select(i){selected=i;history.replaceState(null,'','#step-'+(i+1));render();}
+function fromHash(){const m=location.hash.match(/^#step-(\d+)$/);selected=m?Math.max(0,Math.min(steps.length-1,+m[1]-1)):0;render();}
+get('previous').onclick=()=>select(Math.max(0,selected-1));
+get('next').onclick=()=>select(Math.min(steps.length-1,selected+1));
+get('show-all').onclick=()=>{const show=get('all-steps').hidden;get('all-steps').hidden=!show;get('show-all').setAttribute('aria-expanded',String(show));get('show-all').textContent=show?'收起连续阅读':'展开本节全部步骤，连续阅读';};
+window.addEventListener('hashchange',fromHash);fromHash();
+</script></body></html>
+

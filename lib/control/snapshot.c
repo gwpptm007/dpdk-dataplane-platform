@@ -24,8 +24,10 @@ int dppd_snapshot_build_port_pairs(const struct dppd_config *cfg, struct dppd_fo
 
 /**
  * 按入口端口查询静态配对出口，不检查目的 IP
- * 查到时写入 egress_port 并返回零，参数无效或没有配对时返回非零
- * 由 pipeline.c 调用，查询失败时由调用方决定丢弃
+ * 查到时写入 *egress_port 并返回 0，参数无效或没有配对时返回 -1
+ * pipeline.c 传入 &decision->egress_port，出口通过指针写回，返回值仅表示查询状态
+ * 示例：入口 0 → 配对出口 1 → 写入 *egress_port = 1，返回 0
+ * 查询失败时由调用方决定丢弃，本函数不处理报文内存
  */
 int dppd_snapshot_lookup_peer(const struct dppd_forwarding_snapshot *snapshot, uint16_t ingress_port,
     uint16_t *egress_port)

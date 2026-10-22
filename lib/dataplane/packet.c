@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define DPPD_ETHER_HEADER_LEN 14U
+#define DPPD_ETHER_HEADER_LEN 14U /** 目的 MAC 6 + 源 MAC 6 + 类型 2，不含 VLAN 标签 */
 #define DPPD_VLAN_HEADER_LEN 4U
 #define DPPD_ARP_HEADER_LEN 28U
 #define DPPD_IPV4_MIN_HEADER_LEN 20U
@@ -44,7 +44,7 @@ static int require_bytes(uint32_t offset, uint32_t length, uint32_t available_le
     return 0;
 }
 
-/** 按以太网、VLAN、网络层、传输层逐层前进，只在边界检查成功后访问对应字段 */
+/** 逐层解析以太网、VLAN、IP 与传输层，将字段写入 packet 并返回解析状态 */
 int dppd_packet_parse_headers(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
     struct dppd_packet *packet)
 {
@@ -59,6 +59,12 @@ int dppd_packet_parse_headers(const uint8_t *data, uint32_t available_len, uint3
     packet->connection_state = DPPD_CT_UNTRACKED;
     packet->packet_len = packet_len;
     packet->l2_len = DPPD_ETHER_HEADER_LEN;
+    /**
+     * 无 VLAN 的 IPv4 报文布局
+     * 整包偏移   0～5         6～11        12～13       14 开始
+     * 内容       目的 MAC     源 MAC       协议类型      IPv4 头
+     *            └──────── 以太网头 14 字节 ────────┘
+     */
     ether_type = read_be16(data + 12U);
     offset = DPPD_ETHER_HEADER_LEN;
 
@@ -101,16 +107,25 @@ int dppd_packet_parse_headers(const uint8_t *data, uint32_t available_len, uint3
 
         if (require_bytes(offset, DPPD_IPV4_MIN_HEADER_LEN, available_len, packet_len) != 0)
             return DPPD_PARSE_MALFORMED;
+        /**
+         * IPv4 首字节同时保存版本与 IHL，IHL 以 4 字节为单位
+         * 0x45 = 0100 0101
+         *        └──┘ └──┘
+         *        版本 IHL
+         *         4    5 × 4 = 20 字节
+         * IHL 包含选项长度，后续按实际头长检查可读范围
+         */
         if ((data[offset] >> 4) != 4U)
             return DPPD_PARSE_MALFORMED;
-        /** IHL 以 4 字节为单位，含选项时大于 20 字节，必须确认整个 IP 头都可读取 */
         ihl = (uint8_t)((data[offset] & 0x0fU) * 4U);
         if (ihl < DPPD_IPV4_MIN_HEADER_LEN || require_bytes(offset, ihl, available_len, packet_len) != 0)
             return DPPD_PARSE_MALFORMED;
 
         /**
-         * IPv4 总长度包含 IP 头和负载，不能短于头部，也不能超出整包剩余长度
-         * 不要求全部负载位于当前连续缓冲区，以便只复制报文头就能完成解析
+         * IP 头偏移 2 处的两字节是总长度，包含 IP 头和负载，须介于头长与整包剩余长度之间
+         * 本例：[以太网头 14][IPv4 头 20 | UDP 头 8 | 数据 18]
+         * 整包 packet_len = 60，IP 总长 total_length = 46，IP 头长 ihl = 20
+         * 不要求全部负载位于当前连续缓冲区，IP 声明范围以整包长度校验
          * 以太网帧末尾可能有填充，因此允许 IP 总长度小于整包剩余长度
          */
         total_length = read_be16(data + offset + 2U);
@@ -120,18 +135,24 @@ int dppd_packet_parse_headers(const uint8_t *data, uint32_t available_len, uint3
         packet->l3_type = DPPD_L3_IPV4;
         packet->l3_len = ihl;
         packet->ipv4_total_len = total_length;
+        /**
+         * IP 头内偏移   9         12..15       16..19
+         * 字段          协议号    源地址       目的地址
+         * 本例：源地址起点 14 + 12 = 26，UDP 头起点 14 + 20 = 34
+         * 地址原样复制，保留网络字节序并避免未对齐访问
+         */
         protocol = data[offset + 9U];
         packet->ip_protocol = protocol;
-        /** 原样复制地址字节，既保留网络字节序，也避免把未对齐的报文地址强转为整数指针 */
         memcpy(&packet->ipv4_src_be, data + offset + 12U, sizeof(packet->ipv4_src_be));
         memcpy(&packet->ipv4_dst_be, data + offset + 16U, sizeof(packet->ipv4_dst_be));
         fragment = read_be16(data + offset + 6U);
         offset += ihl;
 
         /**
-         * MF 位或分片偏移只要有一个非零，就统一按分片处理，不继续提取传输层端口
-         * 即使首片可能含有 UDP 或 TCP 头也采用同一策略，避免未经重组就按完整包匹配
-         * 位掩码只取分片相关位，不会把禁止分片的 DF 位误认为报文已经分片
+         * 分片字段：[保留 1 位][DF 1 位][MF 1 位][分片偏移 13 位]
+         * DF：禁止分片；MF：还有后续分片
+         * MF = 1 或分片偏移非零 → 标记 FRAGMENT，返回 OK
+         * 首片带有 UDP/TCP 头，也不提取端口，与后续分片统一处理
          */
         packet->ipv4_more_fragments = (fragment & DPPD_IPV4_MORE_FRAGMENTS) != 0;
         if ((fragment & (DPPD_IPV4_MORE_FRAGMENTS | DPPD_IPV4_OFFSET_MASK)) != 0) {
@@ -140,20 +161,32 @@ int dppd_packet_parse_headers(const uint8_t *data, uint32_t available_len, uint3
         }
 
         if (protocol == DPPD_IPPROTO_UDP) {
-            /** 以 IP 声明的负载长度为上限，不能把以太网填充算作 UDP 数据 */
+            /**
+             * 本例：[IP 头 20][UDP 头 8 | 数据 18]，IP 总长 46
+             * l4_available = 46 - 20 = 26，包含 UDP 头和 UDP 数据
+             * 以 IP 声明的长度为上限，避免把以太网填充算作 UDP 数据
+             */
             const uint32_t l4_available = (uint32_t)total_length - ihl;
             uint16_t udp_length;
 
             if (l4_available < DPPD_UDP_HEADER_LEN ||
                 require_bytes(offset, DPPD_UDP_HEADER_LEN, available_len, packet_len) != 0)
                 return DPPD_PARSE_MALFORMED;
-            /** UDP 长度含固定的 8 字节头，不能超出 IP 负载；这里只核对长度，不读取负载 */
+            /**
+             * UDP 头内偏移   0..1      2..3      4..5      6..7
+             * 字段          源端口    目的端口  UDP 总长  校验和
+             * UDP 头固定 8 字节，长度字段包含头和数据，本例为 8 + 18 = 26
+             * UDP 总长不能小于头长，也不能超过 IP 负载长度 l4_available
+             */
             udp_length = read_be16(data + offset + 4U);
             if (udp_length < DPPD_UDP_HEADER_LEN || udp_length > l4_available)
                 return DPPD_PARSE_MALFORMED;
             packet->l4_type = DPPD_L4_UDP;
             packet->l4_len = DPPD_UDP_HEADER_LEN;
-            /** 与地址字段一样，端口保留原始网络字节序，规则比较时使用相同表示 */
+            /**
+             * 本例整包偏移：[34..35 源端口][36..37 目的端口]
+             * 端口以网络字节序复制到 packet，修改副本不会写回原始报文
+             */
             memcpy(&packet->l4_src_port_be, data + offset, sizeof(packet->l4_src_port_be));
             memcpy(&packet->l4_dst_port_be, data + offset + 2U, sizeof(packet->l4_dst_port_be));
             return DPPD_PARSE_OK;
@@ -190,7 +223,10 @@ int dppd_packet_parse_headers(const uint8_t *data, uint32_t available_len, uint3
     }
 }
 
-/** 中转策略仍读取外层，内层错误独立记录，不能把关键选项的终端限制套用到中转路由 */
+/**
+ * 解析报文头，将协议、地址、端口等字段写入 packet
+ * 基础解析成功后补充隧道信息，返回基础解析状态
+ */
 int dppd_packet_parse_buffer(const uint8_t *data, uint32_t available_len, uint32_t packet_len,
     struct dppd_packet *packet)
 {

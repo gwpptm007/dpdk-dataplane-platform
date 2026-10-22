@@ -24,7 +24,12 @@ static bool worker_io_quiesced(const struct dppd_worker *worker)
         dppd_devices_io_quiesced(&worker->runtime->devices);
 }
 
-/** 一个出口独立提交一批报文，发送归出口，发送前失效仍计入入口的出口不可用丢弃 */
+/**
+ * 向指定出口的当前 worker 队列批量提交报文，count 是本出口实际待发送数量
+ * 提交前再次检查停止状态和出口可用性，失效则释放整批并计入入口丢弃
+ * 驱动接收的报文移交驱动管理，未接收的尾部报文由 worker 释放，不在此重试
+ * 成功提交和队列丢弃计入出口统计
+ */
 static void flush_egress(struct dppd_worker *worker, const struct dppd_port *egress, struct rte_mbuf **packets,
     const uint32_t *lengths, uint16_t count, struct dppd_stats_values *ingress, struct dppd_stats_values *output)
 {
@@ -36,10 +41,20 @@ static void flush_egress(struct dppd_worker *worker, const struct dppd_port *egr
         free_packets(packets, count);
         return;
     }
+    /**
+     * sent 表示驱动接收了待发送数组中的前多少个包，不表示对端已经收到
+     * packets 只包含本出口的待发送包，之前已丢弃的包不在其中，不能按原始 RX 数组编号理解 sent
+     * 例：count 为 3、sent 为 2 → packets[0] 和 packets[1] 交给驱动，packets[2] 仍归 worker
+     */
     uint16_t sent = rte_eth_tx_burst(egress->port_id, worker->queue_id, packets, count);
     output->tx_packets += sent;
+    /** 使用入队前保存的 lengths 统计，避免访问已移交驱动的 mbuf */
     for (uint16_t i = 0; i < sent; ++i)
         output->tx_bytes += lengths[i];
+    /**
+     * packets + sent 指向第一个未被接收的包，只释放剩余 count - sent 个，不在这里重试
+     * 例：3 个包只接收 2 个 → 从 &packets[2] 开始释放 1 个，前两个不能再次访问或释放
+     */
     if (sent < count) {
         output->tx_drops += count - sent;
         output->tx_queue_drops += count - sent;
@@ -79,23 +94,37 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
 }
 
 /**
- * 生成报文处理决定，IPv6 缺少静态邻居时尝试动态解析，并检查出口 DAD 就绪状态
- * 结果写入 decision，实际收发由 process_batch 执行
+ * 执行软件规则与出口选择，将动作、原因和出口写入 decision
+ * IPv6 缺静态邻居且已启用 ND 时，用出口和下一跳查询动态邻居表，补齐 MAC 或标记等待
+ * 转发前检查出口 IPv6 地址是否就绪，将决定交回 process_batch 或 stateful_decide
  */
 static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int parsed, const struct dppd_packet *packet,
     struct dppd_pipeline_decision *decision, struct dppd_software_count_batch *counts)
 {
-    /**
-     * 进入 lib/dataplane/pipeline.c 的 dppd_pipeline_decide_counted
-     * 根据报文和配置判定丢弃或选择转发出口，结果写入 decision
-     */
     dppd_pipeline_decide_counted(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,
         packet, decision, counts);
     if (runtime->nd6 == NULL || packet->l3_type != DPPD_L3_IPV6)
         return;
+    /**
+     * 静态邻居未命中时，pipeline 返回 DROP / NO_NEIGHBOR，但已留下出口和下一跳
+     * 上方检查保证此处是 IPv6 且已启用 ND（IPv6 邻居发现）
+     *
+     * 沿用示例：
+     *   decision->ipv4.port_id = 1，next_hop6 = fe80::1，destination_mac 仍为全 0
+     *   用网口 1 和 fe80::1 查询 ND 动态邻居表
+     *   若找到可用 MAC，dppd_nd6_resolve 直接写入 decision->ipv4.destination_mac
+     * 静态表没有邻居，并不代表动态表也没有，因此这里还需再查一次
+     */
     if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR) {
         int rc = dppd_nd6_resolve(runtime->nd6, decision->ipv4.port_id, decision->ipv4.next_hop6, packet,
             dppd_monotonic_ms(), decision->ipv4.destination_mac);
+
+        /**
+         * rc = 0       → MAC 已写入，改为 FORWARD，填写出口并设置 routed
+         * rc = -EAGAIN → MAC 尚未取得，改为 ND_PENDING，让 process_batch 尝试暂存报文
+         * 其他错误     → 保持 DROP / NO_NEIGHBOR，交回调用方处理失败
+         * ND_PENDING 时 action 仍是 DROP，但 process_batch 会先处理等待入队，再判断丢弃
+         */
         if (rc == 0) {
             decision->action = DPPD_PACKET_FORWARD;
             decision->drop_reason = DPPD_DROP_NONE;
@@ -104,6 +133,7 @@ static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int pa
         } else if (rc == -EAGAIN)
             decision->drop_reason = DPPD_DROP_ND_PENDING;
     }
+    /** 取得下一跳 MAC 后，仍须确认出口 IPv6 地址已就绪，否则改为 DROP / ND_NOT_READY */
     if (decision->action == DPPD_PACKET_FORWARD && !dppd_nd6_port_ready(runtime->nd6, decision->egress_port)) {
         decision->action = DPPD_PACKET_DROP;
         decision->drop_reason = DPPD_DROP_ND_NOT_READY;
@@ -134,7 +164,13 @@ static enum dppd_drop_reason stateful_error(int error)
     }
 }
 
-/** 反向 NAT 先恢复逻辑目的地址供 ACL 和路由使用，线缆字节只在最终放行后统一改写 */
+/**
+ * 结合连接状态生成处理决定，完成报文校验、会话/NAT 准备及策略匹配
+ * 流程：准备候选会话 → 构造 policy → routed_decide → 改写报文 → 提交或取消会话
+ * policy 使用会话得到的逻辑地址和端口匹配规则，packet 保留原包字段供改写校验
+ * decision 输出动作与出口，mbuf 可能被改写函数替换，实际发送与丢弃仍由 process_batch 执行
+ * 放行且改写成功才提交会话，失败取消候选并归还临时 NAT 端口，不刷新会话超时
+ */
 static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **mbuf,
     int parsed, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision,
     struct dppd_software_count_batch *counts)
@@ -143,6 +179,7 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
     struct dppd_connection_attempt attempt = {0};
     struct dppd_packet policy = *packet;
     int rc = 0;
+    /** 先校验 TCP/UDP 报文，再准备候选会话，并将连接状态交给后面的策略匹配 */
     if (parsed != DPPD_PARSE_MALFORMED) {
         if (packet->l4_type == DPPD_L4_TCP || packet->l4_type == DPPD_L4_UDP)
             rc = packet->l3_type == DPPD_L3_IPV6 ? dppd_ipv6_transport_validate(*mbuf, packet)
@@ -169,6 +206,7 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
         dppd_conntrack_finish(&attempt, 0, false);
         return;
     }
+    /** 用带连接状态和逻辑地址的 policy，复用通用软件规则与出口选择 */
     routed_decide(runtime, ingress->port_id, parsed, &policy, decision, counts);
     if (decision->action != DPPD_PACKET_FORWARD) {
         dppd_conntrack_finish(&attempt, 0, false);
@@ -182,11 +220,13 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
             dppd_conntrack_finish(&attempt, 0, false);
             return;
         }
+        /** 出口可用后改写实际报文，调整 MAC、TTL/HopLimit，并按需应用 NAT 和更新校验和 */
         rc = packet->l3_type == DPPD_L3_IPV6 ? dppd_ipv6_rewrite_flow(mbuf, packet, &decision->ipv4,
                                                    egress->mac.addr_bytes, attempt.nat ? &attempt.rewrite : NULL)
                                              : dppd_ipv4_rewrite_flow(mbuf, packet, &decision->ipv4,
                                                    egress->mac.addr_bytes, attempt.nat ? &attempt.rewrite : NULL);
     }
+    /** finish 提交或取消候选并释放会话表锁，此时尚未调用网卡发送 */
     int commit = dppd_conntrack_finish(&attempt, decision->egress_port, rc == 0);
     if (rc == 0)
         rc = commit;
@@ -197,13 +237,35 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
 }
 
 /**
- * 逐包解析并生成处理决定，随后发送、暂存或释放报文
- * 同一入口批次按实际出口分组，确保每个报文只交付一次
+ * 处理同一入口的一批报文，逐包决定去向，再按出口批量发送并提交统计
+ *
+ * worker：当前处理线程，提供运行配置、收发队列编号和统计对象
+ * ingress：这批报文的原入口网口，ND 重试也沿用原入口
+ * rx / received：待处理的 mbuf 指针数组及实际包数，received 不超过 DPPD_MAX_BURST
+ * retry：普通收包传 false，ND 等待包取出重试传 true，避免重复累计 RX、隧道观察和规则 COUNT
+ * expires：ND 等待的毫秒截止时间，首次传 0，由 hold 设置期限；重试沿用原期限，不延长等待
+ *
+ * 处理路径：
+ *   逐包解析 → 处理本机 ND 控制报文、检查 IPv6 入口地址是否就绪
+ *   未启用连接跟踪 → routed_decide 匹配软件规则，选择路由或配对出口
+ *   启用连接跟踪 → stateful_decide 处理会话，并完成决策及报文改写
+ *   等待下一跳 MAC → 尝试交给 ND 等待队列；拒绝或处理失败 → 释放当前包
+ *   允许转发 → 检查出口，按需完成普通路由改写、MARK 和多段报文合并，加入对应出口批次
+ *   逐包处理结束 → 提交规则 COUNT → flush_egress 提交发送 → 累加入口、出口和 worker 统计
+ *
+ * 普通三层转发修改源/目的 MAC、递减 TTL 或 Hop Limit，IPv4 还更新头部校验和
+ * 连接跟踪路径已完成改写时不重复执行；NAT 按配置另行改写 IP、端口和相关校验和
+ *
+ * 本函数接管 rx 中的报文，改写时可能替换 rx[i]，返回后调用方不能再访问或释放这些 mbuf
+ *   ND 入队成功：等待队列持有；TX 提交成功：驱动持有；其余已处理报文：本线程释放
+ * 无返回值；received 为 0 时直接结束，停止收发时释放整批，不等待凑满或重试 TX 未接收的包
+ * 函数返回前提交本批 COUNT，QSBR 静默点由 dppd_worker_main 在一轮端口扫描结束后报告
  */
 static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,
     uint16_t received, bool retry, uint64_t expires)
 {
     struct dppd_runtime *runtime = worker->runtime;
+    /** 按出口暂存待发送的 mbuf 指针、长度和数量，逐包处理结束后统一批量发送 */
     struct rte_mbuf *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];
     uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];
     uint16_t counts[DPPD_MAX_PORTS] = {0};
@@ -226,7 +288,7 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
         uint32_t length = rte_pktmbuf_pkt_len(rx[i]);
         if (!retry)
             delta.rx_bytes += length;
-        /** 进入 packet_mbuf.c 提取报文头字段 */
+        /** 逐包进入 packet_mbuf.c 提取报文头字段，burst 只批量收发，不省略逐包解析 */
         int parsed = dppd_packet_parse_mbuf(rx[i], &packet);
         packet.neighbor_retry = retry;
         /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */
@@ -254,13 +316,26 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             continue;
         }
         /**
-         * 启用连接跟踪时处理状态 ACL 和会话，否则进入本文件的 routed_decide
-         * 失败候选不能占用 NAT 端口或刷新会话超时
+         * 未启用连接跟踪
+         *   → routed_decide → decision
+         *
+         * 启用连接跟踪
+         *   → stateful_decide
+         *       校验、准备候选会话
+         *         → routed_decide
+         *         → 检查出口、改写实际报文
+         *         → 成功提交会话，失败取消候选
          */
         if (runtime->conntrack != NULL)
             stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);
         else
             routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);
+            
+        /**
+         * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列
+         * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它
+         * 入队失败 → mbuf 仍归当前线程，继续下面的丢弃分支并释放
+         */
         if (decision.drop_reason == DPPD_DROP_ND_PENDING) {
             struct dppd_nd6_pending pending = {.mbuf = rx[i],
                 .ingress = ingress->port_id,
@@ -322,6 +397,10 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             rte_pktmbuf_free(rx[i]);
             continue;
         }
+        /**
+         * 根据处理决定取得实际出口对象，三层模式按出口编号查找，端口配对模式复用 paired
+         * FORWARD 只表示策略允许，发送前仍须确认出口存在、编号一致且可发送
+         */
         const struct dppd_port *egress =
             runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;
         if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {
@@ -330,6 +409,14 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             rte_pktmbuf_free(rx[i]);
             continue;
         }
+        /**
+         * 三层转发在这里改写报文头，启用连接跟踪时已由 stateful_decide 改写，不能再次递减跳数
+         * IPv6 普通转发：目的 MAC 改为下一跳 MAC，源 MAC 改为出口 MAC，Hop Limit 减 1
+         *
+         * &rx[i] 允许改写函数在需要复制报文时替换 mbuf 指针，后续发送使用替换后的指针
+         * &packet 提供已解析的头部信息，decision.ipv4 是 IPv4/IPv6 共用的转发结果
+         * 改写失败则释放当前包；成功后继续加入出口发送批次，此处尚未交给网卡
+         */
         if (decision.routed && runtime->conntrack == NULL) {
             bool ipv6 = packet.l3_type == DPPD_L3_IPV6;
             int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)
@@ -357,11 +444,21 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
                 continue;
             }
         }
+        /** 将规则 MARK 写入 mbuf 的附加信息并设置有效标志，不向报文字节中插入标记 */
         if (decision.has_mark) {
             rx[i]->hash.fdir.hi = decision.mark_id;
             rx[i]->ol_flags |= RTE_MBUF_F_RX_FDIR_ID;
         }
+        /**
+         * 以出口在 devices.ports 中的数组下标分组，指针相减得到元素间距
+         * 例：ports[0].port_id = 1、ports[1].port_id = 5，出口为网口 5 时 index 为 1
+         * tx[index]、tx_lengths[index]、counts[index] 和 outputs[index] 都属于这个出口
+         */
         uint16_t index = (uint16_t)(egress - runtime->devices.ports);
+        /**
+         * 多段报文且出口未启用多段发送时，尝试将全部数据合并到第一段
+         * 第一段空间不足等原因导致合并失败时，统计并释放当前包，继续处理下一个
+         */
         if (rx[i]->nb_segs > 1U && (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0 &&
             rte_pktmbuf_linearize(rx[i]) != 0) {
             outputs[index].tx_drops++;
@@ -369,15 +466,26 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             rte_pktmbuf_free(rx[i]);
             continue;
         }
-        /* 长度在交给驱动前保存，发送完成后不再读取已经转移所有权的 mbuf */
+        /**
+         * 将当前包追加到对应出口的待发送批次，只保存指针，此处尚未交给驱动
+         * 提前保存长度供发送统计使用，成功提交后不再读取已转移所有权的 mbuf
+         * 例：counts[index] 为 2，长度和指针都写入下标 2，然后 counts[index] 增为 3
+         * counts 只统计本次 process_batch 收集的包，本批处理结束就发送，不等待凑满
+         */
         tx_lengths[index][counts[index]] = length;
         tx[index][counts[index]++] = rx[i];
     }
     /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */
     dppd_software_count_batch_flush(&rule_counts);
+    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */
     for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)
-        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,
-            &outputs[index]);
+        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta, &outputs[index]);
+    /**
+     * 此时 delta 保存本批入口接收和处理中的丢弃统计，outputs 按出口保存发送及发送失败统计
+     * 先将 delta 记入入口网口，再将各 outputs 记入对应出口，并合并到 delta 供 worker 汇总
+     * 例：入口 0 收到 3 包，均送往出口 1，其中 2 包提交成功、1 包因发送队列未接收而丢弃
+     *   入口 0：RX 加 3；出口 1：TX 加 2、tx_queue_drops 加 1；worker 汇总包含这三项
+     */
     dppd_stats_add(&worker->port_stats[ingress - runtime->devices.ports], &delta);
     for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index) {
         dppd_stats_add(&worker->port_stats[index], &outputs[index]);
@@ -400,7 +508,16 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
     process_batch(worker, ingress, packets, count, false, 0);
 }
 
-/** 等待包重新检查最新 ACL、NAT 与路由，不能把等待前的放行结果带过策略更新 */
+/**
+ * 从 ND 等待数组取回本队列的报文，每次最多处理 DPPD_MAX_BURST 个
+ *
+ * dppd_nd6_take 返回 true → 当前线程重新持有 pending.mbuf
+ *   报文失效或原入口已不存在 → 释放 mbuf，更新丢弃统计
+ *   否则 → process_batch 重新解析，并按最新软件规则、会话和路由决定去向
+ *
+ * retry 传 true，避免重复累计 RX 和规则 COUNT；expires_ms 沿用首次入队的截止时间
+ * 重新处理后仍缺 MAC 的报文可以再次入队，不能依靠反复入队延长等待期限
+ */
 static void process_waiting(struct dppd_worker *worker)
 {
     struct dppd_nd6_pending pending;
@@ -408,9 +525,12 @@ static void process_waiting(struct dppd_worker *worker)
          i < DPPD_MAX_BURST && dppd_nd6_take(worker->runtime->nd6, worker->queue_id, dppd_monotonic_ms(), &pending);
          ++i) {
         const struct dppd_port *ingress = dppd_devices_find(&worker->runtime->devices, pending.ingress);
+        /** 取回不代表可以发送，失效包或已失去原入口的包在此归还 mbuf */
         if (pending.expired || ingress == NULL) {
             rte_pktmbuf_free(pending.mbuf);
-            struct dppd_stats_values dropped = {.policy_drops = 1, .nd6_queue_drops = 1};
+            struct dppd_stats_values dropped = {
+                .policy_drops = 1, .nd6_queue_drops = 1
+            };
             dppd_stats_add(&worker->stats, &dropped);
             if (ingress != NULL)
                 dppd_stats_add(&worker->port_stats[ingress - worker->runtime->devices.ports], &dropped);
@@ -458,9 +578,15 @@ int dppd_worker_main(void *arg)
                 dppd_nd6_tick(runtime->nd6, dppd_monotonic_ms(), send_nd6, worker);
             process_waiting(worker);
         }
+        /** 依次处理各网口的本 worker 队列，一个 process_batch 返回后继续下一个网口 */
         for (i = 0; i < runtime->devices.nb_ports; ++i)
             process_ingress(worker, &runtime->devices.ports[i]);
-        /** 即使所有端口都没有报文，也要报告安全点，避免空闲线程一直阻止旧表回收 */
+        /**
+         * 一轮扫描结束后报告本线程已不再使用之前借用的规则和路由表，供回收器判断旧表能否释放
+         * 静默点是读者进度报告，不是线程休眠；即使没有收包也要报告，然后继续下一轮
+         * 例：控制面将规则 A 换成 B，仍在使用 A 的线程未报告安全点前，回收器必须保留 A
+         * 本轮规则匹配和 COUNT 提交均已结束，此处报告进度；回收条件满足后由控制面释放旧表
+         */
         dppd_software_backend_worker_quiescent(runtime->software_backend, worker->queue_id);
         dppd_ipv4_router_reader_quiescent(runtime->ipv4_router, worker->queue_id);
     }
