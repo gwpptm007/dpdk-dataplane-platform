@@ -3,17 +3,46 @@
 本轮以 `roadmap_v3.md` 的 M5 交付和验收为完成标准，起点为 `2eb7c0e`
 现有在线配置事务的完整验收对应 `1fcfc80`，不能直接作为最新源码的联合验收
 
+2026-10-22 按用户要求收尾并暂停 goal，以下未完成项转为待办，不继续自动启动大型验收
+M5 软件生产化整体尚未验收完成，已通过的独立功能和提交保留
+
 | 顺序 | 交付 | 完成证据 | 状态 |
 | --- | --- | --- | --- |
 | 1 | 持久请求回执、幂等提交、跨重启查询 | 四套各 89/89 单测与完整核心回归，各 56 包正式请求 TAP，324 项源码一致 | 已验收 |
 | 2 | 稳定北向 API、鉴权和权限 | 四套各 90/90 单测、正式 HTTP/TLS 四阶段闭环、角色与资源边界，329 项源码一致 | 已验收 |
 | 3 | 结构化日志、指标、健康与卡死检测 | 四套各 92/92 单测与正式三阶段观测，真实卡死与停止等待限时退出，337 项源码一致 | 已验收 |
 | 4 | NUMA 自动布局 | 同轮四套通过拓扑算法、EAL 核约束、实际布局和转发回归，物理多 NUMA 性能另列 | 已验收 |
-| 5 | 可复现发布、部署、滚动升级和回滚 | 双目录构建比较、包校验、策略保留、失败回滚与恢复测试 | 实施中 |
-| 6 | 软件联合验收 | 多 DPDK、sanitizer、正式 daemon/API、完整 TAP、冻结性能门禁同源通过 | 待执行 |
+| 5 | 可复现发布、部署、滚动升级和回滚 | 已有本地实现与独立 Linux 预检，尚未完成最终版本四套及真实 TAP 验收 | 待办 |
+| 6 | 软件联合验收 | 多 DPDK、sanitizer、正式 daemon/API、完整 TAP、冻结性能门禁同源通过 | 待办 |
 
 每项必要测试通过后独立提交并推送，记录提交、源码摘要、命令与报告
 最终验收必须针对包含所有功能的同一份源码，不修改冻结门禁或排除失败样本
+
+## 本次收尾与恢复入口
+
+已验收并推送：`28e96c6` 持久请求、`cef5719` 北向 API、`48aea64` 观测与 NUMA
+最新功能提交四套各 92/92 Meson 单测与核心、恢复、HTTP/TLS、正式观测回归通过，337 项源码一致
+原始阶段证据保存在 `build/native-check/m5-requests-artifacts`、`m5-api-artifacts` 和 `m5-observability-artifacts`
+
+以下八个文件作为未提交草稿保留在当前工作区，恢复任务时先核对，不要重写已完成实现：
+
+- `scripts/m5_release.py`、`scripts/m5_deploy.py`
+- `tests/unit/test_m5_release.py`、`tests/integration/m5_release.py`
+- `scripts/verify_m5_production.py`、`tests/unit/test_m5_production_acceptance.py`
+- `docs/m5_release.md`、`docs/m5_final_acceptance.md`
+
+剩余待办按依赖顺序执行：
+
+1. 收尾发布模块：此前 Linux 24 项及正式非 TAP 八阶段预检通过，新增 `--jobs` 后需要完整重跑当前 25 项单测
+2. 在 Meson 注册发布单测与联合验收器单测，预计总数由 92 增至 94，以实际注册清单为准
+3. 同步联合验收器的范围校验：发布报告新加 `release_pair`、`incompatible_reader`、`failed_start` 字段尚未接入严格检查
+4. 冻结完整源码与文档，四套运行 `scripts/verify_m5_production.py`，再执行完整 M2 TAP 与四套 daemon、requests、release TAP
+5. 用 `scripts/m5_release.py reproduce --jobs 4` 在两个新目录真实构建，核对三程序一致及包含文档的 `source.tar` 摘要
+6. 等所有功能测试和构建结束，按原冻结契约运行四份五轮性能测量，并聚合全部 22 份输入
+7. 更新实际结果、核对 Git 提交源码及发布归档，再提交并 push；只有全部通过才完成 M5 软件 goal
+
+发布预检使用同一套正式二进制和不同清单版本，失败启动及不兼容 reader 为显式故障注入
+这些证据不代表真实历史版本迁移、无损接管或物理硬件验收，恢复时继续保留边界
 
 ## 功能边界
 
