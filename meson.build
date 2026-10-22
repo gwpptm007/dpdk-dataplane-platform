@@ -107,6 +107,7 @@ executable(
   'dppctl',
   'app/dppctl/main.c',
   'app/dppctl/config_cli.c',
+  'app/dppctl/json.c',
   'app/dppctl/routing_cli.c',
   'app/dppctl/conntrack_cli.c',
   'app/dppctl/transfer_cli.c',

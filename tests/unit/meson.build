@@ -350,6 +350,9 @@ flow_request_test = executable('test_flow_request', 'test_flow_request.c', depen
   link_args: ['-Wl,--wrap=fsync', '-Wl,--wrap=dppd_flow_service_process', '-Wl,--wrap=dppd_async_flow_process'])
 test('M5 persistent request idempotency crash receipts and stale key protection', flow_request_test, timeout: 120)
 
+test('M5 northbound authentication parsing and resource limits', find_program('python3'),
+  args: [files('test_northbound.py')], timeout: 60)
+
 # 真实容器配合并发回调，检查完整副本发布与退出时的指针生命周期
 rule_telemetry_unsigned_suffix = dpdk.version().version_compare('>=23.03') ? 'uint' : 'u64'
 rule_telemetry_test = executable('test_rule_telemetry', 'test_rule_telemetry.c',
@@ -446,6 +449,7 @@ dppctl_test = executable(
   'test_dppctl.c',
   '../../app/dppctl/routing_cli.c',
   '../../app/dppctl/config_cli.c',
+  '../../app/dppctl/json.c',
   '../../app/dppctl/conntrack_cli.c',
   '../../app/dppctl/transfer_cli.c',
   include_directories: dppd_inc,

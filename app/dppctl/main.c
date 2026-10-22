@@ -17,10 +17,12 @@
 #include "conntrack_cli.h"
 #include "transfer_cli.h"
 #include "config_cli.h"
+#include "json.h"
 
 static void print_usage(const char *program)
 {
     fprintf(stderr, "usage:\n");
+    fprintf(stderr, "  global options: --socket PATH --json (versioned management output)\n");
     fprintf(stderr,
         "  %s [--socket PATH] request-submit CLIENT SEQUENCE flow-create|flow-update|flow-remove|flow-config-apply ...\n",
         program);
@@ -1981,13 +1983,21 @@ int main(int argc, char **argv)
     struct dppd_management_request request;
     struct dppd_management_response response;
     bool require_ready;
+    bool json_output = false;
     int argument = 1;
     int rc;
 
-    /* 当前只支持全局 --socket 前缀，剩余 argv 完整交给命令构造器校验 */
-    if (argc >= 3 && strcmp(argv[1], "--socket") == 0) {
-        socket_path = argv[2];
-        argument = 3;
+    /** 全局选项只在命令前解析，JSON 输出和 socket 路径的先后顺序不影响请求 */
+    while (argument < argc) {
+        if (strcmp(argv[argument], "--json") == 0 && !json_output) {
+            json_output = true;
+            ++argument;
+        } else if (strcmp(argv[argument], "--socket") == 0 && argument + 1 < argc) {
+            socket_path = argv[argument + 1];
+            argument += 2;
+        } else {
+            break;
+        }
     }
     /**
      * 跳过程序名和已处理的全局选项，将剩余命令参数构造成管理请求
@@ -2010,12 +2020,20 @@ int main(int argc, char **argv)
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
+    if (json_output && !dppctl_json_supported(request.operation)) {
+        fprintf(stderr, "dppctl: JSON output is not supported for this operation\n");
+        return EXIT_FAILURE;
+    }
     /** 参数校验已通过，此时可以安全读取命令名，health 查询不会因 ready=no 自行失败 */
     require_ready = request.operation == DPPD_MANAGEMENT_HEALTH_GET && strcmp(argv[argument], "ready") == 0;
     rc = exchange(socket_path, &request, &response);
     if (rc != 0) {
         fprintf(stderr, "dppctl: transport failed: %s (%d)\n", strerror(-rc), rc);
         return EXIT_FAILURE;
+    }
+    if (json_output) {
+        rc = dppctl_json_response(&request, &response);
+        return rc != 0 || (require_ready && !response.payload.health.ready) ? EXIT_FAILURE : EXIT_SUCCESS;
     }
     /* transport 错误与 daemon 业务错误分开报告，便于脚本区分连接和规则失败 */
     if (response.status != 0) {
