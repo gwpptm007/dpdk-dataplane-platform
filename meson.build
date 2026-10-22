@@ -13,6 +13,7 @@ dppd_inc = include_directories('include')
 dppd_sources = files(
   'lib/runtime/config.c',
   'lib/runtime/runtime.c',
+  'lib/runtime/numa.c',
   'lib/runtime/device_recovery.c',
   'lib/device/device.c',
   'lib/device/topology.c',
@@ -77,6 +78,7 @@ dppd_sources = files(
   'lib/offload/rte_flow_backend.c',
   'lib/offload/capability.c',
   'lib/observability/stats.c',
+  'lib/observability/production.c',
   'lib/observability/telemetry.c',
   'lib/observability/rule_observation.c',
   'lib/observability/rule_latency.c',

@@ -1,10 +1,14 @@
 #include "dppd/runtime.h"
+#include "dppd/numa.h"
 
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <rte_eal.h>
+#include <rte_ethdev.h>
+#include <rte_launch.h>
 #include <rte_lcore.h>
 #include <rte_pdump.h>
 
@@ -12,7 +16,9 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
 {
     char error[256];
     unsigned int lcore_id;
-    uint16_t worker_index = 0;
+    struct dppd_numa_cpu candidates[RTE_MAX_LCORE], selected[DPPD_MAX_WORKERS];
+    int port_sockets[DPPD_MAX_PORTS];
+    uint32_t candidate_count = 0;
     int rc;
 
     if (runtime == NULL || cfg == NULL)
@@ -24,33 +30,37 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
 
     memset(runtime, 0, sizeof(*runtime));
     runtime->config = *cfg;
+    /** 直接构造配置的调用者也遵守入口边界，旧模式不能误走超时后无限等待的清理路径 */
+    if (cfg->flow_state_path[0] == '\0')
+        runtime->config.worker_timeout_ms = 0;
     atomic_init(&runtime->stop_requested, false);
 
-    /*
-     * queue_id 按 worker_index 连续编号，不直接使用稀疏的 lcore_id。除便于 queue 配置外
-     * 这也满足软件 backend 对 QSBR reader id 落在 [0, DPPD_MAX_WORKERS) 的要求
-     */
+    /** 只在用户启用的非主核中选布局，网卡未知节点保留未知，不猜成节点零 */
     RTE_LCORE_FOREACH_WORKER (lcore_id) {
-        struct dppd_worker *worker;
-
-        if (worker_index == cfg->nb_queues)
-            break;
-        worker = &runtime->workers[worker_index];
+        candidates[candidate_count++] = (struct dppd_numa_cpu){lcore_id, (int)rte_lcore_to_socket_id(lcore_id)};
+    }
+    for (uint16_t i = 0; i < cfg->nb_ports; ++i)
+        port_sockets[i] = rte_eth_dev_socket_id(cfg->ports[i]);
+    rc = dppd_numa_select(candidates, candidate_count, port_sockets, cfg->nb_ports, cfg->nb_queues, selected);
+    if (rc != 0) {
+        fprintf(stderr, "[dppd] queues=%u cannot select worker lcores from %u enabled candidates: %d\n", cfg->nb_queues,
+            candidate_count, rc);
+        return rc;
+    }
+    /** 队列与 QSBR 编号仍连续分配，NUMA 选择只改变队列使用哪个允许的核 */
+    for (uint16_t worker_index = 0; worker_index < cfg->nb_queues; ++worker_index) {
+        struct dppd_worker *worker = &runtime->workers[worker_index];
         worker->runtime = runtime;
-        worker->lcore_id = lcore_id;
+        worker->lcore_id = selected[worker_index].lcore_id;
+        worker->socket_id = selected[worker_index].socket_id;
         worker->queue_id = worker_index;
         atomic_init(&worker->state, DPPD_WORKER_IDLE);
+        atomic_init(&worker->heartbeat_ms, 0);
         dppd_stats_init(&worker->stats);
         for (uint16_t port_index = 0; port_index < cfg->nb_ports; ++port_index)
             dppd_stats_init(&worker->port_stats[port_index]);
-        worker_index++;
     }
-    if (worker_index != cfg->nb_queues) {
-        fprintf(stderr, "[dppd] queues=%u requires %u worker lcores, only %u are enabled\n", cfg->nb_queues,
-            cfg->nb_queues, worker_index);
-        return -ENOSPC;
-    }
-    runtime->nb_workers = worker_index;
+    runtime->nb_workers = cfg->nb_queues;
 
     rc = cfg->routing_path[0] == '\0' ? dppd_snapshot_build_port_pairs(cfg, &runtime->snapshot) : 0;
     if (rc != 0)
@@ -124,16 +134,19 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
         struct dppd_worker *worker = &runtime->workers[i];
 
         /** 必须在提交线程之前发布 STARTING，避免覆盖线程已经发布的 RUNNING 状态 */
+        atomic_store_explicit(&worker->heartbeat_ms, dppd_monotonic_ms(), memory_order_release);
         atomic_store_explicit(&worker->state, DPPD_WORKER_STARTING, memory_order_release);
         rc = rte_eal_remote_launch(dppd_worker_main, worker, worker->lcore_id);
         if (rc != 0) {
             atomic_store_explicit(&worker->state, DPPD_WORKER_FAILED, memory_order_release);
             fprintf(stderr, "[dppd] cannot launch queue %u on lcore %u: %d\n", worker->queue_id, worker->lcore_id, rc);
             dppd_runtime_request_stop(runtime);
-            (void)dppd_runtime_wait(runtime);
-            return rc;
+            int waited = dppd_runtime_wait(runtime);
+            return waited == -ETIMEDOUT ? waited : rc;
         }
         worker->launched = true;
+        /** 部分启动失败也保留活跃线程身份，清理方不能提前释放它仍然借用的资源 */
+        runtime->workers_started = true;
     }
     runtime->workers_started = true;
     return 0;
@@ -163,8 +176,22 @@ int dppd_runtime_check_workers(const struct dppd_runtime *runtime)
                 return 0;
             return -EIO;
         }
+        if (dppd_runtime_worker_stalled(runtime, i, dppd_monotonic_ms()))
+            return -ETIMEDOUT;
     }
     return 0;
+}
+
+bool dppd_runtime_worker_stalled(const struct dppd_runtime *runtime, uint16_t worker, uint64_t now_ms)
+{
+    if (runtime == NULL || worker >= runtime->nb_workers || !runtime->workers_started ||
+        runtime->config.worker_timeout_ms == 0 ||
+        atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
+        dppd_devices_io_quiesced(&runtime->devices))
+        return false;
+    uint64_t heartbeat = atomic_load_explicit(&runtime->workers[worker].heartbeat_ms, memory_order_acquire);
+    /** 读者采样之后 worker 可能更新心跳，略晚于 now 的值仍表示线程正在前进 */
+    return heartbeat == 0 || (now_ms >= heartbeat && now_ms - heartbeat > runtime->config.worker_timeout_ms);
 }
 
 void dppd_runtime_request_stop(struct dppd_runtime *runtime)
@@ -180,12 +207,20 @@ int dppd_runtime_wait(struct dppd_runtime *runtime)
 
     if (runtime == NULL)
         return -EINVAL;
+    uint64_t started = dppd_monotonic_ms();
     for (i = 0; i < runtime->nb_workers; ++i) {
         struct dppd_worker *worker = &runtime->workers[i];
         int rc;
 
         if (!worker->launched)
             continue;
+        /** 管理模式停机也有时限，已请求停止的卡死线程不能绕过主循环心跳检查后永久等待 */
+        while (runtime->config.worker_timeout_ms != 0 && rte_eal_get_lcore_state(worker->lcore_id) == RUNNING) {
+            if (dppd_monotonic_ms() - started > runtime->config.worker_timeout_ms)
+                return -ETIMEDOUT;
+            struct timespec pause = {.tv_nsec = 1000000L};
+            nanosleep(&pause, NULL);
+        }
         rc = rte_eal_wait_lcore(worker->lcore_id);
         worker->launched = false;
         /** 等待结果是最终依据，保留失败状态供清理前的诊断读取 */
@@ -263,7 +298,10 @@ int dppd_runtime_destroy(struct dppd_runtime *runtime)
     /* 先停止 worker，再销毁设备；否则 worker 仍可能访问已停止 port 或软件 backend */
     if (runtime->workers_started) {
         dppd_runtime_request_stop(runtime);
-        (void)dppd_runtime_wait(runtime);
+        int waited = dppd_runtime_wait(runtime);
+        /** 未返回的线程仍借用设备和规则，拒绝清理，让正式入口走失败退出 */
+        if (runtime->workers_started)
+            return waited != 0 ? waited : -EBUSY;
     }
     if (runtime->pdump_initialized) {
         (void)rte_pdump_uninit();

@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import queue
 import socket
 import subprocess
 import sys
@@ -59,11 +60,12 @@ class NorthboundTests(unittest.TestCase):
         if body is not None or raw is not None:
             headers["Content-Type"] = "application/json"
         encoded = raw if raw is not None else json.dumps(body) if body is not None else None
-        connection.request(method, path, body=encoded, headers=headers)
-        response = connection.getresponse()
-        result = response.status, json.loads(response.read())
-        connection.close()
-        return result
+        try:
+            connection.request(method, path, body=encoded, headers=headers)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
 
     def test_authentication_and_roles(self):
         self.assertEqual(self.request(token=False)[0], 401)
@@ -145,6 +147,31 @@ class NorthboundTests(unittest.TestCase):
             for connection in connections:
                 connection.close()
 
+    def test_completed_responses_hold_slots_until_worker_cleanup(self):
+        finished, release = queue.Queue(), threading.Event()
+
+        class HeldFinish(api.Handler):
+            def finish(self):
+                super().finish()
+                # 响应已送出不等于请求线程已退出，显式停在实际释放并发槽之前
+                finished.put(None)
+                release.wait(timeout=2)
+
+        self.server.RequestHandlerClass = HeldFinish
+        try:
+            for _ in range(2):
+                self.assertEqual(self.request()[0], 200)
+                finished.get(timeout=2)
+            # 两个槽都占用时准入直接关闭连接，不应创建第三个后端请求
+            with self.assertRaises((http.client.RemoteDisconnected, ConnectionResetError)):
+                self.request()
+            self.assertEqual(len(self.backend.calls), 2)
+        finally:
+            release.set()
+            self.server._threads.join()
+        self.assertEqual(self.request()[0], 200)
+        self.assertEqual(len(self.backend.calls), 3)
+
     @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "权限文件校验需要 Linux 文件属性")
     def test_credentials_permissions_symlink_and_duplicate_hash(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -208,6 +235,7 @@ class NorthboundTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "日志管道验证需要 Linux 文件描述符")
     def test_full_or_closed_audit_pipe_does_not_hold_requests_or_shutdown(self):
         import fcntl
+        import select
 
         # 子进程使用生产 HTTP 服务和审计器，只把 daemon 替换为不做 I/O 的查询桩
         source = """
@@ -218,7 +246,11 @@ class Backend:
     def execute(self, args): return {'api_version':'v1','status':0,'data':{'ready':True}}
 credentials=object.__new__(api.Credentials)
 credentials.tokens=[(hashlib.sha256(b'r'*64).hexdigest(),api.Principal('reader','1'))]
-server=api.TCPServer(('127.0.0.1',0),api.Handler)
+class CompletedServer(api.TCPServer):
+    def process_request_thread(self, request, client_address):
+        super().process_request_thread(request, client_address)
+        print('handled',flush=True)
+server=CompletedServer(('127.0.0.1',0),api.Handler)
 server.initialize(api.Application(Backend()),credentials,2,0.3)
 def stop(*args): threading.Thread(target=server.shutdown,daemon=True).start()
 signal.signal(signal.SIGTERM,stop)
@@ -244,6 +276,10 @@ print('closed',flush=True)
                     response = connection.getresponse()
                     result = response.status, json.loads(response.read())
                     connection.close()
+                    # 明确等待生产线程释放槽，日志背压测试不能把正常准入拒绝误认为日志阻塞
+                    # ACK 仅在完整线程返回后发出，不重试请求或放宽每条 401/200 的断言
+                    self.assertTrue(select.select([child.stdout], [], [], 2)[0], "request cleanup did not complete")
+                    self.assertEqual(child.stdout.readline(), b"handled\n")
                     return result
 
                 for _ in range(220 if mode == "full" else 4):

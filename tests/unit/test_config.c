@@ -54,9 +54,45 @@ static void test_dnat_config(void)
     assert(dppd_config_parse(7 + 2 * DPPD_MAX_DNAT_RULES, many, &config) != 0);
 }
 
+/** 心跳监护仅在正式持久化入口启用，边界值与显式关闭都在命令行层核对 */
+static void test_worker_timeout(void)
+{
+    struct dppd_config config;
+    char error[160];
+    char *managed[] = {"dppd", "--flow-state", "/private/state", "--worker-timeout-ms", "100"};
+    char *legacy[] = {"dppd", "--worker-timeout-ms", "100"};
+    dppd_config_defaults(&config);
+    assert(config.worker_timeout_ms == 5000);
+    assert(dppd_config_parse(3, managed, &config) == DPPD_CONFIG_OK && config.worker_timeout_ms == 5000);
+    assert(dppd_config_parse(5, managed, &config) == DPPD_CONFIG_OK && config.worker_timeout_ms == 100);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    managed[4] = "600000";
+    assert(dppd_config_parse(5, managed, &config) == DPPD_CONFIG_OK && config.worker_timeout_ms == 600000);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    managed[4] = "0";
+    assert(dppd_config_parse(5, managed, &config) == DPPD_CONFIG_OK && config.worker_timeout_ms == 0);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    const char *invalid[] = {"1", "99", "600001", "-1", "100ms", "", "4294967296"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        managed[4] = (char *)invalid[i];
+        assert(dppd_config_parse(5, managed, &config) == DPPD_CONFIG_ERROR);
+    }
+    assert(dppd_config_parse(1, legacy, &config) == DPPD_CONFIG_OK && config.worker_timeout_ms == 0);
+    assert(dppd_config_parse(3, legacy, &config) == DPPD_CONFIG_ERROR);
+    legacy[2] = "0";
+    assert(dppd_config_parse(3, legacy, &config) == DPPD_CONFIG_OK && config.worker_timeout_ms == 0);
+    dppd_config_defaults(&config);
+    strcpy(config.flow_state_path, "/private/state");
+    config.worker_timeout_ms = 99;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.worker_timeout_ms = 600001;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+}
+
 int main(void)
 {
     test_dnat_config();
+    test_worker_timeout();
     struct dppd_config config;
     char error[128];
     char *defaults[] = {"dppd"};

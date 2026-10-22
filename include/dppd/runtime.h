@@ -30,6 +30,8 @@ enum dppd_worker_state {
 struct dppd_worker {
     struct dppd_runtime *runtime;
     unsigned int lcore_id;
+    /** 实际选中的 NUMA 节点只用于诊断，负数表示拓扑未知 */
+    int socket_id;
     /**
      * queue_id 同时是 RX/TX queue 编号和软件 QSBR reader id。runtime 在启动前一次性
      * 连续分配，运行中不得重新编号，否则 writer 将无法正确等待旧 snapshot 的 reader
@@ -38,6 +40,8 @@ struct dppd_worker {
     bool launched;
     /** 跨线程状态使用 release/acquire 传递，管理查询不直接访问 DPDK 的内部线程结构 */
     atomic_uint state;
+    /** 线程完成一轮收发后低频发布进度，管理线程据此识别仍存活但不前进的线程 */
+    atomic_uint_fast64_t heartbeat_ms;
     struct dppd_worker_stats stats;
     struct dppd_worker_stats port_stats[DPPD_MAX_PORTS];
 };
@@ -73,6 +77,8 @@ void dppd_runtime_set_ipv4_router(struct dppd_runtime *runtime, struct dppd_ipv4
 int dppd_runtime_start(struct dppd_runtime *runtime);
 /** 检查已启动的线程是否异常结束；正常停止和设备移除由各自的退出流程处理 */
 int dppd_runtime_check_workers(const struct dppd_runtime *runtime);
+/** 使用单调时钟检查单个线程，正常暂停和设备门禁期间不报告卡死 */
+bool dppd_runtime_worker_stalled(const struct dppd_runtime *runtime, uint16_t worker, uint64_t now_ms);
 void dppd_runtime_request_stop(struct dppd_runtime *runtime);
 int dppd_runtime_wait(struct dppd_runtime *runtime);
 void dppd_runtime_stats_read(const struct dppd_runtime *runtime, struct dppd_stats_values *total);

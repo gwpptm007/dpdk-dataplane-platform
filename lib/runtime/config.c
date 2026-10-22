@@ -274,6 +274,7 @@ void dppd_config_defaults(struct dppd_config *cfg)
     cfg->mbufs_per_socket = 32768;
     cfg->mbuf_cache = 256;
     cfg->stats_period_ms = 1000;
+    cfg->worker_timeout_ms = 5000;
     cfg->rule_capacity = DPPD_DEFAULT_RULE_CAPACITY;
     cfg->conntrack_timeout_s = 300;
     cfg->nd6_reachable_ms = 30000;
@@ -311,10 +312,12 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"nd6", required_argument, NULL, 1015},
         {"nd6-reachable-ms", required_argument, NULL, 1016},
         {"flow-state", required_argument, NULL, 1017},
+        {"worker-timeout-ms", required_argument, NULL, 1018},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
     int option;
+    bool worker_timeout_selected = false;
 
     if (cfg == NULL)
         return DPPD_CONFIG_ERROR;
@@ -436,6 +439,12 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
                 return DPPD_CONFIG_ERROR;
             strcpy(cfg->flow_state_path, optarg);
             break;
+        case 1018:
+            if (parse_u32(optarg, 0, 600000, &cfg->worker_timeout_ms) != 0 ||
+                (cfg->worker_timeout_ms != 0 && cfg->worker_timeout_ms < 100))
+                return DPPD_CONFIG_ERROR;
+            worker_timeout_selected = true;
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -446,6 +455,12 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
     /* getopt 结束后仍有位置参数，通常表示拼写错误，不能静默忽略 */
     if (optind != argc)
         return DPPD_CONFIG_ERROR;
+    /** 旧入口仍使用原来的线程回收流程，不能启用只有新入口能够安全处理的超时退出 */
+    if (cfg->flow_state_path[0] == '\0') {
+        if (worker_timeout_selected && cfg->worker_timeout_ms != 0)
+            return DPPD_CONFIG_ERROR;
+        cfg->worker_timeout_ms = 0;
+    }
     if (cfg->tap_owner_cookie && cfg->recovery_path[0] == '\0')
         return DPPD_CONFIG_ERROR;
     if (cfg->recovery_monitor[0] != '\0' &&
@@ -465,6 +480,10 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
 
     if (cfg == NULL || error == NULL || error_len == 0)
         return -1;
+    if (cfg->worker_timeout_ms != 0 && (cfg->worker_timeout_ms < 100 || cfg->worker_timeout_ms > 600000)) {
+        snprintf(error, error_len, "worker-timeout-ms must be zero or between 100 and 600000");
+        return -1;
+    }
     if (cfg->flow_state_path[0] != '\0' &&
         (cfg->state_path[0] != '\0' || cfg->recovery_path[0] != '\0' || cfg->routing_path[0] != '\0' ||
             cfg->recovery_monitor[0] != '\0' || cfg->tap_owner_cookie)) {
@@ -604,6 +623,7 @@ void dppd_config_print_usage(const char *program)
     printf("  --enable-pdump      initialize the packet capture service\n");
     printf("  --control-socket P  management socket path (default %s)\n", DPPD_MANAGEMENT_DEFAULT_SOCKET);
     printf("  --flow-state P      restore complete M4 software configuration in exclusive managed mode\n");
+    printf("  --worker-timeout-ms N  managed worker progress timeout, 0 disables, 100..600000 (default 5000)\n");
     printf("  --rule-capacity N   maximum number of desired rules (default %u)\n", DPPD_DEFAULT_RULE_CAPACITY);
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");
     printf("  --ipv4-routing P    enable IPv4 routing with a durable route and static-neighbor snapshot\n");
@@ -629,10 +649,11 @@ void dppd_config_dump(const struct dppd_config *cfg)
     printf("[dppd] ports=");
     for (i = 0; i < cfg->nb_ports; ++i)
         printf("%s%u", i == 0 ? "" : ",", cfg->ports[i]);
-    printf(" queues=%u burst=%u mbufs/socket=%u cache=%u stats=%ums duration=%us"
+    printf(" queues=%u burst=%u mbufs/socket=%u cache=%u stats=%ums duration=%us worker-timeout=%ums"
            " rules=%u control=%s state=%s recovery=%s monitor=%s tap-owner-cookie=%s promisc=%s pdump=%s\n",
         cfg->nb_queues, cfg->burst_size, cfg->mbufs_per_socket, cfg->mbuf_cache, cfg->stats_period_ms, cfg->duration_s,
-        cfg->rule_capacity, cfg->control_socket, cfg->state_path[0] == '\0' ? "disabled" : cfg->state_path,
+        cfg->worker_timeout_ms, cfg->rule_capacity, cfg->control_socket,
+        cfg->state_path[0] == '\0' ? "disabled" : cfg->state_path,
         cfg->recovery_path[0] == '\0' ? "disabled" : cfg->recovery_path,
         cfg->recovery_monitor[0] == '\0' ? "disabled" : cfg->recovery_monitor, cfg->tap_owner_cookie ? "on" : "off",
         cfg->promiscuous ? "on" : "off", cfg->enable_pdump ? "on" : "off");

@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
+#include <rte_cycles.h>
 
 /** 释放仍归本线程持有的报文；已被发送队列接收的报文交给驱动管理，不能再次释放 */
 static void free_packets(struct rte_mbuf **packets, uint16_t count)
@@ -330,7 +331,7 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);
         else
             routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);
-            
+
         /**
          * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列
          * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它
@@ -479,7 +480,8 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
     dppd_software_count_batch_flush(&rule_counts);
     /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */
     for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)
-        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta, &outputs[index]);
+        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,
+            &outputs[index]);
     /**
      * 此时 delta 保存本批入口接收和处理中的丢弃统计，outputs 按出口保存发送及发送失败统计
      * 先将 delta 记入入口网口，再将各 outputs 记入对应出口，并合并到 delta 供 worker 汇总
@@ -528,9 +530,7 @@ static void process_waiting(struct dppd_worker *worker)
         /** 取回不代表可以发送，失效包或已失去原入口的包在此归还 mbuf */
         if (pending.expired || ingress == NULL) {
             rte_pktmbuf_free(pending.mbuf);
-            struct dppd_stats_values dropped = {
-                .policy_drops = 1, .nd6_queue_drops = 1
-            };
+            struct dppd_stats_values dropped = {.policy_drops = 1, .nd6_queue_drops = 1};
             dppd_stats_add(&worker->stats, &dropped);
             if (ingress != NULL)
                 dppd_stats_add(&worker->port_stats[ingress - worker->runtime->devices.ports], &dropped);
@@ -567,7 +567,10 @@ int dppd_worker_main(void *arg)
         return -1;
     }
     /** 完成全部读者注册后才宣布线程可以收发，健康查询据此统计实际运行的队列 */
+    atomic_store_explicit(&worker->heartbeat_ms, dppd_monotonic_ms(), memory_order_release);
     atomic_store_explicit(&worker->state, DPPD_WORKER_RUNNING, memory_order_release);
+    uint64_t heartbeat_cycle = rte_get_timer_cycles();
+    uint64_t heartbeat_interval = rte_get_timer_hz() / 100U;
 
     /** 设备事件直接通知所有工作线程退出，不依赖主线程先设置普通停止标记 */
     while (!worker_io_quiesced(worker)) {
@@ -589,6 +592,12 @@ int dppd_worker_main(void *arg)
          */
         dppd_software_backend_worker_quiescent(runtime->software_backend, worker->queue_id);
         dppd_ipv4_router_reader_quiescent(runtime->ipv4_router, worker->queue_id);
+        /** 快路径只读廉价计时器，每十毫秒才更新时间，空流量也持续证明线程前进 */
+        uint64_t cycle = rte_get_timer_cycles();
+        if (cycle - heartbeat_cycle >= heartbeat_interval) {
+            atomic_store_explicit(&worker->heartbeat_ms, dppd_monotonic_ms(), memory_order_release);
+            heartbeat_cycle = cycle;
+        }
     }
     /** 停止读取规则后注销；主线程还需等待本线程返回，之后才能销毁共享后端 */
     dppd_ipv4_router_reader_unregister(runtime->ipv4_router, worker->queue_id);

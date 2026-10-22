@@ -5,6 +5,15 @@ packet_test = executable(
 )
 test('packet parser', packet_test)
 
+numa_test = executable('test_numa', 'test_numa.c', dependencies: dppd_core_dep)
+test('M5 NUMA worker placement and enabled CPU boundaries', numa_test)
+
+production_unsigned_suffix = dpdk.version().version_compare('>=23.03') ? 'uint' : 'u64'
+production_test = executable('test_production', 'test_production.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_telemetry_register_cmd', '-Wl,--wrap=rte_tel_data_add_dict_int',
+              '-Wl,--wrap=rte_tel_data_add_dict_' + production_unsigned_suffix, '-Wl,--wrap=fsync'])
+test('M5 managed telemetry snapshots counts and lifecycle', production_test, timeout: 30)
+
 # 真实多线程同时争抢额度，覆盖整批拒绝、残留保留、旧凭据和动态缩额
 admission_test = executable('test_admission', 'test_admission.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=calloc'])

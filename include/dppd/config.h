@@ -53,6 +53,8 @@ struct dppd_config {
     uint32_t mbufs_per_socket;
     uint16_t mbuf_cache;
     uint32_t stats_period_ms;
+    /** 显式管理模式的线程进度超时，零表示关闭，旧模式在初始化时禁用 */
+    uint32_t worker_timeout_ms;
     uint32_t duration_s;
     /* desired rule repository 的逻辑容量，不等价于 NIC rte_flow 硬件容量 */
     uint32_t rule_capacity;

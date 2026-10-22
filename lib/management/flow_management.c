@@ -57,10 +57,11 @@ static void health(struct dppd_runtime *runtime, const struct dppd_flow_store_st
     }
     output->workers_expected = runtime->nb_workers;
     output->ports_expected = runtime->devices.nb_ports;
+    uint64_t now = dppd_monotonic_ms();
     for (uint16_t i = 0; i < runtime->nb_workers; ++i) {
         unsigned int state = atomic_load_explicit(&runtime->workers[i].state, memory_order_acquire);
         output->workers_running += state == DPPD_WORKER_RUNNING;
-        output->workers_failed += state == DPPD_WORKER_FAILED;
+        output->workers_failed += state == DPPD_WORKER_FAILED || dppd_runtime_worker_stalled(runtime, i, now);
     }
     if (!runtime->workers_started || output->workers_running != output->workers_expected)
         output->blockers |= DPPD_HEALTH_WORKERS_NOT_RUNNING;

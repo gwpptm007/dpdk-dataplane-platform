@@ -78,6 +78,8 @@ executable('test_scope_business_window', 'scope_business_window.c', dependencies
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', required: false)
 executable('test_m5_daemon_fault', '../../app/dppd/main.c', 'm5_daemon_fault.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'], install: false)
+executable('test_m5_worker_stall', '../../app/dppd/main.c', 'm5_worker_stall.c',
+  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=dppd_software_backend_worker_quiescent'], install: false)
 executable('test_ipv4_store_window', '../../app/dppd/main.c', 'ipv4_store_window.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'], install: false)
 if ring_pmd.found()
