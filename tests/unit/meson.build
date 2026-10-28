@@ -471,3 +471,8 @@ persistence_test = executable(
   dependencies: dppd_core_dep,
 )
 test('rule snapshot persistence', persistence_test)
+
+test('M5 reproducible package and managed deployment safety', python_test,
+  args: [meson.current_source_dir() / 'test_m5_release.py'], timeout: 120)
+test('M5 production acceptance evidence boundaries', python_test,
+  args: [meson.current_source_dir() / 'test_m5_production_acceptance.py'], timeout: 60)
