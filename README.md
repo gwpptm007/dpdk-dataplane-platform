@@ -52,7 +52,7 @@ M3 已交付角色发现、transfer 图、正式管理入口、AGE 和共享 COU
 M5 首项 [M4 配置持久化与进程重启恢复](docs/m5_flow_state.md) 已完成：配置工具支持初始化、
 校验与软件恢复检查，受管理 C API 支持持久化后回执、精确版本恢复和失败隔离。
 正式 `dppd --flow-state` 与管理协议已接入，受理与持久回执分开，写盘失败停止 worker，
-修复后恢复转发，见 [正式 daemon 闭环](docs/m5_managed_daemon.md)。完整 M5 与实机恢复仍待后续交付。
+修复后恢复转发，见 [正式 daemon 闭环](docs/m5_managed_daemon.md)。M5 当前环境软件生产化已完成联合验收，见 [最终验收](docs/m5_final_acceptance.md)，实机硬件恢复仍待验证。
 在线模板与共享 COUNT 已接入 v29 [配置事务](docs/m5_online_configuration.md)，支持整批定义、引用保护、
 软件共享累计、精确版本迁移及故障恢复。
 
