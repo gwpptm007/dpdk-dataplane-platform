@@ -206,6 +206,8 @@ class NorthboundTests(unittest.TestCase):
             with self.assertRaises(api.Failure) as caught:
                 backend.execute(["flow-status"])
             self.assertEqual(caught.exception.code, "backend_timeout_state_unknown")
+            # 输出上限与 JSON 解析独立验收，不能复用故意设置得很短的超时来限制解释器启动
+            backend = api.Backend(program, "/unopened-control", timeout=5)
             write("import sys\nsys.stdout.write('x' * 200000)\n")
             with self.assertRaises(api.Failure) as caught:
                 backend.execute(["flow-status"])

@@ -530,14 +530,41 @@ class PacketEvidenceTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "linux", "进程组清理只在 Linux 实机入口使用")
     def test_timeout_preserves_raw_failure_log_and_reaps_process(self):
+        import select
+
+        read_fd, write_fd = os.pipe()
+        popen, processes = subprocess.Popen, []
+
+        def started_process(*args, **kwargs):
+            process = popen(*args, pass_fds=(write_fd,), **kwargs)
+            processes.append(process)
+            try:
+                # 先确认子进程已写出日志，再开始生产入口的超时等待，避免依赖解释器启动速度
+                self.assertTrue(select.select([read_fd], [], [], 5)[0], "子进程未报告启动")
+                self.assertEqual(os.read(read_fd, 1), b"1")
+            except BaseException:
+                process.kill()
+                process.communicate()
+                raise
+            return process
+
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "timeout.json"
-            with self.assertRaisesRegex(RuntimeError, "超时"):
-                HARDWARE.execute([sys.executable, "-c", "import time; print('started',flush=True); time.sleep(10)"],
-                                 log, timeout=0.1)
+            try:
+                with patch.object(HARDWARE.subprocess, "Popen", side_effect=started_process):
+                    with self.assertRaisesRegex(RuntimeError, "超时"):
+                        HARDWARE.execute([sys.executable, "-c",
+                                          "import os,sys,time; print('started',flush=True); "
+                                          "os.write(int(sys.argv[1]),b'1'); time.sleep(10)", str(write_fd)],
+                                         log, timeout=0.1)
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
             record = json.loads(log.read_text())
             self.assertNotEqual(record["returncode"], 0)
             self.assertIn("started", record["stdout"])
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0].poll())
 
 
 class ManagementIdentityTests(unittest.TestCase):
