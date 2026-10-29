@@ -90,10 +90,11 @@ struct dppd_software_retired_snapshot {
     struct dppd_software_retired_snapshot *next;
 };
 
+/** 软件安装的临时记录，由 prepare 创建，rollback 或 finalize 释放 */
 struct dppd_software_pending_rule {
-    /** prepare token 的所有权由 transaction 持有，rollback/finalize 二选一释放 */
+    /** 待安装规则的副本 */
     struct dppd_rule rule;
-    /** 仅 commit 完成发布后置位，决定 rollback 是否还要删除 classifier 中的版本 */
+    /** commit 发布成功后设为 true，回滚时据此决定是否删除已发布规则 */
     bool published;
 };
 
@@ -104,7 +105,7 @@ static size_t snapshot_size(uint32_t capacity)
         dppd_acl_size(capacity);
 }
 
-/** 规则对象按八字节对齐，尾部 ACL 随整张快照分配和回收，不持有另一份活跃指针 */
+/** 规则对象按 8字节对齐，尾部 ACL 随整张快照分配和回收，不持有另一份活跃指针 */
 static struct dppd_exact *snapshot_exact(struct dppd_software_classifier_snapshot *snapshot, uint32_t capacity)
 {
     return (struct dppd_exact *)(snapshot->objects + capacity);
@@ -217,8 +218,13 @@ static void reclaim_locked(struct dppd_software_backend *backend)
 {
     /**
      * link 指向保存当前节点地址的位置，*link 才是当前节点指针
-     * 初始指向 backend->retired；若保留某节点，再改为指向该节点的 next 字段
-     * 因此给 *link 赋值，可以直接修改链表头或前一个节点的 next
+     * 例：backend->retired → R1 → R2 → NULL，R1、R2 是回收记录，各自指向旧快照
+     *
+     * 检查 R1：link = &backend->retired，*link = R1
+     *   删除 R1 → *link = R2，即把链表头改为 R2
+     *   保留 R1 → link = &R1->next，接着检查 R2
+     * 检查 R2：若 link = &R1->next，删除 R2 就是把 R1->next 改为 R2->next
+     * 同一句 *link = retired->next 因此能处理删除头节点和中间节点
      */
     struct dppd_software_retired_snapshot **link = &backend->retired;
 
@@ -232,8 +238,8 @@ static void reclaim_locked(struct dppd_software_backend *backend)
             continue;
         }
         /**
-         * 安全后让前面的指针绕过当前节点，例如 链表头 → A → Z 改为 链表头 → Z
-         * link 所指的位置仍然有效，下一轮从这个位置检查后继，不能再访问即将释放的 A
+         * 让链表头或前一节点的 next 绕过当前记录，此时尚未释放内存
+         * 删除后 link 不移动，*link 已是后继；link 所指字段在当前记录之外，释放当前记录后仍有效
          */
         *link = retired->next;
         /** 销毁旧规则表并归还它持有的计数器引用，再释放保存 snapshot/token/next 的链表节点 */
@@ -323,6 +329,7 @@ static int publish_locked(struct dppd_software_backend *backend, struct dppd_sof
     /**
      * 用回收节点 R 保存旧快照 A 的地址，A 本身仍留在内存中供已有读者使用
      * R.snapshot → A；backend->active → B，两者分别管理待回收旧表和当前规则表
+     * retired 是一条回收记录，不是旧快照本身
      */
     retired->snapshot = previous;
     /**
@@ -462,7 +469,10 @@ void dppd_software_backend_fini(struct dppd_software_backend *backend)
     memset(backend, 0, sizeof(*backend));
 }
 
-/** 事务的能力检查阶段只判断目标后端和规则能力，不分配资源，也不发布规则 */
+/**
+ * 检查条目是否选择软件后端，且匹配条件、动作均受支持
+ * 通过返回 0，否则返回 -ENOTSUP；此阶段不分配资源或发布规则
+ */
 static int transaction_validate(void *context, const struct dppd_transaction_item *item)
 {
     struct dppd_software_backend *backend = context;
@@ -474,14 +484,15 @@ static int transaction_validate(void *context, const struct dppd_transaction_ite
 }
 
 /**
- * prepare 只分配可回滚的控制面 token，不让未提交规则暴露给 worker。锁内复查容量和
- * 版本冲突后立即解锁；真正发布留到 commit，以便同一事务的任一 prepare 失败时完全
- * 不改变数据面可见规则集
- * 这里不实际预留规则槽位，多个 prepare 成功不代表它们一定能够全部提交
- * commit 仍需检查当时的容量，批量操作的整体容量预检由上层控制面负责
+ * 检查重复版本和容量，保存待安装规则，将准备记录的地址写入 token
+ *
+ * item.rule → pending.rule，item.backend_token 保存 pending 的地址
+ *
+ * 成功返回 0，失败返回负错误码；此时规则尚未发布，也未占用规则槽位
  */
 static int transaction_prepare(void *context, const struct dppd_transaction_item *item, uintptr_t *token)
 {
+    /** context 是初始化接口时保存的软件后端对象地址，在这里恢复具体类型以访问其字段 */
     struct dppd_software_backend *backend = context;
     struct dppd_software_pending_rule *pending;
     struct dppd_software_classifier_snapshot *active;
@@ -494,6 +505,7 @@ static int transaction_prepare(void *context, const struct dppd_transaction_item
         return -ENOMEM;
     (void)pthread_mutex_lock(&backend->writer_lock);
     active = atomic_load_explicit(&backend->active, memory_order_acquire);
+    /** 按 ID 和版本检查重复：已有 ID 20 的版本 7，不会阻止准备它的版本 13 */
     found = snapshot_find(active, backend->capacity, item->rule.id, item->rule.generation);
     if (found >= 0 || active->count >= backend->capacity) {
         (void)pthread_mutex_unlock(&backend->writer_lock);
@@ -502,17 +514,18 @@ static int transaction_prepare(void *context, const struct dppd_transaction_item
     }
     (void)pthread_mutex_unlock(&backend->writer_lock);
     pending->rule = item->rule;
+    /** token 指向 item.backend_token，通过它将 pending 的地址交回事务 */
     *token = (uintptr_t)pending;
     return 0;
 }
 
 /**
- * 控制面提交一条准备好的软件规则：复查当前表，复制快照，加入规则及独立计数器，再发布新表
- * context 是软件后端，token 是 prepare 返回的 pending 地址，规则内容从 pending->rule 取得
- * 此处 token 是事务准备记录，不是 QSBR 回收进度标记；item 在本实现中不再读取
- * 成功返回 0 并设置 pending->published，失败返回负错误码；此函数不会释放 pending
- * 本次切换只发布这一条规则的安装结果，不代表整个跨规则事务同时对报文生效
- * 本函数在安装规则时调用，worker 逐包匹配只读取已发布结果，不会每包复制规则表
+ * 将 token 指向的待安装规则加入软件规则表
+ *
+ * 复查容量和版本 → 复制快照 → 加入规则和计数器 → 发布新快照
+ *
+ * 成功返回 0 并标记 pending 已发布，失败返回负错误码
+ * 每次只发布一条规则，pending 留给后续回滚或收尾释放
  */
 static int transaction_commit(void *context, const struct dppd_transaction_item *item, uintptr_t token)
 {
@@ -524,7 +537,7 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
     uint32_t i;
     struct dppd_install_timer timer;
 
-    /** commit 必须再次检查：prepare 与 commit 之间可能已有另一控制请求完成发布 */
+    /** prepare 未占用槽位，两阶段之间规则表也可能变化，因此需要重新检查 */
     (void)item;
     if (backend == NULL || pending == NULL)
         return -EINVAL;
@@ -618,13 +631,12 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
 }
 
 /**
- * 撤销一条软件规则的安装，token 是 prepare 创建的 pending 地址，返回删除结果或参数错误
- * pending->published
- *   false → 规则未发布 → 只释放 pending → 返回 0
- *   true  → 按 id + generation 删除已发布版本 → 释放 pending → 返回删除结果
- * commit_was_attempted 只说明调用过 commit，不能说明发布成功，本后端以 published 为准
- * 删除也要创建并发布新快照，可能因内存不足失败；即使删除失败也会释放 pending
- * 上层须检查返回值，不能把准备记录已释放当作规则已撤回
+ * 撤销 token 对应的安装，返回 0 表示成功，负值表示参数或删除错误
+ *
+ * pending 未发布 → 释放准备记录
+ * pending 已发布 → 删除同 ID、同版本的规则，再释放准备记录
+ *
+ * 是否需要删除以 published 为准，仅调用过 commit 不代表发布成功
  */
 static int transaction_rollback(void *context, const struct dppd_transaction_item *item, uintptr_t token,
     bool commit_was_attempted)
@@ -640,17 +652,20 @@ static int transaction_rollback(void *context, const struct dppd_transaction_ite
     /** commit 尚未发布时只需释放 token；已发布时删除同一 ID+generation 的精确版本 */
     if (pending->published)
         rc = dppd_software_backend_remove_version(backend, pending->rule.id, pending->rule.generation);
+    /** 删除失败也会释放准备记录；调用方必须检查 rc，规则可能仍在已发布的表中 */
     free(pending);
     return rc;
 }
 
 /**
- * 释放事务准备记录，不修改已经发布的规则，也不释放规则的计数器
- * prepare 创建 pending → commit 将规则内容复制进快照 → finalize 释放 pending
- * 此后 active → 已发布快照 → 规则和计数器仍在，worker 继续使用
- * 上层 dppd_transaction_finalize 随后清零条目 token，并将事务标记为 FINALIZED
- * 正常提交完成后使用此入口；进入隔离并放弃继续回滚时也可用它清理准备记录
- * 因此调用 finalize 本身不能作为业务事务成功的判断依据
+ * 释放 token 指向的准备记录，已发布的规则和计数器继续供 worker 使用
+ *
+ * prepare：item.backend_token → pending，暂存待安装规则
+ * commit ：pending.rule → 复制内容到 B.objects[i].rule，再发布 B
+ * finalize：释放 pending，active → B，B 中的规则和计数器仍保留
+ *
+ * 正常安装时，control.c 更新 service->rules 后，经 dppd_transaction_finalize 调到这里
+ * 控制层放弃继续回滚后调用，包括决定进入恢复隔离的情况
  */
 static void transaction_finalize(void *context, const struct dppd_transaction_item *item, uintptr_t token)
 {
@@ -660,18 +675,19 @@ static void transaction_finalize(void *context, const struct dppd_transaction_it
 }
 
 /**
- * 返回软件后端的事务回调表，context 保存后端地址，供上层调用各阶段函数时传回
- * transaction.c：backend->commit(context, item, token) → 本文件 transaction_commit
- * 同样通过 prepare、rollback、finalize 回调完成准备、撤销和临时资源清理
+ * 返回软件后端的事务接口，将对象地址和各阶段函数地址交给控制层
+ * 回调函数的 static 限制函数名的可见范围，其他文件仍可通过传出的函数指针调用
  */
 struct dppd_transaction_backend dppd_software_transaction_backend(struct dppd_software_backend *backend)
 {
     const struct dppd_transaction_backend operations = {
         /**
-         * .成员名 = 初始值 是 C 的指定初始化语法，左侧名称来自 dppd_transaction_backend 的定义
-         * .context = backend          → 将后端对象指针存入 operations.context
-         * .commit = transaction_commit → 将函数地址存入 operations.commit，此处不会执行函数
-         * 调用 operations.commit(...) 时，才会执行 transaction_commit(...)
+         * .成员名 = 初始值 是 C 的指定初始化语法
+         * .context = backend             → 保存要操作的软件后端对象地址
+         * .prepare = transaction_prepare → 保存本文件的函数地址，此时不执行函数
+         *
+         * 这里 transaction_prepare 与 &transaction_prepare 都表示函数地址
+         * 调用 operations.prepare(operations.context, item, token) 时才执行该函数
          * 按成员名指定初值，无须依照结构体成员顺序；未指定的成员按零初始化规则处理
          */
         .context = backend,

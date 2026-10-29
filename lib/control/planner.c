@@ -52,6 +52,12 @@ static int validate_transfer_domain(const struct dppd_planner_context *context, 
     return 0;
 }
 
+/**
+ * 检查规则、安装端口及运行模式，为 rule 选择执行后端并写入 plan
+ * control_apply_impl → 本函数生成计划 → 返回后进入安装事务
+ * 本例 acl-set：SOFTWARE_ONLY + 软件支持 → plan.backend = SOFTWARE
+ * 成功返回 0，失败返回负错误码；选中硬件后仍需驱动校验
+ */
 int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd_rule *rule,
     struct dppd_execution_plan *plan)
 {
@@ -84,7 +90,7 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
     bool ipv6 = false;
     for (uint16_t i = 0; i < rule->nb_matches; ++i)
         ipv6 |= rule->matches[i].type == DPPD_MATCH_IPV6;
-    /** 有状态处理和当前 IPv6 ACL 只走软件，不安装会绕过本阶段语义的硬件对象 */
+    /** 启用连接跟踪、邻居发现或规则匹配 IPv6 时，使用软件路径保留这些处理步骤 */
     if (context->connection_tracking || context->neighbor_discovery || ipv6) {
         if (rule->domain != DPPD_RULE_DOMAIN_INGRESS || !software_equivalent ||
             rule->fallback == DPPD_FALLBACK_REQUIRE_HARDWARE)
@@ -95,6 +101,7 @@ int dppd_plan_rule(const struct dppd_planner_context *context, const struct dppd
         return 0;
     }
 
+    /** acl-set 明确指定软件；支持检查通过后填写计划，稍后由事务真正安装 */
     if (rule->fallback == DPPD_FALLBACK_SOFTWARE_ONLY) {
         if (!software_equivalent)
             return reject(plan, DPPD_PLAN_REASON_SOFTWARE_UNAVAILABLE, -ENOTSUP);

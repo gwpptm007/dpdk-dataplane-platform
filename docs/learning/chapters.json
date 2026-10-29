@@ -1,0 +1,1303 @@
+[
+  {
+    "id": "1.4",
+    "title": "出口选择与 IPv6 邻居等待",
+    "status": "此前讲过 · 本次集中整理",
+    "scope": "承接 1.3 未被规则丢弃的分支。本节切换为 IPv6 路由示例；无连接跟踪或 NAT，出口 IPv6 地址已就绪。router 为空的端口配对作为对照",
+    "example": "入口 0 → 目的 2001:db8:2::20；命中 /64 路由，出口 1、网关 fe80::1；静态邻居缺失，ND 已启用",
+    "flow": "规则放行 → 路由最长前缀匹配 → 下一跳 MAC\n  静态命中 → FORWARD\n  静态缺失 → ND resolve → 可用 / 等待 / 失败\n等待 → hold → take → process_batch 重判",
+    "steps": [
+      {
+        "title": "路由模式与端口配对的分界",
+        "file": "lib/dataplane/pipeline.c",
+        "fn": "dppd_pipeline_decide_counted",
+        "anchor": "if (router != NULL)",
+        "n": 14,
+        "input": "软件规则未 DROP，packet 已解析",
+        "output": "router 非空走三层；为空走端口配对",
+        "explain": "先在 pipeline 决定从哪里找出口。三层路由失败会在该分支返回，不会再用静态端口配对兜底。decision 初始仍为 DROP，只有满足转发条件才改为 FORWARD。",
+        "state": "router != NULL → 查询目的 IP\nrouter == NULL → snapshot_lookup_peer",
+        "note": "decision->ipv4 是 IPv4/IPv6 共用结果区，名称不意味着此处只能处理 IPv4",
+        "handoff": "进入 ipv4_router.c 的 IPv6 查询，找最长前缀",
+        "related": [
+          [
+            "lib/control/snapshot.c",
+            "dppd_snapshot_lookup_peer"
+          ]
+        ]
+      },
+      {
+        "title": "最长前缀决定出口",
+        "file": "lib/dataplane/ipv4_router.c",
+        "fn": "dppd_ipv6_router_lookup",
+        "anchor": "uint32_t node =",
+        "n": 12,
+        "input": "目的地址 2001:db8:2::20",
+        "output": "selected 保留沿途最近命中的路由编号",
+        "explain": "从根节点逐位走前缀树。越深的命中前缀越长，selected 记录最后一个命中。编号为下标加一，0 表示没有路由；没有命中返回 -ENOENT。",
+        "state": "/0 默认路由 → /32 → /64\n最近命中 /64 → routes6[selected - 1]",
+        "note": "查询使用本次取得的 routing_snapshot；它与软件规则快照是不同对象",
+        "handoff": "用命中路由的出口和网关构造邻居查询条件"
+      },
+      {
+        "title": "先留下出口和下一跳，再判断静态邻居",
+        "file": "lib/dataplane/ipv4_router.c",
+        "fn": "dppd_ipv6_router_lookup",
+        "anchor": "forward->generation =",
+        "n": 9,
+        "input": "出口 1，网关 fe80::1；静态表没有 MAC",
+        "output": "forward 已有出口和 next_hop6，返回 -EHOSTUNREACH",
+        "explain": "下一跳由路由决定：网关全零用目的地址，否则用网关。静态邻居按出口和下一跳查询。即使缺 MAC，也先把路由结果写入 forward，让 worker 有条件继续 ND。",
+        "state": "port_id = 1\nnext_hop6 = fe80::1\ndestination_mac = 未取得\npipeline → DROP / NO_NEIGHBOR",
+        "note": "这是处理决定尚未完成的中间结果，mbuf 此时没有释放",
+        "handoff": "返回 worker.c 的 routed_decide 尝试动态邻居表"
+      },
+      {
+        "title": "动态邻居查询：成功、等待或失败",
+        "file": "lib/dataplane/worker.c",
+        "fn": "routed_decide",
+        "anchor": "if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR)",
+        "n": 21,
+        "input": "IPv6，启用 ND，缺静态邻居",
+        "output": "MAC 可用则 FORWARD；尚未解析则 ND_PENDING",
+        "explain": "dppd_nd6_resolve 按出口 1 和 fe80::1 查询或建邻居记录。0 表示 MAC 已填入；-EAGAIN 表示等待解析；其他错误保留失败。resolve 不直接发送 NS，探测由 tick 驱动。",
+        "state": "rc = 0 → FORWARD + routed\nrc = -EAGAIN → DROP / ND_PENDING\n其他错误 → DROP / NO_NEIGHBOR",
+        "note": "ND_PENDING 的 action 仍为 DROP，但 process_batch 先检查等待入队，不能提前释放",
+        "handoff": "回到 process_batch，尝试让 ND 等待队列接管 mbuf",
+        "related": [
+          [
+            "lib/dataplane/nd6.c",
+            "dppd_nd6_resolve"
+          ],
+          [
+            "lib/dataplane/nd6.c",
+            "dppd_nd6_tick"
+          ]
+        ]
+      },
+      {
+        "title": "hold 成功才转移 mbuf 所有权",
+        "file": "lib/dataplane/worker.c",
+        "fn": "process_batch",
+        "anchor": "if (decision.drop_reason == DPPD_DROP_ND_PENDING)",
+        "n": 14,
+        "input": "当前 rx[i] 仍由 worker 持有",
+        "output": "入队成功继续下一个包；失败进入丢弃分支",
+        "explain": "hold 保存原 mbuf 指针、入口、队列和截止时间，不复制报文。首次等待最多 5000 毫秒，每邻居最多 4 包，总共 128 个槽位。成功后 worker 不能再释放这个包。",
+        "state": "worker → hold 成功 → ND waiting 持有\nhold 失败 → worker 保留 → DROP 分支释放",
+        "note": "先判断 hold 成功，再 continue；只有这一条路径将当前包留在等待队列",
+        "handoff": "等待记录可取出后，回到原队列处理",
+        "related": [
+          [
+            "lib/dataplane/nd6.c",
+            "dppd_nd6_hold"
+          ]
+        ]
+      },
+      {
+        "title": "take 交回报文，重试使用最新规则",
+        "file": "lib/dataplane/worker.c",
+        "fn": "process_waiting",
+        "anchor": "struct dppd_nd6_pending pending;",
+        "n": 25,
+        "input": "ND waiting 中属于本队列的记录",
+        "output": "失效则释放；否则 process_batch(..., true, 原截止时间)",
+        "explain": "take 可因 MAC 可用、重试时间到或等待失效而返回记录，因此取到包不等于可以发。重试重新解析并查最新规则和路由，retry 避免重复累计 RX 与规则 COUNT，截止时间不延长。",
+        "state": "waiting → take → worker\nexpired / 原入口消失 → 释放\n否则 → process_batch → 再决策",
+        "note": "首次 hold 的 100 毫秒重试间隔与 5000 毫秒总期限不同；ND 控制报文不在本节展开",
+        "handoff": "下一节看已经取得 MAC 的普通 IPv6 路由包如何改写与发送",
+        "related": [
+          [
+            "lib/dataplane/nd6.c",
+            "dppd_nd6_take"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "1.5",
+    "title": "报文改写、发送与归属",
+    "status": "此前讲过 · 本次集中整理",
+    "scope": "沿用 1.4 IPv6 路由结果；无 VLAN、连接跟踪或 NAT。普通转发仍验证传输层校验和，示例不展开隧道与扩展头",
+    "example": "目的 IP 2001:db8:2::20，下一跳 fe80::1；Hop Limit 64；待发 [B,C]，count=2、sent=1",
+    "flow": "出口检查 → 校验与临时头部 → 必要时复制 → 写回\n  → MARK / 多段处理 → 按出口收集 → COUNT 提交 → TX\nTX 接受前缀归驱动；未接受尾部由 worker 释放",
+    "steps": [
+      {
+        "title": "FORWARD 之后还要检查出口",
+        "file": "lib/dataplane/worker.c",
+        "fn": "process_batch",
+        "anchor": "const struct dppd_port *egress =",
+        "n": 12,
+        "input": "decision = FORWARD，出口 1",
+        "output": "取得出口对象；不存在或不可发送则释放",
+        "explain": "FORWARD 表示策略和出口选择允许继续。worker 再检查实际端口是否存在、编号是否匹配、是否能发送，通过后才改写；普通路由使用 &rx[i] 允许替换 mbuf。",
+        "state": "decision.egress_port → egress\n出口可用 → 普通路由改写\n不可用 → free + continue",
+        "note": "连接跟踪路径已改写时不再执行普通路由改写，避免 Hop Limit 重复递减",
+        "handoff": "进入 ipv6_rewrite.c，先校验再准备头部"
+      },
+      {
+        "title": "普通 IPv6 路由究竟改什么",
+        "file": "lib/dataplane/ipv6_rewrite.c",
+        "fn": "dppd_ipv6_rewrite_flow",
+        "anchor": "memcpy(header, forward->destination_mac",
+        "n": 4,
+        "input": "下一跳 MAC、出口 MAC、原 Hop Limit=64",
+        "output": "临时 header 中更新 MAC 和 Hop Limit",
+        "explain": "普通路由仅改二层 MAC 和 IPv6 Hop Limit。源/目的 IPv6 地址及 TCP/UDP 端口保持原值。Hop Limit 不参与上层校验和；IPv6 基础头没有头部校验和。本段此前已经完成传输层校验。",
+        "state": "目的 MAC → 下一跳 MAC\n源 MAC → 出口 MAC\nHop Limit：64 → 63\n目的 IP 仍为 2001:db8:2::20",
+        "note": "无 VLAN 时临时头部读取 14+40=54 字节；translation 为 NULL，后续 NAT 分支跳过",
+        "handoff": "确认 mbuf 各段可独占写入，必要时复制整包",
+        "related": [
+          [
+            "lib/dataplane/ipv6_rewrite.c",
+            "dppd_ipv6_rewrite"
+          ],
+          [
+            "lib/dataplane/ipv4_rewrite.c",
+            "dppd_ipv4_rewrite"
+          ]
+        ]
+      },
+      {
+        "title": "共享数据先复制，再替换 rx[i]",
+        "file": "lib/dataplane/ipv6_rewrite.c",
+        "fn": "dppd_ipv6_rewrite_flow",
+        "anchor": "bool copy = false;",
+        "n": 26,
+        "input": "原 mbuf 链，临时 header 已准备",
+        "output": "writable 指向原链或独立副本",
+        "explain": "逐段检查直接缓冲区、外部缓冲区和引用计数。只要一段需要复制，就复制整包；分段本身不等于必须复制。写回后若使用副本，释放当前原包引用并更新 *mbuf，worker 的 rx[i] 随之改变。",
+        "state": "独占可写链 → 原链写回\n共享 / 间接 / 外部段 → 复制整包 → 写回副本\n&rx[i] → *mbuf = writable",
+        "note": "原数据仍有其他引用时不会因本次释放而强行销毁；失败由调用方处理",
+        "handoff": "返回 worker，完成 MARK、多段检查并加入出口数组",
+        "related": [
+          [
+            "lib/dataplane/ipv6_rewrite.c",
+            "dppd_ipv6_rewrite_flow",
+            "if (copy) {",
+            5
+          ]
+        ]
+      },
+      {
+        "title": "按出口追加，不等待凑满",
+        "file": "lib/dataplane/worker.c",
+        "fn": "process_batch",
+        "anchor": "tx_lengths[index][counts[index]] = length;",
+        "n": 12,
+        "input": "B、C 都通过改写和发送能力检查",
+        "output": "tx[index]=[B,C]，counts[index]=2",
+        "explain": "MARK 只写 mbuf 元数据。出口不支持多段发送时尝试 linearize，失败丢弃。长度在发送前保存；本批循环结束先提交规则 COUNT，再按出口 flush，不等待更多包。",
+        "state": "记录长度 → 保存 mbuf 指针 → count 增加\n本批结束 → COUNT flush → flush_egress",
+        "note": "COUNT 表示规则命中，后续发送失败不会撤销已累计的命中",
+        "handoff": "进入 flush_egress 看驱动实际接受多少"
+      },
+      {
+        "title": "sent 只表示驱动接受的前缀",
+        "file": "lib/dataplane/worker.c",
+        "fn": "flush_egress",
+        "anchor": "uint16_t sent =",
+        "n": 14,
+        "input": "packets=[B,C]，count=2，假设 sent=1",
+        "output": "B 交给驱动，C 由 worker 释放",
+        "explain": "rte_eth_tx_burst 返回接受数量。worker 后续统计只读预存 lengths，不再访问已交给驱动的 mbuf。未接受尾部从 packets+sent 开始释放，本批不重试。",
+        "state": "B：驱动管理\nC：worker 释放\n发送前 count=2 → 接受 sent=1",
+        "note": "驱动接受不等于对端已经收到；1.1 可交互切换 sent=0/1/2 复习归属",
+        "handoff": "统计结束返回 worker 主循环，下一轮继续收包"
+      },
+      {
+        "title": "批次结束与 QSBR 安全点",
+        "file": "lib/dataplane/worker.c",
+        "fn": "dppd_worker_main",
+        "anchor": "dppd_software_backend_worker_quiescent",
+        "n": 3,
+        "input": "本轮端口扫描结束，匹配和 COUNT 提交完成",
+        "output": "报告不再使用之前借用的规则和路由表",
+        "explain": "安全点是读者进度报告，不是休眠或全体线程同时停下。控制面据此判断旧快照能否回收。规则表回收与报文 mbuf 释放是两套不同生命周期。",
+        "state": "本轮处理完 → 报告 QSBR → 下一轮收包\n旧规则快照 → 控制面安全回收",
+        "note": "下一章切换到安装规则的控制面；这些操作不是每个包到来时重新执行",
+        "handoff": "进入 2.1，从规则请求追到刚才用于匹配的 active 快照"
+      }
+    ]
+  },
+  {
+    "id": "2.1",
+    "title": "规则安装与事务回调",
+    "status": "从入口重新复习 · 完整过程分为四段",
+    "scope": "只演示普通 RULE_APPLY 的单条新增路径：已有 R1，ID 20 尚不存在，端口 0 可用，控制状态允许修改。acl-set 明确选择软件后端；文件保存仅讲入口，不展开启动恢复、硬件和 NAT",
+    "example": "dppctl acl-set 20 0 0 100 udp any any any 9000 drop count",
+    "flow": "命令参数 → request → Unix socket → 服务端分发\n→ 检查 / 规划 → validate → prepare → commit\n→ 新快照与匹配表 → 发布 active\n→ 保存规则记录 → finalize → 保存入口 → 响应客户端\nworker 后续匹配读取新快照，旧快照交给 QSBR",
+    "steps": [
+      {
+        "phase": 0,
+        "title": "命令进入客户端 main",
+        "file": "app/dppctl/main.c",
+        "fn": "main",
+        "anchor": "rc = build_request(argc - argument",
+        "n": 13,
+        "input": "用户输入固定示例命令，参数位于 argc / argv",
+        "output": "main 把命令参数交给 build_request，准备 request 输出区",
+        "explain": "从程序的 main 开始。若带 --socket PATH，先取出管理 socket 路径；剩余参数传给 build_request。此时只是客户端在处理用户输入，尚未发送请求。",
+        "state": "argv → build_request(..., &request)\n示例只在页面演示，不会执行命令",
+        "note": "默认 socket 路径是 /tmp/dppd-control.sock；这是管理通道，和网卡 RX 队列分开",
+        "handoff": "进入 build_request 的 acl-set 分支，再看 build_acl_request 填哪些字段",
+        "values": {
+          "request": "尚在构造",
+          "pending": "未创建",
+          "snapshot": "active → A：[R1]",
+          "response": "尚未生成"
+        },
+        "related": [
+          [
+            "app/dppctl/main.c",
+            "build_request",
+            "if (argc >= 1 && (strcmp(argv[0], \"acl-set\")",
+            2
+          ]
+        ]
+      },
+      {
+        "phase": 0,
+        "title": "把参数填成完整规则请求",
+        "file": "app/dppctl/main.c",
+        "fn": "build_acl_request",
+        "anchor": "initialize_request(request",
+        "n": 27,
+        "input": "ID=20，PORT=0，EXPECTED=0，PRIORITY=100；udp any any any 9000 drop count",
+        "output": "request.operation=RULE_APPLY；payload 内含端口、规则和预期版本",
+        "explain": "initialize_request 先清零并填写协议头。ID 20 表示规则身份，端口 0 是安装入口，expected=0 表示要求新建。acl-set 固定 SOFTWARE_ONLY；IP 地址和源端口不限，目的端口范围是 9000～9000，动作为 DROP、COUNT。",
+        "state": "request.payload.apply\n├─ install_port_id = 0\n├─ expected_generation = 0\n└─ rule：ID20 / priority100 / UDP / dport9000 / DROP,COUNT",
+        "note": "完整规则在客户端已经构造好；服务端接收固定 C 请求结构体。本例命令写 drop count，构造后的 actions 实际是 [COUNT, DROP]，因为代码先填可选计数动作，再填去向动作",
+        "handoff": "回到 main，调用 exchange 发送 request",
+        "values": {
+          "request": "RULE_APPLY · ID20 · expected0",
+          "pending": "未创建",
+          "snapshot": "active → A：[R1]",
+          "response": "尚未生成"
+        },
+        "related": [
+          [
+            "app/dppctl/main.c",
+            "initialize_request"
+          ],
+          [
+            "app/dppctl/main.c",
+            "build_acl_request",
+            "if (strcmp(argv[5], \"udp\")",
+            8
+          ],
+          [
+            "app/dppctl/main.c",
+            "build_acl_request",
+            "if (strcmp(argv[10], \"allow\")",
+            7
+          ],
+          [
+            "app/dppctl/main.c",
+            "build_filter_actions",
+            "rule->nb_actions = 0;",
+            16
+          ]
+        ]
+      },
+      {
+        "phase": 0,
+        "title": "exchange 跨进程发送请求",
+        "file": "app/dppctl/main.c",
+        "fn": "exchange",
+        "anchor": "fd = socket",
+        "n": 23,
+        "input": "构造好的 request，选定的 socket_path",
+        "output": "send 发出请求，客户端等待 response",
+        "explain": "exchange 创建 AF_UNIX / SOCK_SEQPACKET socket，连接 dppd 的管理地址，并发送 sizeof(*request) 字节。CLI 和 daemon 是两个进程，从这里跨越进程边界；客户端不会直接调用 daemon 的 control 函数。",
+        "state": "dppctl：request → send\n──────── 本机 Unix socket ────────\ndppd：等待接收",
+        "note": "send 成功只说明请求已交给通信通道，不代表规则已经安装。业务结果要等 response.status",
+        "handoff": "切换到服务端：dppd 主循环正在轮询管理连接",
+        "values": {
+          "request": "已发送，客户端等待响应",
+          "pending": "未创建",
+          "snapshot": "active → A：[R1]",
+          "response": "等待服务端处理"
+        },
+        "related": [
+          [
+            "app/dppd/main.c",
+            "main",
+            "loop_error = dppd_management_poll(&management);",
+            1
+          ]
+        ]
+      },
+      {
+        "phase": 1,
+        "title": "主循环接收一个管理请求",
+        "file": "lib/management/server.c",
+        "fn": "dppd_management_poll",
+        "anchor": "received = recv",
+        "n": 8,
+        "input": "dppd 主循环调用 management_poll，连接上的请求已可读",
+        "output": "完整 request 交给 dppd_management_handle",
+        "explain": "poll 先接受连接并等待读取就绪，然后 recv 固定大小请求。长度正确才交给管理分发器。普通控制模式调用 management_handle；flow 管理模式走另一条路径，本节沿普通模式。",
+        "state": "dppd main → management_poll\naccept4 → recv → management_handle",
+        "note": "这里的 poll 是管理主循环处理，不是 process_batch 的网卡收包；请求长度和协议版本分别检查",
+        "handoff": "进入 management_handle，看 operation 怎样选择控制接口",
+        "values": {
+          "request": "daemon 已接收完整结构体",
+          "pending": "未创建",
+          "snapshot": "active → A：[R1]",
+          "response": "响应头准备中"
+        },
+        "related": [
+          [
+            "lib/management/server.c",
+            "dppd_management_poll",
+            "client = accept4",
+            7
+          ],
+          [
+            "lib/management/server.c",
+            "dppd_management_handle",
+            "if (request->version",
+            5
+          ]
+        ]
+      },
+      {
+        "phase": 1,
+        "title": "RULE_APPLY 分支进入控制层",
+        "file": "lib/management/server.c",
+        "fn": "dppd_management_handle",
+        "anchor": "case DPPD_MANAGEMENT_RULE_APPLY:",
+        "n": 10,
+        "input": "request.operation=RULE_APPLY，payload.apply 已包含完整规则",
+        "output": "dppd_control_apply 收到端口、规则、预期版本和结果区",
+        "explain": "management_handle 根据 operation 分发。在 RULE_APPLY 分支直接把 payload 中的三项输入交给 dppd_control_apply；后者记录本次操作观测，并调用内部 control_apply_impl。",
+        "state": "management_handle\n→ dppd_control_apply\n→ control_apply_impl",
+        "note": "同一函数有许多其他管理操作，本节只顺着 RULE_APPLY 这一条分支读",
+        "handoff": "进入 control_apply_impl，先检查规则是否已存在",
+        "values": {
+          "request": "正在处理 RULE_APPLY",
+          "pending": "未创建",
+          "snapshot": "active → A：[R1]",
+          "response": "payload.apply 作为输出区"
+        },
+        "related": [
+          [
+            "lib/control/control.c",
+            "dppd_control_apply"
+          ]
+        ]
+      },
+      {
+        "phase": 1,
+        "title": "判断新增、更新还是内容未变",
+        "file": "lib/control/control.c",
+        "fn": "control_apply_impl",
+        "anchor": "candidate = *rule;",
+        "n": 25,
+        "input": "候选 ID20，expected=0；示例中 ID20 不存在",
+        "output": "走新增路径；预期版本和容量检查通过",
+        "explain": "复制输入为 candidate，并统一写入安装端口。按 ID 查询内存中的规则记录：找到相同内容则直接 UNCHANGED；内容不同须检查旧版本。示例查不到 ID20，expected=0 且容量足够，所以可以继续新增。",
+        "state": "ID20 不存在 + expected0 → 新增\n已存在且相同 → UNCHANGED\n已存在且不同 → 检查预期版本再更新",
+        "note": "本页沿新增成功路径；更新、重复请求和冲突在此分叉，不把它们混成同一段",
+        "handoff": "分配候选版本，形成软件执行计划和事务条目",
+        "values": {
+          "request": "candidate=ID20，新增检查通过",
+          "pending": "未创建",
+          "snapshot": "active → A：[R1]",
+          "response": "尚未安装"
+        },
+        "related": [
+          [
+            "lib/control/control.c",
+            "control_apply_impl",
+            "rc = recovery_write_preflight",
+            6
+          ]
+        ]
+      },
+      {
+        "phase": 1,
+        "title": "形成计划，再接上事务回调",
+        "file": "lib/control/control.c",
+        "fn": "control_apply_impl",
+        "anchor": "candidate.generation =",
+        "n": 29,
+        "input": "新增检查通过，示例假设当前全局修订号为7",
+        "output": "candidate.generation=8，plan 选软件，item 和 backends 准备好",
+        "explain": "控制层给候选分配预期的新版本，并调用 planner。示例 acl-set 已明确 SOFTWARE_ONLY，假设端口和规则能力检查均通过，计划选软件。item 保存规则和计划；backends 保存软件及硬件回调表。随后初始化含一条规则的事务。",
+        "state": "candidate(ID20,gen8) + plan(SOFTWARE)\n→ item\nbackends.software.commit → transaction_commit",
+        "note": ".commit = transaction_commit 保存函数地址；执行 backend->commit(...) 时才真正调用它",
+        "handoff": "进入 dppd_transaction_run，先 validate，再 prepare，最后 commit",
+        "values": {
+          "request": "规则与计划已装入 item",
+          "pending": "未创建",
+          "snapshot": "active → A：[R1]",
+          "response": "事务编号已分配"
+        },
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "dppd_software_transaction_backend"
+          ],
+          [
+            "lib/control/control.c",
+            "control_apply_impl",
+            "rc = dppd_transaction_run",
+            1
+          ],
+          [
+            "lib/control/transaction.c",
+            "backend_for"
+          ],
+          [
+            "lib/control/transaction.c",
+            "dppd_transaction_init"
+          ]
+        ],
+        "principles": [
+          {
+            "title": "prepare 是保存函数地址的成员",
+            "text": "int (*prepare)(...) 声明一个函数指针，括号内的参数和前面的 int 规定可调用函数的类型。结构体声明本身没有选定具体函数；初始化时才把地址存入成员，成员名与函数名不必相同。没有括号的 int *prepare(...) 则是返回 int 指针的函数声明。",
+            "flow": "声明：int (*prepare)(...)\n赋值：.prepare = transaction_prepare\n调用：backend->prepare(...)\n\n赋值时不执行函数，调用时才执行\n此处 transaction_prepare 与 &transaction_prepare 都表示函数地址"
+          },
+          {
+            "title": "context 指向对象，prepare 指向函数",
+            "text": "control.c 取得软件接口后，事务按计划选择 backends.software。backend_for 返回的是操作接口地址；其中 context 保存实际软件后端对象地址。回调将 void *context 转回具体类型后才能访问对象字段。文件内的 static 函数也能通过传出的地址调用。",
+            "flow": "dppd_software_transaction_backend(&service->software)\n  → backends.software.context = &service->software\n  → backends.software.prepare = 本文件 transaction_prepare\n\nbackend_for 选中软件接口\n  → backend->prepare(backend->context, item, &item->backend_token)\n  → 软件 transaction_prepare(&service->software, item, &item->backend_token)\n\nrte_flow 接口保存另一组函数地址，同名 static 函数各自独立"
+          }
+        ]
+      },
+      {
+        "phase": 2,
+        "title": "validate：检查所选后端能否执行",
+        "file": "lib/control/transaction.c",
+        "fn": "dppd_transaction_run",
+        "anchor": "transaction->state = DPPD_TRANSACTION_VALIDATING;",
+        "n": 21,
+        "input": "事务 NEW，item 含规则ID20/gen8及软件计划",
+        "output": "条目验证通过，进入 PREPARING",
+        "explain": "通用事务按 item.plan.backend 选回调表，检查计划中的 ID、版本和规则一致，再调用软件 validate。validate 只校验支持能力，不安装规则、不分配 pending。",
+        "state": "NEW → VALIDATING\nbackend->validate(context,item)\n全部通过 → PREPARING",
+        "note": "校验失败直接记录错误并结束；还未 prepare，没有本次准备资源需要回滚",
+        "handoff": "prepare 将分配可清理的临时记录，并通过 token 交给事务",
+        "values": {
+          "request": "validate 已通过",
+          "pending": "未创建",
+          "snapshot": "active → A：[R1]",
+          "response": "仍未形成业务结果"
+        },
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "transaction_validate"
+          ]
+        ],
+        "principles": [
+          {
+            "title": "检查通过后返回哪里",
+            "text": "软件 transaction_validate 检查计划确实选择软件后端，并确认匹配条件和动作受支持。返回 0 后，事务将该条目标记为 VALIDATED；所有条目都通过后才开始 prepare。回调在这里同步执行，必须等它返回再继续。",
+            "flow": "transaction.c：backend->validate(...)\n  → software_backend.c：transaction_validate\n  → 返回 0\n  → item.state = VALIDATED\n全部条目通过 → 进入 PREPARING"
+          },
+          {
+            "title": "结构体里的函数指针与 C++ 成员函数指针",
+            "text": "backend->prepare 先取出接口中的函数指针，后面的括号才执行调用，等价于 (*backend->prepare)(...)。项目中的 prepare 是保存普通函数地址的数据成员。C++ 的非静态成员函数还需要对象，使用另一种指针类型和调用语法。",
+            "flow": "普通函数指针：\nint (*fn)(int, int) = add;\nfn(2, 3);\n\nC++ 非静态成员函数指针：\nint (Calculator::*fn)(int, int) = &Calculator::add;\n(calc.*fn)(2, 3);\n\n项目里的 void *context 由调用方显式传入，不是自动传递的 this"
+          }
+        ]
+      },
+      {
+        "phase": 2,
+        "title": "prepare：创建 pending，返回 token",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "transaction_prepare",
+        "anchor": "pending = calloc",
+        "input": "软件后端、item.rule(ID20/gen8)、token输出地址",
+        "output": "pending 保存规则；item.backend_token 得到它的地址",
+        "explain": "prepare 分配 pending，在写锁内复查版本重复和容量，然后将规则复制进去。它不发布规则，也不实际占住一个规则槽位。通用事务保存 token，稍后原样传给 commit。",
+        "state": "token 参数 → item.backend_token 这个字段\n*token 写入 pending 的地址\nitem.backend_token → pending\n  ├─ rule = ID20/gen8\n  └─ published = false\nactive 仍指向旧快照 A",
+        "note": "这是准备记录的指针 token；QSBR token 是回收进度，两者用途不同。commit 还需再次检查容量",
+        "handoff": "通用事务进入 COMMITTING，通过回调调用 transaction_commit",
+        "values": {
+          "request": "prepare 已通过",
+          "pending": "已分配 · published=false",
+          "snapshot": "active → A：[R1]",
+          "response": "等待 commit"
+        },
+        "related": [
+          [
+            "lib/control/transaction.c",
+            "dppd_transaction_run",
+            "rc = backend->prepare",
+            3
+          ],
+          [
+            "lib/control/transaction.c",
+            "dppd_transaction_run",
+            "rc = backend->commit",
+            3
+          ]
+        ],
+        "principles": [
+          {
+            "title": "为什么 prepare 传地址，commit 传值",
+            "text": "prepare 要把结果写回事务，所以接收 &item->backend_token。它将 pending 地址转换成 uintptr_t 写入该字段；uintptr_t 是可以容纳对象指针值的无符号整数类型。commit 接收已保存的值，再转换回 pending 指针。",
+            "flow": "prepare(..., &item->backend_token)\n  token = &item->backend_token\n  *token = (uintptr_t)pending\n\ncommit(..., item->backend_token)\n  pending = (struct dppd_software_pending_rule *)token\n\nprepare 返回后 pending 仍在堆上，留给 commit / rollback / finalize"
+          },
+          {
+            "title": "重复版本与资源准备的边界",
+            "text": "重复检查同时比较 ID 和版本。已有 ID20/gen7 不会阻止准备 ID20/gen8；已有相同 ID20/gen8 才算重复。pending 只是临时记录，不预占规则槽位，也不改变 active，因此 commit 需要重新检查容量。"
+          }
+        ]
+      },
+      {
+        "phase": 2,
+        "title": "commit：复制 A，加入新规则",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "transaction_commit",
+        "anchor": "for (i = 0; i < backend->capacity; ++i)",
+        "n": 8,
+        "input": "token 指向 pending，active=A[R1]",
+        "output": "私有 B 中加入 ID20，新规则计数器从0开始",
+        "explain": "commit 将 token 转回 pending 指针，再次检查重复和容量，复制 A 为 B。原 R1 的计数器由 A、B 共享引用；ID20 分配独立计数器。找到 B 的空槽后写入规则和 metrics，增加有效规则数。",
+        "state": "A：[R1] ← worker 仍可读\nB：[R1,ID20] ← 私有副本，尚未发布\nID20.metrics：refs1 / hits0 / bytes0",
+        "note": "规则内容复制进 B，旧规则计数器只共享指针；新增版本的计数器不会继承旧版本统计",
+        "handoff": "把准备好的 B 交给 publish_locked，重建最终规则的匹配表",
+        "values": {
+          "request": "进入软件 commit",
+          "pending": "仍保留 · published=false",
+          "snapshot": "active → A；next → B：[R1,ID20]",
+          "response": "尚未返回"
+        },
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "transaction_commit",
+            "struct dppd_software_pending_rule *pending =",
+            1
+          ],
+          [
+            "lib/dataplane/software_backend.c",
+            "transaction_commit",
+            "for (i = 0; i < backend->capacity; ++i)",
+            8
+          ],
+          [
+            "lib/dataplane/software_backend.c",
+            "snapshot_clone"
+          ],
+          [
+            "lib/dataplane/software_backend.c",
+            "transaction_commit",
+            "next = snapshot_clone",
+            5
+          ]
+        ],
+        "principles": [
+          {
+            "title": "B 拿到规则副本，不依赖 pending 的内存",
+            "text": "next->objects[i].rule = pending->rule 复制整个规则结构体，包括内嵌的匹配和动作数组。已有规则的计数器指针则由 A、B 共享引用；新增规则另建计数器，hits 和 bytes 从零开始。",
+            "flow": "pending.rule ──复制内容──→ B.objects[i].rule\n\nA 中的旧规则 ──→ 原计数器 ←── B 中的旧规则\nB 中的新规则 ──→ 新计数器\n\nreferences = 1 表示一个快照持有，不表示命中一个包"
+          }
+        ]
+      },
+      {
+        "phase": 2,
+        "title": "为 B 建 exact / ACL 匹配表",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "publish_locked",
+        "anchor": "int rc = dppd_exact_add",
+        "n": 6,
+        "input": "B 已有最终规则内容，但匹配索引需重建",
+        "output": "ID20 编入 ACL；全部规则建表成功才继续",
+        "explain": "每条规则先尝试 exact，只有 -ENOTSUP 才转 ACL。示例包含通配地址和端口范围，不能放入 exact，因此走 ACL。匹配表保存槽位下标加1的 tag，供 worker 找回同一快照中的动作和计数器。",
+        "state": "完整规则 → exact 尝试\n本例不支持 → ACL\n所有有效规则建表成功 → 准备发布",
+        "note": "本步是安装时编表；worker 每包 classify 只是查已建好的表。任一建表错误都不会交换 active",
+        "handoff": "原子交换 active：B 从私有副本变成已发布规则快照",
+        "values": {
+          "request": "commit 构建匹配索引",
+          "pending": "published=false",
+          "snapshot": "active → A；B 的 ACL / exact 已就绪",
+          "response": "尚未完成安装"
+        },
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "publish_locked",
+            "struct dppd_acl *acl =",
+            7
+          ]
+        ]
+      },
+      {
+        "phase": 2,
+        "title": "发布：active 从 A 切换到 B",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "publish_locked",
+        "anchor": "previous = atomic_exchange_explicit",
+        "n": 7,
+        "input": "B 的规则和匹配表均已准备完成",
+        "output": "active=B，previous=A；旧A交给QSBR",
+        "explain": "预先取得回收节点后，atomic_exchange 原子换入 B 并返回旧 A。release 与 worker 的 acquire 配合。新的读者可取得 B，已持有 A 的读者继续用 A，旧表等待 QSBR 安全后回收。",
+        "state": "交换前：active → A，next → B\n交换后：active → B，previous → A\nA → retired + QSBR token",
+        "note": "规则从这一步开始可被 worker 读到，早于客户端收到成功响应；这一步只换指针，不复制整表",
+        "handoff": "返回 transaction_commit，记录安装耗时并标记 pending 已发布",
+        "values": {
+          "request": "规则已经发布",
+          "pending": "即将标记 published=true",
+          "snapshot": "active → B：[R1,ID20]；A 等待回收",
+          "response": "控制层尚未收尾"
+        },
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "publish_locked",
+            "retired->snapshot = previous;",
+            26
+          ],
+          [
+            "lib/dataplane/software_backend.c",
+            "dppd_software_backend_decide_counted",
+            "active = atomic_load_explicit",
+            7
+          ]
+        ]
+      },
+      {
+        "phase": 2,
+        "title": "commit 返回，准备记录仍保留",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "transaction_commit",
+        "anchor": "int publish_error =",
+        "n": 24,
+        "input": "publish_locked 已返回0",
+        "output": "pending.published=true，事务 COMMITTED",
+        "explain": "commit 记录本条规则的安装耗时、commit_rule_count=1，然后设置 pending->published 并解锁返回。通用事务将条目标为 COMMITTED；本例只有一项，因此整个事务也进入 COMMITTED。",
+        "state": "publish成功 → 安装统计\n→ pending.published=true\n→ backend commit 返回0\n→ transaction COMMITTED",
+        "note": "若发布失败则销毁尚未发布的 B。失败补偿在2.4展开；本步不释放 pending，留给 finalize 或 rollback",
+        "handoff": "回到 control_apply_impl，更新内存记录并执行 finalize",
+        "values": {
+          "request": "事务安装成功",
+          "pending": "published=true，尚未释放",
+          "snapshot": "active → B；ID20 已可匹配",
+          "response": "后端成功，控制层继续收尾"
+        },
+        "related": [
+          [
+            "lib/control/transaction.c",
+            "dppd_transaction_run",
+            "transaction->state = DPPD_TRANSACTION_COMMITTED;",
+            3
+          ]
+        ],
+        "principles": [
+          {
+            "title": "发布成功、条目完成、事务完成是三个位置",
+            "text": "active 的原子交换已经完成发布。pending->published 记录发布结果，供回滚使用；commit 返回 0 后，事务先标记当前条目，再在全部条目成功后标记整个事务。此时 pending 仍保留。",
+            "flow": "publish_locked：active → B\n  → transaction_commit：pending.published = true，返回 0\n  → dppd_transaction_run：item.state = COMMITTED\n  → 全部条目成功：transaction.state = COMMITTED"
+          }
+        ]
+      },
+      {
+        "phase": 3,
+        "title": "登记完整规则，finalize，再保存",
+        "file": "lib/control/control.c",
+        "fn": "control_apply_impl",
+        "anchor": "rc = dppd_rule_repository_apply",
+        "n": 17,
+        "input": "新规则已在后端生效，控制层持有成功事务",
+        "output": "内存规则记录更新，pending释放，保存入口执行",
+        "explain": "控制层先将 candidate 的内容和版本写入 service->rules，再调用 dppd_transaction_finalize。通用事务选中软件接口，经 finalize 回调释放 pending，随后清零 backend_token。最后才进入配置保存入口；保存成功与否不能只看事务是否 FINALIZED。",
+        "state": "后端已生效 → records保存ID20/gen8\n→ finalize释放pending\n→ 配置路径存在时保存文件",
+        "note": "本次已复习规则记录与 finalize；配置保存仅在这里标出衔接，下一步进入 2.4 的保存步骤展开",
+        "handoff": "控制函数返回 rc，服务端写入 response.status 并把响应发送回客户端",
+        "values": {
+          "request": "控制层收尾完成",
+          "pending": "已由 finalize 释放",
+          "snapshot": "active → B；records 记录 ID20/gen8",
+          "response": "成功时 CREATED/gen8；保存失败则-EUCLEAN"
+        },
+        "related": [
+          [
+            "lib/control/transaction.c",
+            "dppd_transaction_finalize"
+          ],
+          [
+            "lib/dataplane/software_backend.c",
+            "transaction_finalize"
+          ],
+          [
+            "lib/control/rule_repository.c",
+            "dppd_rule_repository_apply"
+          ],
+          [
+            "lib/control/control.c",
+            "persist_current_repository"
+          ]
+        ],
+        "principles": [
+          {
+            "title": "沿调用栈找到释放 pending 的位置",
+            "text": "正常新建成功时，control_apply_impl 更新规则记录后调用事务收尾。软件 finalize 只通过 token 找到 pending 并释放；context、item 在这个回调中没有使用。随后事务清零字段，因为 free 不会自动改写调用方保存的地址。",
+            "flow": "control.c：更新 service->rules\n  → dppd_transaction_finalize\n      → backend->finalize(..., item->backend_token)\n          → software_backend.c：transaction_finalize\n          → free(pending)\n      → item->backend_token = 0\n      → transaction.state = FINALIZED\n  → 回到 control.c，进入保存入口"
+          },
+          {
+            "title": "pending、旧快照 A、新快照 B 分别由谁管理",
+            "text": "pending 是控制面的临时记录。B 已经保存自己的规则副本，因此释放 pending 不会删除已生效规则。旧快照 A 是否能够释放由 QSBR 判断，这是另一条内存生命周期。",
+            "flow": "prepare 创建 pending\ncommit 将规则内容复制进 B，并发布 B\nfinalize 释放 pending\n\nactive → B，继续供 worker 使用\n旧快照 A → 安全后由 snapshot_destroy 回收\n计数器 → 最后一个快照引用归还时释放"
+          }
+        ]
+      },
+      {
+        "phase": 3,
+        "title": "响应回到客户端，检查业务状态",
+        "file": "lib/management/server.c",
+        "fn": "dppd_management_handle",
+        "anchor": "response->status = rc;",
+        "n": 2,
+        "input": "控制层返回业务 rc 与 apply 结果",
+        "output": "daemon发送response；CLI检查response.status并打印结果",
+        "explain": "management_handle 把业务 rc 写入 response.status，返回 poll 发送。exchange 在客户端接收并核对响应头，返回 main。main 先检查传输是否成功，再检查 response.status；只有后者为0才按成功结果打印。",
+        "state": "dppd：rc → response.status → send\nUnix socket → dppctl/exchange recv\nmain：检查传输 → 检查status → 打印",
+        "note": "传输成功不等于规则安装成功；服务端处理错误也会通过正常响应送回。页面不会真正连接管理 socket",
+        "handoff": "回到报文路径：worker 下次取到 B 时，会怎样使用新规则",
+        "values": {
+          "request": "本次管理请求结束",
+          "pending": "已释放",
+          "snapshot": "active → B，规则保持生效",
+          "response": "已返回CLI并检查status"
+        },
+        "related": [
+          [
+            "lib/management/server.c",
+            "dppd_management_poll",
+            "if (send(client",
+            7
+          ],
+          [
+            "app/dppctl/main.c",
+            "exchange",
+            "bytes = recv",
+            15
+          ],
+          [
+            "app/dppctl/main.c",
+            "main",
+            "if (response.status != 0)",
+            7
+          ]
+        ]
+      },
+      {
+        "phase": 3,
+        "title": "与 process_batch 在 active 处衔接",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "dppd_software_backend_decide_counted",
+        "anchor": "active = atomic_load_explicit",
+        "n": 7,
+        "input": "后续到达入口0的包，worker进入软件规则匹配",
+        "output": "读到B并匹配ID20时，DROP标志与COUNT由规则动作生成",
+        "explain": "worker 不是管理请求的调用者。它独立处理业务包，在这里读取 backend->active。取得 B 后，ACL 返回 tag，再从 B.objects[tag-1] 找到 ID20 的动作。DROP 写入软件决策，COUNT累计；最终由 process_batch 释放应丢弃的 mbuf。",
+        "state": "规则配置：发布 backend->active = B\n报文处理：读取同一个 backend->active\nUDP dport9000 命中 ID20 → DROP + COUNT",
+        "note": "新规则的优先级仍要与其他候选比较；本例假设没有更优先的冲突规则。旧A的释放由QSBR另行判断",
+        "handoff": "进入2.2复习快照与QSBR；或返回1.3复习匹配及动作怎样生成decision",
+        "values": {
+          "request": "规则准备来源已经串通",
+          "pending": "已释放",
+          "snapshot": "worker 读到 B 后使用同一版表和动作",
+          "response": "管理响应结束，后续业务包独立处理"
+        },
+        "related": [
+          [
+            "lib/dataplane/worker.c",
+            "process_batch",
+            "routed_decide(runtime, ingress",
+            1
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "2.2",
+    "title": "匹配表、快照发布与 QSBR",
+    "status": "此前讲过 · 本次集中整理",
+    "scope": "沿 transaction_commit → publish_locked → reclaim_locked 阅读。先发布新规则，再根据读者进度安排旧快照回收；快照是运行时内存对象",
+    "example": "A 是旧快照，B 是待发布副本；ID 20 放在 B.objects[2]，对应 tag=3。回收记录用 R 表示，与旧快照 A 分开",
+    "flow": "B 的规则 → exact / ACL → active：A → B\n旧 A → 回收记录 R + QSBR token → check\n  未通过 → 保留 A，B 仍已生效\n  通过 → 摘下 R → 销毁 A → 释放 R",
+    "steps": [
+      {
+        "title": "逐条编入 exact 或 ACL",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "publish_locked",
+        "anchor": "int rc = dppd_exact_add",
+        "n": 6,
+        "input": "B 的有效规则已经写入 objects[]，还需要建立供 worker 查询的匹配表",
+        "output": "每条规则加入 exact 或 ACL，全部成功后才继续发布",
+        "explain": "先调用 dppd_exact_add。返回 0 表示已经入表；只有 -ENOTSUP 才转入 dppd_acl_add。其他错误直接结束本次发布，active 仍指向 A。这时是在安装匹配条件，没有报文参与，也没有执行 DROP。",
+        "state": "exact_add → 0：已加入 exact\n          → -ENOTSUP：改用 ACL\n          → 其他错误：发布失败\nACL 也成功后，继续处理下一条规则",
+        "note": "一条已加入 exact 的规则不会再加入 ACL；exact 表的行号、哈希桶编号与 tag 各有用途",
+        "handoff": "先看 exact 怎样保存完整匹配键，再回到 publish_locked 发布整个 B",
+        "related": [
+          [
+            "lib/dataplane/exact.c",
+            "dppd_exact_add",
+            "if (match->spec.ipv4.src_mask_be",
+            5
+          ],
+          [
+            "lib/dataplane/acl.c",
+            "dppd_acl_add",
+            "struct acl_row row",
+            17
+          ]
+        ],
+        "principles": [
+          {
+            "title": "为什么之前的 UDP 9000 规则进入 ACL",
+            "text": "那条规则的源、目的 IP 都是 any，地址掩码为 0。exact 要求完整地址匹配，因此返回 -ENOTSUP；这是匹配表不支持该条件，不是规则无效。ACL 可以保存这些地址通配和端口范围条件。",
+            "flow": "ID 20：IPv4 / UDP，地址任意，源端口任意，目的端口 9000\n  → exact 检查地址掩码：不是全 1\n  → 返回 -ENOTSUP\n  → publish_locked 调用 acl_add"
+          },
+          {
+            "title": "tag 把匹配结果接回完整规则",
+            "text": "匹配表保存 tag，命中后用它找到 objects[] 中的动作和计数器。tag 是槽位下标加 1，留出 0 表示未命中；它不是规则 ID。",
+            "flow": "安装：ID 20 位于 B.objects[2] → 保存 tag=3\n收包：ACL 返回 tag=3 → B.objects[3-1]\n                     → 取出 COUNT、DROP 和计数器"
+          }
+        ]
+      },
+      {
+        "title": "40 字节键与桶内链表",
+        "file": "lib/dataplane/exact.c",
+        "fn": "dppd_exact_add",
+        "anchor": "uint32_t bucket =",
+        "n": 6,
+        "input": "完整 IP、TCP/UDP 端口和入口组成 row.key",
+        "output": "新行存入 rows[count]，头插目标桶",
+        "explain": "键布局为入口 2、地址族 1、传输层 1、源地址 16、目的地址 16、源端口 2、目的端口 2 字节。IPv4 地址区剩余字节为零。哈希只定位桶，查询还要比较完整键并比较优先级。",
+        "state": "桶值 1 → rows[0]\n插入 rows[3]：next=1，桶值改为4\n桶 → rows[3] → rows[0]",
+        "note": "桶值和 next 是行下标加一，0 结束；exact 的优先级不会自动高于 ACL",
+        "handoff": "返回 publish_locked，索引全部完成后发布整个 B 的指针",
+        "principles": [
+          {
+            "title": "安装规则与查询报文使用相同的键布局",
+            "text": "安装时从规则提取字段，收包时从已解析的报文提取字段。对应字段相同，才会得到相同的键；规则 ID、优先级和 tag 不属于这 40 字节键。",
+            "flow": "规则字段 → key ─┐\n报文字段 → key ─┴→ 哈希定位桶 → 比较完整 key\n                                → 确定匹配规则及 tag"
+          }
+        ]
+      },
+      {
+        "title": "原子交换：换入 B，取出 A",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "publish_locked",
+        "anchor": "previous = atomic_exchange_explicit",
+        "n": 7,
+        "input": "active=A，next=B，B 的规则和匹配表都已构建完成",
+        "output": "active=B，previous=A，next 仍为 B；从 active 取得 B 的 worker 开始使用新规则",
+        "explain": "exchange 写入 B 的地址，同时返回原来保存的 A 的地址。release 与 worker 读取 active 时的 acquire 配合，使读到 B 的线程看到 B 已完成的初始化。本操作只交换指针，不复制或释放快照。",
+        "state": "交换前：backend->active → A，next → B\n交换后：backend->active → B，previous → A\n        已经取得 A 的 worker 仍可继续使用 A",
+        "note": "没有旧快照时只释放预分配的回收记录；有旧快照时，必须先确认读者安全再释放",
+        "handoff": "将旧快照 A 的地址保存到回收记录 R，取得 QSBR 进度标记并挂入链表",
+        "principles": [
+          {
+            "title": "改 active，不会改掉 worker 已保存的地址",
+            "text": "worker 可能在发布前已经把 A 的地址取到局部变量。控制面改变 active 后，这个局部变量仍指向 A。立即 free(A) 就可能让它访问已释放内存，所以发布 B 和释放 A 必须分开。",
+            "flow": "发布前：backend->active → A\n        worker 局部指针 → A\n\n发布后：backend->active → B\n        worker 局部指针 → A（仍在读取）"
+          }
+        ]
+      },
+      {
+        "title": "旧表挂链，立即尝试但不等待",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "publish_locked",
+        "anchor": "retired->snapshot = previous;",
+        "input": "A 已退出 active，回收记录 R 已预分配",
+        "output": "R 保存 A 的地址和 QSBR token，并加入待回收链表；B 已经生效",
+        "explain": "先把 previous 保存到 R.snapshot，再调用 start 取得回收进度标记。R.next 接住原链头，backend->retired 改为指向 R。最后调用 reclaim_locked 尝试回收，但不会等所有 worker 用完才返回发布成功。",
+        "state": "backend->active → B\nbackend->retired → R → 原链头\n                  ├─ snapshot → A\n                  └─ token = 8（示例进度标记）",
+        "note": "R 是回收记录，A 是旧规则快照，两者是独立内存。QSBR token 不是时间戳、规则版本、引用数或 pending 地址",
+        "handoff": "进入 reclaim_locked，结合 worker 的安全点报告判断 A 何时可以释放",
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "dppd_software_backend_worker_quiescent"
+          ],
+          [
+            "lib/dataplane/worker.c",
+            "dppd_worker_main",
+            "dppd_software_backend_worker_quiescent",
+            2
+          ]
+        ],
+        "principles": [
+          {
+            "title": "QSBR 靠读者主动报告，确认此前的读取已结束",
+            "text": "QSBR 是基于静默状态的回收机制。这里的安全点表示线程已不再使用此前借用的快照和相关指针，不是线程休眠。它不扫描局部指针；程序必须在真正用完后报告。本项目在 worker 一轮网口处理、规则匹配和 COUNT 提交完成后报告。",
+            "flow": "start()      → 取得目标进度标记\nquiescent()  → worker 报告已通过安全点\ncheck(token) → 检查相关在线读者是否都已通过对应安全点"
+          },
+          {
+            "title": "两个 worker 的回收时间线",
+            "text": "编号 8 仅用于示例。只要还有相关在线读者未达到这次回收要求，就保留 A；B 的发布和后续控制流程可以继续。报告安全点的是 worker，执行释放的是控制面。",
+            "flow": "① 两个 worker 都已取得 A\n② 控制面发布 B，start 得到 token=8\n③ worker 0 用完 A，报告进度 8；worker 1 仍在读取\n④ check(8) 未通过 → 保留 A\n⑤ worker 1 用完 A，也报告进度 8\n⑥ 后续 check(8) 通过 → 控制面可以释放 A"
+          }
+        ]
+      },
+      {
+        "title": "通过安全检查后，用 link 摘下回收记录",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "reclaim_locked",
+        "anchor": "struct dppd_software_retired_snapshot **link",
+        "input": "待回收链表中的每条记录都保存一个旧快照和对应的 QSBR token",
+        "output": "未通过安全检查就保留；通过后摘下记录、销毁旧快照，再释放记录",
+        "explain": "check(...,false) 中的 false 表示不等待。返回 0 时，当前记录保留在链上，继续检查后继；通过时，先用 *link = retired->next 绕过当前记录，再调用 snapshot_destroy 和 free。",
+        "state": "检查未通过 → link 移到当前记录的 next 字段\n检查通过   → 改写 *link，摘下当前记录\n           → destroy 旧快照 A → free 回收记录 R",
+        "note": "回收器只处理规则快照及其回收记录，不负责释放报文 mbuf",
+        "handoff": "进入 snapshot_destroy，再看 metrics_put 怎样归还计数器引用",
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "snapshot_destroy"
+          ]
+        ],
+        "principles": [
+          {
+            "title": "二级指针指向的是保存节点地址的字段",
+            "text": "backend->retired 本来就是指针，对它取地址需要二级指针保存。link 指向一个指针字段，*link 才是当前节点的地址，因此修改 *link 就能修改链表连接。这里的 R1、R2 是回收记录，不是旧快照本身。",
+            "flow": "原链：backend->retired → R1 → R2 → NULL\n\n检查 R1：link = &backend->retired，*link = R1\n  删除 R1：*link = R1->next\n          即 backend->retired = R2\n\n保留 R1 后检查 R2：link = &R1->next，*link = R2\n  删除 R2：*link = R2->next\n          即 R1->next = NULL"
+          },
+          {
+            "title": "删除后 link 不移动，下一轮仍能找到后继",
+            "text": "摘链已经让 link 指向的字段保存后继地址。这个字段位于链表头或前一个保留节点中，当前记录被释放后它仍有效。若保留当前记录，才需要把 link 移到它的 next 字段。",
+            "flow": "保留 R1：link = &R1->next → 下一轮检查 R2\n删除 R1：*link = R2，link 留在原位 → 下一轮检查 R2\n\nfree(R1) 后不能再访问 R1->next"
+          }
+        ]
+      },
+      {
+        "title": "销毁 A：归还计数器引用，再释放快照",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "metrics_put",
+        "anchor": "if (metrics != NULL",
+        "n": 7,
+        "input": "QSBR 已确认 A 可回收，A、B 可能仍共用未变规则的计数器 M",
+        "output": "A 的快照内存释放；仍被 B 持有的计数器继续存活，R 最后也被释放",
+        "explain": "snapshot_destroy 遍历全部槽位，逐个调用 metrics_put，再 free(snapshot)。metrics_put 递减引用数，atomic_fetch_sub 返回递减前的值；只有旧值为 1，才说明这次归还了最后一个引用，可以释放计数器。",
+        "state": "A、B → M，references=2\n销毁 A → references=1，M 继续给 B 使用\n最后持有者归还 → references=0，释放 M\nA 销毁后，reclaim_locked 再 free(R)",
+        "note": "减少的是 references，不是 hits 或 bytes。snapshot_destroy 自身不检查 QSBR，安全性由调用方先保证",
+        "handoff": "返回 reclaim_locked、publish_locked，再返回 transaction_commit；下一节看控制层怎样更新 records 数组",
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "snapshot_destroy"
+          ],
+          [
+            "lib/dataplane/software_backend.c",
+            "reclaim_locked",
+            "*link = retired->next;",
+            4
+          ]
+        ],
+        "principles": [
+          {
+            "title": "free(A) 释放哪一块内存",
+            "text": "快照头、objects[]、exact 表和 ACL 表随快照一起分配，所以 free(snapshot) 释放这整块 A。计数器由槽位中的指针指向，独立分配，先按引用数决定是否释放。",
+            "flow": "A：快照头 + objects[] + exact + ACL\n             │\n             └─ metrics ──→ M ←── B 的 metrics\n\n销毁 A：归还 M 的引用 → free(A)\n回收器：随后 free(R)\n结果：active → B，B 仍可使用 M"
+          },
+          {
+            "title": "两层保护分别解决两个问题",
+            "text": "QSBR 确认 worker 已结束对旧快照的访问，决定 A 能不能销毁。计数器引用数确认还有没有快照持有 M，决定 M 能不能释放。引用数不统计多少个 worker 正在处理报文。",
+            "flow": "QSBR：读者已安全 → 允许销毁 A\n引用计数：M 仍被 B 持有 → 保留 M 和累计值"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "2.3",
+    "title": "规则的保存、查找、修改与删除",
+    "status": "当前复习至单条新建记录与版本分配",
+    "scope": "本节看完整规则怎样存入 records 数组，再按 ID 查找、修改和删除。最近复习到单条新建和版本分配；后面的索引修改、删除保留为此前材料，不表示本节已全部重新读完",
+    "example": "新建 ID 20，expected=0，集合版本12→13。假设空闲槽位为4：records[4] 保存完整规则，order=[0,4,2,3] 对应 ID=[10,20,30,40]。删除20后可用槽位4保存25；槽位编号只是本例的分配结果",
+    "flow": "规则安装成功 → 将完整内容存进 records 数组\n按 ID 查找 → index 找到位置 → records[slot]\n修改 → 检查版本 → 覆盖该项内容并分配新版本\n删除 → 移除索引 → 清空记录 → 空位置再次使用",
+    "steps": [
+      {
+        "title": "安装成功后，把完整规则存入内存数组",
+        "file": "lib/control/control.c",
+        "fn": "control_apply_impl",
+        "anchor": "rc = dppd_rule_repository_apply",
+        "n": 17,
+        "input": "软件后端已发布 ID20/version13；candidate 是待登记的规则副本",
+        "output": "service->rules 保存完整记录，随后 finalize 释放 pending，再进入配置保存",
+        "explain": "从 control_apply_impl 的安装成功分支进入。这里把 candidate 交给 dppd_rule_repository_apply，更新控制面记录；worker 仍通过软件后端的 active 查表。记录更新成功后，才继续前面读过的 finalize",
+        "state": "candidate → 复制到 records[4].rule\nrecords[4].occupied = true\nresult：CREATED，generation=13",
+        "note": "这里只是在内存中登记规则；是否写入文件由后面的保存步骤处理",
+        "handoff": "进入 dppd_rule_repository_apply，先按 ID 查记录，再决定新建、更新或保持不变",
+        "related": [
+          [
+            "lib/control/rule_repository.c",
+            "dppd_rule_repository_apply",
+            "record = find_record",
+            15
+          ],
+          [
+            "lib/control/transaction.c",
+            "dppd_transaction_finalize",
+            "if (backend->finalize != NULL)",
+            6
+          ]
+        ],
+        "principles": [
+          {
+            "title": "运行规则、控制记录和文件各有什么用途",
+            "text": "它们保存的内容有关联，但由不同路径使用。后端安装成功不代表磁盘文件已经保存成功",
+            "flow": "active → worker 匹配报文、执行动作\nservice->rules.records[] → 控制面查询、管理内容与版本\n配置文件 → 保存时写入，供后续恢复"
+          },
+          {
+            "title": "records 中保存的是规则内容",
+            "text": "record->rule = *rule 是结构体赋值，匹配条件和动作的内嵌数组一起复制；这里没有保存 &candidate",
+            "flow": "candidate（控制函数的局部副本）\n       │ 复制内容\n       ▼\nrecords[4].rule（控制面保留的规则）"
+          }
+        ]
+      },
+      {
+        "title": "按 ID 分清新建、更新和未变化",
+        "file": "lib/control/rule_repository.c",
+        "fn": "dppd_rule_repository_apply",
+        "anchor": "record = find_record",
+        "n": 15,
+        "input": "rule.id=20；expected_generation 表达调用方预期的旧状态",
+        "output": "未找到：检查新建要求；找到：先比较内容，再按需检查旧版本",
+        "explain": "find_record 通过索引找到 records 中的记录。找到后先用 dppd_rule_equal 比较内容，这个比较不包含规则自身 generation；相同内容立即返回 UNCHANGED 和原版本。内容不同才检查 expected_generation",
+        "state": "找到且内容相同 → UNCHANGED，版本和数量不变\n找到且内容不同 → 检查旧版本，符合才更新\n未找到 → expected 为0或ANY才允许新建",
+        "note": "返回 0 后还要读取 result.status，不能只凭返回 0 就认为创建了新规则",
+        "handoff": "新建分支取得槽位，复制规则内容，并正式分配新版本",
+        "related": [
+          [
+            "lib/control/rule_repository.c",
+            "find_record"
+          ],
+          [
+            "lib/control/rule_repository.c",
+            "dppd_rule_repository_apply",
+            "if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != 0)",
+            4
+          ]
+        ],
+        "principles": [
+          {
+            "title": "expected 指的是旧状态，不是新版本",
+            "text": "0 表示期望 ID 尚不存在；具体版本表示期望当前规则仍是该版本；ANY 表示跳过版本限制",
+            "flow": "不存在 + expected=0 → 可以新建\n不存在 + expected=7 → -ESTALE\n存在版本9 + 不同内容 + expected=7 → -ESTALE\n存在版本9 + 相同内容 → UNCHANGED，保留版本9"
+          }
+        ]
+      },
+      {
+        "title": "新建和更新怎样分配规则版本",
+        "file": "lib/control/rule_repository.c",
+        "fn": "dppd_rule_repository_apply",
+        "anchor": "if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != 0)",
+        "input": "新建 ID20，expected=0；集合版本12，当前有3条有效规则",
+        "output": "ID20写入槽位4；集合和新规则版本均为13，count从3变为4",
+        "explain": "索引插入成功后返回 slot，函数在 records[slot] 中标记 occupied 并复制完整规则。随后把整个集合的 generation 加一，赋给新规则，再增加有效规则数。其他已有规则保留各自的版本",
+        "state": "index：(20,0) → slot=4\nrecords[4].rule.id = 20\nrepository.generation：12 → 13\nrecords[4].rule.generation = 13\nrepository.count：3 → 4",
+        "note": "索引键中的0固定占位，不是规则版本；实际版本保存在 records[slot].rule.generation",
+        "handoff": "接下来回看 dppd_slot_index_insert 如何给出槽位4；这是索引层的实现，不是再次安装后端规则",
+        "related": [
+          [
+            "lib/control/control.c",
+            "control_apply_impl",
+            "candidate.generation =",
+            1
+          ],
+          [
+            "lib/control/rule_repository.c",
+            "dppd_rule_repository_apply",
+            "record->rule = *rule;",
+            10
+          ],
+          [
+            "lib/control/control.c",
+            "control_apply_impl",
+            "rc = dppd_rule_repository_apply",
+            2
+          ]
+        ],
+        "principles": [
+          {
+            "title": "已经安装版本13，为什么这里还要加一",
+            "text": "控制层先用集合版本加一填写 candidate，此时没有修改集合版本。安装成功后，这里才正式推进集合版本；串行执行保证中间没有另一笔修改",
+            "flow": "安装前：集合版本12 → candidate.generation=12+1=13\n安装中：后端安装 ID20/version13，集合仍为12\n登记时：++repository.generation → 13\n        records[4].rule.generation → 13"
+          },
+          {
+            "title": "更新已有规则时，数量不增加",
+            "text": "更新分支对照：集合版本12、R1版本7，携带 expected=7 修改内容后，集合与R1均变为13；不使用旧规则版本7+1，也不直接采用输入规则的 generation",
+            "flow": "新建 → 分配新槽位、分配新版本、count加1\n更新 → 覆盖原槽位、分配新版本、count不变\n内容相同 → UNCHANGED，版本和count都不变"
+          }
+        ]
+      },
+      {
+        "title": "怎样从 ID 找到完整规则的数组位置",
+        "file": "lib/control/slot_index.c",
+        "fn": "lower_bound",
+        "anchor": "uint32_t first =",
+        "n": 11,
+        "input": "已有ID10、30、40，order=[0,2,3]",
+        "output": "插入ID20的位置 position=1",
+        "explain": "records[slot] 存完整规则；keys[slot] 存查找键；order[position] 存槽位编号。二分操作有序的 order，返回排序位置，不是实际对象槽位。",
+        "state": "position=1 → order[1]=2 → keys[2] / records[2]\nrecords 不按 ID 搬动；order 按键有序",
+        "note": "free_head 是空闲槽位链头，NONE=UINT32_MAX；槽位0有效",
+        "handoff": "从空闲链取槽位，再在有序编号数组中腾位置"
+      },
+      {
+        "title": "新增规则：取空位置并建立查找索引",
+        "file": "lib/control/slot_index.c",
+        "fn": "dppd_slot_index_insert",
+        "anchor": "uint32_t slot =",
+        "n": 10,
+        "input": "order=[0,2,3]，空闲链4→1→NONE，插入ID20",
+        "output": "slot=4，order=[0,4,2,3]，index.count=4",
+        "explain": "先从空闲链取槽位4，keys[4] 写入(20,0)。memmove 将位置1之后的编号右移，再写入编号4。返回 output=4 后，调用方 rule_repository.c把完整规则写入 records[4]。",
+        "state": "前：[0,2,3] → ID [10,30,40]\n后：[0,4,2,3] → ID [10,20,30,40]\nfree_head=1",
+        "note": "memmove 允许源目标重叠，移动的是编号；这里不分配新内存",
+        "handoff": "下一步删除ID20，看空位怎样回来",
+        "related": [
+          [
+            "lib/control/rule_repository.c",
+            "dppd_rule_repository_apply",
+            "record = &repository->records[slot];",
+            13
+          ]
+        ]
+      },
+      {
+        "title": "删除索引后，空位置怎样再次使用",
+        "file": "lib/control/slot_index.c",
+        "fn": "dppd_slot_index_erase",
+        "anchor": "uint32_t position =",
+        "n": 17,
+        "input": "删除ID20，position=1、slot=4，free_head=1",
+        "output": "order有效部分=[0,2,3]；空闲链4→1→NONE",
+        "explain": "检查键存在后把后面的编号左移。keys[4] 清空ID和版本，同时 next_free 接住原空闲链；free_head 改为4。count减少后尾部旧编号无效。调用方 rule_repository.c还会清空 records[4]。",
+        "state": "删20：[0,4,2,3] → [0,2,3]\n空闲链：1→NONE → 4→1→NONE\n再加25：取槽位4 → [0,4,2,3]\n对应ID：[10,25,30,40]",
+        "note": "槽位复用不是规则身份复用；外部仍用ID和版本。这里只维护索引，不负责删除后端规则",
+        "handoff": "进入2.4，把索引删除接回真正的规则删除和事务回滚",
+        "related": [
+          [
+            "lib/control/rule_repository.c",
+            "dppd_rule_repository_remove"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "2.4",
+    "title": "删除、回滚与保存边界",
+    "status": "此前讲过的收尾流程 · 本次连接索引删除",
+    "scope": "只展开规则删除、事务收尾及保存入口。持久化文件格式、启动恢复、硬件实现、连接跟踪和 NAT 留待后续",
+    "example": "正常删除按 id+generation 定位；回滚例：R1提交成功，R2失败，R3仅prepare；文件保存失败不等于规则回滚",
+    "flow": "正常删除：后端 remove → 内存账本 remove → 保存入口\n事务失败：逆序 rollback → 未发布清准备记录 / 已发布撤销规则\n成功收尾：finalize 保留规则 → 保存；失败标记 dirty",
+    "steps": [
+      {
+        "title": "正常删除先处理后端，再删账本",
+        "file": "lib/control/control.c",
+        "fn": "control_remove_impl",
+        "anchor": "rc = remove_actual_rule",
+        "n": 13,
+        "input": "当前账本中有目标ID和版本，版本检查通过",
+        "output": "后端删除成功后才删除账本，然后保存",
+        "explain": "control_remove_impl 先查账本确定版本并检查预期。后端删除失败就返回，账本保留；后端已删但账本删失败则进入隔离。账本删除内部才调用 slot_index_erase 归还槽位。",
+        "state": "控制请求 → remove_actual_rule\n后端成功 → repository_remove → erase + 清记录\n再 → persist_current_repository",
+        "note": "对外删除成功不表示旧 worker 手中的规则快照立即消失，旧表仍由 QSBR 保护",
+        "handoff": "软件后端通过新的快照撤销规则"
+      },
+      {
+        "title": "删除规则也是发布一个新快照",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "dppd_software_backend_remove_version",
+        "anchor": "next = snapshot_clone",
+        "n": 22,
+        "input": "active=B[R1,R2]，目标为R2的精确版本",
+        "output": "成功active=C[R1]，旧B等待回收",
+        "explain": "复制B得到C，归还C中R2计数器引用，清空槽位并减少count，再publish_locked。发布失败销毁C，B不变。不会直接把active切回某个历史快照。",
+        "state": "B[R1,R2] → C[R1,R2] → 清R2 → C[R1]\n成功：active=C，B→QSBR\n失败：销毁C，active=B",
+        "note": "此处ID和generation一起匹配，避免误删同ID的新版本",
+        "handoff": "再看事务中途失败时，哪些条目要撤销"
+      },
+      {
+        "title": "失败后逆序清理所有已准备条目",
+        "file": "lib/control/transaction.c",
+        "fn": "rollback_items",
+        "anchor": "commit_was_attempted = i < commit_attempts;",
+        "n": 12,
+        "input": "R1提交成功，R2提交失败，R3仅准备",
+        "output": "按R3→R2→R1逆序尝试清理",
+        "explain": "rollback_items 从最后一项开始，准备过的条目都要清理。commit_attempts 包括尝试提交但失败的那一条；软件后端进一步依据 pending.published 判断是否已安装。",
+        "state": "R3：未发布 → 清pending\nR2：未发布 → 清pending\nR1：已发布 → 删规则 + 清pending",
+        "note": "原始错误保存在 failure_code，首个回滚错误保存在 rollback_code；某项清理失败仍继续其他项",
+        "handoff": "进入软件 rollback 看 published 标志的作用"
+      },
+      {
+        "title": "rollback 清记录与撤规则分开判断",
+        "file": "lib/dataplane/software_backend.c",
+        "fn": "transaction_rollback",
+        "anchor": "if (pending->published)",
+        "n": 5,
+        "input": "prepare返回的pending，含rule和published",
+        "output": "未发布只free；已发布先remove_version再free",
+        "explain": "调用过commit不代表发布成功，因此本后端不靠commit_was_attempted判断。即使删除失败，也会释放pending并返回错误；上层必须检查回滚结果，不能把准备记录已释放视为规则已撤回。",
+        "state": "published=false → free pending → 0\npublished=true → remove_version → free pending → rc",
+        "note": "回滚失败时 residual 规则可能仍在，控制层有恢复隔离路径；本节不扩展恢复算法",
+        "handoff": "成功事务则走finalize，保留规则"
+      },
+      {
+        "title": "finalize 结束临时资源生命周期",
+        "file": "lib/control/transaction.c",
+        "fn": "dppd_transaction_finalize",
+        "anchor": "if (backend->finalize != NULL)",
+        "n": 8,
+        "input": "所有条目已COMMITTED，控制层决定不再回滚",
+        "output": "回调释放pending，token清零，状态FINALIZED",
+        "explain": "软件 finalize 只free准备记录，规则和计数器仍由已发布快照管理。正常路径在账本登记后调用，随后才保存文件。异常隔离收尾也可能使用finalize，不能仅凭状态宣称业务成功。",
+        "state": "prepare → pending\ncommit → 复制规则进快照\nfinalize → 释放pending；active中的规则继续工作",
+        "note": "FINALIZED 后不能用该事务再 rollback_committed",
+        "handoff": "最后明确内存运行时快照与磁盘文件的区别",
+        "related": [
+          [
+            "lib/dataplane/software_backend.c",
+            "transaction_finalize"
+          ],
+          [
+            "lib/dataplane/software_backend.c",
+            "transaction_finalize"
+          ]
+        ],
+        "principles": [
+          {
+            "title": "收尾保留已生效规则，清除临时地址",
+            "text": "软件 commit 已把 pending.rule 的内容复制到新快照。finalize 释放 pending 后，事务将 backend_token 清零；新快照和计数器继续存在。FINALIZED 表示这份事务已收尾，磁盘保存仍是随后的一步。",
+            "flow": "backend->finalize → 软件 transaction_finalize → free(pending)\n  → item.backend_token = 0\n  → transaction.state = FINALIZED\n\nactive → B 仍然有效；旧表 A 的回收由 QSBR 管理"
+          }
+        ]
+      },
+      {
+        "title": "保存失败：规则仍生效，dirty等待补写",
+        "file": "lib/control/control.c",
+        "fn": "persist_current_repository",
+        "anchor": "if (service->persistence_path == NULL)",
+        "n": 18,
+        "input": "后端和内存账本已更新，准备记录已释放",
+        "output": "无路径跳过；成功清dirty；失败dirty=true并返回-EUCLEAN",
+        "explain": "保存入口把当前账本写文件。写失败不会撤回后端规则，也不丢弃内存账本。下一次普通修改前，persistence_write_preflight 先尝试补写，仍失败就拒绝新的修改。",
+        "state": "active → 运行时软件规则快照\nservice->rules → 内存账本\n文件 → 最后成功保存的配置\n保存失败：前两者已更新，文件可能落后",
+        "note": "后续待学：文件格式与恢复、硬件规划/rte_flow、连接跟踪/NAT、启动与接口；本阶段没有验证真实DPDK收发",
+        "handoff": "回到学习目录复习两条主线，材料整理完成不代表已经掌握",
+        "related": [
+          [
+            "lib/control/control.c",
+            "persistence_write_preflight"
+          ]
+        ]
+      }
+    ]
+  }
+]

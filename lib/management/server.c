@@ -19,7 +19,7 @@
 /* accept 后等待首个完整请求的上限；客户端必须采用 connect 后立即 send 的模式 */
 #define DPPD_MANAGEMENT_CLIENT_WAIT_MS 20
 
-/* 统一初始化响应头和全部 padding，避免把栈中的未初始化数据发送给客户端 */
+/** 清零响应，回填协议版本和大小，并回显 operation、request_id，供客户端核对响应 */
 static void response_header(const struct dppd_management_request *request, struct dppd_management_response *response)
 {
     memset(response, 0, sizeof(*response));
@@ -361,8 +361,15 @@ static void build_rule_summary(const struct dppd_rule *rule, struct dppd_managem
 /**
  * 校验已接收管理请求的协议头，按 operation 调用控制层，并将业务结果写入 response
  * control 提供规则管理，devices 和 runtime 供设备相关操作使用，request/response 是请求与输出区
- * 普通 RULE_APPLY：management_poll → 本函数 → control.c/dppd_control_apply → control_apply_impl
+ * request/response 是 management_poll 的本地结构体，socket 传来的是请求内容，不是客户端的指针
  * 返回 0 表示已形成响应，业务成功与否读取 response->status；必要指针无效返回 -EINVAL
+ *
+ * management_poll 已通过 recv 取到 request
+ *   → 初始化 response 头
+ *   → 检查协议版本、结构大小和当前服务状态
+ *   → switch (request->operation)
+ *       RULE_APPLY → dppd_control_apply → 安装结果写入 response.payload.apply
+ *   → response.status = rc → 返回 management_poll，由它 send 响应
  */
 int dppd_management_handle(struct dppd_control_service *control, const struct dppd_device_set *devices,
     struct dppd_runtime *runtime, const struct dppd_management_request *request,
@@ -373,7 +380,7 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
     if (control == NULL || request == NULL || response == NULL)
         return -EINVAL;
     response_header(request, response);
-    /*
+    /**
      * size 必须精确匹配而不是仅检查“至少多大”。当前 payload 是本地 C ABI
      * 接受更大或更小的结构都会让 union 字段偏移与 daemon 的解释不一致
      */
@@ -381,13 +388,14 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         response->status = -EPROTO;
         return 0;
     }
-    /**
-     * 回滚失败时 repository 从未发布，但 backend 可能还有实际 flow
-     * 只允许恢复状态、重试、只读健康、能力画像和失败/耗时历史，防止空账本被误认为可以正常运行
-     */
-    /** 同一轮 poll 可以处理多条请求，每条分发前再检查事件，不能沿用轮首的设备状态 */
+    /** 每条请求分发前刷新设备事件，后面的状态检查才能发现刚发生的设备失效 */
     if (runtime != NULL)
         (void)dppd_runtime_device_poll(runtime);
+    /**
+     * READY → 继续分发请求
+     * 非 READY → 只放行下方列出的恢复、查询及设备处理操作
+     * RULE_APPLY 不在放行列表中，此时将 response.status 设为 -EUCLEAN，结束分发并交回 poll 发送响应
+     */
     if (control->recovery_state != DPPD_CONTROL_RECOVERY_READY &&
         request->operation != DPPD_MANAGEMENT_RECOVERY_STATUS && request->operation != DPPD_MANAGEMENT_RECOVERY_RETRY &&
         request->operation != DPPD_MANAGEMENT_HEALTH_GET && request->operation != DPPD_MANAGEMENT_CAPABILITY_GET &&
@@ -488,9 +496,19 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         break;
     case DPPD_MANAGEMENT_RULE_APPLY:
         /**
-         * CLI 已将参数转成 request 中的安装端口、完整规则和预期版本，这里传给控制层
-         * dppd_control_apply → control_apply_impl → 规划、事务安装、内存记录更新和保存
-         * 此分支只分发请求，rc 在本函数末尾写入 response->status，交回 poll 发送给客户端
+         * 将客户端填好的规则安装参数交给 dppd_control_apply
+         * 沿用 acl-set 20 0 0 100 udp any any any 9000 drop count 的示例：
+         *
+         * request.payload.apply                 dppd_control_apply 入参
+         *   install_port_id = 0              →   port_id：安装端口
+         *   rule：ID 20、匹配条件、COUNT/DROP →   rule：完整规则的地址
+         *   expected_generation = 0          →   expected：要求新建，不能覆盖已有 ID
+         * response.payload.apply 的地址      →   result：接收安装结果
+         *
+         * rc → response.status：0 表示请求成功，负值表示错误
+         * result.status：CREATED / UPDATED / UNCHANGED，表示规则发生了什么变化
+         * 先检查 response.status，成功时再解释 result.status
+         * result 还包含 generation、transaction_id 和执行计划，返回后由 poll 发送整个响应
          */
         rc = dppd_control_apply(control, request->payload.apply.install_port_id, &request->payload.apply.rule,
             request->payload.apply.expected_generation, &response->payload.apply);
@@ -735,7 +753,7 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         rc = -ENOTSUP;
         break;
     }
-    /* transport 已经成功解析请求，因此业务错误放入响应而不作为本函数返回值 */
+    /** 处理结果写进响应，即使 rc 是业务错误也返回 0，让 poll 将错误响应发给客户端 */
     response->status = rc;
     return 0;
 }
@@ -808,11 +826,17 @@ int dppd_management_start_flow(struct dppd_management_server *server, struct dpp
 }
 
 /**
- * 由 dppd 主循环调用，在本机 Unix socket 上受理有预算的请求并发送响应
- * server 必须已经启动，成功返回 0，参数或连接处理错误返回负错误码
- * dppctl/exchange 发送请求 → accept4 接受连接 → recv 读取固定结构体
- *   → 普通控制模式调用 management_handle → send 响应 → 关闭本次连接
- * 若 server->flows 非空则走 flow_management_handle，属于另一种配置模式
+ * 由 dppd 主循环调用，接收一个个管理请求并发送处理结果
+ * server 持有监听 socket 和 control/runtime 等服务对象
+ * 一轮最多处理 DPPD_MANAGEMENT_POLL_BUDGET 个连接，成功返回 0，服务级错误返回负错误码
+ *
+ * dppctl exchange：connect → send(request) ──────────────────┐
+ *                                                           ▼
+ * dppd 主循环：poll → accept4 → recv → handler → send(response)
+ * dppctl exchange：recv(response) ←──────────────────────────┘
+ *
+ * 普通控制模式调用 dppd_management_handle；server->flows 非空时走 flow handler
+ * 每个连接只处理一个请求，请求长度错误会返回带错误 status 的响应
  */
 int dppd_management_poll(struct dppd_management_server *server)
 {

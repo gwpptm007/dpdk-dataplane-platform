@@ -474,10 +474,19 @@ static void initialize_request(struct dppd_management_request *request, enum dpp
 }
 
 /**
- * 连接 socket_path 指定的本机管理 socket，发送一个完整 request 并接收、核对 response
- * 返回 0 表示传输和响应头校验成功，业务结果仍由调用方检查 response->status；失败返回负错误码
- * 客户端 main → 本函数 send → daemon management_poll / management_handle → 本函数 recv
- * socket 传递的是管理请求结构体，不是 worker 经网卡接收的业务报文
+ * 连接本机 dppd，发送管理请求并接收响应
+ * socket_path 是 Unix socket 路径，request 是 build_request 填好的请求，response 接收服务端结果
+ * 返回 0 表示传输和响应头校验成功；业务是否成功由 main 检查 response->status；传输失败返回负错误码
+ *
+ * dppctl：main → build_request → request → exchange
+ *                                      │ send(request)
+ *                                      ▼
+ * dppd：主循环 → dppd_management_poll → dppd_management_handle → response
+ *                                      │ send(response)
+ *                                      ▼
+ * dppctl：main ← exchange 收到并核对响应头
+ *
+ * 这里传的是规则配置等管理数据，不是 worker 从网卡收到的业务报文
  */
 static int exchange(const char *socket_path, const struct dppd_management_request *request,
     struct dppd_management_response *response)

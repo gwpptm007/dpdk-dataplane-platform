@@ -27,16 +27,14 @@ static int backend_valid(const struct dppd_transaction_backend *backend)
 }
 
 /**
- * 尽力撤销本次事务已经占用的资源，不能因为某一条撤销失败就放弃其余条目
- * commit_attempts 表示有多少条规则已经调用过 commit，包括调用了但返回错误的那一条
- * 这个信息帮助后端区分“只预留了资源”和“可能已经产生安装副作用”
+ * 按相反顺序撤销本次事务占用的资源，将首个清理错误记入 rollback_code
  *
- * 软件规则示例：R1、R2、R3 均已 prepare，R1 提交成功，R2 提交失败，R3 尚未提交
- * 逆序清理：R3 → published 为 false → 释放准备记录
- *           R2 → published 为 false → 释放准备记录，失败的 commit 已清理未发布副本
- *           R1 → published 为 true  → 删除已安装版本，再释放准备记录
- * 本例 commit_attempts = 2，R1、R2 的 commit_was_attempted 为 true，R3 为 false
- * 任一回滚失败仍继续清理其余条目，首个回滚错误保存在 rollback_code
+ * 软件示例：R1 已发布，R2 提交失败但未发布，R3 只完成准备
+ *   R3 → 释放准备记录
+ *   R2 → 释放准备记录
+ *   R1 → 删除已发布版本，再释放准备记录
+ *
+ * 某一条清理失败时，继续尝试其余条目
  */
 static void rollback_items(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends,
     uint32_t commit_attempts)
@@ -63,6 +61,7 @@ static void rollback_items(struct dppd_transaction *transaction, const struct dp
         if (item->state == DPPD_TRANSACTION_ITEM_FAILED && item->backend_token == 0)
             continue;
         backend = backend_for(backends, item->plan.backend);
+        /** commit_attempts 包含提交失败的那条，例如 R2 失败时为 2，R1、R2 均算尝试过提交 */
         commit_was_attempted = i < commit_attempts;
         rc = backend->rollback(backend->context, item, item->backend_token, commit_was_attempted);
         if (rc == 0)
@@ -77,9 +76,13 @@ static void rollback_items(struct dppd_transaction *transaction, const struct dp
 }
 
 /**
- * 为一批已完成规划的规则建立事务状态，不复制规则数组，也不安装任何对象
- * 调用方持有 items 的内存，必须让它存活到事务结束
- * 这里会清空旧 token，因此不能用 init 代替尚未完成的事务清理
+ * 初始化规则安装事务：记录编号、关联条目，重置状态和错误记录
+ *
+ * transaction（NEW）
+ *   └─ items → 调用方的条目（PENDING，保留 rule 和 plan）
+ *
+ * items 的内存由调用方保留到事务结束
+ * 成功返回 0，参数无效返回 -EINVAL
  */
 int dppd_transaction_init(struct dppd_transaction *transaction, uint64_t transaction_id,
     struct dppd_transaction_item *items, uint32_t nb_items)
@@ -97,6 +100,7 @@ int dppd_transaction_init(struct dppd_transaction *transaction, uint64_t transac
     transaction->failure_stage = DPPD_RULE_STAGE_NONE;
     transaction->failure_item = UINT32_MAX;
     transaction->rollback_item = UINT32_MAX;
+    /** 清零 token 不会释放后端资源，复用条目前需先完成旧事务的回滚或收尾 */
     for (i = 0; i < nb_items; ++i) {
         items[i].state = DPPD_TRANSACTION_ITEM_PENDING;
         items[i].backend_token = 0;
@@ -106,18 +110,20 @@ int dppd_transaction_init(struct dppd_transaction *transaction, uint64_t transac
 }
 
 /**
- * 按“全部校验、全部准备、逐条提交”的顺序安装规则
- * 校验阶段失败直接结束，准备或提交失败则自动回滚已占用的资源
- * 返回值说明原操作为什么失败，rollback_code 另行说明清理是否也失败
- * 返回成功仅表示后端对象已安装，规则账本发布和快照保存仍由控制层负责
+ * 按条目的执行计划安装规则，失败时撤销已占用的资源
  *
- * validate 全部成功 → prepare 全部成功 → commit 逐条成功 → COMMITTED
- * validate 失败 → 尚未占用后端资源，直接返回错误
- * prepare / commit 失败 → rollback_items 逆序清理 → 返回原始错误
- *   rollback_code = 0   → 清理全部成功，事务为 ROLLED_BACK
- *   rollback_code 非 0  → 至少一项清理失败，事务为 FAILED，上层继续处理
- * 软件 commit 每条都会发布快照，整批尚未完成时，先提交的规则也可能已被 worker 使用
- * 全部提交成功后，由控制层决定 finalize 收尾，或调用 rollback_committed 撤销
+ * 软件后端示例：dppd_transaction_run
+ *   ├─ backend->validate(...) → software_backend.c：transaction_validate
+ *   │    检查软件后端能否处理这条规则
+ *   └─ backend->prepare(...)  → software_backend.c：transaction_prepare
+ *        分配临时记录，保存规则，把记录地址交回事务
+ *
+ * 全部 validate → 全部 prepare → 逐条 commit → COMMITTED
+ *   校验失败 → 直接返回错误
+ *   准备或提交失败 → 逆序回滚，再返回原始错误
+ *
+ * 返回 0 表示后端安装完成，控制层随后更新规则记录、收尾并保存配置
+ * 失败时另查 rollback_code：0 表示清理成功，非 0 表示仍有清理错误
  */
 int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends)
 {
@@ -129,11 +135,12 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
 
     transaction->state = DPPD_TRANSACTION_VALIDATING;
     /**
-     * 第一阶段只询问“能不能做”，不允许后端预留槽位或安装规则
-     * 同时核对规划的 ID 和版本确实对应当前规则，避免拿错计划安装另一个版本
+     * 校验后端能力，以及规则和计划的 ID、版本是否一致
+     * 此阶段不占用后端资源，失败时无需回滚
      */
     for (i = 0; i < transaction->nb_items; ++i) {
         struct dppd_transaction_item *item = &transaction->items[i];
+        /** 本例 plan.backend = SOFTWARE → backends.software → software_backend.c 中的各阶段函数 */
         const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);
 
         if (item->rule.id == 0 || item->plan.rule_id != item->rule.id ||
@@ -142,6 +149,8 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
         else if (!backend_valid(backend))
             rc = -ENOTSUP;
         else
+            // 从事务调度进入软件后端
+            // 通过函数指针，调用的是software_backend.c 中的 transaction_validate
             rc = backend->validate(backend->context, item);
         if (rc != 0) {
             item->state = DPPD_TRANSACTION_ITEM_FAILED;
@@ -157,14 +166,24 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
 
     transaction->state = DPPD_TRANSACTION_PREPARING;
     /**
-     * 第二阶段为每条规则准备可撤销的资源，例如空槽位或软件发布需要的临时对象
-     * 后一条准备失败时，前面已经准备好的资源也必须归还
-     * 传入零次 commit 尝试，告诉回滚逻辑这一阶段还没有正式安装对象
+     * 为所有条目准备资源，任一条失败都要归还此前已准备的资源
+     * 尚未调用 commit，因此回滚时传入的提交次数为 0
      */
     for (i = 0; i < transaction->nb_items; ++i) {
         struct dppd_transaction_item *item = &transaction->items[i];
         const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);
 
+        /**
+         * 软件后端的函数指针从初始化到调用：
+         *   control.c：backends.software = dppd_software_transaction_backend(&service->software)
+         *     → 接口保存 context = &service->software、prepare = transaction_prepare
+         *     → backend_for 返回 &backends->software
+         *     → 下面的调用进入 software_backend.c 的 transaction_prepare
+         *
+         * backend 指向操作接口，backend->context 指向实际的软件后端对象
+         * item 原样传入，&item->backend_token 让回调把资源凭据写回事务条目
+         * 选择硬件后端时，同一调用语句使用 rte_flow 接口中保存的函数地址
+         */
         rc = backend->prepare(backend->context, item, &item->backend_token);
         if (rc != 0) {
             item->state = DPPD_TRANSACTION_ITEM_FAILED;
@@ -180,13 +199,13 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
 
     transaction->state = DPPD_TRANSACTION_COMMITTING;
     /**
-     * 第三阶段才真正安装对象，每次提交都使用对应 prepare 返回的 token
-     * 提交报错不一定代表完全没有副作用，因此失败条目本身也要参加回滚
+     * 使用 prepare 返回的 token 安装规则，提交失败的条目也可能需要回滚
+     * 软件后端每提交一条就发布一次快照，worker 可能先看到本批中的部分规则
      */
     for (i = 0; i < transaction->nb_items; ++i) {
         struct dppd_transaction_item *item = &transaction->items[i];
         const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);
-
+        // 返回事务函数，标记安装完成
         rc = backend->commit(backend->context, item, item->backend_token);
         if (rc != 0) {
             item->state = DPPD_TRANSACTION_ITEM_FAILED;
@@ -205,9 +224,8 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
 }
 
 /**
- * 撤销一个已经安装成功、但尚未最终确认的事务
- * 例如批量更新的新版本全部装好后，旧版本删除失败，就需要撤销整批新版本
- * 已经 finalize 的事务不再拥有回滚资源，因此不允许通过这个入口继续撤销
+ * 撤销已提交的事务，例如新版本装好后，删除旧版本失败时撤回新版本
+ * 只接受 COMMITTED 状态；返回 0 表示全部撤销成功，负值表示清理失败
  */
 int dppd_transaction_rollback_committed(struct dppd_transaction *transaction,
     const struct dppd_transaction_backends *backends)
@@ -219,10 +237,11 @@ int dppd_transaction_rollback_committed(struct dppd_transaction *transaction,
 }
 
 /**
- * 结束本次事务的临时资源生命周期，不删除已经安装的规则
- * 正常流程在规则账本发布后调用；异常流程决定隔离且不再回滚时也可用于收尾
- * 逐项清零 token，表示调用方已经放弃再次提交或回滚本次事务的可能
- * finalize 回调不能报错，因此后端必须把它设计成单纯的临时资源释放动作
+ * 释放已提交事务的临时资源，保留已安装的规则
+ *
+ * 后端 finalize → 清零各条目的 token → 状态改为 FINALIZED
+ *
+ * 控制层确认不再回滚后调用；返回 0 表示收尾成功，负值表示状态或后端异常
  */
 int dppd_transaction_finalize(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends)
 {
@@ -236,7 +255,7 @@ int dppd_transaction_finalize(struct dppd_transaction *transaction, const struct
 
         if (item->state != DPPD_TRANSACTION_ITEM_COMMITTED || !backend_valid(backend))
             return -EUCLEAN;
-        /** 后端没有额外清理回调时也要清空 token，并让整个事务进入不可回滚的终态 */
+        /** finalize 回调只释放临时资源，不返回错误；未提供回调时也要清零 token */
         if (backend->finalize != NULL)
             backend->finalize(backend->context, item, item->backend_token);
         item->backend_token = 0;

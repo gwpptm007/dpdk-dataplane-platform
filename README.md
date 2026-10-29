@@ -2,6 +2,8 @@
 
 面向现代 DPDK 用户态数据面、SmartNIC/DPU、`rte_flow` 与 representor 的演进型平台基线。
 
+源码学习材料见 [学习说明](docs/learning/README.md) 和 [交互学习总目录](docs/learning/index.html)，下载项目后可在浏览器中打开 HTML 页面。
+
 相关开源实现、业务价值对比及选型建议见 [SmartNIC 与 DPU 开源项目调研](docs/smartnic_dpu_project_survey.md)，该记录不扩大现有开发范围。
 
 V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软件路径处理送达 CPU RX queue 的包；`rte_flow` 和 embedded-switch transfer rule 属于控制面下发的硬件规则，硬件成功处理的包通常不会进入软件 worker；representor 是 PMD 暴露的 ethdev 拓扑端点，而不是一个软件转发后端。

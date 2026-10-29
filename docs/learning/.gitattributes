@@ -1,0 +1,4 @@
+# Preserve generated page and validation artifact bytes across checkouts.
+*.html text eol=lf
+*.json text eol=lf
+*.png binary

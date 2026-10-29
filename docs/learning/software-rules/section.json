@@ -1,0 +1,125 @@
+[
+  {
+    "title": "1 · 从 worker 进入决策流程",
+    "short": "从解析结果进入决策",
+    "fn": "process_batch → routed_decide → pipeline",
+    "location": "lib/dataplane/worker.c:333 · process_batch → lib/dataplane/worker.c:102 · routed_decide → lib/dataplane/pipeline.c:13 · dppd_pipeline_decide_counted",
+    "explain": "1.2 返回后，worker 已有 parsed 和 packet。本例未启用连接跟踪，因此调用 routed_decide，再由它调用 pipeline 生成 decision；这一段只计算处理结果，发送或释放仍由 worker 执行",
+    "input": "parsed = OK；packet 中的目的端口 = {port}；入口端口 0",
+    "output": "把 parsed、packet、入口及配置交给 pipeline，decision 作为结果区传入",
+    "code": "/* worker.c · process_batch */\n/**\n * 未启用连接跟踪\n *   → routed_decide → decision\n *\n * 启用连接跟踪\n *   → stateful_decide\n *       校验、准备候选会话\n *         → routed_decide\n *         → 检查出口、改写实际报文\n *         → 成功提交会话，失败取消候选\n */\nif (runtime->conntrack != NULL)\n    stateful_decide(worker, ingress, &rx[i], parsed,\n        &packet, &decision, &rule_counts);\nelse\n    routed_decide(runtime, ingress->port_id, parsed,\n        &packet, &decision, &rule_counts);\n\n/* worker.c · routed_decide，本例直接进入此函数 */\ndppd_pipeline_decide_counted(&runtime->snapshot,\n    runtime->software_backend, runtime->ipv4_router, ingress,\n    parsed, packet, decision, counts);",
+    "note": "stateful_decide 也会调用 routed_decide，并在前后处理会话与报文改写。本例 conntrack 与 router 均为 NULL，直接执行通用决策，之后仍按端口配对选择出口",
+    "progress": "正在交给 pipeline",
+    "fields": "parsed = OK = 0\npacket：IPv4 / UDP / 目的端口 {port}\ndecision 尚待填写",
+    "handoff": "下一步进入 pipeline.c，先初始化处理结果并检查畸形报文"
+  },
+  {
+    "title": "2 · 默认保留 DROP，先检查解析状态",
+    "short": "初始化 decision，检查畸形",
+    "fn": "pipeline · 默认动作与 parse_status",
+    "location": "lib/dataplane/pipeline.c:22 · dppd_pipeline_decide_counted",
+    "explain": "pipeline 先清零 decision。由于 DROP 的枚举值为 0，此时 action 默认是 DROP。接着检查 parse_status：畸形报文直接填写原因并返回；本例是 OK，所以继续检查软件规则",
+    "input": "parse_status = DPPD_PARSE_OK = 0",
+    "output": "本例通过畸形检查；action 仍是默认 DROP，后续还有决策要做",
+    "code": "/**\n * 调用：worker.c/process_batch → routed_decide → 本函数\n * 返回：本函数 → routed_decide → process_batch，按 decision 处理报文\n * memset 清零 → action = 0 → DROP，枚举定义在 pipeline.h\n * 初始保留 DROP，只有后续规则允许并选出出口才设置 FORWARD\n */\nmemset(decision, 0, sizeof(*decision));\nif (parse_status == DPPD_PARSE_MALFORMED) {\n    decision->action = DPPD_PACKET_DROP;\n    decision->drop_reason = DPPD_DROP_MALFORMED;\n    return;\n}",
+    "note": "decision 是 process_batch 传入的结果区，本函数返回后会逐层回到 process_batch。默认 DROP 不代表已经释放报文，只有后续规则允许并选出出口才改为 FORWARD",
+    "progress": "基础检查通过，等待规则匹配",
+    "fields": "decision.action = DROP（默认值）\n尚未选出口\n原始 mbuf 仍由 worker 持有",
+    "handoff": "本例软件后端存在，下一步进入 software_backend.c"
+  },
+  {
+    "title": "3 · 读取已发布规则，取得两类匹配候选",
+    "short": "读取规则并匹配 packet",
+    "fn": "software_backend · active / ACL / exact",
+    "location": "lib/dataplane/software_backend.c:1278 · dppd_software_backend_decide_counted → lib/dataplane/acl.c:203 · dppd_acl_classify → lib/dataplane/exact.c:181 · dppd_exact_classify",
+    "explain": "软件后端读取已发布的规则快照 active。dppd_acl_classify 支持掩码、端口范围等条件，定位入口规则段后按优先顺序检查；dppd_exact_classify 用入口、地址族、TCP/UDP 类型及完整源/目的地址和端口组成键，做哈希查找。两者各返回本表选中的规则 tag，0 表示未命中，此时不执行动作",
+    "input": "已发布的教学规则 R1：入口 0、IPv4/UDP、目的端口 9000 → DROP + COUNT",
+    "output": {
+      "hit": "目的端口 9000 命中 R1：本例 ACL tag = 1，exact_tag = 0",
+      "miss": "目的端口 53 不命中 R1：tag = 0，exact_tag = 0"
+    },
+    "code": "/* pipeline.c · 调用软件后端，单独保存规则结果 */\nstruct dppd_software_decision software_decision;\ndppd_software_backend_decide_counted(software_backend,\n    ingress_port, packet, &software_decision, counts);\n\n/* software_backend.c · 此处 decision 指向上面的 software_decision */\nmemset(decision, 0, sizeof(*decision));\n/* 省略空指针检查；同一规则快照供两类匹配使用，候选 0 表示未命中 */\nactive = atomic_load_explicit(&backend->active, memory_order_acquire);\n/** ACL：支持掩码、端口范围等条件，返回候选 tag */\nuint32_t tag = dppd_acl_classify(\n    snapshot_acl(active, backend->capacity), ingress_port, packet);\n/** exact：用完整地址和端口组合查哈希表，返回候选 tag */\nuint32_t exact_tag = dppd_exact_classify(\n    snapshot_exact(active, backend->capacity), ingress_port, packet);",
+    "note": "规则发布时先尝试编入精确表，不支持的条件再编入 ACL。本例 R1 只限定目的端口 9000，源/目的地址和源端口通配，因此走 ACL；假设槽位对应 tag = 1，精确表为空。页面仅演示，不向项目安装规则",
+    "progress": "已取得匹配候选",
+    "fields": {
+      "hit": "ACL tag = 1\nexact_tag = 0\nsoftware_decision 已清零，动作尚未处理",
+      "miss": "ACL tag = 0\nexact_tag = 0\nsoftware_decision 已清零，动作尚未处理"
+    },
+    "handoff": "下一步按候选 tag 找到要执行的那条规则"
+  },
+  {
+    "title": "4 · 只选定一条规则，再处理它的动作",
+    "short": "确定 selected 规则",
+    "fn": "software_backend · rule_before / selected",
+    "location": "lib/dataplane/software_backend.c:1312 · dppd_software_backend_decide_counted → lib/dataplane/software_backend.c:1220 · rule_before",
+    "explain": "先看本例：tag = 1、exact_tag = 0，保留 ACL 候选，再取 active->objects[0]。两类都命中时，rule_before 按 group、priority、id、tag 的顺序比较，前项相等才比较下一项，数值小的优先",
+    "input": {
+      "hit": "tag = 1，exact_tag = 0；假设 R1 位于 active->objects[0]",
+      "miss": "tag = 0，exact_tag = 0"
+    },
+    "output": {
+      "hit": "selected 指向 R1；后面只处理 R1 的 DROP 和 COUNT 动作",
+      "miss": "selected = NULL；动作循环不会执行"
+    },
+    "code": "/** 单个命中直接选用，两个都命中则按统一顺序比较 */\nif (exact_tag != 0 &&\n    (tag == 0 || rule_before(&active->objects[exact_tag - 1].rule,\n        exact_tag, &active->objects[tag - 1].rule, tag)))\n    tag = exact_tag;\nif (tag != 0)\n    selected = &active->objects[tag - 1];",
+    "note": "tag 从 1 开始标识规则对象，数组下标从 0 开始，因此用 tag - 1。tag = 0 表示未命中，selected 保持 NULL；精确匹配不自动优先于 ACL",
+    "progress": "已完成规则选择",
+    "fields": {
+      "hit": "selected = R1\nR1 动作：[DROP, COUNT]\n动作尚未处理",
+      "miss": "selected = NULL\n没有选中规则\n后续保持 matched = false、drop = false"
+    },
+    "handoff": "下一步进入 selected 非空时的动作循环；未命中则跳过循环"
+  },
+  {
+    "title": "5 · 动作填写 software_decision，并累计 COUNT",
+    "short": "处理 DROP / COUNT 动作",
+    "fn": "software_backend · action 循环",
+    "location": "lib/dataplane/software_backend.c:1317 · dppd_software_backend_decide_counted → lib/dataplane/software_backend.c:1249 · count_packet → lib/dataplane/worker.c:480 · process_batch",
+    "explain": {
+      "hit": "选中 R1 后，matched 设为 true。DROP 把 drop 设为 true，但不会退出动作循环；同一规则中的 COUNT 仍会执行。本例不是重试包，COUNT 暂存本包的 1 次命中和 60 字节",
+      "miss": "没有选中规则，整个动作循环跳过。software_decision 保持清零后的结果：matched = false，drop = false；本包没有 COUNT 增量"
+    },
+    "input": "packet.packet_len = 60，neighbor_retry = false；worker 传入 COUNT 批次",
+    "output": {
+      "hit": "software_decision：matched = true，drop = true；本包 COUNT 增量 = 1 次 / 60 字节",
+      "miss": "software_decision：matched = false，drop = false；本包 COUNT 增量 = 0"
+    },
+    "code": "if (selected != NULL) {\n    decision->matched = true;\n    for (action = 0; action < selected->rule.nb_actions; ++action) {\n        const struct dppd_action *source = &selected->rule.actions[action];\n        if (source->type == DPPD_ACTION_DROP)\n            decision->drop = true;\n        /* 省略 MARK、共享 COUNT 分支 */\n        else if (source->type == DPPD_ACTION_COUNT && !packet->neighbor_retry)\n            count_packet(selected->metrics, packet->packet_len, batch);\n    }\n}",
+    "note": "这里的 decision 指向 software_decision，DROP 仅设置标志。COUNT 按 metrics 对象合并次数和字节增量，batch.count 是有效统计对象数，不是包数；新增对象时若容量 32 已满就先提交，process_batch 本批处理结束也会提交，不等待凑满",
+    "progress": "软件规则结果已生成",
+    "fields": {
+      "hit": "software_decision.matched = true\nsoftware_decision.drop = true\n本包 COUNT 增量：1 次 / 60 字节",
+      "miss": "software_decision.matched = false\nsoftware_decision.drop = false\n本包 COUNT 增量：0"
+    },
+    "handoff": "软件后端函数结束，返回 pipeline，检查 software_decision.drop"
+  },
+  {
+    "title": "6 · 回到 pipeline，决定丢弃还是继续选出口",
+    "short": "返回 pipeline → 衔接出口选择",
+    "fn": "pipeline · software_decision.drop",
+    "location": "lib/dataplane/pipeline.c:41 · dppd_pipeline_decide_counted → lib/dataplane/worker.c:356 · process_batch",
+    "explain": {
+      "hit": "pipeline 看到 software_decision.drop = true，填写最终 DROP 和 POLICY 原因，然后返回。对本例 IPv4，routed_decide 随后返回 worker，由 worker 执行释放并处理下一个包",
+      "miss": "pipeline 看到 software_decision.drop = false，不进入策略丢弃分支，继续后面的出口选择。未命中规则不会直接产生最终 FORWARD；出口仍可能不存在或不可用"
+    },
+    "input": {
+      "hit": "software_decision.drop = true",
+      "miss": "software_decision.drop = false"
+    },
+    "output": {
+      "hit": "decision.action = DROP；drop_reason = POLICY；没有出口选择",
+      "miss": "通过软件规则阶段，进入 1.4 出口选择；最终 action 尚未完成"
+    },
+    "code": "/**\n * 软件规则 → software_decision；drop 为真时将最终 decision 设为 DROP/POLICY\n * 本例 IPv4 返回路径：本函数 → worker.c/routed_decide → process_batch\n *   → 更新丢弃统计 → 释放当前 mbuf → continue 下一个包\n * 未丢弃时携带 MARK 继续选出口；COUNT 按命中累计，后续失败不撤销\n */\ndppd_software_backend_decide_counted(software_backend,\n    ingress_port, packet, &software_decision, counts);\nif (software_decision.drop) {\n    decision->action = DPPD_PACKET_DROP;\n    decision->drop_reason = DPPD_DROP_POLICY;\n    return;\n}\ndecision->has_mark = software_decision.has_mark;\ndecision->mark_id = software_decision.mark_id;\n/* 不丢弃时继续后面的路由或端口配对，见 1.4 */",
+    "note": "软件后端的 drop 标志由 pipeline 转为最终 DROP/POLICY，process_batch 才释放 mbuf。规则 COUNT 记录命中，delta.rule_drops 记录按规则丢弃的包，两者含义不同；本批结尾仍会提交 COUNT 增量",
+    "progress": {
+      "hit": "规则判定 DROP → 返回 worker 执行",
+      "miss": "规则未丢弃 → 等待出口选择"
+    },
+    "fields": {
+      "hit": "decision.action = DROP\ndecision.drop_reason = POLICY\n下一步：返回 worker 释放 mbuf",
+      "miss": "software_decision.drop = false\n出口尚未确定\n下一步：继续 1.4 出口选择"
+    },
+    "handoff": "本节的软件规则路径到这里；1.4 将继续展开出口选择"
+  }
+]

@@ -6,7 +6,9 @@
 
 /** 删除后槽位可以复用，是否有效由 occupied 决定，不能只看内存里是否仍有旧规则内容 */
 struct dppd_rule_record {
+    /** 此槽位是否保存有效规则，删除后清零，槽位可再次使用 */
     bool occupied;
+    /** 控制面保存的完整规则副本，包含该规则最近一次创建或更新时的版本 */
     struct dppd_rule rule;
 };
 
@@ -99,10 +101,10 @@ int dppd_rule_repository_list(const struct dppd_rule_repository *repository, uin
 }
 
 /**
- * 将 rule 新增或更新到内存账本，检查预期版本并分配新版本，不安装后端规则或写文件
+ * 将 rule 新增或更新到 records 数组，检查预期版本并分配新版本，不安装后端规则或写文件
  * expected_generation 是调用方预期的旧版本，0 用于期望新建，ANY 表示跳过版本冲突检查
  * 成功返回 0，result 给出 CREATED、UPDATED 或 UNCHANGED 及规则版本；失败返回负错误码
- * 调用方须串行访问账本，本函数不加锁
+ * 调用方须串行访问这些规则记录，本函数不加锁
  *
  * 按 rule.id 查找记录
  *   已存在 → 内容相同 → UNCHANGED，返回已有版本，不检查 expected_generation
@@ -132,7 +134,7 @@ int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const st
         /**
          * 例：调用方读到 R1 版本 7，其他请求已将其改成版本 9
          * 本次携带 expected_generation = 7 且内容不同 → -ESTALE，拒绝覆盖版本 9
-         * 比较的是 R1 当前版本，不是整个仓库的 generation；ANY 明确跳过此检查
+         * 比较的是 R1 当前版本，不是整个规则集合的 generation；ANY 明确跳过此检查
          */
         if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)
             return -ESTALE;
@@ -140,8 +142,8 @@ int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const st
             return -EOVERFLOW;
         record->rule = *rule;
         /**
-         * 新版本取仓库递增序列，不采用输入 rule->generation，也不是旧规则版本加 1
-         * 例：仓库版本 12，R1 版本 7 → 用预期版本 7 更新成功 → 仓库和 R1 均变为 13
+         * 新版本取整个规则集合的递增序列，不采用输入 rule->generation，也不是旧规则版本加 1
+         * 例：集合版本 12，R1 版本 7 → 用预期版本 7 更新成功 → 集合和 R1 均变为 13
          * 其他规则保留各自的版本，更新已有记录不增加 count
          */
         record->rule.generation = ++repository->generation;
@@ -155,14 +157,22 @@ int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const st
     if (repository->generation >= UINT64_MAX - 1U)
         return -EOVERFLOW;
     uint32_t slot;
-    /** 索引记录 (rule.id, 0) → 槽位，真正的规则版本保存在 record->rule.generation */
+    /**
+     * 索引负责按 ID 查槽位，records 数组保存规则内容
+     * 例：索引 (ID 20, 0) → 槽位 3 → records[3].rule
+     * 索引键中的 0 固定占位，真正的规则版本保存在 record->rule.generation
+     */
     int rc = dppd_slot_index_insert(&repository->index, rule->id, 0, &slot);
     if (rc != 0)
         return rc;
     record = &repository->records[slot];
     record->occupied = true;
     record->rule = *rule;
-    /** 新建也从仓库序列分配版本，例如仓库 13 → 新建 R2 → 仓库和 R2 均为 14，R1 仍为 13 */
+    /**
+     * 新建规则：集合版本 12 → 递增为 13 → 将 13 写入这条规则
+     * control_apply_impl 已用 12 + 1 安装候选规则；串行执行期间集合版本未变，两处版本因此一致
+     * 这里才推进 repository->generation，其他已有规则的版本不变
+     */
     record->rule.generation = ++repository->generation;
     repository->count++;
     result->status = DPPD_RULE_CREATED;

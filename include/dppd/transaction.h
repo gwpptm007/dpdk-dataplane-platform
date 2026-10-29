@@ -14,9 +14,8 @@ enum dppd_transaction_state {
     DPPD_TRANSACTION_COMMITTING,
     DPPD_TRANSACTION_COMMITTED,
     /**
-     * 仅用于回滚的临时资源已释放，此后不能再调用 rollback_committed
-     * 正常流程此时已发布规则账本，随后保存失败交给 dirty 状态处理
-     * 异常流程也可能在决定隔离后收尾，因此不能仅凭 FINALIZED 判断整体业务成功
+     * 临时资源已释放，不能再回滚此事务
+     * 规则可能尚未保存，异常隔离时也可收尾，因此该状态不代表整个管理请求成功
      */
     DPPD_TRANSACTION_FINALIZED,
     DPPD_TRANSACTION_ROLLING_BACK,
@@ -47,12 +46,29 @@ struct dppd_transaction_item {
     int error_code;
 };
 
+
+/**
+ * 事务后端接口：保存后端对象和各阶段函数的地址，供事务流程统一调用
+ *
+ * int (*operation)(int, int) → 函数指针，所指函数接收两个 int，返回 int
+ * int *operation(int, int)   → 函数声明，函数返回 int 指针，括号的位置决定含义
+ *
+ * 声明 prepare → 规定函数的参数和返回类型
+ * .prepare = transaction_prepare → 保存具体函数地址，此时不执行函数
+ * backend->prepare(...) → 取出成员中的地址并调用，等价于 (*backend->prepare)(...)
+ *
+ * 这种由后端提供、由事务流程调用的函数称为回调，此处调用会等待函数返回
+ * 成员名不会自动关联具体实现，软件和硬件后端分别初始化自己的函数指针
+ */
 struct dppd_transaction_backend {
-    /** 后端私有上下文，例如硬件对象仓库或软件规则表 */
+    /** 保存要操作的后端对象地址，调用时原样传回，由回调转换成具体对象指针 */
     void *context;
     /** 只检查规则是否支持，不安装规则也不改变后端的资源占用 */
     int (*validate)(void *context, const struct dppd_transaction_item *item);
-    /** 预留可撤销资源并返回 token；失败后仍需清理的资源也要留下可识别的 token */
+    /**
+     * 准备可撤销资源，通过 token 交回资源凭据，失败时也要保留待清理资源的凭据
+     * int (*prepare)(...)：prepare 是函数指针，所指函数接收下面三个参数并返回 int
+     */
     int (*prepare)(void *context, const struct dppd_transaction_item *item, uintptr_t *token);
     /** 使用已经准备好的资源正式安装规则，返回失败也可能已经产生部分副作用 */
     int (*commit)(void *context, const struct dppd_transaction_item *item, uintptr_t token);
@@ -60,23 +76,27 @@ struct dppd_transaction_backend {
     int (
         *rollback)(void *context, const struct dppd_transaction_item *item, uintptr_t token, bool commit_was_attempted);
     /**
-     * 控制层确认不再需要回滚时，释放 prepare 创建的额外临时资源
-     * 不删除实际规则，也不再引入可失败操作；没有额外资源的后端可以不提供此回调
+     * 放弃回滚后释放临时资源，保留已安装规则；回调不返回错误
+     * 没有额外临时资源的后端可不提供此回调
      */
     void (*finalize)(void *context, const struct dppd_transaction_item *item, uintptr_t token);
 };
 
 struct dppd_transaction_backends {
+    /** 软件后端的对象地址和各阶段回调 */
     struct dppd_transaction_backend software;
+    /** rte_flow 后端的对象地址和各阶段回调 */
     struct dppd_transaction_backend rte_flow;
 };
 
 struct dppd_transaction {
     /** 本批统一的事务编号，用于把多条规则的结果关联起来 */
     uint64_t id;
+    /** 整个事务的进度，例如 NEW、COMMITTED 或 ROLLED_BACK */
     enum dppd_transaction_state state;
     /** 借用调用方的条目数组，不负责分配或释放这块内存 */
     struct dppd_transaction_item *items;
+    /** 本次处理的条目数，单条安装时为 1 */
     uint32_t nb_items;
     /** 原操作失败原因，例如第二条规则创建失败 */
     int failure_code;
@@ -99,9 +119,8 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
 int dppd_transaction_rollback_committed(struct dppd_transaction *transaction,
     const struct dppd_transaction_backends *backends);
 /**
- * 释放后端临时资源并结束事务，通常在规则账本发布成功后调用
- * 若已经发生无法补偿的错误，调用方决定进入隔离后也可用它释放不再使用的临时资源
- * finalize 不等于删除已安装规则，而且调用后不能再尝试 rollback_committed
+ * 释放临时资源并结束事务，保留已安装规则，成功后不可再回滚
+ * 通常在内存规则记录更新后调用，决定进入恢复隔离时也可用于收尾
  */
 int dppd_transaction_finalize(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends);
 

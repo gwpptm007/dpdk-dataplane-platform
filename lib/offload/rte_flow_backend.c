@@ -373,8 +373,11 @@ static int transaction_validate(void *context, const struct dppd_transaction_ite
 }
 
 /**
- * 检查版本有效且不存在重复对象后，预留一个槽位，把槽位地址作为 token 交给事务
- * 对象数组在后端生命周期中保持地址稳定，后续 commit 和 rollback 可用同一 token 找回它
+ * 检查版本和共享计数引用，预留一个本地槽位
+ *
+ * token → 预留槽位，后续 commit 和 rollback 用它找到同一个对象
+ *
+ * 成功返回 0，失败返回负错误码；此时尚未在网卡上创建规则
  */
 static int transaction_prepare(void *context, const struct dppd_transaction_item *item, uintptr_t *token)
 {
@@ -423,8 +426,12 @@ static int transaction_prepare(void *context, const struct dppd_transaction_item
 }
 
 /**
- * 把预留槽位转换成已安装对象，只有驱动明确返回成功才设置 installed
- * 如果驱动报错但仍留下非空 handle，也不能丢弃它，后续回滚会继续尝试删除
+ * 使用 token 指向的预留槽位，调用驱动创建规则并记录结果
+ *
+ * 驱动创建成功 → 标记 installed
+ * 创建报错但留下 handle → 保留句柄，交给回滚清理
+ *
+ * 返回 0 表示成功；负值表示错误，但规则可能已创建，回滚需检查槽位状态
  */
 static int transaction_commit(void *context, const struct dppd_transaction_item *item, uintptr_t token)
 {
@@ -451,7 +458,7 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
         return ready;
     /** 即使创建报错，也可能改变部分资源，不能继续沿用此前的探测答复 */
     dppd_flow_probe_cache_invalidate_all(backend->probes);
-    /** 只测量驱动创建调用，校验、事务准备和之后的规则账本保存不算在内 */
+    /** 只测量驱动创建耗时，不包含前面的准备和后面的配置保存 */
     dppd_install_timer_start(&timer);
     if (has_shared(&item->rule))
         rc = backend->api.create_bound == NULL ? -ENOTSUP
@@ -481,9 +488,12 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
 }
 
 /**
- * 撤销某个预留项或已经安装的规则，最终以槽位中的真实状态判断是否需要调用删除
- * 即使 commit 报错，只要留下非空 handle，也可能有资源需要清理
- * 删除失败就保留槽位和 handle，方便恢复隔离阶段继续重试，不能提前减少 count
+ * 撤销 token 指向的对象，根据槽位状态决定是否需要调用驱动删除
+ *
+ * 已安装或持有 handle → 删除驱动对象 → 释放本地槽位
+ * 仅预留槽位         → 直接释放槽位
+ *
+ * 返回 0 表示清理成功；驱动删除失败时保留槽位和句柄，供恢复流程重试
  */
 static int transaction_rollback(void *context, const struct dppd_transaction_item *item, uintptr_t token,
     bool commit_was_attempted)
@@ -508,8 +518,8 @@ static int transaction_rollback(void *context, const struct dppd_transaction_ite
 }
 
 /**
- * 创建固定容量的本地对象仓库，并接入真实 flow API 或调用方提供的测试接口
- * 这里只分配管理槽位，不代表预留了网卡资源，硬件资源限制仍由驱动在操作时报告
+ * 分配固定数量的本地对象槽位，接入默认驱动接口或调用方提供的接口
+ * 本地槽位只用于管理记录，网卡资源在创建规则时由驱动分配
  */
 int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend, uint32_t capacity,
     const struct dppd_flow_api *api)
@@ -563,9 +573,8 @@ int dppd_rte_flow_backend_init(struct dppd_rte_flow_backend *backend, uint32_t c
 }
 
 /**
- * 普通退出时尝试删除所有已安装或失败后仍有 handle 的对象，然后释放本地仓库
- * 某个删除失败时仍继续处理其他对象，但保留仓库并返回第一个错误，避免丢失失败 handle
- * 与隔离重试一样保留部分创建的清理线索，不能因 installed 为假就漏删并报告干净
+ * 退出时删除所有已安装或仍有句柄的对象，全部成功后释放本地对象数组
+ * 单个删除失败时继续清理其余对象，保留数组和失败句柄，返回首个错误
  */
 int dppd_rte_flow_backend_fini(struct dppd_rte_flow_backend *backend)
 {
@@ -646,8 +655,9 @@ int dppd_rte_flow_backend_simulate_reset(struct dppd_rte_flow_backend *backend, 
 }
 
 /**
- * 把硬件仓库包装成通用事务接口，让控制层使用统一的四阶段操作
- * token 就是仓库槽位地址，没有另外分配的临时对象，所以无需独立 finalize 回调
+ * 返回硬件后端的对象地址和事务回调，供 transaction.c 调用
+ * 此处 transaction_prepare 等函数名指向本文件的 static 函数，与软件后端的同名函数独立
+ * token 指向对象槽位，没有单独的准备记录需要释放，因此不提供 finalize
  */
 struct dppd_transaction_backend dppd_rte_flow_transaction_backend(struct dppd_rte_flow_backend *backend)
 {
@@ -765,9 +775,9 @@ int dppd_rte_flow_backend_remove_version(struct dppd_rte_flow_backend *backend, 
 }
 
 /**
- * 恢复隔离中的“尽力清理全部残留”入口，不按规则账本决定哪些对象要保留
- * 有对象删不掉时继续处理其余对象，最后同时返回第一个错误和剩余槽位数量
- * 成功清空后仍需要重新启动和重放快照，不能认为原业务规则已经恢复
+ * 恢复隔离期间清理全部残留对象，单个失败时继续处理其余对象
+ * residual_objects 返回剩余数量，函数返回首个错误或 0
+ * 清空后还需重启并从配置恢复业务规则
  */
 int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend, uint32_t *residual_objects)
 {
@@ -783,7 +793,7 @@ int dppd_rte_flow_backend_reconcile(struct dppd_rte_flow_backend *backend, uint3
 
     /**
      * 只预留槽位但尚未留下 handle 的对象可以直接归还本地资源
-     * 已安装或仍有 handle 的对象必须调用同一驱动删除，不能只清本地标记冒充清理成功
+     * 已安装或仍有 handle 的对象交给原驱动删除，删除成功后才能归还本地槽位
      */
     for (i = 0; i < backend->capacity; ++i) {
         struct dppd_rte_flow_object *object = &backend->objects[i];
