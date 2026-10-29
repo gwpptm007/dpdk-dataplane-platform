@@ -1,0 +1,294 @@
+{
+  "ok": true,
+  "checked_at_utc": "2026-10-29T15:23:06.729396+00:00",
+  "scope": "静态检查本地链接、围栏、尾空白和章节结构；不代表图已渲染或实验已执行",
+  "markdown_files": 18,
+  "chapter_count": 10,
+  "mermaid_count": 34,
+  "mermaid_input": "mermaid-input.json",
+  "chapters": [
+    {
+      "file": "docs/dpdk/chapters/01-overview.md",
+      "readable": true,
+      "lines": 177,
+      "local_links_checked": 13,
+      "mermaid_count": 2,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/02-eal-devices.md",
+      "readable": true,
+      "lines": 191,
+      "local_links_checked": 12,
+      "mermaid_count": 2,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/03-memory-mbuf.md",
+      "readable": true,
+      "lines": 197,
+      "local_links_checked": 14,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/04-queues-io.md",
+      "readable": true,
+      "lines": 243,
+      "local_links_checked": 10,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/05-multicore-performance.md",
+      "readable": true,
+      "lines": 204,
+      "local_links_checked": 11,
+      "mermaid_count": 3,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/06-qsbr.md",
+      "readable": true,
+      "lines": 205,
+      "local_links_checked": 9,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/07-rte-flow.md",
+      "readable": true,
+      "lines": 188,
+      "local_links_checked": 11,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/08-smartnic-dpu.md",
+      "readable": true,
+      "lines": 182,
+      "local_links_checked": 12,
+      "mermaid_count": 3,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/09-async-templates.md",
+      "readable": true,
+      "lines": 202,
+      "local_links_checked": 13,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/10-observability-debugging.md",
+      "readable": true,
+      "lines": 192,
+      "local_links_checked": 14,
+      "mermaid_count": 3,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    }
+  ],
+  "documents": [
+    {
+      "file": "docs/dpdk/chapters/01-overview.md",
+      "readable": true,
+      "lines": 177,
+      "local_links_checked": 13,
+      "mermaid_count": 2,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/02-eal-devices.md",
+      "readable": true,
+      "lines": 191,
+      "local_links_checked": 12,
+      "mermaid_count": 2,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/03-memory-mbuf.md",
+      "readable": true,
+      "lines": 197,
+      "local_links_checked": 14,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/04-queues-io.md",
+      "readable": true,
+      "lines": 243,
+      "local_links_checked": 10,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/05-multicore-performance.md",
+      "readable": true,
+      "lines": 204,
+      "local_links_checked": 11,
+      "mermaid_count": 3,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/06-qsbr.md",
+      "readable": true,
+      "lines": 205,
+      "local_links_checked": 9,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/07-rte-flow.md",
+      "readable": true,
+      "lines": 188,
+      "local_links_checked": 11,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/08-smartnic-dpu.md",
+      "readable": true,
+      "lines": 182,
+      "local_links_checked": 12,
+      "mermaid_count": 3,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/09-async-templates.md",
+      "readable": true,
+      "lines": 202,
+      "local_links_checked": 13,
+      "mermaid_count": 4,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/chapters/10-observability-debugging.md",
+      "readable": true,
+      "lines": 192,
+      "local_links_checked": 14,
+      "mermaid_count": 3,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": true
+    },
+    {
+      "file": "docs/dpdk/labs/README.md",
+      "readable": true,
+      "lines": 57,
+      "local_links_checked": 1,
+      "mermaid_count": 0,
+      "has_diagram": false,
+      "has_experiment": true,
+      "has_self_check": false
+    },
+    {
+      "file": "docs/dpdk/progress.md",
+      "readable": true,
+      "lines": 14,
+      "local_links_checked": 0,
+      "mermaid_count": 0,
+      "has_diagram": false,
+      "has_experiment": false,
+      "has_self_check": false
+    },
+    {
+      "file": "docs/dpdk/project-map.md",
+      "readable": true,
+      "lines": 42,
+      "local_links_checked": 26,
+      "mermaid_count": 0,
+      "has_diagram": false,
+      "has_experiment": false,
+      "has_self_check": false
+    },
+    {
+      "file": "docs/dpdk/README.md",
+      "readable": true,
+      "lines": 66,
+      "local_links_checked": 20,
+      "mermaid_count": 1,
+      "has_diagram": true,
+      "has_experiment": true,
+      "has_self_check": false
+    },
+    {
+      "file": "docs/dpdk/reference/api-index.md",
+      "readable": true,
+      "lines": 37,
+      "local_links_checked": 1,
+      "mermaid_count": 0,
+      "has_diagram": false,
+      "has_experiment": false,
+      "has_self_check": false
+    },
+    {
+      "file": "docs/dpdk/reference/glossary.md",
+      "readable": true,
+      "lines": 37,
+      "local_links_checked": 1,
+      "mermaid_count": 0,
+      "has_diagram": false,
+      "has_experiment": false,
+      "has_self_check": false
+    },
+    {
+      "file": "docs/dpdk/reference/versions.md",
+      "readable": true,
+      "lines": 32,
+      "local_links_checked": 4,
+      "mermaid_count": 0,
+      "has_diagram": false,
+      "has_experiment": false,
+      "has_self_check": false
+    },
+    {
+      "file": "docs/dpdk/validation.md",
+      "readable": true,
+      "lines": 64,
+      "local_links_checked": 5,
+      "mermaid_count": 0,
+      "has_diagram": false,
+      "has_experiment": true,
+      "has_self_check": false
+    }
+  ],
+  "issues": []
+}

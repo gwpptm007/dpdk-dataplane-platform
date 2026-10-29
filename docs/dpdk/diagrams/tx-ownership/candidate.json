@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "TX 短发送与 mbuf 所有权",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [1000, 520],
+    "output": "docs/dpdk/diagrams/tx-ownership/tx-ownership.html",
+    "repository": {
+      "url": "git@github.com:gwpptm007/dpdk-dataplane-platform.git",
+      "revision": "380d7da738eb363ae1424228e332249326ae1b54",
+      "link_mode": "local-only"
+    }
+  },
+  "participants": [
+    {"id":"worker","type":"backend","label":"worker","sublabel":"持有待发数组","sources":[{"path":"lib/dataplane/worker.c","line":34,"end_line":64}]},
+    {"id":"pmd","type":"external","label":"TX PMD","sublabel":"接收成功的前缀","sources":[{"path":"lib/dataplane/worker.c","line":44,"end_line":50}]},
+    {"id":"release","type":"backend","label":"释放接口","sublabel":"处理未接收尾部","sources":[{"path":"lib/dataplane/worker.c","line":12,"end_line":19},{"path":"lib/dataplane/worker.c","line":56,"end_line":64}]}
+  ],
+  "messages": [
+    {"id":"submit","from":"worker","to":"pmd","y":170,"label":"提交 A B C D E","variant":"emphasis"},
+    {"id":"accepted","from":"pmd","to":"worker","y":240,"label":"返回 sent = 3","variant":"return"},
+    {"id":"free-tail","from":"worker","to":"release","y":340,"label":"只释放 D E","variant":"default"}
+  ],
+  "activations": [{"participant":"worker","from":160,"to":390,"type":"backend"},{"participant":"pmd","from":170,"to":240,"type":"external"},{"participant":"release","from":340,"to":390,"type":"backend"}],
+  "cards": [
+    {"dot":"emerald","title":"项目实现","items":["worker.c 的 flush_egress 按 sent 分割数组","数字 5 和 3 仅用于推演","长度统计使用发送前保存的副本"]},
+    {"dot":"amber","title":"所有权边界","items":["A B C 已交给 PMD，不再访问或释放","D E 仍归 worker，本项目选择释放","接收不等于对端收到，后续回收取决于 PMD"]}
+  ]
+}

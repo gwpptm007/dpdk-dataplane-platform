@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "c008a63a-2f44-4413-8e87-724964e82164",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\docs\\dpdk\\diagrams\\tx-ownership\\candidate.json",
+  "output": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\docs\\dpdk\\diagrams\\tx-ownership\\tx-ownership.html",
+  "specification": {
+    "sha256": "695307aa910ec479aa52da0c6bb7e8c474a4edf43eaccb874fce7aa49c4a223c",
+    "bytes": 1999
+  },
+  "artifact": {
+    "sha256": "d15f45323c4a15efa7ae24ceec4e164653cb7d1c6b92497677e408902c86b41c",
+    "bytes": 746687
+  }
+}

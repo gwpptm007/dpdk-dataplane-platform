@@ -1,0 +1,8 @@
+# 图示检查回执绑定文件字节，跨平台检出统一保留 LF
+*.html text eol=lf
+*.json text eol=lf
+*.svg text eol=lf
+*.cjs text eol=lf
+.gitattributes text eol=lf
+# 此文件由 Archify 生成并绑定校验摘要，保留生成器的空行缩进以免破坏回执
+diagrams/tx-ownership/tx-ownership.html whitespace=-blank-at-eol

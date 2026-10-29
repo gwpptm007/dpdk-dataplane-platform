@@ -6,6 +6,8 @@
 
 相关开源实现、业务价值对比及选型建议见 [SmartNIC 与 DPU 开源项目调研](docs/smartnic_dpu_project_survey.md)，该记录不扩大现有开发范围。
 
+学习 DPDK 的内存、队列、多核与卸载机制，可从 [DPDK 原理与项目应用教程](docs/dpdk/README.md) 开始，结合图示、真实源码和分层实验走读。
+
 V3 不再把“软件、硬件、transfer”误建模成逐包执行模式：软件路径处理送达 CPU RX queue 的包；`rte_flow` 和 embedded-switch transfer rule 属于控制面下发的硬件规则，硬件成功处理的包通常不会进入软件 worker；representor 是 PMD 暴露的 ethdev 拓扑端点，而不是一个软件转发后端。
 
 当前可运行基线提供：

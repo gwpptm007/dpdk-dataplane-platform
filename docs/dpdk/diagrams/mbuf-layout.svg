@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520" viewBox="0 0 1000 520" role="img" aria-labelledby="title desc">
+  <title id="title">mbuf 元数据与报文数据区</title>
+  <desc id="desc">普通直接 mbuf 的概念模型，字段箭头表达地址关系，不代表结构体固定字节偏移</desc>
+  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#334155"/></marker></defs>
+  <rect width="1000" height="520" fill="#f8fafc"/>
+  <g font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" fill="#0f172a">
+    <text x="40" y="45" font-size="26" font-weight="bold">一个 mbuf：管理信息与报文字节分开理解</text>
+    <text x="40" y="78" font-size="16">原理示意 · 普通直接 mbuf · 非 ABI 布局 · 数字为教学示例</text>
+    <rect x="40" y="115" width="255" height="260" rx="12" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="60" y="150" font-size="21" font-weight="bold">struct rte_mbuf</text>
+    <text x="60" y="190" font-size="18">buf_addr → 数据区起点</text>
+    <text x="60" y="225" font-size="18">data_off = 128</text>
+    <text x="60" y="260" font-size="18">data_len = 64</text>
+    <text x="60" y="295" font-size="18">pkt_len = 64（单段）</text>
+    <text x="60" y="330" font-size="18">next = NULL</text>
+    <text x="60" y="355" font-size="15">pool / refcnt / ol_flags …</text>
+    <rect x="380" y="155" width="580" height="100" fill="#e2e8f0" stroke="#475569"/>
+    <rect x="380" y="155" width="160" height="100" fill="#fef3c7" stroke="#b45309"/>
+    <rect x="540" y="155" width="180" height="100" fill="#dcfce7" stroke="#15803d"/>
+    <text x="400" y="195" font-size="19">headroom</text>
+    <text x="400" y="227" font-size="17">128 字节</text>
+    <text x="560" y="195" font-size="19">有效报文</text>
+    <text x="560" y="227" font-size="17">64 字节</text>
+    <text x="740" y="195" font-size="19">tailroom</text>
+    <text x="740" y="227" font-size="17">1984 字节</text>
+    <path d="M295 185 H345 V140 H380 V155" stroke="#334155" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="380" y="130" font-size="17">buf_addr = 0x1000</text>
+    <path d="M540 305 V260" stroke="#334155" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="440" y="335" font-size="18">报文起点 = buf_addr + data_off = 0x1080</text>
+    <text x="380" y="375" font-size="18">buf_len = 2176，图中区块宽度不按字节比例</text>
+    <rect x="40" y="410" width="920" height="75" rx="10" fill="#fff" stroke="#94a3b8"/>
+    <text x="60" y="440" font-size="18">next 串联的是另一个 mbuf，并不保证两个数据区地址相邻</text>
+    <text x="60" y="470" font-size="18">共享 / 间接 / 外部缓冲区需要另外追踪数据引用与释放条件</text>
+  </g>
+</svg>

@@ -1,0 +1,245 @@
+{
+  "renderer": "Mermaid browser bundle supplied by caller",
+  "ok": true,
+  "diagrams": 34,
+  "results": [
+    {
+      "id": "chapters-01-overview-01",
+      "file": "docs/dpdk/chapters/01-overview.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1041
+    },
+    {
+      "id": "chapters-01-overview-02",
+      "file": "docs/dpdk/chapters/01-overview.md",
+      "ok": true,
+      "width": 1424,
+      "height": 352.28125
+    },
+    {
+      "id": "chapters-02-eal-devices-01",
+      "file": "docs/dpdk/chapters/02-eal-devices.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1027.078125
+    },
+    {
+      "id": "chapters-02-eal-devices-02",
+      "file": "docs/dpdk/chapters/02-eal-devices.md",
+      "ok": true,
+      "width": 1424,
+      "height": 188.578125
+    },
+    {
+      "id": "chapters-03-memory-mbuf-01",
+      "file": "docs/dpdk/chapters/03-memory-mbuf.md",
+      "ok": true,
+      "width": 1424,
+      "height": 129.6875
+    },
+    {
+      "id": "chapters-03-memory-mbuf-02",
+      "file": "docs/dpdk/chapters/03-memory-mbuf.md",
+      "ok": true,
+      "width": 1424,
+      "height": 989.703125
+    },
+    {
+      "id": "chapters-03-memory-mbuf-03",
+      "file": "docs/dpdk/chapters/03-memory-mbuf.md",
+      "ok": true,
+      "width": 1424,
+      "height": 380.03125
+    },
+    {
+      "id": "chapters-03-memory-mbuf-04",
+      "file": "docs/dpdk/chapters/03-memory-mbuf.md",
+      "ok": true,
+      "width": 1424,
+      "height": 875.203125
+    },
+    {
+      "id": "chapters-04-queues-io-01",
+      "file": "docs/dpdk/chapters/04-queues-io.md",
+      "ok": true,
+      "width": 1424,
+      "height": 4423.234375
+    },
+    {
+      "id": "chapters-04-queues-io-02",
+      "file": "docs/dpdk/chapters/04-queues-io.md",
+      "ok": true,
+      "width": 1424,
+      "height": 607.71875
+    },
+    {
+      "id": "chapters-04-queues-io-03",
+      "file": "docs/dpdk/chapters/04-queues-io.md",
+      "ok": true,
+      "width": 1424,
+      "height": 611.359375
+    },
+    {
+      "id": "chapters-04-queues-io-04",
+      "file": "docs/dpdk/chapters/04-queues-io.md",
+      "ok": true,
+      "width": 1424,
+      "height": 986.59375
+    },
+    {
+      "id": "chapters-05-multicore-performance-01",
+      "file": "docs/dpdk/chapters/05-multicore-performance.md",
+      "ok": true,
+      "width": 1424,
+      "height": 222.53125
+    },
+    {
+      "id": "chapters-05-multicore-performance-02",
+      "file": "docs/dpdk/chapters/05-multicore-performance.md",
+      "ok": true,
+      "width": 1424,
+      "height": 530.09375
+    },
+    {
+      "id": "chapters-05-multicore-performance-03",
+      "file": "docs/dpdk/chapters/05-multicore-performance.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1012.640625
+    },
+    {
+      "id": "chapters-06-qsbr-01",
+      "file": "docs/dpdk/chapters/06-qsbr.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1119.46875
+    },
+    {
+      "id": "chapters-06-qsbr-02",
+      "file": "docs/dpdk/chapters/06-qsbr.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1223.03125
+    },
+    {
+      "id": "chapters-06-qsbr-03",
+      "file": "docs/dpdk/chapters/06-qsbr.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1734.375
+    },
+    {
+      "id": "chapters-06-qsbr-04",
+      "file": "docs/dpdk/chapters/06-qsbr.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1638.125
+    },
+    {
+      "id": "chapters-07-rte-flow-01",
+      "file": "docs/dpdk/chapters/07-rte-flow.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1634.171875
+    },
+    {
+      "id": "chapters-07-rte-flow-02",
+      "file": "docs/dpdk/chapters/07-rte-flow.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1559.4375
+    },
+    {
+      "id": "chapters-07-rte-flow-03",
+      "file": "docs/dpdk/chapters/07-rte-flow.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1362.609375
+    },
+    {
+      "id": "chapters-07-rte-flow-04",
+      "file": "docs/dpdk/chapters/07-rte-flow.md",
+      "ok": true,
+      "width": 1424,
+      "height": 355.1875
+    },
+    {
+      "id": "chapters-08-smartnic-dpu-01",
+      "file": "docs/dpdk/chapters/08-smartnic-dpu.md",
+      "ok": true,
+      "width": 1424,
+      "height": 2800.578125
+    },
+    {
+      "id": "chapters-08-smartnic-dpu-02",
+      "file": "docs/dpdk/chapters/08-smartnic-dpu.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1457.953125
+    },
+    {
+      "id": "chapters-08-smartnic-dpu-03",
+      "file": "docs/dpdk/chapters/08-smartnic-dpu.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1408.578125
+    },
+    {
+      "id": "chapters-09-async-templates-01",
+      "file": "docs/dpdk/chapters/09-async-templates.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1501.21875
+    },
+    {
+      "id": "chapters-09-async-templates-02",
+      "file": "docs/dpdk/chapters/09-async-templates.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1399.734375
+    },
+    {
+      "id": "chapters-09-async-templates-03",
+      "file": "docs/dpdk/chapters/09-async-templates.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1184.046875
+    },
+    {
+      "id": "chapters-09-async-templates-04",
+      "file": "docs/dpdk/chapters/09-async-templates.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1684.359375
+    },
+    {
+      "id": "chapters-10-observability-debugging-01",
+      "file": "docs/dpdk/chapters/10-observability-debugging.md",
+      "ok": true,
+      "width": 1424,
+      "height": 231.109375
+    },
+    {
+      "id": "chapters-10-observability-debugging-02",
+      "file": "docs/dpdk/chapters/10-observability-debugging.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1726.375
+    },
+    {
+      "id": "chapters-10-observability-debugging-03",
+      "file": "docs/dpdk/chapters/10-observability-debugging.md",
+      "ok": true,
+      "width": 1424,
+      "height": 996.796875
+    },
+    {
+      "id": "README-01",
+      "file": "docs/dpdk/README.md",
+      "ok": true,
+      "width": 1424,
+      "height": 1748.640625
+    }
+  ]
+}
