@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "7274e3a5-2d5d-4d15-92a2-08e2b2d9f8ab",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\docs\\dpdk\\reader\\sequence\\candidate.json",
+  "output": "E:\\02_Learning\\2026\\gitcode\\dpdk-dataplane-platform\\dpdk-platform\\docs\\dpdk\\reader\\sequence\\rx-cycle.html",
+  "specification": {
+    "sha256": "6c42a93f809964652f09d22566c6641a0dc9673fc1618dd3793c723616554538",
+    "bytes": 5323
+  },
+  "artifact": {
+    "sha256": "09be9904bfa6f810109d3ad6e7034081009b058a19408cd70d1a217a1d5579fb",
+    "bytes": 759011
+  }
+}

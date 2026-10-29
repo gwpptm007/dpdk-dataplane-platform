@@ -1,0 +1,35 @@
+{
+  "ok": true,
+  "checked_at_utc": "2026-10-29T15:44:42.969Z",
+  "browser": "156.0.4314.50",
+  "scope": "离线 HTML 内容交互和布局检查；不代表 DPDK 运行或物理 NIC 验收",
+  "checks": [
+    "离线初始加载、首步边界、桌面布局",
+    "七步状态、末步边界、按钮键盘操作与 SVG 文字范围",
+    "全部展开与返回逐步模式、当前步骤保留、页面 ID 唯一",
+    "参考答案键盘展开和收起",
+    "资源模型的正常、耗尽、不可能状态与输入合法性",
+    "本地链接、资源和章节锚点",
+    "390px 与 320px 手机布局、图示横向滚动、页面不横向溢出",
+    "打印时自动显示全部推演步骤",
+    "禁用脚本后正文与接收因果链仍可阅读",
+    "无浏览器脚本异常、无远程资源请求"
+  ],
+  "page_errors": [],
+  "remote_resource_requests": [],
+  "screenshots": [
+    "desktop-opening.png",
+    "mobile-320.png",
+    "mobile-390.png",
+    "mobile-step-320.png",
+    "mobile-step-390.png",
+    "step-1.png",
+    "step-2.png",
+    "step-3.png",
+    "step-4.png",
+    "step-5.png",
+    "step-6.png",
+    "step-7.png"
+  ],
+  "visual_review": "请另行查看截图，不从自动化通过推断人工视觉验收"
+}

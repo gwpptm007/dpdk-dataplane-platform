@@ -3,6 +3,9 @@
 *.json text eol=lf
 *.svg text eol=lf
 *.cjs text eol=lf
+*.js text eol=lf
+*.css text eol=lf
 .gitattributes text eol=lf
 # 此文件由 Archify 生成并绑定校验摘要，保留生成器的空行缩进以免破坏回执
 diagrams/tx-ownership/tx-ownership.html whitespace=-blank-at-eol
+reader/sequence/rx-cycle.html whitespace=-blank-at-eol

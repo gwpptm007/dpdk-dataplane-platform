@@ -1,0 +1,237 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "一个单段包的接收周期 · ixgbe 标量路径",
+    "locale": "zh-CN",
+    "output": "docs/dpdk/reader/sequence/rx-cycle.html",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [
+      1080,
+      696
+    ],
+    "legend": {
+      "entries": {
+        "default": {
+          "label": "CPU 侧访问"
+        },
+        "emphasis": {
+          "label": "网卡 DMA 写入"
+        },
+        "security": {
+          "label": "有序读取完成状态"
+        },
+        "dashed": {
+          "label": "达到阈值才发布"
+        },
+        "return": {
+          "label": "返回 mbuf 指针"
+        }
+      }
+    }
+  },
+  "participants": [
+    {
+      "id": "application",
+      "type": "frontend",
+      "label": "应用",
+      "sublabel": "调用与释放"
+    },
+    {
+      "id": "pmd",
+      "type": "backend",
+      "label": "PMD",
+      "sublabel": "CPU 执行驱动"
+    },
+    {
+      "id": "buffers",
+      "type": "database",
+      "label": "mbuf 与池",
+      "sublabel": "主机内存"
+    },
+    {
+      "id": "descriptors",
+      "type": "messagebus",
+      "label": "RX 描述符",
+      "sublabel": "主机内存"
+    },
+    {
+      "id": "nic",
+      "type": "external",
+      "label": "物理网卡",
+      "sublabel": "DMA 引擎"
+    }
+  ],
+  "segments": [
+    {
+      "from": 147,
+      "to": 237,
+      "label": "准备接收"
+    },
+    {
+      "from": 242,
+      "to": 301,
+      "label": "硬件收包"
+    },
+    {
+      "from": 306,
+      "to": 525,
+      "label": "软件取包并补位"
+    },
+    {
+      "from": 530,
+      "to": 566,
+      "label": "应用持有与释放"
+    }
+  ],
+  "messages": [
+    {
+      "id": "allocate-a",
+      "from": "pmd",
+      "to": "buffers",
+      "y": 160,
+      "label": "取出空 mbuf A",
+      "variant": "default"
+    },
+    {
+      "id": "post-a",
+      "from": "pmd",
+      "to": "descriptors",
+      "y": 192,
+      "label": "填入 A 数据区的 IOVA",
+      "variant": "default"
+    },
+    {
+      "id": "enable-rx",
+      "from": "pmd",
+      "to": "nic",
+      "y": 224,
+      "label": "发布可用描述符，允许接收",
+      "variant": "default"
+    },
+    {
+      "id": "dma-data",
+      "from": "nic",
+      "to": "buffers",
+      "y": 256,
+      "label": "DMA 写入 A 的数据区",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dma-completion",
+      "from": "nic",
+      "to": "descriptors",
+      "y": 288,
+      "label": "写长度与 DD",
+      "variant": "emphasis"
+    },
+    {
+      "id": "rx-burst",
+      "from": "application",
+      "to": "pmd",
+      "y": 320,
+      "label": "调用 RX burst",
+      "variant": "default"
+    },
+    {
+      "id": "read-completion",
+      "from": "pmd",
+      "to": "descriptors",
+      "y": 352,
+      "label": "查 DD → acquire → 读取快照",
+      "variant": "security"
+    },
+    {
+      "id": "allocate-b",
+      "from": "pmd",
+      "to": "buffers",
+      "y": 384,
+      "label": "分配替换 mbuf B",
+      "variant": "default"
+    },
+    {
+      "id": "post-b",
+      "from": "pmd",
+      "to": "descriptors",
+      "y": 416,
+      "label": "换成 B 的 IOVA；同步软件指针表",
+      "variant": "default"
+    },
+    {
+      "id": "metadata-a",
+      "from": "pmd",
+      "to": "buffers",
+      "y": 448,
+      "label": "填写 A 的元数据",
+      "variant": "default"
+    },
+    {
+      "id": "publish-rdt",
+      "from": "pmd",
+      "to": "nic",
+      "y": 480,
+      "label": "累计超过阈值才更新 RDT，发布补位",
+      "variant": "dashed"
+    },
+    {
+      "id": "return-a",
+      "from": "pmd",
+      "to": "application",
+      "y": 512,
+      "label": "返回 A 指针与包数",
+      "variant": "return"
+    },
+    {
+      "id": "release-a",
+      "from": "application",
+      "to": "buffers",
+      "y": 544,
+      "label": "处理结束后释放 A 引用",
+      "variant": "default"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "pmd",
+      "from": 315,
+      "to": 520,
+      "type": "backend"
+    },
+    {
+      "participant": "nic",
+      "from": 250,
+      "to": 295,
+      "type": "external"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "读图前提",
+      "items": [
+        "按 DPDK v24.11 ixgbe_recv_pkts 的单段成功路径推演，省略同批其他包",
+        "泳道中的主机内存是访问目标，不是独立执行线程",
+        "A 与 B 是不同 mbuf；数据没有从 A 复制到 B"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "图中不能省略的条件",
+      "items": [
+        "分配 B 失败：停在当前完成描述符，保留 A，下一次再尝试",
+        "描述符写好不等于立即可用；RDT 发布受累计阈值和尾边界约束",
+        "默认普通直接 mbuf 且引用计数为 1，释放 A 才归还池；缓存可能暂存归还对象"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "证据与适用范围",
+      "items": [
+        "源码：DPDK v24.11 / ixgbe_rxtx.c:1683–1873",
+        "此图解释驱动机制，不代表本项目已经使用 ixgbe 硬件完成测量",
+        "其他 PMD、向量路径、分段接收及 net_ring 不应照搬此时序"
+      ]
+    }
+  ]
+}
