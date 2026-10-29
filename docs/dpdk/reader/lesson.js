@@ -109,57 +109,7 @@ function diagram(step, unique) {
   </svg></div>`;
 }
 
-/** 所有文案来自本文件的固定教学内容，交互输入只用于数值计算 */
-function explanation(step, index, unique) {
-  return `${diagram(step, unique)}<div class="state-copy"><h3>${index + 1}. ${step.title}</h3>
-    <p>${step.text}</p><dl><dt>谁在做</dt><dd>${step.actor}</dd><dt>改了什么</dt><dd>${step.changed}</dd>
-    <dt>谁能使用</dt><dd>${step.owner}</dd></dl><p><strong>为什么需要这一步：</strong>${step.why}</p></div>`;
-}
-
-let currentStep = 0;
-const panel = document.getElementById("step-panel");
-const tabs = document.getElementById("step-tabs");
-const previous = document.getElementById("previous");
-const next = document.getElementById("next");
-const toggleMode = document.getElementById("toggle-mode");
-const continuous = document.getElementById("continuous");
-
-/** 只响应显式点击，不自动播放，方便读者在每一步核对缓冲区的使用权 */
-function showStep(index) {
-  currentStep = Math.max(0, Math.min(rxSteps.length - 1, index));
-  panel.innerHTML = explanation(rxSteps[currentStep], currentStep, "current");
-  for (const [i, button] of [...tabs.children].entries()) {
-    button.setAttribute("aria-pressed", String(i === currentStep));
-  }
-  previous.disabled = currentStep === 0;
-  next.disabled = currentStep === rxSteps.length - 1;
-  document.getElementById("step-counter").textContent = `第 ${currentStep + 1} / ${rxSteps.length} 步`;
-  document.getElementById("step-announcement").textContent = `第 ${currentStep + 1} 步：${rxSteps[currentStep].name}`;
-}
-
-rxSteps.forEach((step, index) => {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = `${index + 1} ${step.name}`;
-  button.setAttribute("aria-controls", "step-panel");
-  button.addEventListener("click", () => showStep(index));
-  tabs.append(button);
-  const article = document.createElement("article");
-  article.innerHTML = explanation(step, index, `all-${index}`);
-  continuous.append(article);
-});
-previous.addEventListener("click", () => showStep(currentStep - 1));
-next.addEventListener("click", () => showStep(currentStep + 1));
-toggleMode.addEventListener("click", () => {
-  const all = continuous.hidden;
-  continuous.hidden = !all;
-  panel.hidden = all;
-  tabs.hidden = all;
-  document.getElementById("step-controls").hidden = all;
-  toggleMode.textContent = all ? "切回逐步推演" : "展开全部步骤";
-  toggleMode.setAttribute("aria-expanded", String(all));
-});
-showStep(0);
+DpdkReader.mountSteps(rxSteps, diagram);
 
 /** 这是守恒关系练习，省略多段、TX 和缓存占用后只计算一换一补充的理论余量 */
 function updateBudget() {
@@ -183,17 +133,3 @@ function updateBudget() {
 }
 ["pool-size", "rx-slots", "held"].forEach(id => document.getElementById(id).addEventListener("input", updateBudget));
 updateBudget();
-
-/** 目录高亮仅反映当前阅读位置，不把浏览或展开答案记录为掌握程度 */
-if ("IntersectionObserver" in window) {
-  const observer = new IntersectionObserver(entries => {
-    const visible = entries.filter(entry => entry.isIntersecting);
-    if (!visible.length) return;
-    const id = visible[0].target.id;
-    document.querySelectorAll(".sidebar nav a").forEach(link => {
-      if (link.getAttribute("href") === `#${id}`) link.setAttribute("aria-current", "location");
-      else link.removeAttribute("aria-current");
-    });
-  }, { rootMargin: "-10% 0px -65% 0px" });
-  document.querySelectorAll("main section[id]").forEach(section => observer.observe(section));
-}

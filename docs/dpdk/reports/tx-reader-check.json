@@ -1,0 +1,51 @@
+{
+  "ok": true,
+  "checked_at_utc": "2026-10-29T15:59:58.762Z",
+  "browser": "156.0.4314.50",
+  "scope": "离线 TX 教学页面的交互和布局检查；不代表 DPDK 运行或真实 NIC 验收",
+  "checks": [
+    "离线加载、初始资源、首步边界与桌面布局",
+    "七步状态、末步边界、键盘操作与 SVG 文字范围",
+    "全部展开和切回、步骤保留与 ID 唯一",
+    "自检答案可用键盘展开和收起",
+    "0 到 5 个接受包的状态迁移、完成与归还分离、资源守恒及重复操作禁用",
+    "空值、负数、超限和小数不改变资源状态，重置恢复初始状态",
+    "本地资源、目录锚点和跨页 HTML 锚点",
+    "390px 和 320px 手机的正文、图示与状态练习无页面横向溢出",
+    "打印时显示全部推演并隐藏交互导航",
+    "禁用脚本后正文和发送因果链仍可阅读",
+    "无浏览器脚本异常和远程资源请求"
+  ],
+  "page_errors": [],
+  "remote_resource_requests": [],
+  "source_hashes": {
+    "docs/dpdk/reader/tx.html": "bd00951e77a41587a2468b3ad46dd0470e6654d797344b8273875a2a5778ff9f",
+    "docs/dpdk/reader/reader-ui.js": "d60239a40ff9c66c3f3cd8216f58f5528f94ce8f59a68372b52b85fbd43eadcf",
+    "docs/dpdk/reader/tx-lesson.js": "94936e41956f486c5bf939665df0b6d2d01bdfc80cb454773f5d4afcf4454c12",
+    "docs/dpdk/reader/lesson.css": "b1b050386d7662f99c6c6081b3581b189bf5ee80c2772cdab6308386d802dd51"
+  },
+  "screenshots": [
+    "desktop-opening.png",
+    "step-1.png",
+    "step-2.png",
+    "step-3.png",
+    "step-4.png",
+    "step-5.png",
+    "step-6.png",
+    "step-7.png",
+    "accepted-0.png",
+    "accepted-3.png",
+    "completed-3.png",
+    "reclaimed-3.png",
+    "accepted-5.png",
+    "completed-5.png",
+    "reclaimed-5.png",
+    "mobile-390.png",
+    "mobile-step-390.png",
+    "mobile-exercise-390.png",
+    "mobile-320.png",
+    "mobile-step-320.png",
+    "mobile-exercise-320.png"
+  ],
+  "visual_review": "请另行查看截图，不从自动化通过推断人工视觉验收"
+}

@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="从 TX burst 的返回值追踪描述符、网卡 DMA 读取、完成报告和 mbuf 回收，解释部分发送、拥塞与资源归还">
+  <title>一个包交给网卡以后——TX 描述符、发送完成与 mbuf 回收</title>
+  <link rel="stylesheet" href="lesson.css">
+  <script src="reader-ui.js" defer></script>
+  <script src="tx-lesson.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <aside class="sidebar" aria-label="章节导航">
+    <div class="brand">DPDK / MECHANISM NOTES</div>
+    <strong>包交出去以后<br>谁来收尾</strong>
+    <p>把发送与回收串起来<br>从返回值追到资源归还</p>
+    <nav aria-label="本章目录">
+      <a href="#tx-question">01 返回成功意味着什么</a>
+      <a href="#tx-objects">02 设备怎样找到待发字节</a>
+      <a href="#tx-walkthrough">03 逐步走过一次发送</a>
+      <a href="#tx-completion">04 完成为什么不等于归还</a>
+      <a href="#tx-pressure">05 部分发送与拥塞推演</a>
+      <a href="#tx-project">06 回到本项目源码</a>
+      <a href="#tx-lab">07 预测、观察与排故</a>
+      <a href="#tx-check">08 检验是否真正理解</a>
+      <a href="#tx-sources">09 来源与继续阅读</a>
+    </nav>
+    <a class="back" href="index.html">← 上一章：一个包怎样进入程序</a><br>
+    <a class="back" href="../README.md">全部学习材料</a>
+  </aside>
+  <main id="main">
+    <article>
+      <header class="hero">
+        <div class="eyebrow">深度章节 / TRANSMIT AND RECLAIM</div>
+        <h1>一个包交给网卡以后</h1>
+        <p class="subtitle">TX 描述符、发送完成与 mbuf 回收</p>
+        <p class="lead"><code>rte_eth_tx_burst()</code> 返回 3，应用就不能再碰那 3 个包。
+          可网卡也许还没读完它们，内存池也还没拿回空间。沿着这些不同的时刻，理解发送为什么必须是一条完整的责任链。</p>
+        <div class="badges"><span>承接 RX 与 mbuf 样章</span><span>提交 → 完成 → 回收</span><span>部分发送与资源压力</span></div>
+      </header>
+
+      <section id="tx-question" aria-labelledby="tx-question-title">
+        <h2 id="tx-question-title"><span class="section-no">01</span> 函数返回了，事情为什么还没做完</h2>
+        <p>上一章里，CPU 从接收路径拿到的是已经装有数据的 mbuf。现在它完成规则匹配或报文改写，要把这个包送往另一个端口。
+          最直观的实现是一直等待：等网卡读完所有字节、把它们发出，再让发送函数返回。这样很容易判断何时释放内存，却把 CPU 与较慢的设备进度绑在一起。</p>
+        <p>常见的物理网卡发送路径采用异步交接：CPU 先把“数据在哪里、该读多少、怎样处理”的工作交给设备，随后继续处理其他包。
+          设备在自己的时间线上取数据并推进发送。应用得到的返回值首先回答<strong>有多少个包已被这条发送路径接受</strong>，并不回答远端是否已经收到。</p>
+        <div class="table-scroll"><table><caption>需要分开的三个边界</caption><thead><tr><th scope="col">边界</th><th scope="col">可以得出什么结论</th><th scope="col">还不能得出什么结论</th></tr></thead><tbody>
+          <tr><th scope="row">TX burst 接受</th><td>已接受前缀的后续管理责任交给发送路径</td><td>网卡已经读完、mbuf 已回池、对端已经收到</td></tr>
+          <tr><th scope="row">设备完成依据成立</th><td>驱动可以按设备协议推进相应资源的回收</td><td>另一端应用处理成功，或者软件回收代码已经执行</td></tr>
+          <tr><th scope="row">软件回收执行</th><td>驱动释放引用、更新队列可用资源</td><td>所有共享引用都已消失，或每个对象立即进入其他核心可用的公共池</td></tr>
+        </tbody></table></div>
+        <p>可以借用“把材料交给加工设备”的类比，但不能把设备完成当作快递签收。
+          网卡报告的是本地发送协议中的进度；对端可能因链路错误、过滤、拥塞或自身资源不足而丢弃。
+          如果业务要知道对方是否收到，需要上层协议的确认机制。即便收到 TCP ACK，也只是相应协议语义下的确认，不等于对方业务已经把结果持久化。</p>
+        <aside class="callout"><strong>这里最重要的纪律</strong><p>在普通“把当前引用交给 TX”的用法中，已接受包不再由调用者访问或释放。
+          不能用“函数还没退出”“设备应该没那么快”来证明旧指针仍安全。
+          若刻意保留另一份引用，必须另行设计引用和只读共享协议，不能靠复制 C 指针获得第二份所有权。</p></aside>
+        <p>应用与驱动约定见 <a href="https://github.com/DPDK/dpdk/blob/v24.11/lib/ethdev/rte_ethdev.h">固定版本的 ethdev TX burst 接口</a>。
+          下面会把这份通用契约与一个具体驱动实现分开，避免把某种硬件的字段名字当成全部 DPDK 的统一格式。</p>
+      </section>
+
+      <section id="tx-objects" aria-labelledby="tx-objects-title">
+        <h2 id="tx-objects-title"><span class="section-no">02</span> CPU 交出去的不是一根网卡能理解的 C 指针</h2>
+        <p>应用有 <code>struct rte_mbuf *m</code>，但网卡不需要按 C 结构体布局遍历 <code>m</code>。
+          PMD，即应用线程执行的设备收发驱动，会把软件表达翻译成设备规定的 TX 描述符。
+          描述符是设备工作单；它通常引用原有数据区，而不是把整包内容复制到描述符里面。</p>
+        <div class="table-scroll"><table><caption>从 mbuf 到设备工作单，中间保留了两类信息</caption><thead><tr><th scope="col">信息</th><th scope="col">为什么需要</th><th scope="col">谁主要使用</th></tr></thead><tbody>
+          <tr><th scope="row">数据 IOVA 与段长</th><td>设备要知道从哪里读、读多少字节；IOVA 是设备侧 DMA 地址</td><td>NIC，也就是网卡</td></tr>
+          <tr><th scope="row">包结束与处理命令</th><td>多个数据段怎样组成一包，是否需要特定卸载处理</td><td>NIC</td></tr>
+          <tr><th scope="row">mbuf 软件记录</th><td>设备任务结束后，驱动要找回对应对象和它所属的池</td><td>PMD</td></tr>
+          <tr><th scope="row">完成追踪与环索引</th><td>区分仍在使用、可以回收和可以重新提交的槽位</td><td>设备与 PMD 按各自协议协作</td></tr>
+        </tbody></table></div>
+        <p>DMA 是设备直接访问内存。RX 典型地让设备向主机数据区写入，TX 则让设备从数据区读取。
+          CPU 虚拟地址与设备 IOVA 需要正确映射到同一份存储；把 <code>m</code> 的整数值写给网卡，并不能代替这套映射。
+          在后面的 ixgbe 简单路径中，驱动从 mbuf 取得数据 IOVA 和本段长度，写入描述符，同时把 mbuf 指针保存在软件配套数组里。</p>
+        <h3>为什么多段包会改变队列容量的含义</h3>
+        <p>假设一个包由三段组成：第一段 64 字节，第二段 1024 字节，第三段 200 字节。
+          三块内存不必连续，但设备可以按散布的地址收集数据，把它们组织成同一个包。
+          在典型 ixgbe 多段路径里，这会消耗多个数据描述符，最后一段使用 EOP，即 End Of Packet、包结束标志。</p>
+        <p>所以“空了 10 个描述符”不能普遍换算成“还能发 10 个包”。
+          一些卸载还要用 context descriptor，也就是提供校验和、分段等处理参数的上下文描述符。
+          它占队列位置，但不对应另一份待发包字节。应用 API 返回的是包数，驱动计算空间时处理的却可能是描述符数，两个计量单位要分开。</p>
+        <h3>写好内存以后，为什么还要通知设备</h3>
+        <p>描述符在内存里出现，不等于设备已经获准消费它。
+          ixgbe 使用 TDT，即发送描述符尾寄存器，表示新的提交边界；驱动推进它，类似向设备按下“有新工作”的门铃。
+          在本章的路径里，描述符填写完成后先执行写屏障，再更新 TDT，保证发布顺序符合该平台和设备的约定。</p>
+        <p>写屏障不是“等待设备把包发完”，也不是“把所有缓存清空”。它处理的是内存访问的可见顺序。
+          如果设备先看见新的提交边界、却还没看见对应的新地址和长度，就可能消费旧工作单。
+          把“准备内容”和“发布内容”分成两个动作，是理解许多高性能队列的共同入口。</p>
+        <p>本节设备字段的具体定义和写入顺序可对照 <a href="https://github.com/DPDK/dpdk/blob/v24.11/drivers/net/ixgbe/ixgbe_rxtx.c#L149">tx1、tx4 与 ixgbe_tx_fill_hw_ring</a>。
+          程序复制的是少量指针和描述符字段；设备随后仍要读取真正的报文字节，减少 CPU 全包复制并不让这段内存带宽消耗消失。</p>
+      </section>
+
+      <section id="tx-walkthrough" aria-labelledby="tx-walkthrough-title">
+        <h2 id="tx-walkthrough-title"><span class="section-no">03</span> 跟着一个包走到回收，而不是停在函数返回</h2>
+        <p>先限定普通单段 mbuf、有效数据且不请求 TX 卸载的发送场景。
+          具体顺序选用 DPDK <code>v24.11</code> 的 <code>ixgbe_xmit_pkts_simple()</code>，它进入 <code>tx_xmit_pkts()</code>，
+          并通过 <code>ixgbe_tx_free_bufs()</code> 回收满足条件的一组旧对象。</p>
+        <p>这是一条用于讲解的简单标量路径，即按普通 CPU 指令处理对象；实际设备可能选择向量路径或支持更多卸载的完整路径。
+          它们可以共享应用侧契约，却不必在相同时间释放同一批对象。图中跟踪一组 32 个包，明确列出阈值和资源假设；这不表示应用每次必须发送 32 个包。</p>
+        <div class="lab" aria-label="TX 提交与回收过程推演">
+  <div class="lab-head">
+    <div><h3>盯住同一批对象，区分三个结束时刻</h3><p class="small">选择一步观察，也可以展开连续阅读；手机上的图可横向滚动</p></div>
+    <button id="toggle-mode" class="mode" type="button" aria-controls="continuous" aria-expanded="false">展开全部步骤</button>
+  </div>
+  <p class="small">本例指定 simple 标量路径，TX 环 128 项、RS 与清理触发阈值均为 32。只跟踪一组 32 个单段直接 mbuf，初始空环，无额外卸载、共享引用、本核缓存或其他占用；这些是假设，不是本项目配置。</p>
+  <div id="step-tabs" class="step-tabs" role="group" aria-label="跳到指定发送步骤"></div>
+  <div id="step-panel"></div>
+  <div id="step-controls" class="controls">
+    <button id="previous" type="button" aria-controls="step-panel">← 上一步</button>
+    <button id="next" type="button" class="primary" aria-controls="step-panel">下一步 →</button>
+    <span id="step-counter" class="counter"></span>
+  </div>
+  <p id="step-announcement" class="small" role="status" aria-live="polite" aria-atomic="true"></p>
+  <div id="continuous" class="continuous" hidden></div>
+  <noscript><p>完整因果链：应用持有 → PMD 检查空间 → 填写描述符与软件记录 → 写屏障与 TDT 发布 → 设备 DMA 读取 → 完成写回 → PMD 消费完成信息并归还对象。函数返回和设备处理可交错，接受不等于对端收到。</p></noscript>
+</div>
+
+        <p>如果只想看项目里的返回值分割，可以打开已有的 <a href="../diagrams/tx-ownership/tx-ownership.html">TX 短发送与 mbuf 所有权图</a>。
+          它解释 worker 如何处理接受前缀与剩余尾部；本节则继续追踪驱动和设备内部的责任交接。</p>
+      </section>
+
+      <section id="tx-completion" aria-labelledby="tx-completion-title">
+        <h2 id="tx-completion-title"><span class="section-no">04</span> 设备完成了，为什么池里还没多出对象</h2>
+        <p>“完成”首先是一种依据。要让对象回到可复用资源中，还需要 CPU 执行回收代码，释放引用并更新软件状态。
+          如果驱动每发一个包就马上读取一个完成结果、回收一个对象，会增加设备写回、CPU 检查和访问池的次数。
+          因此所选路径把多个完成与回收动作合并处理，让额外工作被一批包分摊。</p>
+        <h3>RS 与 DD：请求报告，与观察到报告</h3>
+        <p>RS 是 Report Status，意思是让设备为选定描述符报告完成；DD 是 Descriptor Done，是驱动检查的完成结果。
+          这条简单路径并不要求每个描述符都独立报告。它按 <code>tx_rs_thresh</code> 划分报告边界，
+          回收函数检查 <code>tx_next_dd</code> 所指边界的 DD，再按该设备的顺序保证处理这一组对象。</p>
+        <p>这并不意味着“把任意一个 DD 看成前面所有包都完成”。组的范围、提交顺序和硬件保证必须配套。
+          驱动保存这些关系，应用通常只应使用设备接口，而不是从外面猜一个描述符位来决定能否释放。</p>
+        <h3>两个阈值解决的是不同问题</h3>
+        <div class="table-scroll"><table><caption>不要把报告间隔与软件扫描条件混成一个开关</caption><thead><tr><th scope="col">参数</th><th scope="col">在所选路径里控制什么</th><th scope="col">不能怎样理解</th></tr></thead><tbody>
+          <tr><th scope="row"><code>tx_rs_thresh</code></th><td>设置完成报告边界和按组追踪回收的粒度</td><td>不是每次 TX burst 必须提交的包数</td></tr>
+          <tr><th scope="row"><code>tx_free_thresh</code></th><td>空闲描述符低于此值时，在发送路径中尝试回收</td><td>不是“已经发送了这么多包就必须回收”，也不是后台定时器</td></tr>
+        </tbody></table></div>
+        <p>用一个有意省略硬件细节的例子理解：假设一组报告覆盖 32 个单段对象。
+          设备完成边界后，软件一次处理这一组，平均检查成本可能比逐个查询更低；代价是较早完成的对象可能继续被驱动暂存。
+          32 在这里只用于解释，真实配置还受到驱动对环大小、阈值、路径选择的约束，不能照抄为任意 PMD 的推荐值。</p>
+        <p>甚至“描述符重新可用”和“mbuf 引用已经释放”也不能在全部驱动中等同。
+          本章的简单路径在回收组里调用预释放并向池归还可释放对象；ixgbe 完整路径的清理与槽位重用流程不同，可能先推进描述符空闲计数，再在后续位置释放旧对象。
+          源码走读时要沿同一条发送回调追到底，不要从简单路径摘一个函数、再用完整路径的另一半拼成不存在的流程。</p>
+        <details><summary>只发送几包后停下来，为什么看起来像“内存泄漏”？</summary>
+          <p>如果没有后续发送调用触发回收，或者尾部未达到所选路径能观察的完整报告组，驱动可能继续持有那批对象。
+            因而“发完之后池里少几个对象”不足以单独证明泄漏。应先确认持有者、完成依据与清理流程，
+            再区分正常暂存、无法推进的状态以及真正丢失的引用。</p>
+          <p><code>rte_eth_tx_done_cleanup()</code> 是请求驱动归还已经不再使用的发送对象的接口，不是强制完成未结束的 DMA。
+            返回 0 可能表示当前没有可回收对象；驱动或具体路径也可以返回 <code>-ENOTSUP</code>。
+            所选 ixgbe 简单实现仍按组回收，因此把 <code>free_cnt</code> 设为 0 也不能承诺立即清空不足一组的尾部。</p>
+          <p>应用自行积攒但还没提交的发送缓冲又是另一层，需要相应的 flush 操作。
+            不要把一次零包 TX 调用当作所有驱动通用的“发完并回收全部”命令，也不能直接 free 已交出去的包来让池计数好看。</p>
+        </details>
+        <details><summary>“池可用量”到底统计共享池，还是也统计本核缓存？</summary>
+          <p>先认清使用的接口。<code>rte_mempool_avail_count()</code> 会把池内置的各 lcore 缓存也计入可用量，
+            不统计应用另行管理的 user-owned cache。因此对象进入内置本核缓存，本身不能解释这个接口统计的可用总量为何减少。
+            但另一个核心不能直接从你的本核缓存取对象，所以“全池还有空闲”和“当前核心能否分配成功”仍然可能不同。</p>
+          <p>这里的 lcore 是 EAL 管理的逻辑执行核。这个全池计数适合诊断，不应放进每包热路径；
+            并发收发时也不要把多处采样当成同一瞬间的守恒快照。具体计数范围见
+            <a href="https://doc.dpdk.org/api-24.11/rte__mempool_8h.html">mempool 的 avail_count 与 get 接口说明</a>。</p>
+        </details>
+        <p>具体回收代码见 <a href="https://github.com/DPDK/dpdk/blob/v24.11/drivers/net/ixgbe/ixgbe_rxtx.c#L101">ixgbe_tx_free_bufs</a>、
+          <a href="https://github.com/DPDK/dpdk/blob/v24.11/drivers/net/ixgbe/ixgbe_rxtx.c#L2411">ixgbe_tx_done_cleanup_simple</a>；
+          通用请求语义见 <a href="https://doc.dpdk.org/api-24.11/rte__ethdev_8h.html">ethdev 的 tx_done_cleanup 文档</a>。</p>
+      </section>
+
+      <section id="tx-pressure" aria-labelledby="tx-pressure-title">
+        <h2 id="tx-pressure-title"><span class="section-no">05</span> 发送不足时，先分清谁还持有剩下的包</h2>
+        <p>给 TX 一个数组 <code>[A, B, C, D, E]</code>，返回 3，含义是前缀 <code>[A, B, C]</code> 已交接，
+          尾部 <code>[D, E]</code> 仍由调用者负责。它不是从五个包里随意挑了三个，也不是“这五个都已排队，只完成了三个”。
+          忘记处理尾部会遗失引用；把整个数组都释放，则会把驱动仍可能使用的前缀提前归还。</p>
+
+<div id="tx-exercise" class="lab">
+  <h3>自己操作一次：五个包，分别由谁负责</h3>
+  <p>这是独立的 API 所有权练习：应用持有 A～E，池里另有 3 个空闲对象。改变返回值后提交，页面按本项目策略立即释放未接受尾部。
+    随后分别触发“设备完成”和“驱动回收”，观察池余量何时增加。</p>
+  <p class="small">假定直接单段、引用计数 1，没有本核缓存或额外占用。这个五包模型不套用上图的 RS 分组，不代表真实 ixgbe 能按这几个对象直接完成一次清理。</p>
+  <label for="accepted">设定 TX 返回值（接受前几个包，0～5）</label>
+  <input id="accepted" class="accepted-input" type="number" min="0" max="5" step="1" value="3">
+  <div class="controls interactive-only">
+    <button id="submit-tx" class="primary" type="button">1 提交并处理尾部</button>
+    <button id="complete-tx" type="button" disabled>2 设备完成</button>
+    <button id="reclaim-tx" type="button" disabled>3 驱动回收</button>
+    <button id="reset-tx" type="button">重置</button>
+  </div>
+  <div id="packet-cards" class="packet-cards" aria-label="各包当前归属"></div>
+  <dl class="resource-counts">
+    <div><dt>应用持有</dt><dd><output id="app-count">5</output></dd></div>
+    <div><dt>发送路径持有</dt><dd><output id="driver-count">0</output></dd></div>
+    <div><dt>其中已完成待回收</dt><dd><output id="done-count">0</output></dd></div>
+    <div><dt>池中空闲</dt><dd><output id="pool-count">3</output></dd></div>
+  </dl>
+  <p id="exercise-status" role="status" aria-live="polite" aria-atomic="true">应用持有 5 个，池中另有 3 个对象</p>
+  <p class="formula">应用持有 ＋ 发送路径持有 ＋ 池中空闲 = 8</p>
+  <p class="small">“已完成待回收”是“发送路径持有”的子集，不能再加一次。按当前状态打印时，数值表示当前练习状态；它不是真实网卡统计。</p>
+  <noscript><p>未启用脚本时可手算：返回 3 后，A/B/C 转交发送路径，D/E 释放，池余量从 3 变成 5。设备完成不改变 5；软件归还 A/B/C 后才变成 8。</p></noscript>
+</div>
+
+        <h3>重试能吸收短时阻塞，不能创造长期发送能力</h3>
+        <p>若设备很快完成一批旧任务，稍后重试尾部可能成功。但无限循环重试会把 worker 卡在出口：
+          它不再服务其他入口，不再及时处理停止或设备事件，持有的 mbuf 也迟迟不归还。
+          可靠的重试设计需要次数或时间上限、等待队列容量、停止条件，以及最终放弃时的释放责任。</p>
+        <p>用资源守恒推导，假设输入长期为每秒 100 万包，出口实际长期只能消化 80 万包，且没有丢弃或流控降低输入。
+          积压每秒增加 20 万包。多准备 20 万个单段对象，理想化地只增加约 1 秒缓冲时间；
+          它没有改变两端速率差。这是假设计算，不是本项目吞吐测试，更没有计入每包可能占用多个 mbuf 的情况。</p>
+        <p>如果 RX 与 TX 共用一个池，出口暂存越多，入口能申请到的替补就越少。
+          因此入口分配失败的根因可能在出口回收或业务排队。完整的资源路径应画成
+          <code>池 → RX → 应用 → TX → 池</code>，任何一段长期停留，都可能影响下一轮接收。</p>
+        <h3>准备发送、校验和卸载与 TSO 怎样改变这个模型</h3>
+        <p><code>rte_eth_tx_prepare()</code> 用于发送前的检查或必要调整；它可能检查段数、卸载参数，并修改需要准备的校验和字段。
+          因此输入数据必须安全可写。返回值表示前面多少个包已准备好，不表示这些包已提交，准备后仍要调用 TX burst。
+          准备过程不转移这些包的所有权，调用者仍负责它们。
+          遇到第一个不合要求的包时，准备过程停止，后面的包不继续准备；调用者需要分别处理已准备前缀与剩余部分。
+          驱动未实现 prepare 时，还可能直接原样返回全部数量，不能把这个结果当作所有设备要求都已验证。</p>
+        <p>校验和卸载把某些字段的计算交给设备，应用仍要提供正确的头长和标志。
+          TSO，即 TCP Segmentation Offload、TCP 分段卸载，会让一个软件大包在设备侧变成多个线上报文。
+          因而一个 TX 返回计数与对端观察到的帧数不一定一一对应。使用这些能力前，要同时核对设备能力、端口与队列配置、mbuf 元数据以及报文内容。</p>
+        <p>本章的简单路径特意不把这些扩展混进主时序。它们说明的是同一个原则：
+          应用要交付的不只是字节，还有驱动能够正确解释的描述；更快的硬件路径也需要更精确的输入契约。
+          可对照 <a href="https://github.com/DPDK/dpdk/blob/v24.11/lib/ethdev/rte_ethdev.h">tx_prepare 接口</a>与
+          <a href="https://doc.dpdk.org/guides-24.11/prog_guide/mbuf_lib.html">mbuf 卸载元数据说明</a>继续追踪。</p>
+      </section>
+
+      <section id="tx-project" aria-labelledby="tx-project-title">
+        <h2 id="tx-project-title"><span class="section-no">06</span> 本项目的发送函数为什么这样写</h2>
+        <p>下面固定到项目提交 <code>c793dbd</code>。这里的 worker 不自己构造 ixgbe 描述符，也没有把某张网卡的回收阈值硬编码进业务处理。
+          它通过 ethdev 接口提交包，把设备差异留给实际 PMD。前面研究驱动，是为了理解接口背后的约束，而不是把驱动实现复制进 worker。</p>
+        <p>设备配置在能力允许时启用 <code>RTE_ETH_TX_OFFLOAD_MULTI_SEGS</code>，也就是多段发送能力。
+          因此不能把前面的“无 offload 简单路径”说成项目在真实 ixgbe 上必然选择的路径；路径选择必须以实际能力、配置和驱动回调为准。</p>
+        <div class="table-scroll"><table><caption>从配置、交接到停止清理逐段走读</caption><thead><tr><th scope="col">源码</th><th scope="col">实际行为</th><th scope="col">它保护的边界</th></tr></thead><tbody>
+          <tr><th scope="row"><a href="https://github.com/gwpptm007/dpdk-dataplane-platform/blob/c793dbdb70f12f3dcda0085b263e6984479479c8/lib/device/device.c#L452">configure_port_queues</a></th><td>调整描述符数量，基于设备默认 TX 配置设置队列</td><td>请求值与设备接受值可以不同；默认阈值来自驱动</td></tr>
+          <tr><th scope="row"><a href="https://github.com/gwpptm007/dpdk-dataplane-platform/blob/c793dbdb70f12f3dcda0085b263e6984479479c8/lib/dataplane/worker.c#L34">flush_egress</a></th><td>提交前再次检查停止和端口状态，不可发送则释放整批</td><td>检查发生在交接之前，此时全部对象仍由 worker 管理</td></tr>
+          <tr><th scope="row"><a href="https://github.com/gwpptm007/dpdk-dataplane-platform/blob/c793dbdb70f12f3dcda0085b263e6984479479c8/lib/dataplane/worker.c#L50">TX burst 与统计</a></th><td>按接受数记包数；用预存长度计算字节数</td><td>统计不再读取已交给驱动的 mbuf</td></tr>
+          <tr><th scope="row"><a href="https://github.com/gwpptm007/dpdk-dataplane-platform/blob/c793dbdb70f12f3dcda0085b263e6984479479c8/lib/dataplane/worker.c#L59">未接受尾部</a></th><td>增加发送队列丢弃计数，释放剩余尾部，这里不重试</td><td>避免失败包遗失引用，也避免无限重试占住 worker</td></tr>
+        </tbody></table></div>
+        <details><summary>只看这几行，解释为什么需要单独保存 lengths</summary>
+          <pre><code>/* 按 flush_egress 的实际逻辑摘录，省略入口门禁 */
+uint16_t sent = rte_eth_tx_burst(egress-&gt;port_id, worker-&gt;queue_id, packets, count);
+output-&gt;tx_packets += sent;
+for (uint16_t i = 0; i &lt; sent; ++i)
+    output-&gt;tx_bytes += lengths[i];
+if (sent &lt; count) {
+    output-&gt;tx_drops += count - sent;
+    output-&gt;tx_queue_drops += count - sent;
+    free_packets(packets + sent, (uint16_t)(count - sent));
+}</code></pre>
+          <p><code>lengths</code> 保存的是交接前的普通数字，访问它不需要访问已提交的包。
+            如果改成发送后读取 <code>packets[i]-&gt;pkt_len</code>，就把统计逻辑放到了不再拥有该对象的时段。
+            这类错误在慢设备上可能长期不明显，在快速完成或软件 PMD 上更容易暴露。</p>
+        </details>
+        <p>还要注意数组的身份：<code>packets</code> 是当前出口实际待发数组。
+          有些 RX 包已经因解析、规则或路由失败被丢弃，其他包可能走了另一个出口。
+          <code>sent = 3</code> 指这个出口数组的前三项，不是原始 RX burst 的前三项。</p>
+        <p>本项目这条发送路径没有调用 <code>rte_eth_tx_prepare()</code>，也没有通过 <code>rte_eth_tx_done_cleanup()</code> 定期催收。
+          这些 API 在本章用于理解机制和可选能力，不能据此声称项目已经实现相关功能。
+          现有路径中的报文改写自行维护所需校验和；要新增硬件卸载，应另行核对配置与元数据，而非只插入一个函数调用。</p>
+        <h3>同一个 TX API，net_ring 为什么完全不同</h3>
+        <p>项目软件集成测试用 <code>rte_eth_from_rings()</code> 建立端口。
+          net_ring 的 TX 把 mbuf 指针放入软件 ring，成功入队的对象由测试消费方取走并释放；没有物理 DMA、TX 描述符门铃和网卡 DD。
+          成功提交以后 worker 不再释放前缀的约定仍然成立，但后面的执行者变成软件消费者。</p>
+        <p>所以“由发送路径回收”是一条责任链，不保证一定由最初调用的 PMD 函数亲自完成每次 free。
+          查看 <a href="https://github.com/DPDK/dpdk/blob/v24.11/drivers/net/ring/rte_eth_ring.c#L71">net_ring 的收发实现</a>，
+          再与物理 PMD 比较，可以避免把 API 名称误认成硬件机制。</p>
+        <h3>停机时为什么不能先把池销毁</h3>
+        <p>退出时必须先阻止新的使用，并等使用资源的线程和设备按各自协议停止，再销毁底层内存。
+          如果 NIC 或 worker 仍可能访问数据，释放整个池会让尚未结束的访问落到已经失效的内存上。
+          这比漏掉几个空闲对象严重得多；设备 close 失败时也不能假定已经失去访问能力。</p>
+        <p>项目的 <a href="https://github.com/gwpptm007/dpdk-dataplane-platform/blob/c793dbdb70f12f3dcda0085b263e6984479479c8/lib/device/device.c#L944">设备清理路径</a>
+          依次尝试 stop 和 close，任何端口没有成功关闭都会保留共享池；关闭完成后再报告池占用并释放池。
+          多个端口可能共用同一个池，所以不能只看某一个出口已停止就释放整池。
+          这里保证的是资源退出顺序，不承诺停机前每个已接受包都送达了对端。</p>
+      </section>
+
+      <section id="tx-lab" aria-labelledby="tx-lab-title">
+        <h2 id="tx-lab-title"><span class="section-no">07</span> 用实验区分“没交出去”和“还没收回来”</h2>
+        <p>先运行能明确控制的最小软件场景。以下命令在 Linux 项目根目录执行，构建需启用测试、保留断言并提供 net_ring PMD，
+          单队列场景至少需要两个 affinity 允许的 CPU。Windows 页面演示不执行这些命令；准备步骤见 <a href="../labs/README.md">实验入口</a>。</p>
+        <pre><code>python3 tests/integration/software_traffic.py --build-dir build --queues 1</code></pre>
+        <p>先阅读 <a href="https://github.com/gwpptm007/dpdk-dataplane-platform/blob/c793dbdb70f12f3dcda0085b263e6984479479c8/tests/integration/software_traffic.c#L289">scenario == 3</a>：
+          测试往出口 ring 填入占位 mbuf，直到没有可用槽，再送入一个合法包并启动正式 worker。
+          这个包能通过前面的处理，但 TX 此时不能接受它。这样把“出口没有空间”与“入口没流量”区分开来。</p>
+        <div class="table-scroll"><table><caption>执行前写下预测，再与实际断言和日志比对</caption><thead><tr><th scope="col">观察项</th><th scope="col">此场景的预期</th><th scope="col">为什么</th></tr></thead><tbody>
+          <tr><th scope="row">接收包数</th><td>增加 1</td><td>worker 确实收到待转发包</td></tr>
+          <tr><th scope="row">发送接受包数</th><td>不增加</td><td>出口 ring 已满，TX 返回 0</td></tr>
+          <tr><th scope="row">出口 tx_queue_drops</th><td>增加 1</td><td>未接受尾部包含整个待发包，worker 释放它</td></tr>
+          <tr><th scope="row">清理后的池可用量</th><td>用例完成清理后回到记录的基线</td><td>输入包、成功转交包和占位对象都要结束各自的持有责任</td></tr>
+        </tbody></table></div>
+        <p>这个场景验证的是完全未接受的边界，不能由此声称所有 <code>0 &lt; sent &lt; count</code> 的中间值都已真实执行过。
+          页面练习可以帮助检查部分发送的所有权推理，但仍是教学模型。
+          要证明具体真实路径的部分发送，还要构造受控的可用容量和批次，并记录实际返回值。</p>
+        <h3>遇到发送问题，按证据把原因拆开</h3>
+        <p>若 TX 经常返回不足，先看同一时间窗里的提交数量、接受数量、设备状态与队列可用资源；
+          若接受数量正常而池余量持续减少，再查 TX 在途、业务排队、完成报告与软件回收。
+          若本地接受与设备统计都增长而对端看不到，则继续核对线上报文、链路、对端过滤和上层接收条件。
+          这三种现象对应不同边界，不能都归为“发送失败”。</p>
+        <p>设备统计的支持情况和含义也依 PMD 而异，项目的 <code>tx_packets</code> 在这里按 API 接受数累加。
+          比较时应说明采样时间窗、是否包含硬件分段、是否经过虚拟端口，避免把不同层次的计数直接相减后称为丢包率。</p>
+        <aside class="callout"><strong>本轮证据范围</strong><p>这一章交付的是源码核查和浏览器教学材料。
+          上面的软件运行结果需要在可用 Linux 环境执行后另行登记；物理 TX DMA、完成时序、吞吐和端到端交付需要对应设备与受控流量证据。
+          页面状态变化与假设计算均不作为实测结果。</p></aside>
+      </section>
+
+      <section id="tx-check" aria-labelledby="tx-check-title">
+        <h2 id="tx-check-title"><span class="section-no">08</span> 用变化条件检验自己的模型</h2>
+        <p>先独立解释，再展开答案。浏览与展开不会记录为“已经掌握”。</p>
+        <details><summary>1. TX 返回 3，能立即释放数组中的前 3 个 mbuf 吗？</summary><p>不能。返回值划定的是已交接前缀，这些引用不再由应用处理。
+          网卡可能仍要 DMA 读取它们，或者软件 PMD 已交给另一个消费者。应用释放后对象可能被重新分配并写入新数据，从而破坏尚未结束的使用。</p></details>
+        <details><summary>2. 提交 5 个包只接受 3 个，重试时从哪个位置开始？</summary><p>只有后两个仍属于应用。
+          若策略允许重试，应从 <code>packets + 3</code> 开始处理剩余 2 个，并保留终止与释放条件。
+          重新提交全部 5 个会重复处理已移交对象。本项目选择直接释放未接受尾部。</p></details>
+        <details><summary>3. 一个包由三段组成，TX 返回 1，表示只发送了第一段吗？</summary><p>返回值以包为单位，表示这一个包已被接受。
+          在支持相应多段配置的路径中，驱动需要管理这条链对应的多个段；应用不能再把后两段当成未发送尾部自行释放。
+          描述符个数、mbuf 个数和包数并不总相等。</p></details>
+        <details><summary>4. 网卡已经完成，为什么池可用量仍没有恢复？</summary><p>完成依据成立与 CPU 执行回收是不同事件。
+          回收可能等待后续调用或批量条件；释放一个引用后也可能还有其他合法引用。
+          应追踪实际持有者并在正确的清理边界核对基线，不能只用瞬间池余量判断泄漏。
+          内置 lcore 缓存已包含在 rte_mempool_avail_count 的计数里，不能用它解释该总量减少。</p></details>
+        <details><summary>5. tx_prepare 返回全部包数，能证明它们已发送或一定合法吗？</summary><p>不能。prepare 不是提交，返回的是准备完成的前缀。
+          驱动未实现时还可能不检查而原样返回；真正发送仍需 TX burst，并处理它的实际接受数量。
+          prepare 可能修改校验和等字节，调用之前也要保证数据安全可写。</p></details>
+        <details><summary>6. 把发送队列扩大一倍，能消除持续出口过载吗？</summary><p>不能保证。
+          队列可以吸收更长的短时突发，但长期输入超过输出时，积压仍增长，并可能提高排队时延和 mbuf 占用。
+          需要增加实际服务能力、控制输入，或采用有界排队与明确丢弃策略。</p></details>
+        <details><summary>7. 调用 tx_done_cleanup 返回 0，是否证明驱动泄漏了内存？</summary><p>不能。
+          当前可能没有满足回收条件的对象，具体路径也可能按完整报告组回收。
+          先确认接口支持情况、设备完成进度、尾部是否可被观察，以及已有对象由谁持有，再判定是否异常。</p></details>
+        <details><summary>8. 软件 ring 测试通过，证明了哪一段发送责任链？</summary><p>证明范围由实际断言决定，例如 worker 正确交出成功前缀、释放失败尾部，以及消费者排空后资源恢复。
+          它没有物理 TX 描述符、DMA 读或网卡完成报告，因此不能证明这些硬件环节正确，也不能据此报告物理线速。</p></details>
+      </section>
+
+      <section id="tx-sources" aria-labelledby="tx-sources-title">
+        <h2 id="tx-sources-title"><span class="section-no">09</span> 从接口契约走到具体实现</h2>
+        <p>建议按下面的顺序继续阅读。先找到“应用可以依赖什么”，再看一个驱动如何实现，最后比较另一条路径。
+          GitHub 驱动源码固定 <code>v24.11</code> 标签；官方 <code>24.11</code> 文档站可能显示该系列的维护版本，不能混用网页源码行号。</p>
+        <ul>
+          <li><a href="https://github.com/DPDK/dpdk/blob/v24.11/lib/ethdev/rte_ethdev.h">ethdev 接口</a>：定位 TX burst、TX prepare 与 TX done cleanup，分别列出返回值和所有权含义</li>
+          <li><a href="https://github.com/DPDK/dpdk/blob/v24.11/drivers/net/ixgbe/ixgbe_rxtx.c#L231">tx_xmit_pkts</a>：沿空闲量检查、填环、设置 RS、写屏障和 TDT 更新追踪一次提交</li>
+          <li><a href="https://github.com/DPDK/dpdk/blob/v24.11/drivers/net/ixgbe/ixgbe_rxtx.c#L101">ixgbe_tx_free_bufs</a>：找到 DD 检查、软件 mbuf 关联、引用释放、批量归还与索引推进</li>
+          <li><a href="https://github.com/DPDK/dpdk/blob/v24.11/drivers/net/ixgbe/ixgbe_rxtx.c#L2540">ixgbe 发送路径选择</a>：解释实际配置为什么可能选向量、简单或完整路径</li>
+          <li><a href="https://github.com/DPDK/dpdk/blob/v24.11/drivers/net/ring/rte_eth_ring.c">net_ring</a>：说明同一个应用契约怎样由软件指针交接实现</li>
+        </ul>
+        <aside class="callout"><strong>把 RX 与 TX 放在一起理解</strong><p>RX 让设备获得可写空间，完成后把装有数据的对象交给应用；
+          TX 让设备获得可读数据，满足完成与回收条件后结束发送路径持有的引用。
+          CPU 不必等待每个设备动作，但每个对象必须始终有明确的持有者、交接点和最终退出路径。</p></aside>
+        <p>下一层问题是：这条资源循环怎样分布到多个核心，池缓存和 NUMA 又怎样改变代价。
+          这些专题目前仍以 <a href="../chapters/05-multicore-performance.md">原有多核章节</a>供参考，尚未全部按本章深度重写。</p>
+      </section>
+      <footer>
+        <p>本章正文使用共享样式并支持离线阅读；交互推演不驱动真实网卡、不预测发送耗时。
+          项目源码固定于 <code>c793dbdb70f12f3dcda0085b263e6984479479c8</code>，业务代码与上一章基线一致。</p>
+        <p><a href="index.html">回到 RX 深度样章</a> · <a href="../validation.md">查看教材验收记录</a> · <a href="../README.md">全部学习材料</a></p>
+      </footer>
+    </article>
+  </main>
+</body>
+</html>

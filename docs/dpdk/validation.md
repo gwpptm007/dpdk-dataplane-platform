@@ -98,6 +98,48 @@ node docs/dpdk/tools/reader-check.cjs
 它检查行为与几何边界，不代替内容审查或人工看图。
 独立时序图的 [候选](reader/sequence/candidate.json) 和 [检查摘要](reader/sequence/rx-cycle.finalize-summary.json) 用于复现。
 
-正文直接维护 `reader/index.html`，共享样式在 `reader/lesson.css`，七步状态和资源练习在 `reader/lesson.js`。
+RX 正文直接维护 `reader/index.html`，共享样式在 `reader/lesson.css`，RX 七步状态和资源练习在 `reader/lesson.js`。
+通用翻页、展开和目录高亮操作在 `reader/reader-ui.js`，由 RX 与 TX 页面共用。
 这些文件无需构建；新增内容后运行静态检查与页面检查，并实际查看截图。
 不要手改生成的 `reader/sequence/rx-cycle.html`；应修改其候选并重新 finalize，保持产物与回执一致。
+
+## TX 深度章节
+
+新增入口：[一个包交给网卡以后](reader/tx.html)，验收日期：2026-10-29。
+项目源码核查固定 `c793dbdb70f12f3dcda0085b263e6984479479c8`，业务代码与 RX 章基线一致。
+本章只增加教学内容与页面交互，原业务代码、Linux 测试和个人掌握记录未修改。
+
+主例固定 DPDK `v24.11` 的 ixgbe simple 标量路径：128 个 TX 描述符、两个阈值均为 32，
+用一组 32 个普通直接、单段、独占 mbuf 追踪提交、DD 完成与清理。
+源码审查确认初始可用描述符为 127，提交后为 95，成功回收一组后恢复为 127。
+明确区分该示例、完整/向量路径和项目的 MULTI_SEGS 配置，不声称项目实际必走 simple。
+
+五包交互练习独立解释 ethdev 的已接受前缀契约，允许选择返回值 0～5。
+页面按项目逻辑释放未接受尾部，随后把完成和回收分开，始终核对 8 个对象的去向。
+该模型不复现真实 NIC 的 RS 分组、硬件时间或吞吐。
+
+| 检查 | 结果 |
+| --- | --- |
+| TX 页面交互 | 11 组检查通过，覆盖 7 步、展开与切回、键盘、自检、0～5 全部返回值、非法输入和重复操作限制 |
+| 资源守恒 | 应用持有 + 发送路径持有 + 池中空闲恒为 8；已完成数只作为发送路径持有的子集 |
+| 页面与离线 | 桌面、390px/320px 手机、打印、无脚本和本地锚点通过；无远程资源请求与脚本异常 |
+| RX 回归 | 提取共用阅读控件后，原 RX 页面 10 组检查再次通过 |
+| 内容与图示 | 核对提交顺序、RS/DD、低流量尾部、cleanup/prepare、mempool 计数范围、项目发送与关闭清理；人工查看七步图和手机练习 |
+| 原有 TX 时序图 | 复用原产物，未改变候选、HTML 或回执字节 |
+| Linux / 物理 NIC | 本轮 `not_run`；软件实验保留可复现命令和预测，不把教学状态当成运行证据 |
+
+复查命令：
+
+```bash
+python docs/dpdk/tools/check.py
+node docs/dpdk/tools/reader-check.cjs
+node docs/dpdk/tools/tx-reader-check.cjs
+```
+
+运行环境要求与 RX 页面检查相同。TX 检查报告与截图写入 `build/dpdk-learning/tx-reader/`；
+提交的 [TX 页面检查报告](reports/tx-reader-check.json) 记录正文、脚本与样式的 SHA256，
+[RX 页面检查报告](reports/reader-check.json) 更新为共享控件调整后的回归结果。
+浏览器报告只记录自动检查；内容语义与截图可读性另行审查。
+
+TX 正文维护 `reader/tx.html`，图示状态与练习逻辑维护 `reader/tx-lesson.js`。
+继续阅读时可从 RX 页的“下一章”进入，也可从 TX 页返回 RX。

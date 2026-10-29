@@ -6,6 +6,7 @@
   <meta name="description" content="沿着一个包的接收过程，深入理解 DPDK 描述符、DMA、mbuf、RX burst 和资源回收，附交互推演与项目源码">
   <title>一个包怎样从网卡进入程序 · DPDK 机制手册</title>
   <link rel="stylesheet" href="lesson.css">
+  <script src="reader-ui.js" defer></script>
   <script src="lesson.js" defer></script>
 </head>
 <body>
@@ -27,6 +28,7 @@
       <a href="#self-check">10 检验是否真正理解</a>
       <a href="#sources">来源与复核</a>
     </nav>
+    <a class="back" href="tx.html">下一章：TX 发送与回收 →</a><br>
     <a class="back" href="../README.md">← 全部学习材料</a>
   </aside>
   <main id="main">
@@ -267,6 +269,7 @@ process_batch(worker, ingress, packets, count, false, 0);</code></pre><p>数组�
   <aside class="callout"><strong>本章希望留下的能力</strong><p>面对一个陌生 PMD，你应当能自己找到：数据写入位置、完成依据、mbuf 关联、补充策略、交付边界和失败路径。面对项目里的一个丢包问题，你应当能给出可检验的资源或时序假设，而不是只尝试修改参数。这些问题可以带着你继续理解 TX、RSS、多核、NUMA 和硬件卸载。</p></aside>
 </section>
 
+      <aside class="note"><strong>把这个包继续追下去</strong><p>接收完成后，应用可以丢弃包，也可以交给出口。继续阅读<a href="tx.html">《一个包交给网卡以后》</a>，追踪 TX 接受、DMA 读取、完成写回和 mbuf 回收的不同边界。</p></aside>
       <footer>
         <p>本章是教学与源码走读材料。交互图和计算练习不调用 DPDK，也不模拟 PCIe 时序。
           正文、CSS 和 JS 可直接修改，无构建步骤；浏览或展开答案不会修改个人学习记录。</p>
