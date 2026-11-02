@@ -62,7 +62,7 @@ static void observe_transaction(struct dppd_control_service *service, const stru
     }
 }
 
-/** 无法证明对象与账本一致时封锁后续写入，原始失败已由观测上下文单独保留 */
+/** 后端实际规则与控制面记录可能不一致时，标记需要恢复并阻止后续普通修改，返回 -EUCLEAN */
 static int isolate_control(struct dppd_control_service *service, int code)
 {
     service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
@@ -70,7 +70,15 @@ static int isolate_control(struct dppd_control_service *service, int code)
     return -EUCLEAN;
 }
 
-/** 共享定义和引用规则必须在同一个文件里保存，不能先保存一半再留下悬空引用 */
+/**
+ * 收集共享计数器定义，再交给持久化模块保存完整配置；成功返回 0，失败返回错误码
+ *
+ * rte_flow 后端 → shared[]：共享计数器的 ID、版本、安装端口和作用域
+ * service->rules          ：当前全部规则，部分规则可能按 ID 引用上述计数器
+ *             ↓
+ * 两者写入同一文件，恢复规则时才能找到它引用的共享计数器定义
+ * 保存的是创建配置，不包含驱动句柄或累计报文数
+ */
 static int save_current_snapshot(struct dppd_control_service *service)
 {
     struct dppd_shared_count_spec shared[DPPD_SHARED_COUNT_MAX];
@@ -83,13 +91,13 @@ static int save_current_snapshot(struct dppd_control_service *service)
 }
 
 /**
- * 把当前完整规则账本写入快照，未配置保存路径时直接成功返回
- * 保存发生在规则生效之后，写磁盘失败不能被解释为已经回滚规则
- * 此时设置 dirty 并返回 EUCLEAN，后续修改必须先补写成功，避免磁盘与内存越差越远
- * 后端规则已生效 + 内存账本已更新 → 尝试写文件
- *   未配置路径 → 跳过保存，返回 0
- *   保存成功   → 清除 dirty，更新 persisted_generation，返回 0
- *   保存失败   → 保留已生效规则和内存账本，设置 dirty，返回 -EUCLEAN
+ * 将 service 中的完整规则配置和共享计数器定义保存到文件
+ * 单条安装走到这里：规则已生效 → service->rules 已更新 → finalize 已释放临时资源
+ *
+ *   未配置路径 → 不保存，返回 0
+ *   保存成功   → 清除失败标记，记录已保存的版本，返回 0
+ *   保存失败   → 保留已生效规则，设置 persistence_dirty，返回 -EUCLEAN
+ * persistence_dirty 表示当前配置尚未保存成功，后续修改前必须先补写成功
  */
 static int persist_current_repository(struct dppd_control_service *service)
 {
@@ -115,13 +123,16 @@ static int persist_current_repository(struct dppd_control_service *service)
     return 0;
 }
 
-/** 新修改开始前检查上次保存是否失败，必要时先补写当前已经生效的完整状态 */
+/**
+ * 修改规则前检查保存状态，必要时先补写当前配置；通过返回 0，补写失败返回 -EUCLEAN
+ * 例如规则 20 已生效但保存失败，接着收到安装规则 21 的请求
+ *   persistence_dirty = false → 无需补写，继续处理规则 21
+ *   persistence_dirty = true  → 先保存当前配置（其中已有规则 20）
+ *                               成功 → 清除标记，继续处理规则 21
+ *                               失败 → 返回错误，不开始安装规则 21，规则 20 仍生效
+ */
 static int persistence_write_preflight(struct dppd_control_service *service)
 {
-    /**
-     * clean 状态不重复保存，dirty 状态先修复上次未完成的保存
-     * 修复失败就拒绝本次修改，这里不会通过丢弃内存中的规则来消除 dirty
-     */
     return service->persistence_dirty ? persist_current_repository(service) : 0;
 }
 
@@ -908,6 +919,12 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
             return rc;
         rc = dppd_transaction_run(&transaction, &backends);
     }
+    /**
+     * run 返回安装错误前，已经对 prepare/commit 占用的资源尝试回滚
+     *   rollback_code = 0 → 没有清理错误，返回本次安装错误
+     *   rollback_code ≠ 0 → 仍可能残留后端规则，进入恢复隔离，阻止继续修改
+     * 此分支直接返回，不再更新 service->rules，也不执行后面的保存配置
+     */
     if (rc != 0) {
         observe_transaction(service, &transaction);
         if (transaction.rollback_code != 0)

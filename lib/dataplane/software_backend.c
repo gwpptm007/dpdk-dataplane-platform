@@ -631,12 +631,13 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
 }
 
 /**
- * 撤销 token 对应的安装，返回 0 表示成功，负值表示参数或删除错误
+ * 清理 token 指向的 pending，按 published 判断是否还要撤销已发布的规则
  *
  * pending 未发布 → 释放准备记录
  * pending 已发布 → 删除同 ID、同版本的规则，再释放准备记录
  *
- * 是否需要删除以 published 为准，仅调用过 commit 不代表发布成功
+ * 软件后端不使用 item 和 commit_was_attempted，尝试过提交不代表已经发布
+ * 成功返回 0，参数或规则删除失败返回负错误码；删除失败时仍释放 pending
  */
 static int transaction_rollback(void *context, const struct dppd_transaction_item *item, uintptr_t token,
     bool commit_was_attempted)
@@ -649,7 +650,7 @@ static int transaction_rollback(void *context, const struct dppd_transaction_ite
     (void)commit_was_attempted;
     if (backend == NULL || pending == NULL)
         return -EINVAL;
-    /** commit 尚未发布时只需释放 token；已发布时删除同一 ID+generation 的精确版本 */
+    /** 例如撤销 ID 20、版本 13，只删除这个版本，不按 ID 删除可能仍需保留的旧版本 */
     if (pending->published)
         rc = dppd_software_backend_remove_version(backend, pending->rule.id, pending->rule.generation);
     /** 删除失败也会释放准备记录；调用方必须检查 rc，规则可能仍在已发布的表中 */

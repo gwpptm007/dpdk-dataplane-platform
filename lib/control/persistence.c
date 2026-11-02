@@ -63,6 +63,7 @@ static void put_u16_le(uint8_t *output, uint16_t value)
     output[1] = (uint8_t)(value >> 8);
 }
 
+/** 小端编码：低位字节放在前面，例如 0x12345678 → 78 56 34 12 */
 static void put_u32_le(uint8_t *output, uint32_t value)
 {
     output[0] = (uint8_t)value;
@@ -99,9 +100,10 @@ static uint64_t get_u64_le(const uint8_t *input)
     return value;
 }
 
-/*
- * 使用 CRC32/IEEE 检测截断、部分写入和静默损坏。CRC 不是认证机制；
- * snapshot 文件仍依赖目录权限，不能把它当作不可信输入的安全签名
+/**
+ * 将 data 的 length 个字节计入 CRC32/IEEE，返回可继续处理下一段数据的中间状态
+ * 调用方以 UINT32_MAX 开始，依次处理 header 和 payload，最后异或 UINT32_MAX 得到校验值
+ * 用于读取时检查数据损坏，不能作为防止人为篡改的签名
  */
 static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t length)
 {
@@ -117,6 +119,14 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t length)
     return crc;
 }
 
+/**
+ * 将 rule 编码到调用方提供的 output，match_size 和 action_size 指定当前格式的槽位宽度
+ * output 至少容纳 40 + 8 × match_size + 8 × action_size 字节，成功返回 0，规则或格式不支持返回 -EINVAL
+ *
+ * 一条记录：[基础字段 40 字节][匹配槽 0..7][动作槽 0..7]
+ * v2 示例：40 + 8 × 20 + 8 × 8 = 264 字节，未使用的槽和保留字节清零
+ * 逐字段编码以固定偏移和字节序，不直接保存 C 结构体的内存布局
+ */
 static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t match_size, uint32_t action_size)
 {
     char validation_error[128];
@@ -136,16 +146,16 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t m
     put_u16_le(output + 32, rule->nb_matches);
     put_u16_le(output + 34, rule->nb_actions);
     put_u16_le(output + 36, rule->install_port_id);
-    /* 38..39 为 v2 record 保留字段，memset 已保证写出为 0 */
+    /** 以上偏移均从本条记录起点 output 计算，38..39 为保留字节，保持为零 */
 
     for (i = 0; i < rule->nb_matches; ++i) {
         const struct dppd_match *match = &rule->matches[i];
         uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + i * match_size;
 
         put_u32_le(encoded, (uint32_t)match->type);
-        /*
-         * IP/L4 字段在 IR 中已是网络字节序。这里复制协议字节而不是把它们当作
-         * host integer 编码，保证大小端主机读取后仍得到同一网络地址和端口
+        /**
+         * IP 地址和传输层端口已经按网络字节序存放，直接复制，不再转为小端
+         * 例如目的端口 9000 = 0x2328，保留字节 23 28；规则 ID 等普通整数使用 put_u*_le
          */
         switch (match->type) {
         case DPPD_MATCH_ETH:
@@ -190,6 +200,7 @@ static int encode_rule(const struct dppd_rule *rule, uint8_t *output, uint32_t m
         }
     }
 
+    /** 动作区固定排在全部 8 个匹配槽后面，实际只用 3 个匹配槽时也不能提前 */
     for (i = 0; i < rule->nb_actions; ++i) {
         const struct dppd_action *action = &rule->actions[i];
         uint8_t *encoded = output + DPPD_SNAPSHOT_RULE_HEADER_SIZE + DPPD_RULE_MAX_ITEMS * match_size + i * action_size;
@@ -397,7 +408,10 @@ static int decode_rule_layout(const uint8_t *input, struct dppd_rule *rule, uint
     return 0;
 }
 
-/** 一次 write 可能只写出部分数据，持续推进指针直到写完，信号中断则重试 */
+/**
+ * 将 length 个字节全部写到 fd，成功返回 0，失败返回负错误码，信号中断则重试
+ * 例如请求 792 字节却只写入 512 字节，就将 data 后移 512，继续写剩余 280 字节
+ */
 static int write_all(int fd, const uint8_t *data, size_t length)
 {
     while (length != 0) {
@@ -544,8 +558,14 @@ static int decode_shared_spec(const uint8_t *input, struct dppd_shared_count_spe
 }
 
 /**
- * 先把完整快照写入同目录临时文件，再用重命名替换旧快照
- * 替换之前失败可以保留旧文件，替换之后同步失败仍要报告错误，不能宣称已经可靠保存
+ * 将 repository 中的全部规则与 specs 中的 shared_count 个共享计数器定义保存到 path
+ * shared_revision 是共享计数器配置的整体修订号，和单个对象的 generation 分开保存
+ *
+ * 复制配置并校验引用 → 选择文件格式 → 编码文件头和配置数据，计算 CRC
+ *   → 写同目录临时文件 → fsync 文件 → rename 替换目标文件 → fsync 父目录
+ *
+ * 成功返回 0，失败返回负错误码；临时数组和缓冲区在返回前释放
+ * rename 前失败保留旧文件；rename 后目录同步失败，新文件已可见，但仍返回错误
  */
 int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_repository *repository,
     const struct dppd_shared_count_spec *specs, uint32_t shared_count, uint64_t shared_revision)
@@ -579,6 +599,10 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
     if (payload_size > SIZE_MAX)
         return -EOVERFLOW;
 
+    /**
+     * specs 是调用方的数组，复制后只对本地 shared 排序，不改变原数组
+     * 例如 ID [9, 3] → [3, 9]，便于检查重复 ID，以及后续按 ID 查找引用对象
+     */
     if (shared_count != 0) {
         shared = calloc(shared_count, sizeof(*shared));
         if (shared == NULL) {
@@ -595,12 +619,21 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
     if (shared_revision != 0 || shared_count != 0)
         version = DPPD_SNAPSHOT_V5_VERSION;
 
+    /**
+     * count 是本次预计保存的规则总数，generation 是读取前取得的整体版本
+     * repository->records[槽位].rule → rules[] → 后续编码为文件字节
+     * rules[] 保存规则内容的副本，不借用原记录地址，也不包含后端驱动句柄
+     */
     if (count != 0) {
         rules = calloc(count, sizeof(*rules));
         if (rules == NULL) {
             rc = -ENOMEM;
             goto cleanup;
         }
+        /**
+         * 从 ID 0 之后开始，最多取 count 条；入口检查整体版本是否仍为 generation
+         * 例如 count = 3：应得到 listed = 3 且 has_more = false，才能保存完整配置
+         */
         rc = dppd_rule_repository_list(repository, 0, generation, rules, count, &listed, &has_more, &generation);
         if (rc != 0)
             goto cleanup;
@@ -608,7 +641,11 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
             rc = -EUCLEAN;
             goto cleanup;
         }
-        /** 仅在需要 AGE 或共享身份时升级格式，普通 IPv4 和 IPv6 保留原版本 */
+        /**
+         * version 是整份文件的格式版本，与规则的 generation 无关
+         * 默认 v2 → 含 IPv6 至少 v3 → 含 AGE 至少 v4 → 含共享计数配置使用 v5
+         * 只升级不降级，例如先遇到 SHARED_COUNT 再遇到 IPv6，仍使用 v5
+         */
         for (i = 0; i < count; ++i) {
             for (uint16_t item = 0; item < rules[i].nb_matches; ++item)
                 if (rules[i].matches[item].type == DPPD_MATCH_IPV6 && version < DPPD_SNAPSHOT_V3_VERSION)
@@ -620,10 +657,15 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
                     version = DPPD_SNAPSHOT_V4_VERSION;
         }
     }
+    /**
+     * 检查规则引用的共享计数器是否存在，且版本、端口和规则域均匹配
+     * 例如规则引用 ID 7 的版本 2，定义只有 ID 7 的版本 3，也不能保存
+     */
     if (!shared_references_valid(rules, count, shared, shared_count)) {
         rc = -EINVAL;
         goto cleanup;
     }
+    /** 文件布局：v3/v4 扩大匹配项以容纳 IPv6，v5 再扩大文件头和动作项以保存共享计数配置 */
     if (version >= DPPD_SNAPSHOT_V3_VERSION) {
         match_size = DPPD_SNAPSHOT_V3_MATCH_SIZE;
         record_size = DPPD_SNAPSHOT_V3_RECORD_SIZE;
@@ -633,6 +675,11 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
         action_size = DPPD_SNAPSHOT_V5_ACTION_SIZE;
         record_size = DPPD_SNAPSHOT_V5_RECORD_SIZE;
     }
+    /**
+     * 文件 = header + payload，payload 不包含文件头
+     * payload：[规则 0] ... [规则 count-1] [共享定义 0] ... [共享定义 shared_count-1]
+     * 大小 = 规则数量 × 每条编码长度 + 共享对象数量 × 每个定义的编码长度
+     */
     payload_size = (uint64_t)count * record_size + (uint64_t)shared_count * DPPD_SNAPSHOT_V5_SHARED_SIZE;
     if (payload_size > SIZE_MAX || payload_size > (uint64_t)INT64_MAX - header_size) {
         rc = -EOVERFLOW;
@@ -644,6 +691,11 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
             rc = -ENOMEM;
             goto cleanup;
         }
+        /**
+         * payload 是字节指针，第 i 条规则从 i × record_size 字节处开始
+         * v2 每条 264 字节：规则 0 从 0 开始，规则 1 从 264 开始，规则 2 从 528 开始
+         * 此处只填充内存，后面的 write_all 才写入文件
+         */
         for (i = 0; i < count; ++i) {
             rc = encode_rule(&rules[i], payload + (size_t)i * record_size, match_size, action_size);
             if (rc != 0)
@@ -654,6 +706,14 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
                 payload + (size_t)count * record_size + (size_t)i * DPPD_SNAPSHOT_V5_SHARED_SIZE);
     }
 
+    /**
+     * 文件头描述后面的 payload，下面的偏移从整份文件的起点计算
+     *   0..7   格式标识 DPPRULE\0       8..11  文件格式版本
+     *  12..15  文件头长度             16..19  每条规则的编码长度
+     *  20..23  规则数量               24..31  规则集合的整体版本
+     *  32..39  payload 长度           40..43  CRC 校验值，计算时先保持为零
+     * v2/v3/v4 文件头为 48 字节；v5 扩为 64 字节，追加共享计数器配置的信息
+     */
     memset(header, 0, sizeof(header));
     memcpy(header, snapshot_magic, sizeof(snapshot_magic));
     put_u32_le(header + 8, version);
@@ -667,17 +727,23 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
         put_u32_le(header + 56, shared_count);
         put_u32_le(header + 60, DPPD_SNAPSHOT_V5_SHARED_SIZE);
     }
+    /**
+     * CRC 计算顺序：header（校验字段为零）→ payload → 最终异或 → 填回 header[40..43]
+     * 第二次调用接着第一次的中间状态计算，相当于连续处理 header + payload
+     * 读取时也先将校验字段置零再重算，与文件中保存的值比较
+     */
     checksum = crc32_update(UINT32_MAX, header, header_size);
     checksum = crc32_update(checksum, payload, (size_t)payload_size) ^ UINT32_MAX;
     put_u32_le(header + DPPD_SNAPSHOT_CHECKSUM_OFFSET, checksum);
 
+    /** 例如目标 /var/lib/dppd/rules.bin，进程号 1234 → 临时文件 /var/lib/dppd/rules.bin.tmp.1234 */
     if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path, (long)getpid()) >= (int)sizeof(temporary)) {
         rc = -ENAMETOOLONG;
         goto cleanup;
     }
-    /*
-     * O_EXCL 防止覆盖其他进程的临时文件；0600 避免规则内容在 rename 前短暂
-     * 暴露。临时文件位于目标同目录，保证 rename 在同一文件系统内原子完成
+    /**
+     * 创建同目录临时文件，O_EXCL 要求文件不存在，0600 只允许所属用户读写
+     * 新配置写完整前不动原文件；同目录使后面的 rename 可以在同一文件系统内原子替换
      */
     fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0) {
@@ -687,6 +753,7 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
     rc = write_all(fd, header, header_size);
     if (rc == 0 && payload_size != 0)
         rc = write_all(fd, payload, (size_t)payload_size);
+    /** write 成功后数据仍可能留在系统缓存，fsync 请求同步文件内容，再检查 close 的结果 */
     if (rc == 0 && fsync(fd) != 0)
         rc = -errno;
     if (close(fd) != 0 && rc == 0)
@@ -694,10 +761,12 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
     fd = -1;
     if (rc != 0)
         goto unlink_temporary;
+    /** 替换成功后，目标路径指向完整的新文件，临时文件名消失；已经打开旧文件的读者仍可读旧内容 */
     if (rename(temporary, path) != 0) {
         rc = -errno;
         goto unlink_temporary;
     }
+    /** 再同步父目录中的文件名变更；此处失败也返回错误，但目标文件已经替换，不能当作仍是旧文件 */
     rc = fsync_parent_directory(path);
     goto cleanup;
 

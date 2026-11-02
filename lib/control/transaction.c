@@ -27,21 +27,22 @@ static int backend_valid(const struct dppd_transaction_backend *backend)
 }
 
 /**
- * 按相反顺序撤销本次事务占用的资源，将首个清理错误记入 rollback_code
+ * 从后往前清理本次事务的条目，具体释放或删除操作由所选后端执行
+ * commit_attempts 是已尝试提交的条目数，包含提交失败的那条
  *
  * 软件示例：R1 已发布，R2 提交失败但未发布，R3 只完成准备
  *   R3 → 释放准备记录
  *   R2 → 释放准备记录
  *   R1 → 删除已发布版本，再释放准备记录
  *
- * 某一条清理失败时，继续尝试其余条目
+ * 本函数无返回值，清理全部成功时设为 ROLLED_BACK，否则设为 FAILED 并记录首个清理错误
  */
 static void rollback_items(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends,
     uint32_t commit_attempts)
 {
     uint32_t i = transaction->nb_items;
 
-    /** 按最后准备或提交的对象优先撤销，避免先释放了后续对象仍可能依赖的资源 */
+    /** 三条规则时，下标依次为 2 → 1 → 0；尚未占用资源的条目在下面跳过 */
     transaction->state = DPPD_TRANSACTION_ROLLING_BACK;
     while (i > 0) {
         struct dppd_transaction_item *item;
@@ -52,8 +53,8 @@ static void rollback_items(struct dppd_transaction *transaction, const struct dp
         --i;
         item = &transaction->items[i];
         /**
-         * 只经过校验的条目没有占用资源，不需要回滚
-         * 失败条目若留下非零 token，说明仍有需要清理的资源，不能仅因为 FAILED 就跳过
+         * PREPARED、COMMITTED 需要清理；FAILED 则看 token 是否记录了待清理资源
+         * PENDING、VALIDATED 没有准备资源，直接跳过
          */
         if (item->state != DPPD_TRANSACTION_ITEM_PREPARED && item->state != DPPD_TRANSACTION_ITEM_COMMITTED &&
             item->state != DPPD_TRANSACTION_ITEM_FAILED)
@@ -61,8 +62,9 @@ static void rollback_items(struct dppd_transaction *transaction, const struct dp
         if (item->state == DPPD_TRANSACTION_ITEM_FAILED && item->backend_token == 0)
             continue;
         backend = backend_for(backends, item->plan.backend);
-        /** commit_attempts 包含提交失败的那条，例如 R2 失败时为 2，R1、R2 均算尝试过提交 */
+        /** R2 提交失败时 commit_attempts = 2：下标 0、1 为 true，下标 2 为 false */
         commit_was_attempted = i < commit_attempts;
+        /** 软件计划选择 .rollback = software_backend.c 的 transaction_rollback，token 转交原 pending 地址 */
         rc = backend->rollback(backend->context, item, item->backend_token, commit_was_attempted);
         if (rc == 0)
             item->state = DPPD_TRANSACTION_ITEM_ROLLED_BACK;
@@ -149,8 +151,7 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
         else if (!backend_valid(backend))
             rc = -ENOTSUP;
         else
-            // 从事务调度进入软件后端
-            // 通过函数指针，调用的是software_backend.c 中的 transaction_validate
+            /** 调用所选后端的校验函数，软件计划进入 software_backend.c 的 transaction_validate */
             rc = backend->validate(backend->context, item);
         if (rc != 0) {
             item->state = DPPD_TRANSACTION_ITEM_FAILED;
@@ -205,7 +206,7 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
     for (i = 0; i < transaction->nb_items; ++i) {
         struct dppd_transaction_item *item = &transaction->items[i];
         const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);
-        // 返回事务函数，标记安装完成
+        /** 调用后端正式安装，成功后再将条目标记为 COMMITTED */
         rc = backend->commit(backend->context, item, item->backend_token);
         if (rc != 0) {
             item->state = DPPD_TRANSACTION_ITEM_FAILED;
@@ -213,6 +214,11 @@ int dppd_transaction_run(struct dppd_transaction *transaction, const struct dppd
             transaction->failure_code = rc;
             transaction->failure_stage = DPPD_RULE_STAGE_COMMIT;
             transaction->failure_item = i;
+            /**
+             * 提交失败也可能留下资源，当前条目必须纳入回滚
+             * 单条示例 i = 0：commit_attempts = 1，回滚后仍返回原来的提交错误
+             * 清理若也失败，另存到 transaction->rollback_code，交给控制层决定是否隔离
+             */
             rollback_items(transaction, backends, i + 1U);
             return rc;
         }

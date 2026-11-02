@@ -75,6 +75,15 @@ int dppd_rule_repository_get(const struct dppd_rule_repository *repository, uint
     return 0;
 }
 
+/**
+ * 原始记录中的 rule
+ *       │ 结构体赋值，复制内容
+ *       ▼
+ * 临时 rules[i]
+ *       │ 后续编码
+ *       ▼
+ * 文件中的字节
+ */
 int dppd_rule_repository_list(const struct dppd_rule_repository *repository, uint64_t after_rule_id,
     uint64_t expected_repository_generation, struct dppd_rule *rules, uint32_t limit, uint32_t *count, bool *has_more,
     uint64_t *repository_generation)

@@ -8,11 +8,15 @@
 
 struct rte_flow_action_handle;
 
-/** 共享对象的持久身份不包含驱动指针，重启按此定义重新创建且计数从零开始 */
+/** 多条规则可引用同一个共享计数器；这里只保存创建配置，重启后重新创建并从零计数 */
 struct dppd_shared_count_spec {
+    /** 共享计数器 ID，供规则的 SHARED_COUNT 动作引用 */
     uint64_t id;
+    /** 对象版本，用于识别规则引用的是否仍是同一代对象 */
     uint64_t generation;
+    /** 创建此计数器的 DPDK 端口编号 */
     uint16_t install_port_id;
+    /** 计数器所属的规则域，如 ingress、egress 或 transfer */
     enum dppd_rule_domain domain;
 };
 
