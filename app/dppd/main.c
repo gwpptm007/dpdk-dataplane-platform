@@ -1,3 +1,11 @@
+/*
+ * @Author: gwpptm007 wqgwpptm@gmail.com
+ * @Date: 2026-10-19 16:38:52
+ * @LastEditors: gwpptm007 wqgwpptm@gmail.com
+ * @LastEditTime: 2026-11-03 20:11:41
+ * @FilePath: \dpdk-dataplane-platform\app\dppd\main.c
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ */
 #include <errno.h>
 #include <inttypes.h>
 #include <signal.h>
@@ -245,11 +253,12 @@ static void finish_recovery_remove(void *context, uint64_t attempt, int remove_e
 
 static void handle_signal(int signal_number)
 {
-    /* 信号处理器只写 sig_atomic_t，实际资源回收全部回到主线程执行 */
+    /** 信号处理器只设置退出标记，主线程跳出循环后再停止 worker 和回收资源 */
     (void)signal_number;
     stop_signal = 1;
 }
 
+/** 主线程每轮结束后休眠 100 毫秒，worker 继续收包；一轮总时长还包含前面的处理耗时 */
 static void sleep_control_loop(void)
 {
     struct timespec remaining = {
@@ -317,9 +326,23 @@ static int setup_ipv4_routing(struct dppd_runtime *runtime, struct dppd_control_
     return rc;
 }
 
+/**
+ * 程序入口：解析启动配置，准备数据面和控制面，启动工作线程并运行管理循环
+ *
+ * 运行范围检查 → rte_eal_init → dppd_config_parse
+ *   ├─ 配置 flow_state_path → dppd_managed_run，使用独立的受管理流程
+ *   └─ 普通启动路径
+ *       → 恢复保护检查 → runtime_init：准备 worker 配置、网口、队列和内存池
+ *       → control_init：创建控制服务 → 绑定软件后端、路由等运行时对象
+ *       → 按需恢复规则 → management_start：创建管理入口
+ *       → runtime_start：启动 worker → RX burst → 已学过的 process_batch
+ *       → 主线程循环处理管理请求、设备事件和统计
+ *
+ * 退出时先停止 worker，再释放控制面和设备资源，最后清理 EAL
+ */
 int main(int argc, char **argv)
 {
-    /* 受控入口必须先封住进程派生和权限变化，再让 EAL 创建线程或访问 TAP */
+    /** 在 EAL 创建线程和访问设备前，先执行受控运行范围检查 */
     int scope_error = dppd_scope_open(&managed_scope, DPPD_SCOPE_BUSINESS);
     if (scope_error != 0) {
         fprintf(stderr, "[dppd] managed scope refused: %d\n", scope_error);
@@ -343,7 +366,31 @@ int main(int argc, char **argv)
     int rc = EXIT_FAILURE;
     bool recovery_isolation = false;
 
-    /* EAL 必须先消费 -l/-a/--vdev 等参数，后续只解析 -- 后的应用参数 */
+    /**
+     * 启动分三阶段：主机先准备资源 → EAL 建立 DPDK 环境 → 本项目配置收发资源
+     *
+     * 1）运行 dppd 之前，由管理员或部署脚本准备 Linux 主机
+     *    大页模式：预留系统大页，按环境准备 hugetlbfs 挂载和访问权限
+     *      → 预留数量通常通过 nr_hugepages 或内核启动参数设置，本项目没有自动配置脚本
+     *    VFIO 模式：加载 vfio-pci，并把指定 PCI 设备绑定给它
+     *      → scripts/bind_nic.sh 中执行 modprobe 和 dpdk-devbind.py --bind=vfio-pci
+     *    这些步骤不由本次 rte_eal_init 调用自动完成
+     *    scripts/run_platform.sh 只启动程序，不预留大页，也不调用网卡绑定脚本
+     *
+     * 2）下面的 rte_eal_init 在 DPDK 库内部完成基础初始化
+     *    解析 DPDK 参数，准备 lcore 线程环境和内存映射
+     *      → 大页模式使用已预留的大页；--no-huge 使用非大页模式
+     *    根据设备参数由对应 PMD（用户态轮询驱动）探测设备，建立 ethdev 网口对象
+     *    VFIO 提供内核侧设备访问，PMD 负责具体网卡操作，两者不是同一个驱动
+     *    例外：mlx5 等分叉驱动保留相应内核驱动，不能照搬 VFIO 解绑步骤；虚拟设备不一定需要 PCI 绑定
+     *
+     * 3）EAL 返回后，本项目再通过 runtime_init → dppd_devices_init（lib/device/device.c）
+     *    创建 mbuf 池 → configure 网口 → setup RX/TX 队列 → start 网口
+     *    随后 runtime_start 才启动 worker 执行业务收包循环
+     *
+     * 参数分工：dppd [EAL 参数：-l、-a、--vdev 等] -- [本项目参数：--ports、--queues 等]
+     * 成功返回已消费的参数数量，后面移动 argc/argv，再交给应用配置解析器；失败返回负值
+     */
     eal_consumed = rte_eal_init(argc, argv);
     if (eal_consumed < 0) {
         fprintf(stderr, "[dppd] EAL initialization failed\n");
@@ -536,10 +583,21 @@ int main(int argc, char **argv)
     if (dppd_runtime_start(&runtime) != 0)
         goto cleanup_telemetry;
 
-    /* 使用 DPDK 单调 timer cycle，避免系统时间调整影响 duration 与统计周期 */
+    /** 使用 DPDK 单调计时器计算运行时长和统计周期，避免系统时间调整影响判断 */
     timer_hz = rte_get_timer_hz();
     started_at = rte_get_timer_cycles();
     next_stats = started_at + (timer_hz * config.stats_period_ms) / 1000U;
+    /**
+     * worker 启动后，主线程进入管理循环，与各 lcore 上的报文循环并行执行
+     *
+     * 主线程：检查设备和 worker → 输出统计、清理过期会话 → 处理 dppctl 请求
+     *           → 再查设备事件、轮询规则老化、发布查询快照 → 处理恢复状态 → 休眠
+     * worker：按 queue_id 收包 → process_batch → 报告安全点和心跳 → 下一轮
+     *
+     * 正常运行到达 duration 或收到信号时结束循环；无法继续运行的检查错误也会跳出
+     * 规则清理失败则先停止并等待 worker，保留管理入口供恢复查询和清理重试
+     * 跳出循环后，统一关闭管理入口、停止并等待 worker，再回收共享资源
+     */
     while (!stop_signal) {
         const uint64_t now = rte_get_timer_cycles();
 
@@ -587,12 +645,13 @@ int main(int argc, char **argv)
             dppd_runtime_stats_dump(&runtime);
             next_stats = now + (timer_hz * config.stats_period_ms) / 1000U;
         }
-        /*
-         * 管理请求只在主线程串行执行，repository 与硬件事务无需额外加锁；
-         * poll 内部有连接预算，保证本循环仍能周期性观察 stop_signal
-         */
+        /** 分批清理过期会话，限制本轮工作量，避免长时间占用主线程 */
         if (runtime.conntrack != NULL)
             dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 128);
+        /**
+         * 普通管理入口在主线程串行处理请求，每轮连接数有预算，处理后继续设备检查
+         * 规则操作的业务错误通过响应交给 dppctl，不等同于本次 poll 的服务处理错误
+         */
         loop_error = dppd_management_poll(&management);
         if (loop_error != 0) {
             fprintf(stderr, "[dppd] management request processing failed: %d\n", loop_error);
@@ -603,7 +662,7 @@ int main(int argc, char **argv)
             break;
         /** AGE 查询失败只保留错误并重试，不把缺少驱动数据当作已经过期 */
         (void)dppd_control_age_poll(&control, dppd_monotonic_ms() * UINT64_C(1000000), DPPD_AGE_POLL_BUDGET);
-        /** 整轮请求处理完再发布，不让独立查询线程看到整批更新的中间账本 */
+        /** 整轮请求处理完再发布规则查询快照，独立查询线程读取这份完整结果 */
         if (dppd_telemetry_publish_rules(&control) != 0)
             fprintf(stderr, "[dppd] rule telemetry snapshot unavailable\n");
         if (control.recovery_state != DPPD_CONTROL_RECOVERY_READY) {
@@ -633,7 +692,11 @@ int main(int argc, char **argv)
         sleep_control_loop();
     }
 
-    /* 主循环结束后立即封住入口，防止客户端在 worker 停止窗口继续排队 */
+    /**
+     * 正常退出主线：关闭管理入口 → 请求 worker 停止 → 等待工作函数返回 → 释放共享资源
+     * request_stop 只写停止标记，wait 才确认任务已结束，不能发送通知后就立即释放规则或设备
+     * worker 退出前会注销规则和路由读者，等待成功后才能销毁这些后端
+     */
     dppd_management_stop(&management);
     dppd_runtime_request_stop(&runtime);
     if (dppd_runtime_wait(&runtime) != 0)
@@ -643,16 +706,20 @@ int main(int argc, char **argv)
     if (loop_error == 0 && !recovery_isolation)
         rc = EXIT_SUCCESS;
 
+    /**
+     * 按资源依赖释放：查询与管理入口 → control 的规则后端和路由 → runtime 的协议与设备 → EAL
+     * 网口关闭后才能释放 mbuf 池，避免驱动仍持有接收或发送缓冲
+     * cleanup_* 是跳转标签，执行后会继续向下清理；启动失败只跳到已完成初始化的那一层
+     */
 cleanup_telemetry:
-    /* 标签按“只清理已成功初始化的层”组织，适用于启动失败和正常退出 */
     dppd_telemetry_unregister_runtime();
 cleanup_management:
-    /* 先关闭入口，再回收已安装 flow，避免退出阶段接收新事务 */
+    /** stop 可重复调用，启动失败和正常退出都先停止接收新管理请求 */
     dppd_management_stop(&management);
 cleanup_control:
     /** 退出窗口也可能收到复位事件，未知句柄不能落入普通 fini 的逐项删除 */
     (void)dppd_runtime_device_poll(&runtime);
-    if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)
+    if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)//清理路由、规则后端、控制面记录
         rc = EXIT_FAILURE;
     /** backend 真正释放才证明已删除所有本进程 handle，失败时保留磁盘标记等待下次核对 */
     if (recovery_guard.fd >= 0 && control.rte_flow.objects == NULL && dppd_recovery_guard_clean(&recovery_guard) != 0) {
@@ -660,7 +727,7 @@ cleanup_control:
         rc = EXIT_FAILURE;
     }
 cleanup_runtime:
-    /** 清理失败或退出期间才收到移除通知，都必须保留失败退出码 */
+    /** 关闭抓包服务，释放邻居等待报文、连接会话及设备资源 */
     if (dppd_runtime_destroy(&runtime) != 0 || dppd_devices_io_quiesced(&runtime.devices))
         rc = EXIT_FAILURE;
 cleanup_eal:
@@ -671,3 +738,17 @@ cleanup_eal:
         rc = EXIT_FAILURE;
     return rc;
 }
+
+
+/**
+ * 主机准备
+  → EAL 初始化
+  → 配置解析
+  → worker 布局、内存池和队列准备
+  → 控制服务及管理入口准备
+  → 启动 worker
+  → 主线程管理、worker 收包
+  → 请求停止并等待
+  → 释放控制面、设备和内存池
+  → 清理 EAL，退出
+*/

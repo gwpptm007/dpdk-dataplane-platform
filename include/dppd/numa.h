@@ -5,8 +5,8 @@
 
 /** 核编号来自用户允许的 EAL 集合，负 socket 表示拓扑未知 */
 struct dppd_numa_cpu {
-    unsigned int lcore_id;
-    int socket_id;
+    unsigned int lcore_id;  //DPDK 逻辑核心编号
+    int socket_id;          //NUMA 节点编号，负值表示未知
 };
 
 /** 每个 worker 都扫描全部端口，先选本地端口最多的核，同分时均衡 socket */

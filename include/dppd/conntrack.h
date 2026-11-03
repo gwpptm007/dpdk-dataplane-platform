@@ -8,14 +8,29 @@
 
 struct dppd_conntrack;
 
-/** 地址和端口保持网络字节序，protocol 使用 IP 协议编号，不比较结构体填充字节 */
+/**
+ * 描述一条流的五元组：源 IP、目的 IP、源端口、目的端口、传输层协议
+ * 正向示例：10.0.0.2:53000 → 192.0.2.10:9000，UDP
+ * 反向示例：192.0.2.10:9000 → 10.0.0.2:53000，UDP（未启用 NAT 时）
+ * 会话查找还会检查地址族和入口网口，正反向索引可指向同一条会话记录
+ */
 struct dppd_flow_tuple {
-    uint32_t source_be, destination_be;
-    uint16_t source_port_be, destination_port_be;
+    /** IPv4 源地址，网络字节序 */
+    uint32_t source_be;
+    /** IPv4 目的地址，网络字节序 */
+    uint32_t destination_be;
+    /** 源端口，网络字节序 */
+    uint16_t source_port_be;
+    /** 目的端口，网络字节序 */
+    uint16_t destination_port_be;
+    /** IP 协议编号，TCP 为 6，UDP 为 17 */
     uint8_t protocol;
-    /** 地址族参与索引，不能让地址尾部相同的 IPv4 与 IPv6 命中同一会话 */
+    /** true 使用下面的 IPv6 地址，false 使用上面的 IPv4 地址，地址族也参与匹配 */
     bool ipv6;
-    uint8_t source6[16], destination6[16];
+    /** IPv6 源地址的 16 个网络字节 */
+    uint8_t source6[16];
+    /** IPv6 目的地址的 16 个网络字节 */
+    uint8_t destination6[16];
 };
 
 enum dppd_tcp_state {

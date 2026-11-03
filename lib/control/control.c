@@ -289,8 +289,8 @@ static int actual_backend_for(const struct dppd_control_service *service, uint64
 }
 
 /**
- * 删除指定版本的实际对象，但不修改规则账本
- * 上层可先删除整批对象，确认全部成功后再统一发布账本变化
+ * 按 ID 和版本定位实际后端，调用软件或硬件的删除函数，返回该操作的结果
+ * 只删除后端规则，service->rules 中的记录由调用方在确认成功后更新或移除
  */
 static int remove_actual_rule(struct dppd_control_service *service, uint64_t rule_id, uint64_t generation)
 {
@@ -298,7 +298,7 @@ static int remove_actual_rule(struct dppd_control_service *service, uint64_t rul
     enum dppd_plan_backend backend_kind;
     int rc;
 
-    /** 账本认为对象存在时，实际对象缺失就是错误，不能当作“已经删过了”的幂等成功 */
+    /** 目标版本必须恰好存在于一个后端；两边都有或两边都没有时返回一致性错误 */
     rc = actual_backend_for(service, rule_id, generation, &backend_kind);
     if (rc != 0)
         return rc;
@@ -936,8 +936,13 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
         int rollback_rc;
 
         /**
-         * 新版本安装成功 → 删除旧版本 → 更新内存记录
-         * 删除旧版本失败时撤销新版本，内存记录仍保留旧规则
+         * 更新示例：ID 20 的旧版本为 7，本次候选版本为 13
+         * 后端：[20/7] → 安装新版本 → [20/7, 20/13] → 删除旧版本 → [20/13]
+         * 控制面记录在后面 repository_apply 成功时才由 7 改为 13
+         *
+         * 删除旧版本失败 → 尝试删除新版本 13，控制面记录保持为 7
+         * 撤销新版本也失败 → 进入恢复隔离，阻止继续修改
+         * 这是先装后删的两次操作，过程中可能新旧并存，不保证逐包看到原子替换
          */
         observe_rule(service, DPPD_RULE_STAGE_REMOVE, &existing, existing.install_port_id, NULL);
         rc = remove_actual_rule(service, existing.id, existing.generation);
@@ -1562,10 +1567,10 @@ isolate:
 }
 
 /**
- * 按 ID 和预期版本删除规则，removed 和 generation 返回账本删除结果及仓库版本
- * 查账本确定版本 → 删除实际后端对象 → 删除内存账本及索引 → 保存当前配置
- * 后端删除失败时保留账本；后端已删但账本更新失败时进入恢复隔离
- * 返回 0 表示成功，负值表示错误；保存失败不会撤销已完成的删除
+ * 处理用户的单条删除请求，按 rule_id 查记录并检查 expected_generation
+ * 查当前版本 → 删除后端规则 → 删除 service->rules 中的记录和索引 → 保存配置
+ * removed 表示是否实际删除了记录，generation 返回规则集合的整体版本
+ * 返回 0 表示成功，负值表示错误；保存失败时删除仍已完成
  */
 static int control_remove_impl(struct dppd_control_service *service, uint64_t rule_id, uint64_t expected_generation,
     bool *removed, uint64_t *generation)
@@ -1583,6 +1588,7 @@ static int control_remove_impl(struct dppd_control_service *service, uint64_t ru
         return rc;
     rc = dppd_rule_repository_get(&service->rules, rule_id, &existing);
     if (rc == -ENOENT) {
+        /** 记录不存在：预期为 0 或 ANY 时返回成功且 removed = false，指定旧版本时返回 -ESTALE */
         rc = dppd_rule_repository_remove(&service->rules, rule_id, expected_generation, removed, generation);
         service->observation.unchanged = rc == 0;
         return rc;
@@ -1594,11 +1600,13 @@ static int control_remove_impl(struct dppd_control_service *service, uint64_t ru
     if (dppd_rule_repository_generation(&service->rules) >= UINT64_MAX - 1U)
         return -EOVERFLOW;
     observe_rule(service, DPPD_RULE_STAGE_REMOVE, &existing, existing.install_port_id, NULL);
+    /** 先删除精确版本的后端规则，失败就返回，控制面记录仍保留 */
     rc = remove_actual_rule(service, rule_id, existing.generation);
     if (rc != 0)
         return rc;
     observe_stage(service, DPPD_RULE_STAGE_PUBLISH);
     rc = dppd_rule_repository_remove(&service->rules, rule_id, existing.generation, removed, generation);
+    /** 后端已删除，记录却未能删除，两边状态不一致，必须进入恢复隔离 */
     if (rc != 0 || !*removed) {
         dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);
         return isolate_control(service, rc != 0 ? rc : -EUCLEAN);

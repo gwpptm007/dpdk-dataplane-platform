@@ -4,6 +4,8 @@
 
 源码学习材料见 [学习说明](docs/learning/README.md) 和 [交互学习总目录](docs/learning/index.html)，下载项目后可在浏览器中打开 HTML 页面。
 
+已走读的规则管理机制集中记录在 [规则增删改：技术原理、方案选择与实现](docs/learning/rule-management-principles.md)，可按需查阅版本检查、事务回调、快照与 QSBR、索引及持久化。
+
 相关开源实现、业务价值对比及选型建议见 [SmartNIC 与 DPU 开源项目调研](docs/smartnic_dpu_project_survey.md)，该记录不扩大现有开发范围。
 
 学习 DPDK 的内存、队列、多核与卸载机制，可从 [DPDK 原理与项目应用教程](docs/dpdk/README.md) 开始，结合图示、真实源码和分层实验走读。

@@ -249,6 +249,7 @@ int dppd_devices_pause_io(struct dppd_device_set *devices, uint64_t expected_seq
     return reset_event_fence(devices, expected_sequence, false, NULL);
 }
 
+/** 取得网口的 NUMA 节点用于分配资源；节点未知或超出数组范围时回退到节点 0 */
 static int port_socket(uint16_t port_id)
 {
     int socket_id = rte_eth_dev_socket_id(port_id);
@@ -258,6 +259,12 @@ static int port_socket(uint16_t port_id)
     return socket_id;
 }
 
+/**
+ * 按网口所在的 NUMA 节点创建 mbuf 池，结果放在 devices->pools[节点编号]
+ * 两个网口同属节点 0 → 共用 pools[0]；分属节点 0、1 → 分别创建 pools[0]、pools[1]
+ * 每个池含 cfg->mbufs_per_socket 个对象；不是按网口或队列各建一个池
+ * 成功返回 0，失败返回负错误码，已创建的池由调用方的设备清理流程处理
+ */
 static int create_socket_pools(struct dppd_device_set *devices, const struct dppd_config *cfg)
 {
     uint16_t i;
@@ -274,6 +281,17 @@ static int create_socket_pools(struct dppd_device_set *devices, const struct dpp
         if (devices->pools[socket_id] != NULL)
             continue;
         snprintf(name, sizeof(name), "dppd_mbuf_s%d", socket_id);
+        /** priv_size = 0，不额外预留应用私有区；使用 DPDK 默认数据区大小，在选定 NUMA 节点分配
+         *
+         *  | 参数 | 本次含义 |
+            |---|---|
+            | `name` | 池名称，例如 `dppd_mbuf_s0` |
+            | `mbufs_per_socket` | 池内对象数量，默认 32768 |
+            | `mbuf_cache` | 每个 lcore 的本地缓存规模，默认 256 |
+            | `0` | 不额外预留应用私有区 |
+            | `RTE_MBUF_DEFAULT_BUF_SIZE` | 使用 DPDK 默认数据区大小 |
+            | `socket_id` | 在指定 NUMA 节点分配 |
+        */
         devices->pools[socket_id] = rte_pktmbuf_pool_create(name, cfg->mbufs_per_socket, cfg->mbuf_cache, 0,
             RTE_MBUF_DEFAULT_BUF_SIZE, socket_id);
         if (devices->pools[socket_id] == NULL) {
@@ -368,6 +386,11 @@ int dppd_devices_reset_identity_ready(const struct dppd_device_set *devices, con
     return reset_identity_ready(devices, cfg, NULL);
 }
 
+/**
+ * 读取网口能力，检查队列数量，选择可用的 RSS 和发送卸载功能，将配置写入 plan
+ * 此处只生成配置，不创建队列或启动网口；成功返回 0，失败返回负错误码
+ * 普通启动时 devices 为 NULL；复位重建时还要核对身份，保留原来的功能与描述符数量
+ */
 static int prepare_port_configuration(const struct dppd_port *port, const struct dppd_config *cfg,
     struct port_configuration *plan, const struct dppd_device_set *devices, uint64_t sequence)
 {
@@ -393,6 +416,15 @@ static int prepare_port_configuration(const struct dppd_port *port, const struct
     plan->conf.intr_conf.rmv = removal_interrupt;
     if (cfg->nb_queues > info->max_rx_queues || cfg->nb_queues > info->max_tx_queues)
         return -ENOTSUP;
+    /**
+     * RSS（接收端扩展）负责把符合配置的报文分配给 RX 队列，worker 只轮询自己的队列
+     * 典型硬件路径：报文字段 → RSS 哈希 → RETA 队列映射 → RX 队列 → 对应 worker
+     * 示例：流 A 的包 → 队列 0 → worker 0；流 B 的包 → 队列 1 → worker 1
+     * 配置不变且所选字段相同的包通常留在同一队列，不是按包轮流分配，也不保证各队列均匀
+     *
+     * requested_rss 是希望启用的类型，flow_type_rss_offloads 是设备支持的类型
+     * 按位与只启用两者共有的部分，例如请求 IP/UDP/TCP、设备只支持 IP/TCP，则不启用 UDP 类型
+     */
     uint64_t requested_rss = RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP | RTE_ETH_RSS_TCP;
     plan->rss_hf = cfg->nb_queues > 1U ? requested_rss & info->flow_type_rss_offloads : 0;
     plan->tx_offloads = info->tx_offload_capa & RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
@@ -431,8 +463,28 @@ static int prepare_port_configuration(const struct dppd_port *port, const struct
         if (!rte_is_same_ether_addr(&port->mac, &plan->mac))
             return -EXDEV;
     }
+    /** 多队列但没有可用的 RSS 类型时拒绝启动，不能只建多个队列就认为已实现分流 */
     if (cfg->nb_queues > 1U && plan->rss_hf == 0)
         return -ENOTSUP;
+    /**
+     * 单队列不启用 RSS；多队列设置 RSS 模式和启用类型，后续 dev_configure 才提交给 PMD
+     * 此处未指定 RSS key，也未编程设置 RETA，具体默认值及分流行为由 PMD 决定
+     *
+     * RSS 与 worker 通过同一个网口的 queue_id 接起来
+     *   runtime.c / dppd_runtime_init
+     *     → worker->queue_id = worker_index，worker->lcore_id = 选中的 lcore
+     *   本文件 / configure_port_queues
+     *     → 为每个网口建立队列 0..nb_queues-1，并启用这里准备的 RSS 配置
+     *   runtime.c / dppd_runtime_start
+     *     → remote_launch(worker_main, worker, worker->lcore_id)，将同一份 worker 配置传给工作函数
+     *   worker.c / process_ingress
+     *     → rx_burst(当前网口, worker->queue_id, ...)，只收这个编号的队列
+     *
+     * 例如选核结果是 lcore 3、5：
+     *   RSS → 网口 0 的 RX 队列 0 → worker 0（queue_id 0）→ 在 lcore 3 上处理
+     *   RSS → 网口 0 的 RX 队列 1 → worker 1（queue_id 1）→ 在 lcore 5 上处理
+     * RSS 选择队列，runtime 指定谁来轮询该队列；queue_id 不等于 lcore_id
+     */
     plan->conf.rxmode.mq_mode = cfg->nb_queues > 1U ? RTE_ETH_MQ_RX_RSS : RTE_ETH_MQ_RX_NONE;
     plan->conf.rx_adv_conf.rss_conf.rss_hf = plan->rss_hf;
     plan->conf.txmode.offloads = plan->tx_offloads;
@@ -449,6 +501,18 @@ static void publish_port_configuration(struct dppd_port *port, const struct port
     port->mac = plan->mac;
 }
 
+/**
+ * 按 plan 配置网口，为每个队列编号分别建立 RX 和 TX 队列，RX 使用传入的 mbuf 池
+ * configure 网口 → 调整描述符数量 → 逐队列 RX setup、TX setup
+ * 成功返回 0，失败返回负错误码；本函数不启动网口，实际描述符数量写入 plan->identity
+ * @param port 网口结构体指针
+ * @param cfg 配置结构体指针
+ * @param pool mbuf 池指针
+ * @param plan 端口配置计划结构体指针
+ * @param devices 设备集合指针
+ * @param sequence 事件序列号
+ * @return 成功返回 0，失败返回负错误码
+ */
 static int configure_port_queues(struct dppd_port *port, const struct dppd_config *cfg, struct rte_mempool *pool,
     struct port_configuration *plan, const struct dppd_device_set *devices, uint64_t sequence)
 {
@@ -462,6 +526,10 @@ static int configure_port_queues(struct dppd_port *port, const struct dppd_confi
     port->configured = true;
     if (devices != NULL && (rc = reset_event_fence(devices, sequence, false, NULL)) != 0)
         return rc;
+    /**
+     * 默认每个 RX/TX 队列各请求 1024 个描述符，再按设备的数量范围和对齐要求调整
+     * 队列数是 cfg->nb_queues，描述符数是各队列的资源规模，burst_size 是单次收包上限
+     */
     uint16_t rx_desc = plan->rx_desc, tx_desc = plan->tx_desc;
     rc = rte_eth_dev_adjust_nb_rx_tx_desc(port->port_id, &rx_desc, &tx_desc);
     if (rc != 0)
@@ -492,6 +560,17 @@ static int configure_port_queues(struct dppd_port *port, const struct dppd_confi
     return 0;
 }
 
+/**
+ * 启动已配置好队列的网口，按需启用混杂或全组播接收，并取得 MAC 地址
+ * 成功返回 0，任一步失败返回负错误码；已完成的启动由 port->started 记录，供调用方清理
+ *
+ * @param port 网口结构体指针
+ * @param cfg 配置结构体指针
+ * @param plan 端口配置计划结构体指针
+ * @param devices 设备集合指针
+ * @param sequence 事件序列号
+ * @return 成功返回 0，失败返回负错误码
+ */
 static int start_configured_port(struct dppd_port *port, const struct dppd_config *cfg, struct port_configuration *plan,
     const struct dppd_device_set *devices, uint64_t sequence)
 {
@@ -538,6 +617,14 @@ static void print_port_configuration(const struct dppd_port *port, const struct 
         port->mac.addr_bytes[3], port->mac.addr_bytes[4], port->mac.addr_bytes[5]);
 }
 
+/**
+ * 将单个网口配置并启动，pool 是该网口所属 NUMA 节点的 mbuf 池
+ *
+ * prepare_port_configuration → 查询能力，准备 RSS、卸载功能和描述符配置
+ * configure_port_queues      → 提交端口配置，建立 RX/TX 队列
+ * start_configured_port      → 启动网口，设置接收模式，读取 MAC
+ * 全部成功后才保存最终能力信息，返回 0；任一步失败就返回错误，由上层清理已完成的操作
+ */
 static int configure_port(struct dppd_port *port, const struct dppd_config *cfg, struct rte_mempool *pool)
 {
     struct port_configuration plan;
@@ -545,8 +632,8 @@ static int configure_port(struct dppd_port *port, const struct dppd_config *cfg,
     if (rc == 0)
         rc = configure_port_queues(port, cfg, pool, &plan, NULL, 0);
     if (rc == 0)
-        rc = start_configured_port(port, cfg, &plan, NULL, 0);
-    /** 初次启动失败后的 configured 和 started 仍反映已发生的操作，供原有 stop 回收 */
+        rc = start_configured_port(port, cfg, &plan, NULL, 0); // 启动网口
+    /** 后续步骤失败时，configured/started 仍保留已完成的状态，上层据此关闭设备 */
     if (rc != 0)
         return rc;
     publish_port_configuration(port, &plan);
@@ -698,6 +785,19 @@ int dppd_devices_reset_reconfigure(struct dppd_device_set *devices, const struct
     return 0;
 }
 
+/**
+ * 将 cfg 指定的 DPDK 网口配置为可收发状态，端口信息和内存池保存在 devices 中
+ * 前提是 EAL 已完成设备探测，cfg->ports 中的编号必须对应有效 ethdev
+ *
+ * 初始化顺序
+ *   1. 检查网口编号，记录端口配对、NUMA 节点和初始状态
+ *   2. 按 NUMA 节点创建 mbuf 池
+ *   3. 为每个网口登记移除回调，配置 RX/TX 队列并启动端口
+ *   4. 查询链路状态，收集设备拓扑供控制面使用
+ *
+ * 成功返回 0；资源准备失败时调用设备清理流程，并返回原错误码
+ * 这里启动网口，worker 收包循环仍由后续 dppd_runtime_start 启动
+ */
 int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config *cfg)
 {
     uint16_t i;
@@ -733,13 +833,13 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
         port->socket_id = port_socket(port->port_id);
     }
 
+    // mbuf 池按 NUMA 节点创建
     rc = create_socket_pools(devices, cfg);
     if (rc != 0)
         goto fail;
 
     for (i = 0; i < cfg->nb_ports; ++i) {
         struct dppd_port *port = &devices->ports[i];
-
         rc = rte_eth_dev_callback_register(port->port_id, RTE_ETH_EVENT_INTR_RMV, handle_removal, devices);
         if (rc != 0) {
             fprintf(stderr, "[dppd] port=%u removal callback registration failed: %d\n", port->port_id, rc);
@@ -751,6 +851,7 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
             rc = -ENODEV;
             goto fail;
         }
+        // 把池交给网口配置
         rc = configure_port(port, cfg, devices->pools[port->socket_id]);
         if (rc != 0) {
             fprintf(stderr, "[dppd] failed to configure port %u: %s (%d)\n", port->port_id, rte_strerror(-rc), rc);

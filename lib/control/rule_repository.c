@@ -362,8 +362,8 @@ int dppd_rule_repository_update_batch(struct dppd_rule_repository *repository, c
 }
 
 /**
- * 删除内存账本中的规则，校验预期版本后撤销索引、清空记录并推进仓库修订号
- * 成功返回 0，removed 表示是否实际删除，generation 返回操作后的仓库版本；失败返回负错误码
+ * 删除控制面按 rule_id 保存的记录，检查预期版本后移除索引、清空槽位并推进整体版本
+ * 成功返回 0，removed 表示是否实际删除，generation 返回操作后的整体版本；失败返回负错误码
  * 后端规则须由控制层先删除，本函数不操作 worker 快照或硬件对象
  * rule_id → 找到 record → slot_index_erase 归还索引槽位 → 清空 record → count 减 1
  */
@@ -393,7 +393,7 @@ int dppd_rule_repository_remove(struct dppd_rule_repository *repository, uint64_
     memset(record, 0, sizeof(*record));
     repository->count--;
     *removed = true;
-    /* 删除同样推进 generation，避免重放旧版本时出现 ABA 问题 */
+    /** 例如整体版本 13 → 删除后为 14，即使以后重新创建同 ID，也不会复用已删规则的版本 */
     *generation = ++repository->generation;
     return 0;
 }

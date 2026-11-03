@@ -62,6 +62,7 @@ struct dppd_device_set {
     atomic_uint removal_event_ports;
     atomic_uint destroy_event_ports;
     struct dppd_port ports[DPPD_MAX_PORTS];
+    /** 按 NUMA 节点编号保存 mbuf 池，同节点网口共用，未使用节点的指针为 NULL */
     struct rte_mempool *pools[RTE_MAX_NUMA_NODES];
     struct dppd_topology topology;
 };

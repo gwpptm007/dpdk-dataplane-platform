@@ -28,7 +28,9 @@ enum dppd_worker_state {
 };
 
 struct dppd_worker {
+    /** 借用所属 runtime，以取得设备、转发配置、软件后端和停止标记 */
     struct dppd_runtime *runtime;
+    /** 执行业务循环的 DPDK lcore 编号，与 queue_id 分别编号 */
     unsigned int lcore_id;
     /** 实际选中的 NUMA 节点只用于诊断，负数表示拓扑未知 */
     int socket_id;
@@ -37,6 +39,7 @@ struct dppd_worker {
      * 连续分配，运行中不得重新编号，否则 writer 将无法正确等待旧 snapshot 的 reader
      */
     uint16_t queue_id;
+    /** 启动请求是否已成功提交，退出时据此等待对应 lcore 返回 */
     bool launched;
     /** 跨线程状态使用 release/acquire 传递，管理查询不直接访问 DPDK 的内部线程结构 */
     atomic_uint state;

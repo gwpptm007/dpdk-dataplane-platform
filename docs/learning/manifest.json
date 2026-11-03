@@ -8,24 +8,25 @@
     "section-2.1.html",
     "section-2.2.html",
     "section-2.3.html",
-    "section-2.4.html"
+    "section-2.4.html",
+    "startup/index.html"
   ],
   "steps": [
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_ingress",
-      "line": 503,
-      "endLine": 511,
+      "line": 509,
+      "endLine": 517,
       "code": "static void process_ingress(struct dppd_worker *worker, const struct dppd_port *ingress)\n{\n    if (worker_io_quiesced(worker) || atomic_load_explicit(&ingress->removed, memory_order_acquire))\n        return;\n    struct rte_mbuf *packets[DPPD_MAX_BURST];\n    /** 最多接收 burst_size 个包，不等待凑满 */\n    uint16_t count = rte_eth_rx_burst(ingress->port_id, worker->queue_id, packets, worker->runtime->config.burst_size);\n    process_batch(worker, ingress, packets, count, false, 0);\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L503"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L509"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 265,
-      "endLine": 498,
+      "line": 269,
+      "endLine": 502,
       "code": "static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,\n    uint16_t received, bool retry, uint64_t expires)\n{\n    struct dppd_runtime *runtime = worker->runtime;\n    /** 按出口暂存待发送的 mbuf 指针、长度和数量，逐包处理结束后统一批量发送 */\n    struct rte_mbuf *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint16_t counts[DPPD_MAX_PORTS] = {0};\n    struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};\n    struct dppd_software_count_batch rule_counts = {0};\n    if (worker_io_quiesced(worker)) {\n        /** RX 返回的报文已归线程所有，事件不能让这批 mbuf 因提前返回而泄漏 */\n        free_packets(rx, received);\n        return;\n    }\n    if (received == 0)\n        return;\n    delta.rx_packets = retry ? 0 : received;\n    const struct dppd_port *paired =\n        runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;\n    for (uint16_t i = 0; i < received; ++i) {\n        /** packet 保存解析字段，decision 保存处理决定，rx[i] 指向原始报文 */\n        struct dppd_pipeline_decision decision;\n        struct dppd_packet packet = {0};\n        uint32_t length = rte_pktmbuf_pkt_len(rx[i]);\n        if (!retry)\n            delta.rx_bytes += length;\n        /** 逐包进入 packet_mbuf.c 提取报文头字段，burst 只批量收发，不省略逐包解析 */\n        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);\n        packet.neighbor_retry = retry;\n        /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */\n        if (!retry) {\n            delta.tunnel_vxlan_packets += packet.tunnel.type == DPPD_TUNNEL_VXLAN;\n            delta.tunnel_geneve_packets += packet.tunnel.type == DPPD_TUNNEL_GENEVE;\n            delta.tunnel_gre_packets += packet.tunnel.type == DPPD_TUNNEL_GRE;\n            delta.tunnel_malformed += packet.tunnel.status == DPPD_PARSE_MALFORMED;\n            delta.tunnel_unsupported += packet.tunnel.status == DPPD_PARSE_UNSUPPORTED;\n        }\n        if (parsed == DPPD_PARSE_MALFORMED)\n            delta.rx_malformed++;\n        else if (parsed == DPPD_PARSE_UNSUPPORTED)\n            delta.rx_unsupported++;\n        if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&\n            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {\n            delta.nd6_rx_packets++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        if (packet.l3_type == DPPD_L3_IPV6 && !dppd_nd6_port_ready(runtime->nd6, ingress->port_id)) {\n            delta.nd6_not_ready_drops++;\n            delta.policy_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 未启用连接跟踪\n         *   → routed_decide → decision\n         *\n         * 启用连接跟踪\n         *   → stateful_decide\n         *       校验、准备候选会话\n         *         → routed_decide\n         *         → 检查出口、改写实际报文\n         *         → 成功提交会话，失败取消候选\n         */\n        if (runtime->conntrack != NULL)\n            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);\n        else\n            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);\n\n        /**\n         * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列\n         * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它\n         * 入队失败 → mbuf 仍归当前线程，继续下面的丢弃分支并释放\n         */\n        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {\n            struct dppd_nd6_pending pending = {.mbuf = rx[i],\n                .ingress = ingress->port_id,\n                .queue = worker->queue_id,\n                .expires_ms = expires};\n            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,\n                    dppd_monotonic_ms()) == 0) {\n                delta.nd6_queued++;\n                continue;\n            }\n            delta.nd6_queue_drops++;\n        }\n        /**\n         * 决定函数只填写结果，worker 在这里执行丢弃并按原因更新统计\n         * 释放当前报文后继续处理本批下一个包，不影响其他报文\n         */\n        if (decision.action != DPPD_PACKET_FORWARD) {\n            if (decision.drop_reason != DPPD_DROP_MALFORMED)\n                delta.policy_drops++;\n            if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)\n                delta.nd6_not_ready_drops++;\n            else if (decision.drop_reason == DPPD_DROP_POLICY)\n                delta.rule_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_ROUTE)\n                delta.no_route_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_NEIGHBOR)\n                delta.no_neighbor_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV4_UNSUPPORTED)\n                delta.ipv4_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV6_UNSUPPORTED)\n                delta.ipv6_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_INVALID)\n                delta.ct_invalid_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_FULL)\n                delta.ct_full_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_UNSUPPORTED)\n                delta.ct_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_ZONE)\n                delta.ct_zone_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_CHECKSUM)\n                delta.ct_checksum_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_POOL)\n                delta.nat_pool_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_MISS)\n                delta.nat_miss_drops++;\n            else if (decision.drop_reason == DPPD_DROP_TTL) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_hop_drops++;\n                else\n                    delta.ipv4_ttl_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_REWRITE) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_rewrite_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_EGRESS)\n                delta.egress_drops++;\n            /** 归还当前 mbuf，再进入逐包循环的下一轮 */\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 根据处理决定取得实际出口对象，三层模式按出口编号查找，端口配对模式复用 paired\n         * FORWARD 只表示策略允许，发送前仍须确认出口存在、编号一致且可发送\n         */\n        const struct dppd_port *egress =\n            runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;\n        if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {\n            delta.policy_drops++;\n            delta.egress_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 三层转发在这里改写报文头，启用连接跟踪时已由 stateful_decide 改写，不能再次递减跳数\n         * IPv6 普通转发：目的 MAC 改为下一跳 MAC，源 MAC 改为出口 MAC，Hop Limit 减 1\n         *\n         * &rx[i] 允许改写函数在需要复制报文时替换 mbuf 指针，后续发送使用替换后的指针\n         * &packet 提供已解析的头部信息，decision.ipv4 是 IPv4/IPv6 共用的转发结果\n         * 改写失败则释放当前包；成功后继续加入出口发送批次，此处尚未交给网卡\n         */\n        if (decision.routed && runtime->conntrack == NULL) {\n            bool ipv6 = packet.l3_type == DPPD_L3_IPV6;\n            int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)\n                          : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);\n            if (rc != 0) {\n                delta.policy_drops++;\n                if (ipv6) {\n                    if (rc == -ETIMEDOUT)\n                        delta.ipv6_hop_drops++;\n                    else if (rc == -EBADMSG)\n                        delta.ipv6_checksum_drops++;\n                    else if (rc == -ENOTSUP)\n                        delta.ipv6_unsupported_drops++;\n                    else\n                        delta.ipv6_rewrite_drops++;\n                } else if (rc == -ETIMEDOUT)\n                    delta.ipv4_ttl_drops++;\n                else if (rc == -EBADMSG)\n                    delta.ipv4_checksum_drops++;\n                else if (rc == -ENOTSUP)\n                    delta.ipv4_unsupported_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n                rte_pktmbuf_free(rx[i]);\n                continue;\n            }\n        }\n        /** 将规则 MARK 写入 mbuf 的附加信息并设置有效标志，不向报文字节中插入标记 */\n        if (decision.has_mark) {\n            rx[i]->hash.fdir.hi = decision.mark_id;\n            rx[i]->ol_flags |= RTE_MBUF_F_RX_FDIR_ID;\n        }\n        /**\n         * 以出口在 devices.ports 中的数组下标分组，指针相减得到元素间距\n         * 例：ports[0].port_id = 1、ports[1].port_id = 5，出口为网口 5 时 index 为 1\n         * tx[index]、tx_lengths[index]、counts[index] 和 outputs[index] 都属于这个出口\n         */\n        uint16_t index = (uint16_t)(egress - runtime->devices.ports);\n        /**\n         * 多段报文且出口未启用多段发送时，尝试将全部数据合并到第一段\n         * 第一段空间不足等原因导致合并失败时，统计并释放当前包，继续处理下一个\n         */\n        if (rx[i]->nb_segs > 1U && (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0 &&\n            rte_pktmbuf_linearize(rx[i]) != 0) {\n            outputs[index].tx_drops++;\n            outputs[index].tx_linearize_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 将当前包追加到对应出口的待发送批次，只保存指针，此处尚未交给驱动\n         * 提前保存长度供发送统计使用，成功提交后不再读取已转移所有权的 mbuf\n         * 例：counts[index] 为 2，长度和指针都写入下标 2，然后 counts[index] 增为 3\n         * counts 只统计本次 process_batch 收集的包，本批处理结束就发送，不等待凑满\n         */\n        tx_lengths[index][counts[index]] = length;\n        tx[index][counts[index]++] = rx[i];\n    }\n    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */\n    dppd_software_count_batch_flush(&rule_counts);\n    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)\n        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,\n            &outputs[index]);\n    /**\n     * 此时 delta 保存本批入口接收和处理中的丢弃统计，outputs 按出口保存发送及发送失败统计\n     * 先将 delta 记入入口网口，再将各 outputs 记入对应出口，并合并到 delta 供 worker 汇总\n     * 例：入口 0 收到 3 包，均送往出口 1，其中 2 包提交成功、1 包因发送队列未接收而丢弃\n     *   入口 0：RX 加 3；出口 1：TX 加 2、tx_queue_drops 加 1；worker 汇总包含这三项\n     */\n    dppd_stats_add(&worker->port_stats[ingress - runtime->devices.ports], &delta);\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index) {\n        dppd_stats_add(&worker->port_stats[index], &outputs[index]);\n        dppd_stats_accumulate(&delta, &outputs[index]);\n    }\n    /** 每批只更新一次工作线程汇总，避免入口丢弃已累计而出口字节还没累计的额外窗口 */\n    dppd_stats_add(&worker->stats, &delta);\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L265"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L269"
     },
     {
       "file": "lib/dataplane/packet_mbuf.c",
@@ -54,10 +55,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 265,
-      "endLine": 498,
+      "line": 269,
+      "endLine": 502,
       "code": "static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,\n    uint16_t received, bool retry, uint64_t expires)\n{\n    struct dppd_runtime *runtime = worker->runtime;\n    /** 按出口暂存待发送的 mbuf 指针、长度和数量，逐包处理结束后统一批量发送 */\n    struct rte_mbuf *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint16_t counts[DPPD_MAX_PORTS] = {0};\n    struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};\n    struct dppd_software_count_batch rule_counts = {0};\n    if (worker_io_quiesced(worker)) {\n        /** RX 返回的报文已归线程所有，事件不能让这批 mbuf 因提前返回而泄漏 */\n        free_packets(rx, received);\n        return;\n    }\n    if (received == 0)\n        return;\n    delta.rx_packets = retry ? 0 : received;\n    const struct dppd_port *paired =\n        runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;\n    for (uint16_t i = 0; i < received; ++i) {\n        /** packet 保存解析字段，decision 保存处理决定，rx[i] 指向原始报文 */\n        struct dppd_pipeline_decision decision;\n        struct dppd_packet packet = {0};\n        uint32_t length = rte_pktmbuf_pkt_len(rx[i]);\n        if (!retry)\n            delta.rx_bytes += length;\n        /** 逐包进入 packet_mbuf.c 提取报文头字段，burst 只批量收发，不省略逐包解析 */\n        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);\n        packet.neighbor_retry = retry;\n        /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */\n        if (!retry) {\n            delta.tunnel_vxlan_packets += packet.tunnel.type == DPPD_TUNNEL_VXLAN;\n            delta.tunnel_geneve_packets += packet.tunnel.type == DPPD_TUNNEL_GENEVE;\n            delta.tunnel_gre_packets += packet.tunnel.type == DPPD_TUNNEL_GRE;\n            delta.tunnel_malformed += packet.tunnel.status == DPPD_PARSE_MALFORMED;\n            delta.tunnel_unsupported += packet.tunnel.status == DPPD_PARSE_UNSUPPORTED;\n        }\n        if (parsed == DPPD_PARSE_MALFORMED)\n            delta.rx_malformed++;\n        else if (parsed == DPPD_PARSE_UNSUPPORTED)\n            delta.rx_unsupported++;\n        if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&\n            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {\n            delta.nd6_rx_packets++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        if (packet.l3_type == DPPD_L3_IPV6 && !dppd_nd6_port_ready(runtime->nd6, ingress->port_id)) {\n            delta.nd6_not_ready_drops++;\n            delta.policy_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 未启用连接跟踪\n         *   → routed_decide → decision\n         *\n         * 启用连接跟踪\n         *   → stateful_decide\n         *       校验、准备候选会话\n         *         → routed_decide\n         *         → 检查出口、改写实际报文\n         *         → 成功提交会话，失败取消候选\n         */\n        if (runtime->conntrack != NULL)\n            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);\n        else\n            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);\n\n        /**\n         * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列\n         * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它\n         * 入队失败 → mbuf 仍归当前线程，继续下面的丢弃分支并释放\n         */\n        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {\n            struct dppd_nd6_pending pending = {.mbuf = rx[i],\n                .ingress = ingress->port_id,\n                .queue = worker->queue_id,\n                .expires_ms = expires};\n            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,\n                    dppd_monotonic_ms()) == 0) {\n                delta.nd6_queued++;\n                continue;\n            }\n            delta.nd6_queue_drops++;\n        }\n        /**\n         * 决定函数只填写结果，worker 在这里执行丢弃并按原因更新统计\n         * 释放当前报文后继续处理本批下一个包，不影响其他报文\n         */\n        if (decision.action != DPPD_PACKET_FORWARD) {\n            if (decision.drop_reason != DPPD_DROP_MALFORMED)\n                delta.policy_drops++;\n            if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)\n                delta.nd6_not_ready_drops++;\n            else if (decision.drop_reason == DPPD_DROP_POLICY)\n                delta.rule_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_ROUTE)\n                delta.no_route_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_NEIGHBOR)\n                delta.no_neighbor_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV4_UNSUPPORTED)\n                delta.ipv4_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV6_UNSUPPORTED)\n                delta.ipv6_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_INVALID)\n                delta.ct_invalid_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_FULL)\n                delta.ct_full_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_UNSUPPORTED)\n                delta.ct_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_ZONE)\n                delta.ct_zone_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_CHECKSUM)\n                delta.ct_checksum_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_POOL)\n                delta.nat_pool_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_MISS)\n                delta.nat_miss_drops++;\n            else if (decision.drop_reason == DPPD_DROP_TTL) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_hop_drops++;\n                else\n                    delta.ipv4_ttl_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_REWRITE) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_rewrite_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_EGRESS)\n                delta.egress_drops++;\n            /** 归还当前 mbuf，再进入逐包循环的下一轮 */\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 根据处理决定取得实际出口对象，三层模式按出口编号查找，端口配对模式复用 paired\n         * FORWARD 只表示策略允许，发送前仍须确认出口存在、编号一致且可发送\n         */\n        const struct dppd_port *egress =\n            runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;\n        if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {\n            delta.policy_drops++;\n            delta.egress_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 三层转发在这里改写报文头，启用连接跟踪时已由 stateful_decide 改写，不能再次递减跳数\n         * IPv6 普通转发：目的 MAC 改为下一跳 MAC，源 MAC 改为出口 MAC，Hop Limit 减 1\n         *\n         * &rx[i] 允许改写函数在需要复制报文时替换 mbuf 指针，后续发送使用替换后的指针\n         * &packet 提供已解析的头部信息，decision.ipv4 是 IPv4/IPv6 共用的转发结果\n         * 改写失败则释放当前包；成功后继续加入出口发送批次，此处尚未交给网卡\n         */\n        if (decision.routed && runtime->conntrack == NULL) {\n            bool ipv6 = packet.l3_type == DPPD_L3_IPV6;\n            int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)\n                          : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);\n            if (rc != 0) {\n                delta.policy_drops++;\n                if (ipv6) {\n                    if (rc == -ETIMEDOUT)\n                        delta.ipv6_hop_drops++;\n                    else if (rc == -EBADMSG)\n                        delta.ipv6_checksum_drops++;\n                    else if (rc == -ENOTSUP)\n                        delta.ipv6_unsupported_drops++;\n                    else\n                        delta.ipv6_rewrite_drops++;\n                } else if (rc == -ETIMEDOUT)\n                    delta.ipv4_ttl_drops++;\n                else if (rc == -EBADMSG)\n                    delta.ipv4_checksum_drops++;\n                else if (rc == -ENOTSUP)\n                    delta.ipv4_unsupported_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n                rte_pktmbuf_free(rx[i]);\n                continue;\n            }\n        }\n        /** 将规则 MARK 写入 mbuf 的附加信息并设置有效标志，不向报文字节中插入标记 */\n        if (decision.has_mark) {\n            rx[i]->hash.fdir.hi = decision.mark_id;\n            rx[i]->ol_flags |= RTE_MBUF_F_RX_FDIR_ID;\n        }\n        /**\n         * 以出口在 devices.ports 中的数组下标分组，指针相减得到元素间距\n         * 例：ports[0].port_id = 1、ports[1].port_id = 5，出口为网口 5 时 index 为 1\n         * tx[index]、tx_lengths[index]、counts[index] 和 outputs[index] 都属于这个出口\n         */\n        uint16_t index = (uint16_t)(egress - runtime->devices.ports);\n        /**\n         * 多段报文且出口未启用多段发送时，尝试将全部数据合并到第一段\n         * 第一段空间不足等原因导致合并失败时，统计并释放当前包，继续处理下一个\n         */\n        if (rx[i]->nb_segs > 1U && (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0 &&\n            rte_pktmbuf_linearize(rx[i]) != 0) {\n            outputs[index].tx_drops++;\n            outputs[index].tx_linearize_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 将当前包追加到对应出口的待发送批次，只保存指针，此处尚未交给驱动\n         * 提前保存长度供发送统计使用，成功提交后不再读取已转移所有权的 mbuf\n         * 例：counts[index] 为 2，长度和指针都写入下标 2，然后 counts[index] 增为 3\n         * counts 只统计本次 process_batch 收集的包，本批处理结束就发送，不等待凑满\n         */\n        tx_lengths[index][counts[index]] = length;\n        tx[index][counts[index]++] = rx[i];\n    }\n    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */\n    dppd_software_count_batch_flush(&rule_counts);\n    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)\n        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,\n            &outputs[index]);\n    /**\n     * 此时 delta 保存本批入口接收和处理中的丢弃统计，outputs 按出口保存发送及发送失败统计\n     * 先将 delta 记入入口网口，再将各 outputs 记入对应出口，并合并到 delta 供 worker 汇总\n     * 例：入口 0 收到 3 包，均送往出口 1，其中 2 包提交成功、1 包因发送队列未接收而丢弃\n     *   入口 0：RX 加 3；出口 1：TX 加 2、tx_queue_drops 加 1；worker 汇总包含这三项\n     */\n    dppd_stats_add(&worker->port_stats[ingress - runtime->devices.ports], &delta);\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index) {\n        dppd_stats_add(&worker->port_stats[index], &outputs[index]);\n        dppd_stats_accumulate(&delta, &outputs[index]);\n    }\n    /** 每批只更新一次工作线程汇总，避免入口丢弃已累计而出口字节还没累计的额外窗口 */\n    dppd_stats_add(&worker->stats, &delta);\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L265"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L269"
     },
     {
       "file": "lib/dataplane/worker.c",
@@ -78,10 +79,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 293,
-      "endLine": 293,
+      "line": 297,
+      "endLine": 297,
       "code": "        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L293"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L297"
     },
     {
       "file": "lib/dataplane/packet_mbuf.c",
@@ -158,10 +159,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 293,
-      "endLine": 293,
+      "line": 297,
+      "endLine": 297,
       "code": "        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L293"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L297"
     },
     {
       "file": "lib/dataplane/worker.c",
@@ -174,10 +175,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 333,
-      "endLine": 333,
+      "line": 337,
+      "endLine": 337,
       "code": "            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L333"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L337"
     },
     {
       "file": "lib/dataplane/worker.c",
@@ -206,10 +207,10 @@
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "dppd_software_backend_decide_counted",
-      "line": 1278,
-      "endLine": 1341,
+      "line": 1281,
+      "endLine": 1344,
       "code": "void dppd_software_backend_decide_counted(struct dppd_software_backend *backend, uint16_t ingress_port,\n    const struct dppd_packet *packet, struct dppd_software_decision *decision, struct dppd_software_count_batch *batch)\n{\n    struct dppd_software_classifier_snapshot *active;\n    struct dppd_software_rule_object *selected = NULL;\n    memset(decision, 0, sizeof(*decision));\n    if (backend == NULL || packet == NULL)\n        return;\n    /**\n     * backend->active → 本包的规则快照 active → ACL/精确匹配各自返回候选，0 表示未命中\n     *\n     * 读到这里可继续追查：active 中的规则是谁提前准备并发布进去的\n     * 报文处理：process_batch → routed_decide → pipeline → 本函数读取 active，匹配当前包\n     * 规则配置：control.c/dppd_control_apply → control_apply_impl → transaction_run\n     *           → 软件 transaction_commit → publish_locked 构建匹配表并更新 backend->active\n     * 两条流程通过同一个 backend->active 衔接；转去读配置入口是在追查规则来源，并非本函数调用它\n     * 回到本函数后，继续用取得的同一快照查询下面的 ACL 和 exact 表\n     *\n     * 每包只取一次 active，两类匹配共用同一版本，不获取控制面写锁\n     * 调用线程须已注册上线 QSBR，防止读取期间旧规则表被回收\n     * acquire 与发布端 release 配对，保证读到新指针时规则内容也已可见\n     */\n    active = atomic_load_explicit(&backend->active, memory_order_acquire);\n    /**\n     * ACL 支持掩码、端口范围等条件；exact 对完整地址和端口组合做哈希查找\n     * 各自返回本表优先命中的规则 tag，0 表示未命中，选定候选后再执行动作\n     */\n    uint32_t tag = dppd_acl_classify(snapshot_acl(active, backend->capacity), ingress_port, packet);\n    uint32_t exact_tag = dppd_exact_classify(snapshot_exact(active, backend->capacity), ingress_port, packet);\n    /**\n     * ACL tag + exact_tag → 选定一个 tag\n     * 单个命中 → 直接选用；两个都命中 → 按 rule_before 排序\n     * tag = 0 → 无规则；tag > 0 → active->objects[tag - 1]，数组下标从 0 开始\n     */\n    if (exact_tag != 0 &&\n        (tag == 0 || rule_before(&active->objects[exact_tag - 1].rule, exact_tag, &active->objects[tag - 1].rule, tag)))\n        tag = exact_tag;\n    if (tag != 0)\n        selected = &active->objects[tag - 1];\n    if (selected != NULL) {\n        uint16_t action;\n\n        /**\n         * 只执行选中规则的动作，DROP/MARK 写入软件决策，COUNT 累计命中统计\n         * R1 示例：[DROP, COUNT] → matched = true、drop = true，并累计本包次数和字节数\n         * DROP 不退出循环，也不释放报文；释放由 worker.c/process_batch 按最终决策执行\n         */\n        decision->matched = true;\n        for (action = 0; action < selected->rule.nb_actions; ++action) {\n            const struct dppd_action *source = &selected->rule.actions[action];\n\n            if (source->type == DPPD_ACTION_DROP)\n                decision->drop = true;\n            else if (source->type == DPPD_ACTION_MARK) {\n                decision->has_mark = true;\n                decision->mark_id = source->conf.mark_id;\n            } else if (source->type == DPPD_ACTION_SHARED_COUNT && !packet->neighbor_retry) {\n                atomic_fetch_add_explicit(&selected->metrics->shared->hits, 1, memory_order_relaxed);\n                atomic_fetch_add_explicit(&selected->metrics->shared->bytes, packet->packet_len, memory_order_relaxed);\n            } else if (source->type == DPPD_ACTION_COUNT && !packet->neighbor_retry)\n                count_packet(selected->metrics, packet->packet_len, batch);\n        }\n    }\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1278"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1281"
     },
     {
       "file": "lib/dataplane/acl.c",
@@ -230,42 +231,42 @@
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "dppd_software_backend_decide_counted",
-      "line": 1312,
-      "endLine": 1316,
+      "line": 1315,
+      "endLine": 1319,
       "code": "    if (exact_tag != 0 &&\n        (tag == 0 || rule_before(&active->objects[exact_tag - 1].rule, exact_tag, &active->objects[tag - 1].rule, tag)))\n        tag = exact_tag;\n    if (tag != 0)\n        selected = &active->objects[tag - 1];",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1312"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1315"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "rule_before",
-      "line": 1220,
-      "endLine": 1229,
+      "line": 1223,
+      "endLine": 1232,
       "code": "static bool rule_before(const struct dppd_rule *a, uint32_t a_tag, const struct dppd_rule *b, uint32_t b_tag)\n{\n    if (a->group != b->group)\n        return a->group < b->group;\n    if (a->priority != b->priority)\n        return a->priority < b->priority;\n    if (a->id != b->id)\n        return a->id < b->id;\n    return a_tag < b_tag;\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1220"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1223"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "dppd_software_backend_decide_counted",
-      "line": 1317,
-      "endLine": 1340,
+      "line": 1320,
+      "endLine": 1343,
       "code": "    if (selected != NULL) {\n        uint16_t action;\n\n        /**\n         * 只执行选中规则的动作，DROP/MARK 写入软件决策，COUNT 累计命中统计\n         * R1 示例：[DROP, COUNT] → matched = true、drop = true，并累计本包次数和字节数\n         * DROP 不退出循环，也不释放报文；释放由 worker.c/process_batch 按最终决策执行\n         */\n        decision->matched = true;\n        for (action = 0; action < selected->rule.nb_actions; ++action) {\n            const struct dppd_action *source = &selected->rule.actions[action];\n\n            if (source->type == DPPD_ACTION_DROP)\n                decision->drop = true;\n            else if (source->type == DPPD_ACTION_MARK) {\n                decision->has_mark = true;\n                decision->mark_id = source->conf.mark_id;\n            } else if (source->type == DPPD_ACTION_SHARED_COUNT && !packet->neighbor_retry) {\n                atomic_fetch_add_explicit(&selected->metrics->shared->hits, 1, memory_order_relaxed);\n                atomic_fetch_add_explicit(&selected->metrics->shared->bytes, packet->packet_len, memory_order_relaxed);\n            } else if (source->type == DPPD_ACTION_COUNT && !packet->neighbor_retry)\n                count_packet(selected->metrics, packet->packet_len, batch);\n        }\n    }",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1317"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1320"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "count_packet",
-      "line": 1249,
-      "endLine": 1270,
+      "line": 1252,
+      "endLine": 1273,
       "code": "static void count_packet(struct dppd_software_rule_metrics *metrics, uint32_t bytes,\n    struct dppd_software_count_batch *batch)\n{\n    if (batch == NULL) {\n        atomic_fetch_add_explicit(&metrics->hits, 1, memory_order_relaxed);\n        atomic_fetch_add_explicit(&metrics->bytes, bytes, memory_order_relaxed);\n        return;\n    }\n    /** count 是批次内有效统计对象数，同一对象重复命中只增加该项的次数和字节数 */\n    for (uint16_t i = 0; i < batch->count; ++i)\n        if (batch->entries[i].metrics == metrics) {\n            batch->entries[i].hits++;\n            batch->entries[i].bytes += bytes;\n            return;\n        }\n    /** 新增对象前若没有空位则先提交，32 是对象容量，不要求凑满 32 个包 */\n    if (batch->count == DPPD_SOFTWARE_COUNT_BATCH_SIZE)\n        dppd_software_count_batch_flush(batch);\n    batch->entries[batch->count].metrics = metrics;\n    batch->entries[batch->count].hits = 1;\n    batch->entries[batch->count++].bytes = bytes;\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1249"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1252"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 480,
-      "endLine": 480,
+      "line": 484,
+      "endLine": 484,
       "code": "    dppd_software_count_batch_flush(&rule_counts);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L480"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L484"
     },
     {
       "file": "lib/dataplane/pipeline.c",
@@ -278,10 +279,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 356,
-      "endLine": 356,
+      "line": 360,
+      "endLine": 360,
       "code": "        if (decision.action != DPPD_PACKET_FORWARD) {",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L356"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L360"
     },
     {
       "file": "lib/dataplane/pipeline.c",
@@ -342,10 +343,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 340,
-      "endLine": 351,
+      "line": 344,
+      "endLine": 355,
       "code": "        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {\n            struct dppd_nd6_pending pending = {.mbuf = rx[i],\n                .ingress = ingress->port_id,\n                .queue = worker->queue_id,\n                .expires_ms = expires};\n            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,\n                    dppd_monotonic_ms()) == 0) {\n                delta.nd6_queued++;\n                continue;\n            }\n            delta.nd6_queue_drops++;\n        }",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L340"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L344"
     },
     {
       "file": "lib/dataplane/nd6.c",
@@ -358,10 +359,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_waiting",
-      "line": 525,
-      "endLine": 540,
+      "line": 531,
+      "endLine": 546,
       "code": "    struct dppd_nd6_pending pending;\n    for (unsigned int i = 0;\n         i < DPPD_MAX_BURST && dppd_nd6_take(worker->runtime->nd6, worker->queue_id, dppd_monotonic_ms(), &pending);\n         ++i) {\n        const struct dppd_port *ingress = dppd_devices_find(&worker->runtime->devices, pending.ingress);\n        /** 取回不代表可以发送，失效包或已失去原入口的包在此归还 mbuf */\n        if (pending.expired || ingress == NULL) {\n            rte_pktmbuf_free(pending.mbuf);\n            struct dppd_stats_values dropped = {.policy_drops = 1, .nd6_queue_drops = 1};\n            dppd_stats_add(&worker->stats, &dropped);\n            if (ingress != NULL)\n                dppd_stats_add(&worker->port_stats[ingress - worker->runtime->devices.ports], &dropped);\n        } else\n            process_batch(worker, ingress, &pending.mbuf, 1, true, pending.expires_ms);\n    }\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L525"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L531"
     },
     {
       "file": "lib/dataplane/nd6.c",
@@ -374,10 +375,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 405,
-      "endLine": 412,
+      "line": 409,
+      "endLine": 416,
       "code": "        const struct dppd_port *egress =\n            runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;\n        if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {\n            delta.policy_drops++;\n            delta.egress_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L405"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L409"
     },
     {
       "file": "lib/dataplane/ipv6_rewrite.c",
@@ -422,10 +423,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 476,
-      "endLine": 484,
+      "line": 480,
+      "endLine": 488,
       "code": "        tx_lengths[index][counts[index]] = length;\n        tx[index][counts[index]++] = rx[i];\n    }\n    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */\n    dppd_software_count_batch_flush(&rule_counts);\n    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)\n        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,\n            &outputs[index]);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L476"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L480"
     },
     {
       "file": "lib/dataplane/worker.c",
@@ -438,10 +439,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "dppd_worker_main",
-      "line": 593,
-      "endLine": 594,
+      "line": 607,
+      "endLine": 608,
       "code": "        dppd_software_backend_worker_quiescent(runtime->software_backend, worker->queue_id);\n        dppd_ipv4_router_reader_quiescent(runtime->ipv4_router, worker->queue_id);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L593"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L607"
     },
     {
       "file": "app/dppctl/main.c",
@@ -510,10 +511,10 @@
     {
       "file": "app/dppd/main.c",
       "fn": "main",
-      "line": 514,
-      "endLine": 514,
+      "line": 561,
+      "endLine": 561,
       "code": "            loop_error = dppd_management_poll(&management);",
-      "sourceHref": "sources/app__dppd__main.c.html#L514"
+      "sourceHref": "sources/app__dppd__main.c.html#L561"
     },
     {
       "file": "lib/management/server.c",
@@ -550,50 +551,50 @@
     {
       "file": "lib/control/control.c",
       "fn": "dppd_control_apply",
-      "line": 1745,
-      "endLine": 1760,
+      "line": 1770,
+      "endLine": 1785,
       "code": "int dppd_control_apply(struct dppd_control_service *service, uint16_t port_id, const struct dppd_rule *rule,\n    uint64_t expected, struct dppd_control_apply_result *result)\n{\n    /**\n     * management_handle 的 RULE_APPLY 分支从这里进入\n     * begin_observed → 开始记录本次请求的规则 ID、端口等诊断信息\n     * control_apply_impl → 检查并执行规则创建或更新，填写 result\n     * finish_observed → 汇总诊断信息，原样返回处理结果 rc\n     * observed 只表示是否启动了诊断记录，不表示规则安装成功\n     */\n    bool observed =\n        begin_observed(service, DPPD_RULE_OPERATION_APPLY, rule != NULL ? rule->id : 0, expected, 1, true, port_id);\n    int rc = control_apply_impl(service, port_id, rule, expected, result);\n\n    return finish_observed(service, observed, rc);\n}",
-      "sourceHref": "sources/lib__control__control.c.html#L1745"
+      "sourceHref": "sources/lib__control__control.c.html#L1770"
     },
     {
       "file": "lib/control/control.c",
       "fn": "control_apply_impl",
-      "line": 809,
-      "endLine": 830,
+      "line": 820,
+      "endLine": 841,
       "code": "    candidate = *rule;\n    candidate.install_port_id = install_port_id;\n    /**\n     * 按 ID 查询 service->rules 中保存的规则，找到后复制到 existing\n     * 查 ID 20\n     *   找到 → 内容相同：UNCHANGED，沿用原版本并立即返回\n     *        → 内容不同：检查 expected_generation，通过后 updating = true\n     *   未找到（-ENOENT）→ 检查新建要求和剩余容量，updating 保持 false\n     *   其他查询错误 → 直接返回错误\n     */\n    rc = dppd_rule_repository_get(&service->rules, rule->id, &existing);\n    if (rc == 0) {\n        /**\n         * 相等比较包含安装端口、匹配条件和动作，不比较 generation\n         * 同内容重复提交直接成功，先于旧版本检查，不重复安装 不增加版本\n         */\n        if (dppd_rule_equal(&existing, &candidate)) {\n            result->status = DPPD_RULE_UNCHANGED;\n            result->generation = existing.generation;\n            service->observation.unchanged = true;\n            return 0;\n        }",
-      "sourceHref": "sources/lib__control__control.c.html#L809"
+      "sourceHref": "sources/lib__control__control.c.html#L820"
     },
     {
       "file": "lib/control/control.c",
       "fn": "control_apply_impl",
-      "line": 797,
-      "endLine": 802,
+      "line": 808,
+      "endLine": 813,
       "code": "    rc = recovery_write_preflight(service);\n    if (rc != 0)\n        return rc;\n    rc = persistence_write_preflight(service);\n    if (rc != 0)\n        return rc;",
-      "sourceHref": "sources/lib__control__control.c.html#L797"
+      "sourceHref": "sources/lib__control__control.c.html#L808"
     },
     {
       "file": "lib/control/control.c",
       "fn": "control_apply_impl",
-      "line": 856,
-      "endLine": 882,
+      "line": 867,
+      "endLine": 893,
       "code": "    candidate.generation = dppd_rule_repository_generation(&service->rules) + 1U;\n    /** 汇总端口、已启用功能和后端能力，供 planner 判断这条规则应在哪里执行 */\n    planner_context.topology = service->topology;\n    planner_context.ipv4_routing = service->routing != NULL;\n    planner_context.connection_tracking = service->conntrack != NULL;\n    planner_context.neighbor_discovery = service->nd6 != NULL;\n    planner_context.install_port_id = install_port_id;\n    /** 允许考虑硬件后端，具体规则能否安装仍需后续驱动校验 */\n    planner_context.hardware_available = true;\n    planner_context.software_equivalent = dppd_software_backend_rule_supported(&candidate);\n    observe_rule(service, DPPD_RULE_STAGE_PLAN, &candidate, install_port_id, NULL);\n    /** candidate + planner_context → result->plan；本例 acl-set 指定只用软件，规划成功后才进入安装事务 */\n    rc = dppd_plan_rule(&planner_context, &candidate, &result->plan);\n    if (rc != 0)\n        return rc;\n\n    /** item 把规则和执行方案放在一起，供事务按计划安装：candidate + plan → item */\n    memset(&item, 0, sizeof(item));\n    item.rule = candidate;\n    item.plan = result->plan;\n    /** 取得两套后端回调表；执行时按 item.plan.backend 选择，本例只调用软件后端 */\n    memset(&backends, 0, sizeof(backends));\n    backends.software = dppd_software_transaction_backend(&service->software);\n    backends.rte_flow = dppd_rte_flow_transaction_backend(&service->rte_flow);\n    /** 本次取得当前事务编号，再递增备用；事务编号与规则版本分别计数 */\n    result->transaction_id = service->next_transaction_id++;\n    service->observation.context.transaction_id = result->transaction_id;",
-      "sourceHref": "sources/lib__control__control.c.html#L856"
+      "sourceHref": "sources/lib__control__control.c.html#L867"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "dppd_software_transaction_backend",
-      "line": 681,
-      "endLine": 701,
+      "line": 682,
+      "endLine": 702,
       "code": "struct dppd_transaction_backend dppd_software_transaction_backend(struct dppd_software_backend *backend)\n{\n    const struct dppd_transaction_backend operations = {\n        /**\n         * .成员名 = 初始值 是 C 的指定初始化语法\n         * .context = backend             → 保存要操作的软件后端对象地址\n         * .prepare = transaction_prepare → 保存本文件的函数地址，此时不执行函数\n         *\n         * 这里 transaction_prepare 与 &transaction_prepare 都表示函数地址\n         * 调用 operations.prepare(operations.context, item, token) 时才执行该函数\n         * 按成员名指定初值，无须依照结构体成员顺序；未指定的成员按零初始化规则处理\n         */\n        .context = backend,\n        .validate = transaction_validate,\n        .prepare = transaction_prepare,\n        .commit = transaction_commit,\n        .rollback = transaction_rollback,\n        .finalize = transaction_finalize,\n    };\n    return operations;\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L681"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L682"
     },
     {
       "file": "lib/control/control.c",
       "fn": "control_apply_impl",
-      "line": 891,
-      "endLine": 891,
+      "line": 902,
+      "endLine": 902,
       "code": "    rc = dppd_transaction_run(&transaction, &backends);",
-      "sourceHref": "sources/lib__control__control.c.html#L891"
+      "sourceHref": "sources/lib__control__control.c.html#L902"
     },
     {
       "file": "lib/control/transaction.c",
@@ -606,18 +607,18 @@
     {
       "file": "lib/control/transaction.c",
       "fn": "dppd_transaction_init",
-      "line": 87,
-      "endLine": 110,
+      "line": 89,
+      "endLine": 112,
       "code": "int dppd_transaction_init(struct dppd_transaction *transaction, uint64_t transaction_id,\n    struct dppd_transaction_item *items, uint32_t nb_items)\n{\n    uint32_t i;\n\n    if (transaction == NULL || transaction_id == 0 || items == NULL || nb_items == 0)\n        return -EINVAL;\n    transaction->id = transaction_id;\n    transaction->state = DPPD_TRANSACTION_NEW;\n    transaction->items = items;\n    transaction->nb_items = nb_items;\n    transaction->failure_code = 0;\n    transaction->rollback_code = 0;\n    transaction->failure_stage = DPPD_RULE_STAGE_NONE;\n    transaction->failure_item = UINT32_MAX;\n    transaction->rollback_item = UINT32_MAX;\n    /** 清零 token 不会释放后端资源，复用条目前需先完成旧事务的回滚或收尾 */\n    for (i = 0; i < nb_items; ++i) {\n        items[i].state = DPPD_TRANSACTION_ITEM_PENDING;\n        items[i].backend_token = 0;\n        items[i].error_code = 0;\n    }\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__transaction.c.html#L87"
+      "sourceHref": "sources/lib__control__transaction.c.html#L89"
     },
     {
       "file": "lib/control/transaction.c",
       "fn": "dppd_transaction_run",
-      "line": 136,
-      "endLine": 156,
-      "code": "    transaction->state = DPPD_TRANSACTION_VALIDATING;\n    /**\n     * 校验后端能力，以及规则和计划的 ID、版本是否一致\n     * 此阶段不占用后端资源，失败时无需回滚\n     */\n    for (i = 0; i < transaction->nb_items; ++i) {\n        struct dppd_transaction_item *item = &transaction->items[i];\n        /** 本例 plan.backend = SOFTWARE → backends.software → software_backend.c 中的各阶段函数 */\n        const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);\n\n        if (item->rule.id == 0 || item->plan.rule_id != item->rule.id ||\n            item->plan.rule_generation != item->rule.generation)\n            rc = -EINVAL;\n        else if (!backend_valid(backend))\n            rc = -ENOTSUP;\n        else\n            // 从事务调度进入软件后端\n            // 通过函数指针，调用的是software_backend.c 中的 transaction_validate\n            rc = backend->validate(backend->context, item);\n        if (rc != 0) {\n            item->state = DPPD_TRANSACTION_ITEM_FAILED;",
-      "sourceHref": "sources/lib__control__transaction.c.html#L136"
+      "line": 138,
+      "endLine": 158,
+      "code": "    transaction->state = DPPD_TRANSACTION_VALIDATING;\n    /**\n     * 校验后端能力，以及规则和计划的 ID、版本是否一致\n     * 此阶段不占用后端资源，失败时无需回滚\n     */\n    for (i = 0; i < transaction->nb_items; ++i) {\n        struct dppd_transaction_item *item = &transaction->items[i];\n        /** 本例 plan.backend = SOFTWARE → backends.software → software_backend.c 中的各阶段函数 */\n        const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);\n\n        if (item->rule.id == 0 || item->plan.rule_id != item->rule.id ||\n            item->plan.rule_generation != item->rule.generation)\n            rc = -EINVAL;\n        else if (!backend_valid(backend))\n            rc = -ENOTSUP;\n        else\n            /** 调用所选后端的校验函数，软件计划进入 software_backend.c 的 transaction_validate */\n            rc = backend->validate(backend->context, item);\n        if (rc != 0) {\n            item->state = DPPD_TRANSACTION_ITEM_FAILED;\n            item->error_code = rc;",
+      "sourceHref": "sources/lib__control__transaction.c.html#L138"
     },
     {
       "file": "lib/dataplane/software_backend.c",
@@ -638,18 +639,18 @@
     {
       "file": "lib/control/transaction.c",
       "fn": "dppd_transaction_run",
-      "line": 187,
-      "endLine": 189,
+      "line": 188,
+      "endLine": 190,
       "code": "        rc = backend->prepare(backend->context, item, &item->backend_token);\n        if (rc != 0) {\n            item->state = DPPD_TRANSACTION_ITEM_FAILED;",
-      "sourceHref": "sources/lib__control__transaction.c.html#L187"
+      "sourceHref": "sources/lib__control__transaction.c.html#L188"
     },
     {
       "file": "lib/control/transaction.c",
       "fn": "dppd_transaction_run",
-      "line": 209,
-      "endLine": 211,
+      "line": 210,
+      "endLine": 212,
       "code": "        rc = backend->commit(backend->context, item, item->backend_token);\n        if (rc != 0) {\n            item->state = DPPD_TRANSACTION_ITEM_FAILED;",
-      "sourceHref": "sources/lib__control__transaction.c.html#L209"
+      "sourceHref": "sources/lib__control__transaction.c.html#L210"
     },
     {
       "file": "lib/dataplane/software_backend.c",
@@ -726,10 +727,10 @@
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "dppd_software_backend_decide_counted",
-      "line": 1300,
-      "endLine": 1306,
+      "line": 1303,
+      "endLine": 1309,
       "code": "    active = atomic_load_explicit(&backend->active, memory_order_acquire);\n    /**\n     * ACL 支持掩码、端口范围等条件；exact 对完整地址和端口组合做哈希查找\n     * 各自返回本表优先命中的规则 tag，0 表示未命中，选定候选后再执行动作\n     */\n    uint32_t tag = dppd_acl_classify(snapshot_acl(active, backend->capacity), ingress_port, packet);\n    uint32_t exact_tag = dppd_exact_classify(snapshot_exact(active, backend->capacity), ingress_port, packet);",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1300"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1303"
     },
     {
       "file": "lib/dataplane/software_backend.c",
@@ -742,50 +743,50 @@
     {
       "file": "lib/control/transaction.c",
       "fn": "dppd_transaction_run",
-      "line": 222,
-      "endLine": 224,
+      "line": 228,
+      "endLine": 230,
       "code": "    transaction->state = DPPD_TRANSACTION_COMMITTED;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__transaction.c.html#L222"
+      "sourceHref": "sources/lib__control__transaction.c.html#L228"
     },
     {
       "file": "lib/control/control.c",
       "fn": "control_apply_impl",
-      "line": 941,
-      "endLine": 957,
+      "line": 963,
+      "endLine": 979,
       "code": "    rc = dppd_rule_repository_apply(&service->rules, &candidate, updating ? existing.generation : expected_generation,\n        &repository_result);\n    if (rc != 0) {\n        /** 后端已生效而内存记录更新失败，停止普通写入并进入恢复隔离 */\n        dppd_rule_observation_fault(&service->observation, rc);\n        return isolate_control(service, rc);\n    }\n    service->observation.applied = true;\n    result->status = repository_result.status;\n    result->generation = repository_result.generation;\n    rc = dppd_transaction_finalize(&transaction, &backends);\n    if (rc != 0) {\n        dppd_rule_observation_fault(&service->observation, rc);\n        return isolate_control(service, rc);\n    }\n    return persist_current_repository(service);\n}",
-      "sourceHref": "sources/lib__control__control.c.html#L941"
+      "sourceHref": "sources/lib__control__control.c.html#L963"
     },
     {
       "file": "lib/control/transaction.c",
       "fn": "dppd_transaction_finalize",
-      "line": 246,
-      "endLine": 265,
+      "line": 252,
+      "endLine": 271,
       "code": "int dppd_transaction_finalize(struct dppd_transaction *transaction, const struct dppd_transaction_backends *backends)\n{\n    uint32_t i;\n\n    if (transaction == NULL || backends == NULL || transaction->state != DPPD_TRANSACTION_COMMITTED)\n        return -EINVAL;\n    for (i = 0; i < transaction->nb_items; ++i) {\n        struct dppd_transaction_item *item = &transaction->items[i];\n        const struct dppd_transaction_backend *backend = backend_for(backends, item->plan.backend);\n\n        if (item->state != DPPD_TRANSACTION_ITEM_COMMITTED || !backend_valid(backend))\n            return -EUCLEAN;\n        /** finalize 回调只释放临时资源，不返回错误；未提供回调时也要清零 token */\n        if (backend->finalize != NULL)\n            backend->finalize(backend->context, item, item->backend_token);\n        item->backend_token = 0;\n    }\n    transaction->state = DPPD_TRANSACTION_FINALIZED;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__transaction.c.html#L246"
+      "sourceHref": "sources/lib__control__transaction.c.html#L252"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "transaction_finalize",
-      "line": 670,
-      "endLine": 675,
+      "line": 671,
+      "endLine": 676,
       "code": "static void transaction_finalize(void *context, const struct dppd_transaction_item *item, uintptr_t token)\n{\n    (void)context;\n    (void)item;\n    free((struct dppd_software_pending_rule *)token);\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L670"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L671"
     },
     {
       "file": "lib/control/rule_repository.c",
       "fn": "dppd_rule_repository_apply",
-      "line": 115,
-      "endLine": 181,
+      "line": 124,
+      "endLine": 190,
       "code": "int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const struct dppd_rule *rule,\n    uint64_t expected_generation, struct dppd_rule_apply_result *result)\n{\n    struct dppd_rule_record *record;\n    char validation_error[128];\n\n    if (repository == NULL || repository->records == NULL || rule == NULL || rule->id == 0 || result == NULL)\n        return -EINVAL;\n    if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0)\n        return -EINVAL;\n\n    record = find_record(repository, rule->id);\n    if (record != NULL) {\n        /** equal 比较规则内容，不比较规则自身的 generation；相同内容重复提交不推进版本 */\n        if (dppd_rule_equal(&record->rule, rule)) {\n            result->status = DPPD_RULE_UNCHANGED;\n            result->generation = record->rule.generation;\n            return 0;\n        }\n        /**\n         * 例：调用方读到 R1 版本 7，其他请求已将其改成版本 9\n         * 本次携带 expected_generation = 7 且内容不同 → -ESTALE，拒绝覆盖版本 9\n         * 比较的是 R1 当前版本，不是整个规则集合的 generation；ANY 明确跳过此检查\n         */\n        if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)\n            return -ESTALE;\n        if (repository->generation >= UINT64_MAX - 1U)\n            return -EOVERFLOW;\n        record->rule = *rule;\n        /**\n         * 新版本取整个规则集合的递增序列，不采用输入 rule->generation，也不是旧规则版本加 1\n         * 例：集合版本 12，R1 版本 7 → 用预期版本 7 更新成功 → 集合和 R1 均变为 13\n         * 其他规则保留各自的版本，更新已有记录不增加 count\n         */\n        record->rule.generation = ++repository->generation;\n        result->status = DPPD_RULE_UPDATED;\n        result->generation = record->rule.generation;\n        return 0;\n    }\n\n    if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != 0)\n        return -ESTALE;\n    if (repository->generation >= UINT64_MAX - 1U)\n        return -EOVERFLOW;\n    uint32_t slot;\n    /**\n     * 索引负责按 ID 查槽位，records 数组保存规则内容\n     * 例：索引 (ID 20, 0) → 槽位 3 → records[3].rule\n     * 索引键中的 0 固定占位，真正的规则版本保存在 record->rule.generation\n     */\n    int rc = dppd_slot_index_insert(&repository->index, rule->id, 0, &slot);\n    if (rc != 0)\n        return rc;\n    record = &repository->records[slot];\n    record->occupied = true;\n    record->rule = *rule;\n    /**\n     * 新建规则：集合版本 12 → 递增为 13 → 将 13 写入这条规则\n     * control_apply_impl 已用 12 + 1 安装候选规则；串行执行期间集合版本未变，两处版本因此一致\n     * 这里才推进 repository->generation，其他已有规则的版本不变\n     */\n    record->rule.generation = ++repository->generation;\n    repository->count++;\n    result->status = DPPD_RULE_CREATED;\n    result->generation = record->rule.generation;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L115"
+      "sourceHref": "sources/lib__control__rule_repository.c.html#L124"
     },
     {
       "file": "lib/control/control.c",
       "fn": "persist_current_repository",
-      "line": 94,
-      "endLine": 116,
+      "line": 102,
+      "endLine": 124,
       "code": "static int persist_current_repository(struct dppd_control_service *service)\n{\n    struct dppd_rule_failure_event previous = service->observation.context;\n    int rc;\n\n    if (service->persistence_path == NULL)\n        return 0;\n    observe_stage(service, DPPD_RULE_STAGE_PERSIST);\n    if (service->observation.context.rule_count > 1)\n        observe_batch(service, DPPD_RULE_STAGE_PERSIST);\n    rc = save_current_snapshot(service);\n    if (rc != 0) {\n        dppd_rule_observation_fault(&service->observation, rc);\n        service->persistence_dirty = true;\n        service->persistence_last_error = rc;\n        return -EUCLEAN;\n    }\n    service->persistence_dirty = false;\n    service->persistence_last_error = 0;\n    service->persisted_generation = dppd_rule_repository_generation(&service->rules);\n    service->observation.context = previous;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__control.c.html#L94"
+      "sourceHref": "sources/lib__control__control.c.html#L102"
     },
     {
       "file": "lib/management/server.c",
@@ -822,18 +823,18 @@
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "dppd_software_backend_decide_counted",
-      "line": 1300,
-      "endLine": 1306,
+      "line": 1303,
+      "endLine": 1309,
       "code": "    active = atomic_load_explicit(&backend->active, memory_order_acquire);\n    /**\n     * ACL 支持掩码、端口范围等条件；exact 对完整地址和端口组合做哈希查找\n     * 各自返回本表优先命中的规则 tag，0 表示未命中，选定候选后再执行动作\n     */\n    uint32_t tag = dppd_acl_classify(snapshot_acl(active, backend->capacity), ingress_port, packet);\n    uint32_t exact_tag = dppd_exact_classify(snapshot_exact(active, backend->capacity), ingress_port, packet);",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1300"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1303"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 333,
-      "endLine": 333,
+      "line": 337,
+      "endLine": 337,
       "code": "            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L333"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L337"
     },
     {
       "file": "lib/dataplane/software_backend.c",
@@ -886,18 +887,18 @@
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "dppd_software_backend_worker_quiescent",
-      "line": 1200,
-      "endLine": 1204,
+      "line": 1203,
+      "endLine": 1207,
       "code": "void dppd_software_backend_worker_quiescent(struct dppd_software_backend *backend, unsigned int worker_id)\n{\n    if (backend != NULL && backend->qsbr_initialized && worker_id < DPPD_MAX_WORKERS)\n        rte_rcu_qsbr_quiescent(backend->qsbr, worker_id);\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1200"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1203"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "dppd_worker_main",
-      "line": 593,
-      "endLine": 594,
+      "line": 607,
+      "endLine": 608,
       "code": "        dppd_software_backend_worker_quiescent(runtime->software_backend, worker->queue_id);\n        dppd_ipv4_router_reader_quiescent(runtime->ipv4_router, worker->queue_id);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L593"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L607"
     },
     {
       "file": "lib/dataplane/software_backend.c",
@@ -942,34 +943,34 @@
     {
       "file": "lib/control/control.c",
       "fn": "control_apply_impl",
-      "line": 941,
-      "endLine": 957,
+      "line": 963,
+      "endLine": 979,
       "code": "    rc = dppd_rule_repository_apply(&service->rules, &candidate, updating ? existing.generation : expected_generation,\n        &repository_result);\n    if (rc != 0) {\n        /** 后端已生效而内存记录更新失败，停止普通写入并进入恢复隔离 */\n        dppd_rule_observation_fault(&service->observation, rc);\n        return isolate_control(service, rc);\n    }\n    service->observation.applied = true;\n    result->status = repository_result.status;\n    result->generation = repository_result.generation;\n    rc = dppd_transaction_finalize(&transaction, &backends);\n    if (rc != 0) {\n        dppd_rule_observation_fault(&service->observation, rc);\n        return isolate_control(service, rc);\n    }\n    return persist_current_repository(service);\n}",
-      "sourceHref": "sources/lib__control__control.c.html#L941"
+      "sourceHref": "sources/lib__control__control.c.html#L963"
     },
     {
       "file": "lib/control/rule_repository.c",
       "fn": "dppd_rule_repository_apply",
-      "line": 126,
-      "endLine": 140,
+      "line": 135,
+      "endLine": 149,
       "code": "    record = find_record(repository, rule->id);\n    if (record != NULL) {\n        /** equal 比较规则内容，不比较规则自身的 generation；相同内容重复提交不推进版本 */\n        if (dppd_rule_equal(&record->rule, rule)) {\n            result->status = DPPD_RULE_UNCHANGED;\n            result->generation = record->rule.generation;\n            return 0;\n        }\n        /**\n         * 例：调用方读到 R1 版本 7，其他请求已将其改成版本 9\n         * 本次携带 expected_generation = 7 且内容不同 → -ESTALE，拒绝覆盖版本 9\n         * 比较的是 R1 当前版本，不是整个规则集合的 generation；ANY 明确跳过此检查\n         */\n        if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)\n            return -ESTALE;",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L126"
+      "sourceHref": "sources/lib__control__rule_repository.c.html#L135"
     },
     {
       "file": "lib/control/transaction.c",
       "fn": "dppd_transaction_finalize",
-      "line": 259,
-      "endLine": 264,
+      "line": 265,
+      "endLine": 270,
       "code": "        if (backend->finalize != NULL)\n            backend->finalize(backend->context, item, item->backend_token);\n        item->backend_token = 0;\n    }\n    transaction->state = DPPD_TRANSACTION_FINALIZED;\n    return 0;",
-      "sourceHref": "sources/lib__control__transaction.c.html#L259"
+      "sourceHref": "sources/lib__control__transaction.c.html#L265"
     },
     {
       "file": "lib/control/rule_repository.c",
       "fn": "dppd_rule_repository_apply",
-      "line": 126,
-      "endLine": 140,
+      "line": 135,
+      "endLine": 149,
       "code": "    record = find_record(repository, rule->id);\n    if (record != NULL) {\n        /** equal 比较规则内容，不比较规则自身的 generation；相同内容重复提交不推进版本 */\n        if (dppd_rule_equal(&record->rule, rule)) {\n            result->status = DPPD_RULE_UNCHANGED;\n            result->generation = record->rule.generation;\n            return 0;\n        }\n        /**\n         * 例：调用方读到 R1 版本 7，其他请求已将其改成版本 9\n         * 本次携带 expected_generation = 7 且内容不同 → -ESTALE，拒绝覆盖版本 9\n         * 比较的是 R1 当前版本，不是整个规则集合的 generation；ANY 明确跳过此检查\n         */\n        if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)\n            return -ESTALE;",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L126"
+      "sourceHref": "sources/lib__control__rule_repository.c.html#L135"
     },
     {
       "file": "lib/control/rule_repository.c",
@@ -982,42 +983,42 @@
     {
       "file": "lib/control/rule_repository.c",
       "fn": "dppd_rule_repository_apply",
-      "line": 155,
-      "endLine": 158,
+      "line": 164,
+      "endLine": 167,
       "code": "    if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != 0)\n        return -ESTALE;\n    if (repository->generation >= UINT64_MAX - 1U)\n        return -EOVERFLOW;",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L155"
+      "sourceHref": "sources/lib__control__rule_repository.c.html#L164"
     },
     {
       "file": "lib/control/rule_repository.c",
       "fn": "dppd_rule_repository_apply",
-      "line": 155,
-      "endLine": 181,
+      "line": 164,
+      "endLine": 190,
       "code": "    if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != 0)\n        return -ESTALE;\n    if (repository->generation >= UINT64_MAX - 1U)\n        return -EOVERFLOW;\n    uint32_t slot;\n    /**\n     * 索引负责按 ID 查槽位，records 数组保存规则内容\n     * 例：索引 (ID 20, 0) → 槽位 3 → records[3].rule\n     * 索引键中的 0 固定占位，真正的规则版本保存在 record->rule.generation\n     */\n    int rc = dppd_slot_index_insert(&repository->index, rule->id, 0, &slot);\n    if (rc != 0)\n        return rc;\n    record = &repository->records[slot];\n    record->occupied = true;\n    record->rule = *rule;\n    /**\n     * 新建规则：集合版本 12 → 递增为 13 → 将 13 写入这条规则\n     * control_apply_impl 已用 12 + 1 安装候选规则；串行执行期间集合版本未变，两处版本因此一致\n     * 这里才推进 repository->generation，其他已有规则的版本不变\n     */\n    record->rule.generation = ++repository->generation;\n    repository->count++;\n    result->status = DPPD_RULE_CREATED;\n    result->generation = record->rule.generation;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L155"
+      "sourceHref": "sources/lib__control__rule_repository.c.html#L164"
     },
     {
       "file": "lib/control/control.c",
       "fn": "control_apply_impl",
-      "line": 856,
-      "endLine": 856,
+      "line": 867,
+      "endLine": 867,
       "code": "    candidate.generation = dppd_rule_repository_generation(&service->rules) + 1U;",
-      "sourceHref": "sources/lib__control__control.c.html#L856"
+      "sourceHref": "sources/lib__control__control.c.html#L867"
     },
     {
       "file": "lib/control/rule_repository.c",
       "fn": "dppd_rule_repository_apply",
-      "line": 143,
-      "endLine": 152,
+      "line": 152,
+      "endLine": 161,
       "code": "        record->rule = *rule;\n        /**\n         * 新版本取整个规则集合的递增序列，不采用输入 rule->generation，也不是旧规则版本加 1\n         * 例：集合版本 12，R1 版本 7 → 用预期版本 7 更新成功 → 集合和 R1 均变为 13\n         * 其他规则保留各自的版本，更新已有记录不增加 count\n         */\n        record->rule.generation = ++repository->generation;\n        result->status = DPPD_RULE_UPDATED;\n        result->generation = record->rule.generation;\n        return 0;",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L143"
+      "sourceHref": "sources/lib__control__rule_repository.c.html#L152"
     },
     {
       "file": "lib/control/control.c",
       "fn": "control_apply_impl",
-      "line": 941,
-      "endLine": 942,
+      "line": 963,
+      "endLine": 964,
       "code": "    rc = dppd_rule_repository_apply(&service->rules, &candidate, updating ? existing.generation : expected_generation,\n        &repository_result);",
-      "sourceHref": "sources/lib__control__control.c.html#L941"
+      "sourceHref": "sources/lib__control__control.c.html#L963"
     },
     {
       "file": "lib/control/slot_index.c",
@@ -1038,10 +1039,10 @@
     {
       "file": "lib/control/rule_repository.c",
       "fn": "dppd_rule_repository_apply",
-      "line": 168,
-      "endLine": 180,
+      "line": 177,
+      "endLine": 189,
       "code": "    record = &repository->records[slot];\n    record->occupied = true;\n    record->rule = *rule;\n    /**\n     * 新建规则：集合版本 12 → 递增为 13 → 将 13 写入这条规则\n     * control_apply_impl 已用 12 + 1 安装候选规则；串行执行期间集合版本未变，两处版本因此一致\n     * 这里才推进 repository->generation，其他已有规则的版本不变\n     */\n    record->rule.generation = ++repository->generation;\n    repository->count++;\n    result->status = DPPD_RULE_CREATED;\n    result->generation = record->rule.generation;\n    return 0;",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L168"
+      "sourceHref": "sources/lib__control__rule_repository.c.html#L177"
     },
     {
       "file": "lib/control/slot_index.c",
@@ -1054,106 +1055,194 @@
     {
       "file": "lib/control/rule_repository.c",
       "fn": "dppd_rule_repository_remove",
-      "line": 361,
-      "endLine": 390,
-      "code": "int dppd_rule_repository_remove(struct dppd_rule_repository *repository, uint64_t rule_id, uint64_t expected_generation,\n    bool *removed, uint64_t *generation)\n{\n    struct dppd_rule_record *record;\n\n    if (repository == NULL || repository->records == NULL || rule_id == 0 || removed == NULL || generation == NULL)\n        return -EINVAL;\n    record = find_record(repository, rule_id);\n    if (record == NULL) {\n        if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != 0)\n            return -ESTALE;\n        *removed = false;\n        *generation = repository->generation;\n        return 0;\n    }\n    if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)\n        return -ESTALE;\n\n    /** 删除同样需要一个新的有效版本，不能先清空记录再发现版本号已耗尽 */\n    if (repository->generation >= UINT64_MAX - 1U)\n        return -EOVERFLOW;\n    if (dppd_slot_index_erase(&repository->index, rule_id, 0) != 0)\n        return -EUCLEAN;\n    memset(record, 0, sizeof(*record));\n    repository->count--;\n    *removed = true;\n    /* 删除同样推进 generation，避免重放旧版本时出现 ABA 问题 */\n    *generation = ++repository->generation;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L361"
+      "line": 370,
+      "endLine": 399,
+      "code": "int dppd_rule_repository_remove(struct dppd_rule_repository *repository, uint64_t rule_id, uint64_t expected_generation,\n    bool *removed, uint64_t *generation)\n{\n    struct dppd_rule_record *record;\n\n    if (repository == NULL || repository->records == NULL || rule_id == 0 || removed == NULL || generation == NULL)\n        return -EINVAL;\n    record = find_record(repository, rule_id);\n    if (record == NULL) {\n        if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != 0)\n            return -ESTALE;\n        *removed = false;\n        *generation = repository->generation;\n        return 0;\n    }\n    if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)\n        return -ESTALE;\n\n    /** 删除同样需要一个新的有效版本，不能先清空记录再发现版本号已耗尽 */\n    if (repository->generation >= UINT64_MAX - 1U)\n        return -EOVERFLOW;\n    if (dppd_slot_index_erase(&repository->index, rule_id, 0) != 0)\n        return -EUCLEAN;\n    memset(record, 0, sizeof(*record));\n    repository->count--;\n    *removed = true;\n    /** 例如整体版本 13 → 删除后为 14，即使以后重新创建同 ID，也不会复用已删规则的版本 */\n    *generation = ++repository->generation;\n    return 0;\n}",
+      "sourceHref": "sources/lib__control__rule_repository.c.html#L370"
     },
     {
       "file": "lib/control/control.c",
       "fn": "control_remove_impl",
-      "line": 1580,
-      "endLine": 1591,
-      "code": "    rc = remove_actual_rule(service, rule_id, existing.generation);\n    if (rc != 0)\n        return rc;\n    observe_stage(service, DPPD_RULE_STAGE_PUBLISH);\n    rc = dppd_rule_repository_remove(&service->rules, rule_id, existing.generation, removed, generation);\n    if (rc != 0 || !*removed) {\n        dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);\n        return isolate_control(service, rc != 0 ? rc : -EUCLEAN);\n    }\n    service->observation.applied = true;\n    return persist_current_repository(service);\n}",
-      "sourceHref": "sources/lib__control__control.c.html#L1580"
+      "line": 1604,
+      "endLine": 1616,
+      "code": "    rc = remove_actual_rule(service, rule_id, existing.generation);\n    if (rc != 0)\n        return rc;\n    observe_stage(service, DPPD_RULE_STAGE_PUBLISH);\n    rc = dppd_rule_repository_remove(&service->rules, rule_id, existing.generation, removed, generation);\n    /** 后端已删除，记录却未能删除，两边状态不一致，必须进入恢复隔离 */\n    if (rc != 0 || !*removed) {\n        dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);\n        return isolate_control(service, rc != 0 ? rc : -EUCLEAN);\n    }\n    service->observation.applied = true;\n    return persist_current_repository(service);\n}",
+      "sourceHref": "sources/lib__control__control.c.html#L1604"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "dppd_software_backend_remove_version",
-      "line": 1047,
-      "endLine": 1064,
-      "code": "    next = snapshot_clone(active, backend->capacity);\n    if (next == NULL) {\n        (void)pthread_mutex_unlock(&backend->writer_lock);\n        return -ENOMEM;\n    }\n    /** 只放弃副本持有的计数器引用，旧快照仍持有自己的引用，不能在此强行释放 */\n    metrics_put(next->objects[index].metrics);\n    memset(&next->objects[index], 0, sizeof(next->objects[index]));\n    next->count--;\n    int publish_error = publish_locked(backend, next);\n    if (publish_error != 0) {\n        snapshot_destroy(next, backend->capacity);\n        (void)pthread_mutex_unlock(&backend->writer_lock);\n        return publish_error;\n    }\n    (void)pthread_mutex_unlock(&backend->writer_lock);\n    return 0;\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1047"
+      "line": 1049,
+      "endLine": 1067,
+      "code": "    next = snapshot_clone(active, backend->capacity);\n    if (next == NULL) {\n        (void)pthread_mutex_unlock(&backend->writer_lock);\n        return -ENOMEM;\n    }\n    /** 例如计数器原有 1 个引用，复制后为 2，此处归还副本引用后为 1，原快照仍可使用 */\n    metrics_put(next->objects[index].metrics);\n    /** 清空整个槽位并减少有效规则数；不搬动其他槽位，发布时据此重建 exact/ACL 匹配表 */\n    memset(&next->objects[index], 0, sizeof(next->objects[index]));\n    next->count--;\n    int publish_error = publish_locked(backend, next);\n    if (publish_error != 0) {\n        snapshot_destroy(next, backend->capacity);\n        (void)pthread_mutex_unlock(&backend->writer_lock);\n        return publish_error;\n    }\n    (void)pthread_mutex_unlock(&backend->writer_lock);\n    return 0;\n}",
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L1049"
     },
     {
       "file": "lib/control/transaction.c",
       "fn": "rollback_items",
-      "line": 65,
-      "endLine": 76,
-      "code": "        commit_was_attempted = i < commit_attempts;\n        rc = backend->rollback(backend->context, item, item->backend_token, commit_was_attempted);\n        if (rc == 0)\n            item->state = DPPD_TRANSACTION_ITEM_ROLLED_BACK;\n        /** 保留第一个清理错误，同时继续尝试清理其余条目，便于上层判断是否必须隔离 */\n        else if (transaction->rollback_code == 0) {\n            transaction->rollback_code = rc;\n            transaction->rollback_item = i;\n        }\n    }\n    transaction->state = transaction->rollback_code == 0 ? DPPD_TRANSACTION_ROLLED_BACK : DPPD_TRANSACTION_FAILED;\n}",
-      "sourceHref": "sources/lib__control__transaction.c.html#L65"
+      "line": 66,
+      "endLine": 77,
+      "code": "        commit_was_attempted = i < commit_attempts;\n        /** 软件计划选择 .rollback = software_backend.c 的 transaction_rollback，token 转交原 pending 地址 */\n        rc = backend->rollback(backend->context, item, item->backend_token, commit_was_attempted);\n        if (rc == 0)\n            item->state = DPPD_TRANSACTION_ITEM_ROLLED_BACK;\n        /** 保留第一个清理错误，同时继续尝试清理其余条目，便于上层判断是否必须隔离 */\n        else if (transaction->rollback_code == 0) {\n            transaction->rollback_code = rc;\n            transaction->rollback_item = i;\n        }\n    }\n    transaction->state = transaction->rollback_code == 0 ? DPPD_TRANSACTION_ROLLED_BACK : DPPD_TRANSACTION_FAILED;",
+      "sourceHref": "sources/lib__control__transaction.c.html#L66"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "transaction_rollback",
-      "line": 653,
-      "endLine": 657,
+      "line": 654,
+      "endLine": 658,
       "code": "    if (pending->published)\n        rc = dppd_software_backend_remove_version(backend, pending->rule.id, pending->rule.generation);\n    /** 删除失败也会释放准备记录；调用方必须检查 rc，规则可能仍在已发布的表中 */\n    free(pending);\n    return rc;",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L653"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L654"
     },
     {
       "file": "lib/control/transaction.c",
       "fn": "dppd_transaction_finalize",
-      "line": 259,
-      "endLine": 265,
+      "line": 265,
+      "endLine": 271,
       "code": "        if (backend->finalize != NULL)\n            backend->finalize(backend->context, item, item->backend_token);\n        item->backend_token = 0;\n    }\n    transaction->state = DPPD_TRANSACTION_FINALIZED;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__transaction.c.html#L259"
+      "sourceHref": "sources/lib__control__transaction.c.html#L265"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "transaction_finalize",
-      "line": 670,
-      "endLine": 675,
+      "line": 671,
+      "endLine": 676,
       "code": "static void transaction_finalize(void *context, const struct dppd_transaction_item *item, uintptr_t token)\n{\n    (void)context;\n    (void)item;\n    free((struct dppd_software_pending_rule *)token);\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L670"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L671"
     },
     {
       "file": "lib/dataplane/software_backend.c",
       "fn": "transaction_finalize",
-      "line": 670,
-      "endLine": 675,
+      "line": 671,
+      "endLine": 676,
       "code": "static void transaction_finalize(void *context, const struct dppd_transaction_item *item, uintptr_t token)\n{\n    (void)context;\n    (void)item;\n    free((struct dppd_software_pending_rule *)token);\n}",
-      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L670"
+      "sourceHref": "sources/lib__dataplane__software_backend.c.html#L671"
     },
     {
       "file": "lib/control/control.c",
       "fn": "persist_current_repository",
-      "line": 99,
-      "endLine": 116,
+      "line": 107,
+      "endLine": 124,
       "code": "    if (service->persistence_path == NULL)\n        return 0;\n    observe_stage(service, DPPD_RULE_STAGE_PERSIST);\n    if (service->observation.context.rule_count > 1)\n        observe_batch(service, DPPD_RULE_STAGE_PERSIST);\n    rc = save_current_snapshot(service);\n    if (rc != 0) {\n        dppd_rule_observation_fault(&service->observation, rc);\n        service->persistence_dirty = true;\n        service->persistence_last_error = rc;\n        return -EUCLEAN;\n    }\n    service->persistence_dirty = false;\n    service->persistence_last_error = 0;\n    service->persisted_generation = dppd_rule_repository_generation(&service->rules);\n    service->observation.context = previous;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__control.c.html#L99"
+      "sourceHref": "sources/lib__control__control.c.html#L107"
     },
     {
       "file": "lib/control/control.c",
       "fn": "persistence_write_preflight",
-      "line": 119,
-      "endLine": 126,
-      "code": "static int persistence_write_preflight(struct dppd_control_service *service)\n{\n    /**\n     * clean 状态不重复保存，dirty 状态先修复上次未完成的保存\n     * 修复失败就拒绝本次修改，这里不会通过丢弃内存中的规则来消除 dirty\n     */\n    return service->persistence_dirty ? persist_current_repository(service) : 0;\n}",
-      "sourceHref": "sources/lib__control__control.c.html#L119"
+      "line": 134,
+      "endLine": 137,
+      "code": "static int persistence_write_preflight(struct dppd_control_service *service)\n{\n    return service->persistence_dirty ? persist_current_repository(service) : 0;\n}",
+      "sourceHref": "sources/lib__control__control.c.html#L134"
     },
     {
-      "file": "lib/control/rule_repository.c",
-      "fn": "dppd_rule_repository_apply",
-      "line": 115,
-      "endLine": 181,
-      "code": "int dppd_rule_repository_apply(struct dppd_rule_repository *repository, const struct dppd_rule *rule,\n    uint64_t expected_generation, struct dppd_rule_apply_result *result)\n{\n    struct dppd_rule_record *record;\n    char validation_error[128];\n\n    if (repository == NULL || repository->records == NULL || rule == NULL || rule->id == 0 || result == NULL)\n        return -EINVAL;\n    if (dppd_rule_validate(rule, validation_error, sizeof(validation_error)) != 0)\n        return -EINVAL;\n\n    record = find_record(repository, rule->id);\n    if (record != NULL) {\n        /** equal 比较规则内容，不比较规则自身的 generation；相同内容重复提交不推进版本 */\n        if (dppd_rule_equal(&record->rule, rule)) {\n            result->status = DPPD_RULE_UNCHANGED;\n            result->generation = record->rule.generation;\n            return 0;\n        }\n        /**\n         * 例：调用方读到 R1 版本 7，其他请求已将其改成版本 9\n         * 本次携带 expected_generation = 7 且内容不同 → -ESTALE，拒绝覆盖版本 9\n         * 比较的是 R1 当前版本，不是整个规则集合的 generation；ANY 明确跳过此检查\n         */\n        if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != record->rule.generation)\n            return -ESTALE;\n        if (repository->generation >= UINT64_MAX - 1U)\n            return -EOVERFLOW;\n        record->rule = *rule;\n        /**\n         * 新版本取整个规则集合的递增序列，不采用输入 rule->generation，也不是旧规则版本加 1\n         * 例：集合版本 12，R1 版本 7 → 用预期版本 7 更新成功 → 集合和 R1 均变为 13\n         * 其他规则保留各自的版本，更新已有记录不增加 count\n         */\n        record->rule.generation = ++repository->generation;\n        result->status = DPPD_RULE_UPDATED;\n        result->generation = record->rule.generation;\n        return 0;\n    }\n\n    if (expected_generation != DPPD_RULE_GENERATION_ANY && expected_generation != 0)\n        return -ESTALE;\n    if (repository->generation >= UINT64_MAX - 1U)\n        return -EOVERFLOW;\n    uint32_t slot;\n    /**\n     * 索引负责按 ID 查槽位，records 数组保存规则内容\n     * 例：索引 (ID 20, 0) → 槽位 3 → records[3].rule\n     * 索引键中的 0 固定占位，真正的规则版本保存在 record->rule.generation\n     */\n    int rc = dppd_slot_index_insert(&repository->index, rule->id, 0, &slot);\n    if (rc != 0)\n        return rc;\n    record = &repository->records[slot];\n    record->occupied = true;\n    record->rule = *rule;\n    /**\n     * 新建规则：集合版本 12 → 递增为 13 → 将 13 写入这条规则\n     * control_apply_impl 已用 12 + 1 安装候选规则；串行执行期间集合版本未变，两处版本因此一致\n     * 这里才推进 repository->generation，其他已有规则的版本不变\n     */\n    record->rule.generation = ++repository->generation;\n    repository->count++;\n    result->status = DPPD_RULE_CREATED;\n    result->generation = record->rule.generation;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__rule_repository.c.html#L115"
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 394,
+      "endLine": 398,
+      "code": "    eal_consumed = rte_eal_init(argc, argv);\n    if (eal_consumed < 0) {\n        fprintf(stderr, \"[dppd] EAL initialization failed\\n\");\n        return EXIT_FAILURE;\n    }",
+      "sourceHref": "sources/app__dppd__main.c.html#L394"
     },
     {
-      "file": "lib/control/control.c",
-      "fn": "persist_current_repository",
-      "line": 94,
-      "endLine": 116,
-      "code": "static int persist_current_repository(struct dppd_control_service *service)\n{\n    struct dppd_rule_failure_event previous = service->observation.context;\n    int rc;\n\n    if (service->persistence_path == NULL)\n        return 0;\n    observe_stage(service, DPPD_RULE_STAGE_PERSIST);\n    if (service->observation.context.rule_count > 1)\n        observe_batch(service, DPPD_RULE_STAGE_PERSIST);\n    rc = save_current_snapshot(service);\n    if (rc != 0) {\n        dppd_rule_observation_fault(&service->observation, rc);\n        service->persistence_dirty = true;\n        service->persistence_last_error = rc;\n        return -EUCLEAN;\n    }\n    service->persistence_dirty = false;\n    service->persistence_last_error = 0;\n    service->persisted_generation = dppd_rule_repository_generation(&service->rules);\n    service->observation.context = previous;\n    return 0;\n}",
-      "sourceHref": "sources/lib__control__control.c.html#L94"
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 400,
+      "endLine": 402,
+      "code": "    argc -= eal_consumed;\n    argv += eal_consumed;\n    parse_result = dppd_config_parse(argc, argv, &config);",
+      "sourceHref": "sources/app__dppd__main.c.html#L400"
     },
     {
-      "file": "lib/control/control.c",
-      "fn": "control_apply_impl",
-      "line": 956,
-      "endLine": 956,
-      "code": "    return persist_current_repository(service);",
-      "sourceHref": "sources/lib__control__control.c.html#L956"
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 394,
+      "endLine": 394,
+      "code": "    eal_consumed = rte_eal_init(argc, argv);",
+      "sourceHref": "sources/app__dppd__main.c.html#L394"
+    },
+    {
+      "file": "lib/runtime/runtime.c",
+      "fn": "dppd_runtime_init",
+      "line": 74,
+      "endLine": 79,
+      "code": "        worker->runtime = runtime;\n        worker->lcore_id = selected[worker_index].lcore_id;\n        worker->socket_id = selected[worker_index].socket_id;\n        worker->queue_id = worker_index;\n        atomic_init(&worker->state, DPPD_WORKER_IDLE);\n        atomic_init(&worker->heartbeat_ms, 0);",
+      "sourceHref": "sources/lib__runtime__runtime.c.html#L74"
+    },
+    {
+      "file": "lib/runtime/runtime.c",
+      "fn": "dppd_runtime_init",
+      "line": 89,
+      "endLine": 91,
+      "code": "    rc = dppd_devices_init(&runtime->devices, cfg);\n    if (rc != 0)\n        return rc;",
+      "sourceHref": "sources/lib__runtime__runtime.c.html#L89"
+    },
+    {
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 483,
+      "endLine": 485,
+      "code": "    dppd_runtime_set_software_backend(&runtime, &control.software);\n    control.conntrack = runtime.conntrack;\n    control.nd6 = runtime.nd6;",
+      "sourceHref": "sources/app__dppd__main.c.html#L483"
+    },
+    {
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 525,
+      "endLine": 528,
+      "code": "    if (dppd_management_start(&management, &control, &runtime.devices, &runtime, config.control_socket) != 0) {\n        fprintf(stderr, \"[dppd] management socket initialization failed: %s\\n\", config.control_socket);\n        goto cleanup_control;\n    }",
+      "sourceHref": "sources/app__dppd__main.c.html#L525"
+    },
+    {
+      "file": "lib/runtime/runtime.c",
+      "fn": "dppd_runtime_start",
+      "line": 186,
+      "endLine": 186,
+      "code": "        rc = rte_eal_remote_launch(dppd_worker_main, worker, worker->lcore_id);",
+      "sourceHref": "sources/lib__runtime__runtime.c.html#L186"
+    },
+    {
+      "file": "lib/dataplane/worker.c",
+      "fn": "process_ingress",
+      "line": 515,
+      "endLine": 516,
+      "code": "    uint16_t count = rte_eth_rx_burst(ingress->port_id, worker->queue_id, packets, worker->runtime->config.burst_size);\n    process_batch(worker, ingress, packets, count, false, 0);",
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L515"
+    },
+    {
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 700,
+      "endLine": 704,
+      "code": "    dppd_management_stop(&management);\n    dppd_runtime_request_stop(&runtime);\n    if (dppd_runtime_wait(&runtime) != 0)\n        loop_error = -EIO;\n    dppd_runtime_stats_dump(&runtime);",
+      "sourceHref": "sources/app__dppd__main.c.html#L700"
+    },
+    {
+      "file": "lib/runtime/runtime.c",
+      "fn": "dppd_runtime_wait",
+      "line": 277,
+      "endLine": 278,
+      "code": "        rc = rte_eal_wait_lcore(worker->lcore_id);\n        worker->launched = false;",
+      "sourceHref": "sources/lib__runtime__runtime.c.html#L277"
+    },
+    {
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 343,
+      "endLine": 740,
+      "code": "int main(int argc, char **argv)\n{\n    /** 在 EAL 创建线程和访问设备前，先执行受控运行范围检查 */\n    int scope_error = dppd_scope_open(&managed_scope, DPPD_SCOPE_BUSINESS);\n    if (scope_error != 0) {\n        fprintf(stderr, \"[dppd] managed scope refused: %d\\n\", scope_error);\n        return EXIT_FAILURE;\n    }\n    struct dppd_config config;\n    struct dppd_control_service control;\n    struct dppd_management_server management;\n    struct dppd_runtime runtime;\n    struct dppd_recovery_guard recovery_guard = {.fd = -1};\n    struct dppd_monitor_client monitor_client = {.fd = -1};\n    struct recovery_context recovery_context = {.guard = &recovery_guard,\n        .devices = &runtime.devices,\n        .monitor = &monitor_client};\n    uint64_t started_at;\n    uint64_t next_stats;\n    uint64_t timer_hz;\n    int parse_result;\n    int eal_consumed;\n    int loop_error = 0;\n    int rc = EXIT_FAILURE;\n    bool recovery_isolation = false;\n\n    /**\n     * 启动分三阶段：主机先准备资源 → EAL 建立 DPDK 环境 → 本项目配置收发资源\n     *\n     * 1）运行 dppd 之前，由管理员或部署脚本准备 Linux 主机\n     *    大页模式：预留系统大页，按环境准备 hugetlbfs 挂载和访问权限\n     *      → 预留数量通常通过 nr_hugepages 或内核启动参数设置，本项目没有自动配置脚本\n     *    VFIO 模式：加载 vfio-pci，并把指定 PCI 设备绑定给它\n     *      → scripts/bind_nic.sh 中执行 modprobe 和 dpdk-devbind.py --bind=vfio-pci\n     *    这些步骤不由本次 rte_eal_init 调用自动完成\n     *    scripts/run_platform.sh 只启动程序，不预留大页，也不调用网卡绑定脚本\n     *\n     * 2）下面的 rte_eal_init 在 DPDK 库内部完成基础初始化\n     *    解析 DPDK 参数，准备 lcore 线程环境和内存映射\n     *      → 大页模式使用已预留的大页；--no-huge 使用非大页模式\n     *    根据设备参数由对应 PMD（用户态轮询驱动）探测设备，建立 ethdev 网口对象\n     *    VFIO 提供内核侧设备访问，PMD 负责具体网卡操作，两者不是同一个驱动\n     *    例外：mlx5 等分叉驱动保留相应内核驱动，不能照搬 VFIO 解绑步骤；虚拟设备不一定需要 PCI 绑定\n     *\n     * 3）EAL 返回后，本项目再通过 runtime_init → dppd_devices_init（lib/device/device.c）\n     *    创建 mbuf 池 → configure 网口 → setup RX/TX 队列 → start 网口\n     *    随后 runtime_start 才启动 worker 执行业务收包循环\n     *\n     * 参数分工：dppd [EAL 参数：-l、-a、--vdev 等] -- [本项目参数：--ports、--queues 等]\n     * 成功返回已消费的参数数量，后面移动 argc/argv，再交给应用配置解析器；失败返回负值\n     */\n    eal_consumed = rte_eal_init(argc, argv);\n    if (eal_consumed < 0) {\n        fprintf(stderr, \"[dppd] EAL initialization failed\\n\");\n        return EXIT_FAILURE;\n    }\n\n    argc -= eal_consumed;\n    argv += eal_consumed;\n    parse_result = dppd_config_parse(argc, argv, &config);\n    if (parse_result == DPPD_CONFIG_HELP) {\n        dppd_config_print_usage(argv[0]);\n        rc = EXIT_SUCCESS;\n        goto cleanup_eal;\n    }\n    if (parse_result != DPPD_CONFIG_OK) {\n        fprintf(stderr, \"[dppd] invalid application arguments\\n\");\n        dppd_config_print_usage(argv[0]);\n        goto cleanup_eal;\n    }\n\n    if (config.flow_state_path[0] != '\\0') {\n        char error[256];\n        if (dppd_config_validate(&config, error, sizeof(error)) != 0) {\n            fprintf(stderr, \"[dppd] managed configuration refused: %s\\n\", error);\n            goto cleanup_eal;\n        }\n        rc = dppd_managed_run(&config, &managed_scope);\n        goto cleanup_eal;\n    }\n    const char *other_storage[] = {config.state_path, config.recovery_path, config.recovery_monitor,\n        config.control_socket};\n    int routing_paths_error =\n        dppd_routing_check_paths(config.routing_path, other_storage, sizeof(other_storage) / sizeof(other_storage[0]));\n    if (routing_paths_error != 0) {\n        fprintf(stderr, \"[dppd] IPv4 storage paths refused: %d\\n\", routing_paths_error);\n        goto cleanup_eal;\n    }\n    dppd_config_dump(&config);\n    /**\n     * EAL 已完成参数和设备探测，但本项目尚未配置队列、启动 worker 或重放规则\n     * 旧进程的待核对标记必须在这些步骤之前拦住启动，空 backend 不能证明设备已干净\n     */\n    if (config.recovery_path[0] != '\\0') {\n        int guard_rc = dppd_recovery_guard_open(&recovery_guard, config.recovery_path, config.state_path);\n        if (guard_rc != 0) {\n            fprintf(stderr, \"[dppd] recovery guard open failed: %d\\n\", guard_rc);\n            goto cleanup_eal;\n        }\n        if (recovery_guard.record.count != 0) {\n            fprintf(stderr,\n                \"[dppd] prior hardware activity requires external reconciliation: \"\n                \"revision=%\" PRIu64 \" ports=%u; inspect with dppd-recovery show PATH\\n\",\n                recovery_guard.record.revision, recovery_guard.record.count);\n            goto cleanup_eal;\n        }\n        if (dppd_recovery_record_requires_monitor(&recovery_guard.record) && config.recovery_monitor[0] == '\\0') {\n            fprintf(stderr, \"[dppd] this recovery record requires --recovery-monitor\\n\");\n            goto cleanup_eal;\n        }\n        if (config.recovery_monitor[0] != '\\0') {\n            int monitor_rc = bind_monitor(&config, &recovery_guard, &monitor_client);\n            if (monitor_rc != 0) {\n                fprintf(stderr, \"[dppd] recovery monitor handshake failed: %d\\n\", monitor_rc);\n                goto cleanup_eal;\n            }\n            printf(\"[dppd] recovery monitor bound; fresh replies required for hardware installation\\n\");\n        }\n    }\n    /*\n     * 初始化依赖顺序：先发现并启动 ethdev，得到拓扑；control 引用该拓扑；\n     * management 再引用 control。goto 清理标签严格按相反顺序释放\n     */\n    if (dppd_runtime_init(&runtime, &config) != 0)\n        goto cleanup_eal;\n    if (dppd_control_init(&control, &runtime.devices.topology, config.rule_capacity, NULL) != 0) {\n        fprintf(stderr, \"[dppd] control service initialization failed\\n\");\n        goto cleanup_runtime;\n    }\n    /** 快照重放前就启用事件门禁，不能等到 worker 启动后才开始保护驱动句柄 */\n    int device_binding = dppd_runtime_device_bind(&runtime, &control);\n    if (device_binding != 0) {\n        fprintf(stderr, \"[dppd] device event tracking refused: %d\\n\", device_binding);\n        goto cleanup_control;\n    }\n    /*\n     * worker 只借用 control 持有的 backend；退出时 main 的清理顺序会先停止并 wait 所有\n     * worker（使其注销 QSBR reader），再调用 control_fini 释放 snapshot/QSBR。这里不能\n     * 绑定临时对象，也不能在 runtime_start 后替换该地址\n     */\n    dppd_runtime_set_software_backend(&runtime, &control.software);\n    control.conntrack = runtime.conntrack;\n    control.nd6 = runtime.nd6;\n    int routing_error = setup_ipv4_routing(&runtime, &control);\n    if (routing_error != 0) {\n        fprintf(stderr, \"[dppd] IPv4 routing restore refused: %d\\n\", routing_error);\n        goto cleanup_control;\n    }\n    /** 启动重放也会安装硬件规则，所以必须在读取并重放快照之前绑定保护 */\n    if (recovery_guard.fd >= 0) {\n        recovery_context.native_owner = config.tap_owner_cookie;\n        control.rte_flow.before_create = prepare_recovery;\n        control.rte_flow.before_create_context = &recovery_context;\n        control.rte_flow.after_create = finish_recovery_create;\n        control.rte_flow.after_remove = finish_recovery_remove;\n        control.rte_flow.before_shared_create = prepare_shared_recovery;\n        control.rte_flow.after_shared_create = finish_shared_recovery_create;\n        control.rte_flow.after_shared_remove = finish_recovery_remove;\n    }\n    if (config.state_path[0] != '\\0') {\n        int restore_rc = dppd_control_persistence_restore(&control, config.state_path);\n\n        if (restore_rc != 0) {\n            if (restore_rc != -EUCLEAN || control.recovery_state != DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED) {\n                fprintf(stderr, \"[dppd] rule snapshot restore failed: path=%s error=%s (%d)\\n\", config.state_path,\n                    restore_rc < 0 && restore_rc >= -4095 ? strerror(-restore_rc) : \"unknown\", restore_rc);\n                goto cleanup_control;\n            }\n            /*\n             * transaction 回滚未完成：绝不能启动 worker 或开放普通规则接口，但保留\n             * 当前进程的 backend handle，供受限的 reconcile-retry 再次删除\n             */\n            recovery_isolation = true;\n            fprintf(stderr,\n                \"[dppd] snapshot rollback incomplete; entering recovery isolation \"\n                \"for path=%s\\n\",\n                config.state_path);\n        }\n        if (!recovery_isolation)\n            printf(\"[dppd] rule snapshot ready: path=%s generation=%\" PRIu64 \" rules=%u\\n\", config.state_path,\n                dppd_rule_repository_generation(&control.rules), dppd_rule_repository_count(&control.rules));\n    }\n    if (dppd_management_start(&management, &control, &runtime.devices, &runtime, config.control_socket) != 0) {\n        fprintf(stderr, \"[dppd] management socket initialization failed: %s\\n\", config.control_socket);\n        goto cleanup_control;\n    }\n    signal(SIGINT, handle_signal);\n    signal(SIGTERM, handle_signal);\n    /** 先发布本次重放或隔离的完成态，诊断线程只读取副本，不访问规则或驱动 */\n    if (dppd_telemetry_register(&runtime, &control) != 0) {\n        fprintf(stderr, \"[dppd] telemetry command registration failed\\n\");\n        goto cleanup_management;\n    }\n    if (dppd_runtime_device_poll(&runtime) != 0)\n        goto cleanup_telemetry;\n    recovery_isolation |= control.recovery_state != DPPD_CONTROL_RECOVERY_READY;\n    if (recovery_isolation) {\n        /**\n         * 隔离保留只读诊断，不启动 ethdev worker，也不输出正常转发统计\n         * 清理重试结束后更新诊断副本，成功进入 RESTART_REQUIRED 后仍必须退出重启\n         */\n        while (!stop_signal) {\n            loop_error = dppd_runtime_device_poll(&runtime);\n            if (loop_error != 0)\n                break;\n            loop_error = dppd_monitor_client_check(&monitor_client);\n            if (loop_error != 0) {\n                fprintf(stderr, \"[dppd] recovery monitor unavailable during isolation: %d\\n\", loop_error);\n                break;\n            }\n            /** 隔离仅停止软件转发，设备仍需监控，移除时应退出并清理而不是继续等待 */\n            loop_error = dppd_devices_io_quiesced(&runtime.devices) ? 0 : dppd_devices_poll_links(&runtime.devices);\n            if (loop_error != 0) {\n                fprintf(stderr, \"[dppd] device monitoring failed during recovery isolation\\n\");\n                break;\n            }\n            if (runtime.conntrack != NULL)\n                dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 128);\n            loop_error = dppd_management_poll(&management);\n            if (loop_error != 0) {\n                fprintf(stderr, \"[dppd] recovery management processing failed: %d\\n\", loop_error);\n                break;\n            }\n            if (dppd_telemetry_publish_rules(&control) != 0)\n                fprintf(stderr, \"[dppd] rule telemetry snapshot unavailable\\n\");\n            if (control.recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {\n                fprintf(stderr, \"[dppd] residual flows cleared; exiting for clean snapshot replay\\n\");\n                loop_error = -EUCLEAN;\n                break;\n            }\n            sleep_control_loop();\n        }\n        goto cleanup_telemetry;\n    }\n\n    loop_error = dppd_monitor_client_check(&monitor_client);\n    if (loop_error != 0) {\n        fprintf(stderr, \"[dppd] recovery monitor unavailable before worker startup: %d\\n\", loop_error);\n        goto cleanup_telemetry;\n    }\n    if (dppd_runtime_start(&runtime) != 0)\n        goto cleanup_telemetry;\n\n    /** 使用 DPDK 单调计时器计算运行时长和统计周期，避免系统时间调整影响判断 */\n    timer_hz = rte_get_timer_hz();\n    started_at = rte_get_timer_cycles();\n    next_stats = started_at + (timer_hz * config.stats_period_ms) / 1000U;\n    /**\n     * worker 启动后，主线程进入管理循环，与各 lcore 上的报文循环并行执行\n     *\n     * 主线程：检查设备和 worker → 输出统计、清理过期会话 → 处理 dppctl 请求\n     *           → 再查设备事件、轮询规则老化、发布查询快照 → 处理恢复状态 → 休眠\n     * worker：按 queue_id 收包 → process_batch → 报告安全点和心跳 → 下一轮\n     *\n     * 正常运行到达 duration 或收到信号时结束循环；无法继续运行的检查错误也会跳出\n     * 规则清理失败则先停止并等待 worker，保留管理入口供恢复查询和清理重试\n     * 跳出循环后，统一关闭管理入口、停止并等待 worker，再回收共享资源\n     */\n    while (!stop_signal) {\n        const uint64_t now = rte_get_timer_cycles();\n\n        /** 事件优先于链路、AGE 和管理处理，先等待 worker 退出，再保留受限诊断入口 */\n        loop_error = dppd_runtime_device_poll(&runtime);\n        if (loop_error != 0)\n            break;\n        if (control.recovery_state != DPPD_CONTROL_RECOVERY_READY)\n            recovery_isolation = true;\n        else if (runtime.workers_started && runtime.device_recovery.status.state == DPPD_DEVICE_RECOVERY_RUNNING)\n            recovery_isolation = false;\n\n        loop_error = dppd_scope_check(&managed_scope);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] managed scope lost; stopping workers: %d\\n\", loop_error);\n            break;\n        }\n        loop_error = dppd_monitor_client_check(&monitor_client);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] recovery monitor unavailable; stopping workers: %d\\n\", loop_error);\n            break;\n        }\n\n        /**\n         * 进入恢复隔离后，不再按普通运行时长退出，也不继续周期性输出转发统计\n         * 这样用户仍有机会查看残留对象并发起清理，避免定时退出丢失本进程的 handle\n         */\n        if (!recovery_isolation && config.duration_s != 0 && now - started_at >= timer_hz * config.duration_s)\n            break;\n        loop_error = dppd_devices_io_quiesced(&runtime.devices) ? 0 : dppd_devices_poll_links(&runtime.devices);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] device monitoring failed; stopping workers\\n\");\n            break;\n        }\n        /**\n         * 线程可能在完成启动请求后才遇到规则读者注册失败\n         * 检测到异常结束就停止其他线程并退出，避免管理进程存活却缺少转发队列\n         */\n        loop_error = dppd_runtime_check_workers(&runtime);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] worker monitoring failed; stopping workers\\n\");\n            break;\n        }\n        if (!recovery_isolation && now >= next_stats) {\n            dppd_runtime_stats_dump(&runtime);\n            next_stats = now + (timer_hz * config.stats_period_ms) / 1000U;\n        }\n        /** 分批清理过期会话，限制本轮工作量，避免长时间占用主线程 */\n        if (runtime.conntrack != NULL)\n            dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 128);\n        /**\n         * 普通管理入口在主线程串行处理请求，每轮连接数有预算，处理后继续设备检查\n         * 规则操作的业务错误通过响应交给 dppctl，不等同于本次 poll 的服务处理错误\n         */\n        loop_error = dppd_management_poll(&management);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] management request processing failed: %d\\n\", loop_error);\n            break;\n        }\n        loop_error = dppd_runtime_device_poll(&runtime);\n        if (loop_error != 0)\n            break;\n        /** AGE 查询失败只保留错误并重试，不把缺少驱动数据当作已经过期 */\n        (void)dppd_control_age_poll(&control, dppd_monotonic_ms() * UINT64_C(1000000), DPPD_AGE_POLL_BUDGET);\n        /** 整轮请求处理完再发布规则查询快照，独立查询线程读取这份完整结果 */\n        if (dppd_telemetry_publish_rules(&control) != 0)\n            fprintf(stderr, \"[dppd] rule telemetry snapshot unavailable\\n\");\n        if (control.recovery_state != DPPD_CONTROL_RECOVERY_READY) {\n            if (!recovery_isolation) {\n                /**\n                 * 启动之后发生的补偿失败，也要执行与启动恢复失败相同的隔离约束\n                 * 先发送停止请求，再等待已经启动的工作线程结束，之后才处理清理重试\n                 * 停止软件转发不代表硬件残留规则停止工作，硬件对象仍要单独清理\n                 */\n                dppd_runtime_request_stop(&runtime);\n                if (dppd_runtime_wait(&runtime) != 0) {\n                    loop_error = -EIO;\n                    break;\n                }\n                recovery_isolation = true;\n                fprintf(stderr, \"[dppd] rule recovery required; workers stopped\\n\");\n            }\n            if (control.recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {\n                /**\n                 * 残留对象已清理，不在原进程中直接恢复正常服务\n                 * 用失败码退出，让操作者或服务管理器重启并从旧快照重新建立完整状态\n                 */\n                loop_error = -EUCLEAN;\n                break;\n            }\n        }\n        sleep_control_loop();\n    }\n\n    /**\n     * 正常退出主线：关闭管理入口 → 请求 worker 停止 → 等待工作函数返回 → 释放共享资源\n     * request_stop 只写停止标记，wait 才确认任务已结束，不能发送通知后就立即释放规则或设备\n     * worker 退出前会注销规则和路由读者，等待成功后才能销毁这些后端\n     */\n    dppd_management_stop(&management);\n    dppd_runtime_request_stop(&runtime);\n    if (dppd_runtime_wait(&runtime) != 0)\n        loop_error = -EIO;\n    dppd_runtime_stats_dump(&runtime);\n    /** 隔离期间即使由用户发信号结束，也不能把这次故障退出报告为正常运行成功 */\n    if (loop_error == 0 && !recovery_isolation)\n        rc = EXIT_SUCCESS;\n\n    /**\n     * 按资源依赖释放：查询与管理入口 → control 的规则后端和路由 → runtime 的协议与设备 → EAL\n     * 网口关闭后才能释放 mbuf 池，避免驱动仍持有接收或发送缓冲\n     * cleanup_* 是跳转标签，执行后会继续向下清理；启动失败只跳到已完成初始化的那一层\n     */\ncleanup_telemetry:\n    dppd_telemetry_unregister_runtime();\ncleanup_management:\n    /** stop 可重复调用，启动失败和正常退出都先停止接收新管理请求 */\n    dppd_management_stop(&management);\ncleanup_control:\n    /** 退出窗口也可能收到复位事件，未知句柄不能落入普通 fini 的逐项删除 */\n    (void)dppd_runtime_device_poll(&runtime);\n    if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)//清理路由、规则后端、控制面记录\n        rc = EXIT_FAILURE;\n    /** backend 真正释放才证明已删除所有本进程 handle，失败时保留磁盘标记等待下次核对 */\n    if (recovery_guard.fd >= 0 && control.rte_flow.objects == NULL && dppd_recovery_guard_clean(&recovery_guard) != 0) {\n        fprintf(stderr, \"[dppd] recovery guard could not record completed cleanup\\n\");\n        rc = EXIT_FAILURE;\n    }\ncleanup_runtime:\n    /** 关闭抓包服务，释放邻居等待报文、连接会话及设备资源 */\n    if (dppd_runtime_destroy(&runtime) != 0 || dppd_devices_io_quiesced(&runtime.devices))\n        rc = EXIT_FAILURE;\ncleanup_eal:\n    dppd_monitor_client_close(&monitor_client);\n    /** 启动被旧标记阻断时同样只解锁，绝不能自动清除上一进程的线索 */\n    dppd_recovery_guard_close(&recovery_guard);\n    if (rte_eal_cleanup() != 0 && rc == EXIT_SUCCESS)\n        rc = EXIT_FAILURE;\n    return rc;\n}",
+      "sourceHref": "sources/app__dppd__main.c.html#L343"
+    },
+    {
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 343,
+      "endLine": 740,
+      "code": "int main(int argc, char **argv)\n{\n    /** 在 EAL 创建线程和访问设备前，先执行受控运行范围检查 */\n    int scope_error = dppd_scope_open(&managed_scope, DPPD_SCOPE_BUSINESS);\n    if (scope_error != 0) {\n        fprintf(stderr, \"[dppd] managed scope refused: %d\\n\", scope_error);\n        return EXIT_FAILURE;\n    }\n    struct dppd_config config;\n    struct dppd_control_service control;\n    struct dppd_management_server management;\n    struct dppd_runtime runtime;\n    struct dppd_recovery_guard recovery_guard = {.fd = -1};\n    struct dppd_monitor_client monitor_client = {.fd = -1};\n    struct recovery_context recovery_context = {.guard = &recovery_guard,\n        .devices = &runtime.devices,\n        .monitor = &monitor_client};\n    uint64_t started_at;\n    uint64_t next_stats;\n    uint64_t timer_hz;\n    int parse_result;\n    int eal_consumed;\n    int loop_error = 0;\n    int rc = EXIT_FAILURE;\n    bool recovery_isolation = false;\n\n    /**\n     * 启动分三阶段：主机先准备资源 → EAL 建立 DPDK 环境 → 本项目配置收发资源\n     *\n     * 1）运行 dppd 之前，由管理员或部署脚本准备 Linux 主机\n     *    大页模式：预留系统大页，按环境准备 hugetlbfs 挂载和访问权限\n     *      → 预留数量通常通过 nr_hugepages 或内核启动参数设置，本项目没有自动配置脚本\n     *    VFIO 模式：加载 vfio-pci，并把指定 PCI 设备绑定给它\n     *      → scripts/bind_nic.sh 中执行 modprobe 和 dpdk-devbind.py --bind=vfio-pci\n     *    这些步骤不由本次 rte_eal_init 调用自动完成\n     *    scripts/run_platform.sh 只启动程序，不预留大页，也不调用网卡绑定脚本\n     *\n     * 2）下面的 rte_eal_init 在 DPDK 库内部完成基础初始化\n     *    解析 DPDK 参数，准备 lcore 线程环境和内存映射\n     *      → 大页模式使用已预留的大页；--no-huge 使用非大页模式\n     *    根据设备参数由对应 PMD（用户态轮询驱动）探测设备，建立 ethdev 网口对象\n     *    VFIO 提供内核侧设备访问，PMD 负责具体网卡操作，两者不是同一个驱动\n     *    例外：mlx5 等分叉驱动保留相应内核驱动，不能照搬 VFIO 解绑步骤；虚拟设备不一定需要 PCI 绑定\n     *\n     * 3）EAL 返回后，本项目再通过 runtime_init → dppd_devices_init（lib/device/device.c）\n     *    创建 mbuf 池 → configure 网口 → setup RX/TX 队列 → start 网口\n     *    随后 runtime_start 才启动 worker 执行业务收包循环\n     *\n     * 参数分工：dppd [EAL 参数：-l、-a、--vdev 等] -- [本项目参数：--ports、--queues 等]\n     * 成功返回已消费的参数数量，后面移动 argc/argv，再交给应用配置解析器；失败返回负值\n     */\n    eal_consumed = rte_eal_init(argc, argv);\n    if (eal_consumed < 0) {\n        fprintf(stderr, \"[dppd] EAL initialization failed\\n\");\n        return EXIT_FAILURE;\n    }\n\n    argc -= eal_consumed;\n    argv += eal_consumed;\n    parse_result = dppd_config_parse(argc, argv, &config);\n    if (parse_result == DPPD_CONFIG_HELP) {\n        dppd_config_print_usage(argv[0]);\n        rc = EXIT_SUCCESS;\n        goto cleanup_eal;\n    }\n    if (parse_result != DPPD_CONFIG_OK) {\n        fprintf(stderr, \"[dppd] invalid application arguments\\n\");\n        dppd_config_print_usage(argv[0]);\n        goto cleanup_eal;\n    }\n\n    if (config.flow_state_path[0] != '\\0') {\n        char error[256];\n        if (dppd_config_validate(&config, error, sizeof(error)) != 0) {\n            fprintf(stderr, \"[dppd] managed configuration refused: %s\\n\", error);\n            goto cleanup_eal;\n        }\n        rc = dppd_managed_run(&config, &managed_scope);\n        goto cleanup_eal;\n    }\n    const char *other_storage[] = {config.state_path, config.recovery_path, config.recovery_monitor,\n        config.control_socket};\n    int routing_paths_error =\n        dppd_routing_check_paths(config.routing_path, other_storage, sizeof(other_storage) / sizeof(other_storage[0]));\n    if (routing_paths_error != 0) {\n        fprintf(stderr, \"[dppd] IPv4 storage paths refused: %d\\n\", routing_paths_error);\n        goto cleanup_eal;\n    }\n    dppd_config_dump(&config);\n    /**\n     * EAL 已完成参数和设备探测，但本项目尚未配置队列、启动 worker 或重放规则\n     * 旧进程的待核对标记必须在这些步骤之前拦住启动，空 backend 不能证明设备已干净\n     */\n    if (config.recovery_path[0] != '\\0') {\n        int guard_rc = dppd_recovery_guard_open(&recovery_guard, config.recovery_path, config.state_path);\n        if (guard_rc != 0) {\n            fprintf(stderr, \"[dppd] recovery guard open failed: %d\\n\", guard_rc);\n            goto cleanup_eal;\n        }\n        if (recovery_guard.record.count != 0) {\n            fprintf(stderr,\n                \"[dppd] prior hardware activity requires external reconciliation: \"\n                \"revision=%\" PRIu64 \" ports=%u; inspect with dppd-recovery show PATH\\n\",\n                recovery_guard.record.revision, recovery_guard.record.count);\n            goto cleanup_eal;\n        }\n        if (dppd_recovery_record_requires_monitor(&recovery_guard.record) && config.recovery_monitor[0] == '\\0') {\n            fprintf(stderr, \"[dppd] this recovery record requires --recovery-monitor\\n\");\n            goto cleanup_eal;\n        }\n        if (config.recovery_monitor[0] != '\\0') {\n            int monitor_rc = bind_monitor(&config, &recovery_guard, &monitor_client);\n            if (monitor_rc != 0) {\n                fprintf(stderr, \"[dppd] recovery monitor handshake failed: %d\\n\", monitor_rc);\n                goto cleanup_eal;\n            }\n            printf(\"[dppd] recovery monitor bound; fresh replies required for hardware installation\\n\");\n        }\n    }\n    /*\n     * 初始化依赖顺序：先发现并启动 ethdev，得到拓扑；control 引用该拓扑；\n     * management 再引用 control。goto 清理标签严格按相反顺序释放\n     */\n    if (dppd_runtime_init(&runtime, &config) != 0)\n        goto cleanup_eal;\n    if (dppd_control_init(&control, &runtime.devices.topology, config.rule_capacity, NULL) != 0) {\n        fprintf(stderr, \"[dppd] control service initialization failed\\n\");\n        goto cleanup_runtime;\n    }\n    /** 快照重放前就启用事件门禁，不能等到 worker 启动后才开始保护驱动句柄 */\n    int device_binding = dppd_runtime_device_bind(&runtime, &control);\n    if (device_binding != 0) {\n        fprintf(stderr, \"[dppd] device event tracking refused: %d\\n\", device_binding);\n        goto cleanup_control;\n    }\n    /*\n     * worker 只借用 control 持有的 backend；退出时 main 的清理顺序会先停止并 wait 所有\n     * worker（使其注销 QSBR reader），再调用 control_fini 释放 snapshot/QSBR。这里不能\n     * 绑定临时对象，也不能在 runtime_start 后替换该地址\n     */\n    dppd_runtime_set_software_backend(&runtime, &control.software);\n    control.conntrack = runtime.conntrack;\n    control.nd6 = runtime.nd6;\n    int routing_error = setup_ipv4_routing(&runtime, &control);\n    if (routing_error != 0) {\n        fprintf(stderr, \"[dppd] IPv4 routing restore refused: %d\\n\", routing_error);\n        goto cleanup_control;\n    }\n    /** 启动重放也会安装硬件规则，所以必须在读取并重放快照之前绑定保护 */\n    if (recovery_guard.fd >= 0) {\n        recovery_context.native_owner = config.tap_owner_cookie;\n        control.rte_flow.before_create = prepare_recovery;\n        control.rte_flow.before_create_context = &recovery_context;\n        control.rte_flow.after_create = finish_recovery_create;\n        control.rte_flow.after_remove = finish_recovery_remove;\n        control.rte_flow.before_shared_create = prepare_shared_recovery;\n        control.rte_flow.after_shared_create = finish_shared_recovery_create;\n        control.rte_flow.after_shared_remove = finish_recovery_remove;\n    }\n    if (config.state_path[0] != '\\0') {\n        int restore_rc = dppd_control_persistence_restore(&control, config.state_path);\n\n        if (restore_rc != 0) {\n            if (restore_rc != -EUCLEAN || control.recovery_state != DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED) {\n                fprintf(stderr, \"[dppd] rule snapshot restore failed: path=%s error=%s (%d)\\n\", config.state_path,\n                    restore_rc < 0 && restore_rc >= -4095 ? strerror(-restore_rc) : \"unknown\", restore_rc);\n                goto cleanup_control;\n            }\n            /*\n             * transaction 回滚未完成：绝不能启动 worker 或开放普通规则接口，但保留\n             * 当前进程的 backend handle，供受限的 reconcile-retry 再次删除\n             */\n            recovery_isolation = true;\n            fprintf(stderr,\n                \"[dppd] snapshot rollback incomplete; entering recovery isolation \"\n                \"for path=%s\\n\",\n                config.state_path);\n        }\n        if (!recovery_isolation)\n            printf(\"[dppd] rule snapshot ready: path=%s generation=%\" PRIu64 \" rules=%u\\n\", config.state_path,\n                dppd_rule_repository_generation(&control.rules), dppd_rule_repository_count(&control.rules));\n    }\n    if (dppd_management_start(&management, &control, &runtime.devices, &runtime, config.control_socket) != 0) {\n        fprintf(stderr, \"[dppd] management socket initialization failed: %s\\n\", config.control_socket);\n        goto cleanup_control;\n    }\n    signal(SIGINT, handle_signal);\n    signal(SIGTERM, handle_signal);\n    /** 先发布本次重放或隔离的完成态，诊断线程只读取副本，不访问规则或驱动 */\n    if (dppd_telemetry_register(&runtime, &control) != 0) {\n        fprintf(stderr, \"[dppd] telemetry command registration failed\\n\");\n        goto cleanup_management;\n    }\n    if (dppd_runtime_device_poll(&runtime) != 0)\n        goto cleanup_telemetry;\n    recovery_isolation |= control.recovery_state != DPPD_CONTROL_RECOVERY_READY;\n    if (recovery_isolation) {\n        /**\n         * 隔离保留只读诊断，不启动 ethdev worker，也不输出正常转发统计\n         * 清理重试结束后更新诊断副本，成功进入 RESTART_REQUIRED 后仍必须退出重启\n         */\n        while (!stop_signal) {\n            loop_error = dppd_runtime_device_poll(&runtime);\n            if (loop_error != 0)\n                break;\n            loop_error = dppd_monitor_client_check(&monitor_client);\n            if (loop_error != 0) {\n                fprintf(stderr, \"[dppd] recovery monitor unavailable during isolation: %d\\n\", loop_error);\n                break;\n            }\n            /** 隔离仅停止软件转发，设备仍需监控，移除时应退出并清理而不是继续等待 */\n            loop_error = dppd_devices_io_quiesced(&runtime.devices) ? 0 : dppd_devices_poll_links(&runtime.devices);\n            if (loop_error != 0) {\n                fprintf(stderr, \"[dppd] device monitoring failed during recovery isolation\\n\");\n                break;\n            }\n            if (runtime.conntrack != NULL)\n                dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 128);\n            loop_error = dppd_management_poll(&management);\n            if (loop_error != 0) {\n                fprintf(stderr, \"[dppd] recovery management processing failed: %d\\n\", loop_error);\n                break;\n            }\n            if (dppd_telemetry_publish_rules(&control) != 0)\n                fprintf(stderr, \"[dppd] rule telemetry snapshot unavailable\\n\");\n            if (control.recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {\n                fprintf(stderr, \"[dppd] residual flows cleared; exiting for clean snapshot replay\\n\");\n                loop_error = -EUCLEAN;\n                break;\n            }\n            sleep_control_loop();\n        }\n        goto cleanup_telemetry;\n    }\n\n    loop_error = dppd_monitor_client_check(&monitor_client);\n    if (loop_error != 0) {\n        fprintf(stderr, \"[dppd] recovery monitor unavailable before worker startup: %d\\n\", loop_error);\n        goto cleanup_telemetry;\n    }\n    if (dppd_runtime_start(&runtime) != 0)\n        goto cleanup_telemetry;\n\n    /** 使用 DPDK 单调计时器计算运行时长和统计周期，避免系统时间调整影响判断 */\n    timer_hz = rte_get_timer_hz();\n    started_at = rte_get_timer_cycles();\n    next_stats = started_at + (timer_hz * config.stats_period_ms) / 1000U;\n    /**\n     * worker 启动后，主线程进入管理循环，与各 lcore 上的报文循环并行执行\n     *\n     * 主线程：检查设备和 worker → 输出统计、清理过期会话 → 处理 dppctl 请求\n     *           → 再查设备事件、轮询规则老化、发布查询快照 → 处理恢复状态 → 休眠\n     * worker：按 queue_id 收包 → process_batch → 报告安全点和心跳 → 下一轮\n     *\n     * 正常运行到达 duration 或收到信号时结束循环；无法继续运行的检查错误也会跳出\n     * 规则清理失败则先停止并等待 worker，保留管理入口供恢复查询和清理重试\n     * 跳出循环后，统一关闭管理入口、停止并等待 worker，再回收共享资源\n     */\n    while (!stop_signal) {\n        const uint64_t now = rte_get_timer_cycles();\n\n        /** 事件优先于链路、AGE 和管理处理，先等待 worker 退出，再保留受限诊断入口 */\n        loop_error = dppd_runtime_device_poll(&runtime);\n        if (loop_error != 0)\n            break;\n        if (control.recovery_state != DPPD_CONTROL_RECOVERY_READY)\n            recovery_isolation = true;\n        else if (runtime.workers_started && runtime.device_recovery.status.state == DPPD_DEVICE_RECOVERY_RUNNING)\n            recovery_isolation = false;\n\n        loop_error = dppd_scope_check(&managed_scope);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] managed scope lost; stopping workers: %d\\n\", loop_error);\n            break;\n        }\n        loop_error = dppd_monitor_client_check(&monitor_client);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] recovery monitor unavailable; stopping workers: %d\\n\", loop_error);\n            break;\n        }\n\n        /**\n         * 进入恢复隔离后，不再按普通运行时长退出，也不继续周期性输出转发统计\n         * 这样用户仍有机会查看残留对象并发起清理，避免定时退出丢失本进程的 handle\n         */\n        if (!recovery_isolation && config.duration_s != 0 && now - started_at >= timer_hz * config.duration_s)\n            break;\n        loop_error = dppd_devices_io_quiesced(&runtime.devices) ? 0 : dppd_devices_poll_links(&runtime.devices);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] device monitoring failed; stopping workers\\n\");\n            break;\n        }\n        /**\n         * 线程可能在完成启动请求后才遇到规则读者注册失败\n         * 检测到异常结束就停止其他线程并退出，避免管理进程存活却缺少转发队列\n         */\n        loop_error = dppd_runtime_check_workers(&runtime);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] worker monitoring failed; stopping workers\\n\");\n            break;\n        }\n        if (!recovery_isolation && now >= next_stats) {\n            dppd_runtime_stats_dump(&runtime);\n            next_stats = now + (timer_hz * config.stats_period_ms) / 1000U;\n        }\n        /** 分批清理过期会话，限制本轮工作量，避免长时间占用主线程 */\n        if (runtime.conntrack != NULL)\n            dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 128);\n        /**\n         * 普通管理入口在主线程串行处理请求，每轮连接数有预算，处理后继续设备检查\n         * 规则操作的业务错误通过响应交给 dppctl，不等同于本次 poll 的服务处理错误\n         */\n        loop_error = dppd_management_poll(&management);\n        if (loop_error != 0) {\n            fprintf(stderr, \"[dppd] management request processing failed: %d\\n\", loop_error);\n            break;\n        }\n        loop_error = dppd_runtime_device_poll(&runtime);\n        if (loop_error != 0)\n            break;\n        /** AGE 查询失败只保留错误并重试，不把缺少驱动数据当作已经过期 */\n        (void)dppd_control_age_poll(&control, dppd_monotonic_ms() * UINT64_C(1000000), DPPD_AGE_POLL_BUDGET);\n        /** 整轮请求处理完再发布规则查询快照，独立查询线程读取这份完整结果 */\n        if (dppd_telemetry_publish_rules(&control) != 0)\n            fprintf(stderr, \"[dppd] rule telemetry snapshot unavailable\\n\");\n        if (control.recovery_state != DPPD_CONTROL_RECOVERY_READY) {\n            if (!recovery_isolation) {\n                /**\n                 * 启动之后发生的补偿失败，也要执行与启动恢复失败相同的隔离约束\n                 * 先发送停止请求，再等待已经启动的工作线程结束，之后才处理清理重试\n                 * 停止软件转发不代表硬件残留规则停止工作，硬件对象仍要单独清理\n                 */\n                dppd_runtime_request_stop(&runtime);\n                if (dppd_runtime_wait(&runtime) != 0) {\n                    loop_error = -EIO;\n                    break;\n                }\n                recovery_isolation = true;\n                fprintf(stderr, \"[dppd] rule recovery required; workers stopped\\n\");\n            }\n            if (control.recovery_state == DPPD_CONTROL_RECOVERY_RESTART_REQUIRED) {\n                /**\n                 * 残留对象已清理，不在原进程中直接恢复正常服务\n                 * 用失败码退出，让操作者或服务管理器重启并从旧快照重新建立完整状态\n                 */\n                loop_error = -EUCLEAN;\n                break;\n            }\n        }\n        sleep_control_loop();\n    }\n\n    /**\n     * 正常退出主线：关闭管理入口 → 请求 worker 停止 → 等待工作函数返回 → 释放共享资源\n     * request_stop 只写停止标记，wait 才确认任务已结束，不能发送通知后就立即释放规则或设备\n     * worker 退出前会注销规则和路由读者，等待成功后才能销毁这些后端\n     */\n    dppd_management_stop(&management);\n    dppd_runtime_request_stop(&runtime);\n    if (dppd_runtime_wait(&runtime) != 0)\n        loop_error = -EIO;\n    dppd_runtime_stats_dump(&runtime);\n    /** 隔离期间即使由用户发信号结束，也不能把这次故障退出报告为正常运行成功 */\n    if (loop_error == 0 && !recovery_isolation)\n        rc = EXIT_SUCCESS;\n\n    /**\n     * 按资源依赖释放：查询与管理入口 → control 的规则后端和路由 → runtime 的协议与设备 → EAL\n     * 网口关闭后才能释放 mbuf 池，避免驱动仍持有接收或发送缓冲\n     * cleanup_* 是跳转标签，执行后会继续向下清理；启动失败只跳到已完成初始化的那一层\n     */\ncleanup_telemetry:\n    dppd_telemetry_unregister_runtime();\ncleanup_management:\n    /** stop 可重复调用，启动失败和正常退出都先停止接收新管理请求 */\n    dppd_management_stop(&management);\ncleanup_control:\n    /** 退出窗口也可能收到复位事件，未知句柄不能落入普通 fini 的逐项删除 */\n    (void)dppd_runtime_device_poll(&runtime);\n    if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)//清理路由、规则后端、控制面记录\n        rc = EXIT_FAILURE;\n    /** backend 真正释放才证明已删除所有本进程 handle，失败时保留磁盘标记等待下次核对 */\n    if (recovery_guard.fd >= 0 && control.rte_flow.objects == NULL && dppd_recovery_guard_clean(&recovery_guard) != 0) {\n        fprintf(stderr, \"[dppd] recovery guard could not record completed cleanup\\n\");\n        rc = EXIT_FAILURE;\n    }\ncleanup_runtime:\n    /** 关闭抓包服务，释放邻居等待报文、连接会话及设备资源 */\n    if (dppd_runtime_destroy(&runtime) != 0 || dppd_devices_io_quiesced(&runtime.devices))\n        rc = EXIT_FAILURE;\ncleanup_eal:\n    dppd_monitor_client_close(&monitor_client);\n    /** 启动被旧标记阻断时同样只解锁，绝不能自动清除上一进程的线索 */\n    dppd_recovery_guard_close(&recovery_guard);\n    if (rte_eal_cleanup() != 0 && rc == EXIT_SUCCESS)\n        rc = EXIT_FAILURE;\n    return rc;\n}",
+      "sourceHref": "sources/app__dppd__main.c.html#L343"
+    },
+    {
+      "file": "app/dppd/main.c",
+      "fn": "main",
+      "line": 394,
+      "endLine": 394,
+      "code": "    eal_consumed = rte_eal_init(argc, argv);",
+      "sourceHref": "sources/app__dppd__main.c.html#L394"
     }
   ],
   "source_files": [
@@ -1175,6 +1264,7 @@
     "lib/dataplane/pipeline.c",
     "lib/dataplane/software_backend.c",
     "lib/dataplane/worker.c",
-    "lib/management/server.c"
+    "lib/management/server.c",
+    "lib/runtime/runtime.c"
   ]
 }

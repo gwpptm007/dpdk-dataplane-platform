@@ -2,7 +2,15 @@
 
 入口：[学习总目录](index.html)。在本地浏览器中打开，按章节查看示例、代码、解释和状态变化。
 
+**当前先看：[3.1 程序从启动到退出](startup/index.html)。** 启动代码虽然已经讲过，但整体关系尚未理解，因此先重新建立全景，连接跟踪与 NAT 暂缓。页面采用固定双网口例子，先讲分工与状态，再按阶段对照源码；所有主线说明始终显示，源码片段可以按需展开。
+
 本目录保存长期维护的学习材料，与 `.archify/` 中的架构图、流程图产物分开管理。学习页面最初随图表整理，现已迁到这里，内容只在本目录维护。旧学习目录和跳转页已全部移除，请使用本目录的入口；1.1 页面仍链接到 `.archify/` 中保留的完整流程图。
+
+## 技术原理参考
+
+[规则增删改：技术原理、方案选择与实现](rule-management-principles.md) 将已经走读的规则管理主线集中整理，包含版本检查、后端回调、分阶段事务、快照发布与 QSBR、索引与匹配表，以及配置保存和失败处理。以后遇到相同机制可以直接查阅，不必重复逐函数学习。
+
+[mbuf 内存池与收发循环图](diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html) 将“创建池、RX 队列绑定、收包处理、worker/PMD 分别归还”连在一起；[图的阅读说明与源码位置](diagrams/mbuf-cycle-20261103-182926/README.md)。
 
 ## 目录与维护方式
 
@@ -10,6 +18,7 @@
 | --- | --- |
 | `index.html` | 学习总目录，由 `build.py` 生成 |
 | `progress.json` | 经对话确认的各节进度、当前停点、下一步与记录日期 |
+| `startup/guide.json`、`startup/template.html` | 3.1 的六阶段讲解、全景、分工与源码锚点；`startup/index.html` 由构建生成 |
 | `packet-path/` | 1.1 收发与归属，页面本身也是后续章节共用样式的来源 |
 | `packet-parse/` | 1.2 报文解析，内容在 `lesson.json`，布局在 `lesson-template.html` |
 | `software-rules/` | 1.3 软件规则，内容在 `section.json`，布局在 `section-template.html` |
@@ -29,6 +38,8 @@ python docs/learning/build.py
 最近补齐的函数指针、QSBR、临时记录生命周期和规则版本讲解，可从首页“最近补齐的讲解”直接进入。原理与例子在当前步骤和“展开全部步骤”两种阅读方式中都会显示；内容同步不会自动推进学习停点。
 
 ## 验证记录
+
+[启动全景页检查](startup/check.json) 对应 3.1 本次整理，检查总目录入口、六阶段导航、默认可见的解释、源码展开与当前行号定位，以及 1440/800/390 像素宽度。可运行 `node docs/learning/startup/check.cjs` 复查，需要本机 Chrome/Edge；不覆盖下面的历史验证记录。
 
 本次讲解补齐的检查见 [content-check.json](content-check.json)，检查新增原理块、连续阅读、源码链接以及学习停点保持不变。
 

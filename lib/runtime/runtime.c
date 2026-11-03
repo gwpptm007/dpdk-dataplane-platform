@@ -12,6 +12,19 @@
 #include <rte_lcore.h>
 #include <rte_pdump.h>
 
+/**
+ * 初始化数据面运行环境，为后续 worker 收包准备资源
+ * cfg 提供网口、队列数和 mbuf 数量等配置，初始化结果保存在 runtime 中
+ *
+ * 初始化顺序
+ *   1. 检查并保存配置
+ *   2. 分配 worker 使用的 lcore 和队列编号，清零状态与统计
+ *   3. 创建 mbuf 池，配置 RX/TX 队列并启动网口
+ *   4. 准备邻居发现，按配置启用连接跟踪和抓包服务
+ *
+ * 此时网口已启动，worker 要等 dppd_runtime_start 调用后才开始收包
+ * 成功返回 0，失败返回负错误码
+ */
 int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cfg)
 {
     char error[256];
@@ -30,12 +43,16 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
 
     memset(runtime, 0, sizeof(*runtime));
     runtime->config = *cfg;
-    /** 直接构造配置的调用者也遵守入口边界，旧模式不能误走超时后无限等待的清理路径 */
+    /** worker 进度超时只用于 flow_state_path 启用的管理模式，普通模式将其关闭 */
     if (cfg->flow_state_path[0] == '\0')
         runtime->config.worker_timeout_ms = 0;
     atomic_init(&runtime->stop_requested, false);
 
-    /** 只在用户启用的非主核中选布局，网卡未知节点保留未知，不猜成节点零 */
+    /**
+     * candidates 收集 EAL 已启用的非主 lcore 及其 NUMA 节点，不使用未启用的 CPU
+     * port_sockets 记录各网口所在的 NUMA 节点；设备返回未知节点时保留负值
+     * NUMA 节点用于选择靠近网口的核心，不是 RX/TX 队列编号
+     */
     RTE_LCORE_FOREACH_WORKER (lcore_id) {
         candidates[candidate_count++] = (struct dppd_numa_cpu){lcore_id, (int)rte_lcore_to_socket_id(lcore_id)};
     }
@@ -47,7 +64,11 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
             candidate_count, rc);
         return rc;
     }
-    /** 队列与 QSBR 编号仍连续分配，NUMA 选择只改变队列使用哪个允许的核 */
+    /**
+     * --queues 2 → 创建两个 worker 配置，queue_id 依次为 0、1
+     * worker 0 轮询各网口的队列 0，worker 1 轮询各网口的队列 1，不按网口分别创建线程
+     * lcore_id 来自 selected，可能不连续；queue_id 连续分配，也用作软件 QSBR reader 编号
+     */
     for (uint16_t worker_index = 0; worker_index < cfg->nb_queues; ++worker_index) {
         struct dppd_worker *worker = &runtime->workers[worker_index];
         worker->runtime = runtime;
@@ -77,6 +98,11 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         dppd_devices_stop(&runtime->devices);
         return rc;
     }
+    /**
+     * 启用连接跟踪时创建一张会话表，由 runtime 持有，所有 worker 共用
+     * 启动只创建空表，报文通过 stateful_decide 处理后才可能产生会话
+     * 不启用时 conntrack 保持 NULL，process_batch 直接走普通 routed_decide
+     */
     if (cfg->conntrack_capacity != 0) {
         rc = dppd_conntrack_create_dual(&runtime->conntrack, cfg->conntrack_capacity, cfg->conntrack_timeout_s,
             &cfg->snat, &cfg->snat6, cfg->dnat, cfg->dnat_count);
@@ -117,6 +143,16 @@ void dppd_runtime_set_ipv4_router(struct dppd_runtime *runtime, struct dppd_ipv4
         runtime->ipv4_router = router;
 }
 
+/**
+ * 将已准备好的 worker 工作函数提交到各自的 lcore，开始执行收包任务
+ *
+ * 清除停止标记 → 逐个设为 STARTING → remote_launch(worker_main, worker, lcore_id)
+ *   → 提交成功，记录 launched，主线程继续启动下一个 worker
+ *   → 提交失败，请求已启动的 worker 停止，并等待它们返回
+ *
+ * 全部提交成功返回 0，失败返回负错误码
+ * 返回 0 不代表所有 worker 已完成准备，实际可运行状态由 worker 自己发布为 RUNNING
+ */
 int dppd_runtime_start(struct dppd_runtime *runtime)
 {
     uint16_t i;
@@ -129,13 +165,24 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
         return dppd_devices_removal_requested(&runtime->devices) ? -ENODEV : -EUCLEAN;
 
     atomic_store_explicit(&runtime->stop_requested, false, memory_order_release);
-    /* worker 失败时先置 stop，再 wait 已经启动的 lcore，确保其 QSBR reader 都能注销 */
+    /** 依次启动各队列的 worker；任一提交失败时，下面的错误分支停止并等待已启动者 */
     for (i = 0; i < runtime->nb_workers; ++i) {
         struct dppd_worker *worker = &runtime->workers[i];
 
         /** 必须在提交线程之前发布 STARTING，避免覆盖线程已经发布的 RUNNING 状态 */
         atomic_store_explicit(&worker->heartbeat_ms, dppd_monotonic_ms(), memory_order_release);
         atomic_store_explicit(&worker->state, DPPD_WORKER_STARTING, memory_order_release);
+        /**
+         * 把函数地址、worker 地址和目标 lcore 交给 EAL，在对应的已有工作线程上执行
+         * 例如 worker->lcore_id = 3：lcore 3 调用 dppd_worker_main(worker)
+         * worker 地址原样成为工作函数的 arg，不复制结构体；主线程不等待整个收包循环结束
+         *
+         * | 参数 | 含义 |
+            |---|---|
+            | `dppd_worker_main` | 要执行的函数地址 |
+            | `worker` | 传给工作函数的参数地址 |
+            | `worker->lcore_id` | 在哪个 DPDK lcore 上执行 |
+         */
         rc = rte_eal_remote_launch(dppd_worker_main, worker, worker->lcore_id);
         if (rc != 0) {
             atomic_store_explicit(&worker->state, DPPD_WORKER_FAILED, memory_order_release);
@@ -145,7 +192,7 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
             return waited == -ETIMEDOUT ? waited : rc;
         }
         worker->launched = true;
-        /** 部分启动失败也保留活跃线程身份，清理方不能提前释放它仍然借用的资源 */
+        /** 已有启动成功的任务，后面即使再启动失败，清理时也必须先等待这些任务退出 */
         runtime->workers_started = true;
     }
     runtime->workers_started = true;
@@ -194,12 +241,18 @@ bool dppd_runtime_worker_stalled(const struct dppd_runtime *runtime, uint16_t wo
     return heartbeat == 0 || (now_ms >= heartbeat && now_ms - heartbeat > runtime->config.worker_timeout_ms);
 }
 
+/** 设置共享停止标记，worker 观察到后退出循环；本函数不等待线程结束，也不释放资源 */
 void dppd_runtime_request_stop(struct dppd_runtime *runtime)
 {
     if (runtime != NULL)
         atomic_store_explicit(&runtime->stop_requested, true, memory_order_release);
 }
 
+/**
+ * 等待已提交启动任务的 worker 返回，收集工作函数结果并更新运行状态
+ * launched 为 false 的条目无需等待；已返回的任务清除 launched，全部结束后清除 workers_started
+ * 成功返回 0，任务失败返回其错误；启用进度超时的模式可能返回 -ETIMEDOUT，此时仍不能释放线程使用的资源
+ */
 int dppd_runtime_wait(struct dppd_runtime *runtime)
 {
     uint16_t i;
@@ -291,11 +344,16 @@ void dppd_runtime_stats_dump(const struct dppd_runtime *runtime)
         total.policy_drops, total.tx_drops);
 }
 
+/**
+ * 释放 runtime 拥有的资源，成功返回 0，失败返回负错误码
+ * 确认 worker 已退出 → 关闭抓包服务 → 释放邻居等待报文和连接会话 → 关闭设备、释放 mbuf 池
+ * control 持有的软件后端和路由由调用方另行清理，runtime 只借用这些指针
+ */
 int dppd_runtime_destroy(struct dppd_runtime *runtime)
 {
     if (runtime == NULL)
         return -EINVAL;
-    /* 先停止 worker，再销毁设备；否则 worker 仍可能访问已停止 port 或软件 backend */
+    /** 尚有 worker 任务时先通知并等待，确认全部返回后才允许继续释放资源 */
     if (runtime->workers_started) {
         dppd_runtime_request_stop(runtime);
         int waited = dppd_runtime_wait(runtime);

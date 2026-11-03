@@ -1,4 +1,7 @@
 # Preserve generated page and validation artifact bytes across checkouts.
 *.html text eol=lf
 *.json text eol=lf
+*.cjs text eol=lf
 *.png binary
+# Archify receipts bind the generated HTML bytes; preserve its indented blank lines.
+diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html whitespace=-blank-at-eol

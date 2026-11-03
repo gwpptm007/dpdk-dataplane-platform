@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.1 程序从启动到退出 · 源码导读</title>
+<style>
+:root{--ink:#1b2d41;--muted:#526579;--blue:#215ba4;--line:#d6e1ec;--bg:#f4f7fb;--green:#16614b;--amber:#8a500b}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:85px}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.8 "Microsoft YaHei","Segoe UI",sans-serif}main{max-width:1160px;margin:auto;padding:28px 28px 60px}a{color:var(--blue);text-underline-offset:3px}h1{font-size:34px;line-height:1.4;margin:10px 0 16px}h2{font-size:25px;line-height:1.5;margin:0 0 16px}h3{font-size:19px;margin:0 0 10px}p{margin:0 0 14px}code{font-family:Consolas,"Microsoft YaHei",monospace;font-size:.91em;overflow-wrap:anywhere}.eyebrow{font-weight:700;font-size:14px;color:var(--blue)}.lead{font-size:20px;max-width:900px}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px;margin:22px 0}.notice{border-left:5px solid #b87c27;background:#fff9ed}.small{font-size:14px;color:var(--muted)}.example{display:flex;flex-wrap:wrap;gap:10px}.example span{background:#eef4fc;border:1px solid #cbdcf0;border-radius:8px;padding:5px 11px;font-size:15px}.phase-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.phase{padding:20px 16px;background:#edf4fc;border:1px solid #bed2e9;border-radius:10px;position:relative}.phase b{display:block;font-size:19px;margin-bottom:8px}.phase .number{display:block;color:var(--blue);font-size:13px;font-weight:700}.phase p{font-size:16px;margin:0}.flow-note{margin-top:14px;color:var(--muted);font-size:15px}.parallel{display:grid;grid-template-columns:1fr 1fr;gap:16px}.role{padding:20px;background:#f0f6ff;border-radius:10px;border-top:4px solid var(--blue)}.role.workers{background:#eef8f3;border-color:var(--green)}.role ul{padding-left:22px;margin:6px 0}.port-path{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:12px;background:#f1f7fc;border-radius:10px;padding:18px;margin-bottom:18px}.port-path b{padding:9px 17px;background:#fff;border:1px solid #bed2e9;border-radius:8px}.port-path span{font-weight:700;color:var(--blue)}.stage-nav{position:sticky;top:0;z-index:10;background:#ffffffed;backdrop-filter:blur(10px);padding:12px;display:flex;gap:8px;flex-wrap:wrap;border:1px solid var(--line);border-radius:10px;margin:24px 0}.stage-nav a{font-size:14px;text-decoration:none;padding:5px 9px;border-radius:6px}.stage-nav a[aria-current="step"]{background:var(--blue);color:white}.step-card{scroll-margin-top:95px;border-top:4px solid #96b6d8}.step-card:target{border-color:var(--blue)}.stage-label{font-size:14px;font-weight:700;color:var(--blue);margin-bottom:8px}.question{font-size:19px;font-weight:700}.result{background:#eef8f3;border-left:4px solid var(--green);padding:12px 16px;margin:16px 0}.boundary{font-size:15px;color:var(--muted);padding:13px 16px;background:#f5f7fa;border-radius:8px}.handoff{margin:14px 0 0;font-size:16px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#172b42;color:#f1f6fd;padding:20px;border-radius:10px;font:15px/1.9 Consolas,"Microsoft YaHei",monospace;margin:16px 0}details{margin-top:18px;border-top:1px solid var(--line);padding-top:12px}summary{cursor:pointer;color:var(--blue);font-weight:700;font-size:16px}.source{margin:14px 0 6px;font-size:14px;overflow-wrap:anywhere}.source a{font-weight:700}.source-note{font-size:15px}.code-block pre{font-size:14px}.code-block .kind{font-size:13px;color:var(--muted)}button{font:inherit;font-size:15px;border:1px solid #b7cbe0;background:#fff;color:var(--blue);padding:8px 14px;border-radius:7px;cursor:pointer}.tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.tools a{font-size:15px}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:16px}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:12px 10px}th{background:#edf3f9}td:first-child{font-weight:700;min-width:90px}.glossary td:first-child{min-width:150px}.stop-note{background:#eaf3ff;border:1px solid #b8d2ef;padding:18px;border-radius:9px}.footer{font-size:14px;color:var(--muted)}.back-top{display:block;text-align:right;font-size:14px}.top-links{display:flex;gap:16px;flex-wrap:wrap;font-size:14px}a:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid #d49224;outline-offset:4px}
+.notice{padding:14px 20px;font-size:15px}.notice p{margin:5px 0 0}header .lead{font-size:18px}
+@media(max-width:850px){.phase-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.parallel{grid-template-columns:1fr}main{padding:22px 18px 45px}h1{font-size:28px}.stage-nav{position:static}html{scroll-padding-top:20px}.step-card{scroll-margin-top:20px}}
+@media(max-width:480px){body{font-size:16px}.phase-grid{grid-template-columns:1fr}.card{padding:18px}h1{font-size:25px}h2{font-size:22px}.lead{font-size:18px}pre{font-size:14px;padding:14px}.stage-nav a{font-size:13px}.port-path{gap:7px;padding:12px}.port-path b{padding:6px 10px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+@media print{.stage-nav,.tools,button{display:none}body{background:#fff}main{max-width:none;padding:0}.card{break-inside:avoid;border-radius:0}pre{background:#f0f2f4;color:#111}a{color:#111}.phase-grid{grid-template-columns:repeat(4,1fr)}}
+</style>
+</head>
+<body><main id="top">
+<nav class="top-links" aria-label="返回入口"><a href="../index.html">← 学习总目录</a><a href="../rule-management-principles.md">规则原理参考</a><a href="../diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html">mbuf 循环图</a></nav>
+<header><p class="eyebrow">第 3 章 · 程序全貌 / 3.1 从启动到退出</p><h1>dppd 从准备到收包，再到退出</h1><p class="lead">用网口 0 ↔ 网口 1 转发的例子，先看四段全景和两类分工，再对照源码。主线全部显示，源码可以按需展开。</p></header>
+<section class="card notice" aria-label="当前学习状态"><strong>当前先重新梳理整体关系，连接跟踪与 NAT 暂缓。</strong><p>下面按阶段 0～5 看“谁来做、准备什么、做完多了什么”。代码讲过和页面打开过，都不作为已经掌握的依据。</p></section>
+<section class="card" id="overview"><h2>全景只分四段：准备机器 → 准备程序 → 持续运行 → 安全退出</h2><div class="phase-grid">
+<div class="phase"><span class="number">① 程序外</span><b>准备机器</b><p>按运行模式准备大页、权限和网卡驱动，再执行 dppd</p></div>
+<div class="phase"><span class="number">② 主线程准备</span><b>准备程序</b><p>EAL 与参数 → 内存池和队列 → 控制服务与管理入口</p></div>
+<div class="phase"><span class="number">③ 多线程并行</span><b>持续运行</b><p>主线程管理配置与设备；worker 一轮轮处理报文</p></div>
+<div class="phase"><span class="number">④ 主线程收尾</span><b>安全退出</b><p>关闭入口 → 通知并等待 worker → 释放规则和设备 → 清理 EAL</p></div>
+</div><p class="flow-note">前一段是在为后一段创造条件。“网口启动了”“worker 开始收包了”“已经发出停止请求”“worker 已退出”是不同状态。</p></section>
+<section class="card" id="example"><h2>固定例子：两个网口、两个 worker</h2><div class="port-path"><b>网口 0</b><span>→</span><b>程序处理报文</b><span>→</span><b>网口 1</b></div><p>我们要让进入网口 0 的包，经软件检查后从网口 1 发出，反向同理。先采用静态端口配对，不启用路由、连接跟踪、NAT 和 ND。</p><div class="example"><span>两个网口：0、1</span><span>两个 worker</span><span>每网口两个 RX/TX 队列</span><span>每次收包上限：32</span></div><p class="small">为解释方便，假设主 lcore 为 0、选出的 worker lcore 为 1 和 2，两个网口在同一个 NUMA 节点。编号与硬件路径均为示例，不代表当前电脑的运行状态。</p></section>
+<section class="card" id="roles"><h2>运行时只有两类分工，先别把它们混在一起</h2><div class="parallel"><div class="role"><h3>主线程：准备、管理、收尾</h3><ul><li>启动时创建运行资源、绑定对象</li><li>运行时处理 dppctl 请求、检查设备和 worker、输出统计</li><li>退出时发出停止请求，等待任务结束后再释放资源</li></ul><p class="small">主线程休眠 100 毫秒时，其他线程的 worker 继续运行</p></div><div class="role workers"><h3>worker：按队列反复处理报文</h3><ul><li>worker 0：轮询两个网口各自的 RX 队列 0</li><li>worker 1：轮询两个网口各自的 RX 队列 1</li><li>每轮执行 RX burst → process_batch → 转发或释放</li></ul><p class="small">两个网口、每网口两个队列，对应两个 worker，不是四个</p></div></div><pre>示例分流关系（不是每包轮流分配）
+RSS → 网口 0 的 RX 队列 0 → worker 0 → 示例 lcore 1
+RSS → 网口 0 的 RX 队列 1 → worker 1 → 示例 lcore 2
+
+RSS 选择 RX 队列；runtime 把 queue_id 与 lcore_id 放在 worker 配置中
+启动时将这份配置传给工作函数，收包时按同一个 queue_id 读取</pre></section>
+<nav class="stage-nav" id="stage-nav" aria-label="启动阶段导航"><a href="#stage-0">0 · 先准备机器，程序还没运行</a><a href="#stage-1">1 · 程序先读懂运行环境和启动要求</a><a href="#stage-2">2 · 把收包需要的人和工具准备好</a><a href="#stage-3">3 · 准备配置管理，把对象连接起来</a><a href="#stage-4">4 · 开始运行：主线程管理，worker 收包</a><a href="#stage-5">5 · 先等人停下来，再收走工具</a></nav>
+<div class="tools"><button id="toggle-code" type="button" aria-pressed="false">展开全部源码片段</button><a href="#boundaries">直接看几个容易混淆的状态</a><a href="#glossary">查看术语对照</a></div>
+<section id="walkthrough" aria-label="分阶段源码对照"><article class="card step-card" id="stage-0"><div class="stage-label">阶段 0</div><h2>先准备机器，程序还没运行</h2><p class="question">调用 rte_eal_init 之前，大页和网卡由谁准备？</p><p>Linux 管理员或部署脚本先准备运行条件。采用大页和 VFIO 的物理网卡路径时，先预留大页、准备访问权限，再加载 VFIO 并绑定要使用的网卡。这里的操作在 dppd 进程之外。</p><pre>Linux 主机
+  ├─ 预留大页、按环境准备挂载和权限
+  └─ 按 PMD 要求准备内核驱动与设备绑定
+       ↓
+  执行 dppd，进入 main</pre><div class="result"><strong>走到这里：</strong>机器具备运行条件，dppd 还没有创建自己的报文池或开始处理包</div><div class="boundary">本项目没有自动预留大页的脚本；bind_nic.sh 只提供 VFIO 加载与绑定，run_platform.sh 只执行程序。mlx5 等驱动不照搬 VFIO 解绑步骤，--no-huge 和虚拟设备也有不同前提<p class="source"><a href="../../../scripts/bind_nic.sh">scripts/bind_nic.sh</a> · <a href="../../../scripts/run_platform.sh">scripts/run_platform.sh</a></p></div><p class="handoff"><strong>怎么接下一步：</strong>接下来程序才进入 main，让 EAL 使用这些资源</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">这行是程序内的 EAL 入口，启动前的主机准备不会出现在它前面的一组 C 调用里</p><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L394">app/dppd/main.c:394 · main</a></p><pre><code>    eal_consumed = rte_eal_init(argc, argv);
+    if (eal_consumed &lt; 0) {
+        fprintf(stderr, &quot;[dppd] EAL initialization failed\n&quot;);
+        return EXIT_FAILURE;
+    }</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-1"><div class="stage-label">阶段 1</div><h2>程序先读懂运行环境和启动要求</h2><p class="question">哪些参数交给 DPDK，哪些交给本项目？</p><p>main 先做运行范围检查，然后调用 EAL，准备 DPDK 的线程环境、内存映射并探测设备。EAL 处理完自己的参数后，剩余参数交给项目解析器，填写 config。</p><pre>dppd [DPDK 参数] -- [本项目参数]
+          │                  │
+          ▼                  ▼
+    rte_eal_init      dppd_config_parse
+    核心、内存、设备   网口、队列数、burst 等</pre><div class="result"><strong>走到这里：</strong>EAL 环境和 config 已准备好，worker 尚未执行业务收包循环</div><div class="boundary">EAL 初始化成功不等于业务开始收包；ethdev 是 DPDK 给应用使用的网口对象</div><p class="handoff"><strong>怎么接下一步：</strong>接下来按 config 真正准备报文池、队列和 worker 配置</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">先由 EAL 消费参数，再把剩下的部分交给本项目，最终结果放进 config</p><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L400">app/dppd/main.c:400 · main</a></p><pre><code>    argc -= eal_consumed;
+    argv += eal_consumed;
+    parse_result = dppd_config_parse(argc, argv, &amp;config);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L394">app/dppd/main.c:394 · main</a></p><pre><code>    eal_consumed = rte_eal_init(argc, argv);</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-2"><div class="stage-label">阶段 2</div><h2>把收包需要的人和工具准备好</h2><p class="question">网口、队列、mbuf 池和 worker 是怎样接起来的？</p><p>runtime_init 先给 worker 分配 lcore 和队列编号，再调用 devices_init 创建 mbuf 池、配置 RX/TX 队列并启动网口。此时准备的是工作配置和设备，业务循环还没有开始。</p><pre>runtime_init
+  ├─ worker 0：queue_id 0，示例选中 lcore 1
+  ├─ worker 1：queue_id 1，示例选中 lcore 2
+  └─ devices_init
+       → 创建 mbuf 池
+       → 每个网口建立 RX/TX 队列 0、1
+       → RX 队列记录使用哪个池
+       → 启动网口</pre><div class="result"><strong>走到这里：</strong>收发资源就位、网口已启动；worker 配置仍为 IDLE，尚未进入业务循环</div><div class="boundary">nb_queues 是每网口的队列数，也决定 worker 数。描述符默认每队列请求 1024 个并由设备调整，burst 32 只是每次收包上限，不要求凑齐</div><p class="handoff"><strong>怎么接下一步：</strong>接下来准备控制服务和管理入口，让 worker 启动后有规则可以读取</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">worker 配置把 queue_id 和 lcore_id 放在同一个对象里；devices_init 根据相同的队列数量建立网口资源</p><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L74">lib/runtime/runtime.c:74 · dppd_runtime_init</a></p><pre><code>        worker-&gt;runtime = runtime;
+        worker-&gt;lcore_id = selected[worker_index].lcore_id;
+        worker-&gt;socket_id = selected[worker_index].socket_id;
+        worker-&gt;queue_id = worker_index;
+        atomic_init(&amp;worker-&gt;state, DPPD_WORKER_IDLE);
+        atomic_init(&amp;worker-&gt;heartbeat_ms, 0);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L89">lib/runtime/runtime.c:89 · dppd_runtime_init</a></p><pre><code>    rc = dppd_devices_init(&amp;runtime-&gt;devices, cfg);
+    if (rc != 0)
+        return rc;</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-3"><div class="stage-label">阶段 3</div><h2>准备配置管理，把对象连接起来</h2><p class="question">worker 从哪里取得规则？dppctl 怎样找到程序？</p><p>main 初始化 control，并把 control 持有的软件后端地址绑定到 runtime。随后按需恢复配置、创建管理 socket。worker 启动后通过 runtime 取得后端；dppctl 则通过 socket 发送管理请求。</p><pre>control.software ──绑定地址──→ runtime.software_backend
+                                      ↑
+                                  worker 使用
+
+dppctl ──Unix socket──→ management ──处理请求──→ control</pre><div class="result"><strong>走到这里：</strong>数据面可以找到规则后端，管理入口也已建立，后续主线程循环负责处理请求</div><div class="boundary">此处只是准备和绑定对象；软件规则如何发布已经另有原理文档，不在这里重新展开</div><p class="handoff"><strong>怎么接下一步：</strong>资源和关联都准备好后，才能提交 worker 的业务任务</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">传递的是对象地址。控制服务持有后端，runtime 和 worker 借用它，退出时也必须考虑这个依赖</p><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L483">app/dppd/main.c:483 · main</a></p><pre><code>    dppd_runtime_set_software_backend(&amp;runtime, &amp;control.software);
+    control.conntrack = runtime.conntrack;
+    control.nd6 = runtime.nd6;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L525">app/dppd/main.c:525 · main</a></p><pre><code>    if (dppd_management_start(&amp;management, &amp;control, &amp;runtime.devices, &amp;runtime, config.control_socket) != 0) {
+        fprintf(stderr, &quot;[dppd] management socket initialization failed: %s\n&quot;, config.control_socket);
+        goto cleanup_control;
+    }</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-4"><div class="stage-label">阶段 4</div><h2>开始运行：主线程管理，worker 收包</h2><p class="question">调用 remote_launch 后，是谁在执行收包函数？</p><p>runtime_start 将工作函数和 worker 地址提交给选定 lcore。EAL 的工作线程执行 worker_main，完成规则读者注册后发布 RUNNING，再循环收包。主线程则继续执行管理循环，两边并行。</p><pre>主线程：runtime_start → 提交 worker 任务 → 管理循环
+                           │
+                           ├─ lcore 1：worker 0，轮询各网口队列 0
+                           └─ lcore 2：worker 1，轮询各网口队列 1
+
+worker：RX burst → process_batch → 转发或释放 → 下一轮
+主线程：检查设备/worker → 处理管理请求、维护统计 → 休眠后下一轮</pre><div class="result"><strong>走到这里：</strong>worker 正在处理包，主线程维持管理和监控；主线程休眠不会让 worker 一起休眠</div><div class="boundary">remote_launch 提交成功与 worker 已完成准备是两件事。STARTING 表示启动中，worker 完成注册后才报告 RUNNING；RSS 选择队列，runtime 决定哪个 lcore 的 worker 轮询它</div><p class="handoff"><strong>怎么接下一步：</strong>收到退出信号或发生无法继续的错误时，主线程进入停止流程</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">remote_launch 的三个参数分别是函数地址、传入的 worker 地址、目标 lcore；rx_burst 用同一份 worker 中的 queue_id 收包</p><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L186">lib/runtime/runtime.c:186 · dppd_runtime_start</a></p><pre><code>        rc = rte_eal_remote_launch(dppd_worker_main, worker, worker-&gt;lcore_id);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L515">lib/dataplane/worker.c:515 · process_ingress</a></p><pre><code>    uint16_t count = rte_eth_rx_burst(ingress-&gt;port_id, worker-&gt;queue_id, packets, worker-&gt;runtime-&gt;config.burst_size);
+    process_batch(worker, ingress, packets, count, false, 0);</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-5"><div class="stage-label">阶段 5</div><h2>先等人停下来，再收走工具</h2><p class="question">为什么发出停止请求后，不能马上释放内存？</p><p>request_stop 只设置停止标记。worker 观察到后退出循环、注销规则读者并返回；主线程必须通过 wait 确认任务结束，才继续清理规则、设备和内存池。</p><pre>关闭管理入口
+  → request_stop：发出停止请求
+  → worker：退出循环、注销读者、返回
+  → wait：主线程确认任务已结束
+  → 清理 control
+  → 清理 runtime：关闭网口，再释放 mbuf 池
+  → 清理 EAL，进程退出</pre><div class="result"><strong>走到这里：</strong>正常清理后，业务线程、规则对象、设备和池依次释放，最后结束 DPDK 环境</div><div class="boundary">STOP 请求不等于任务已退出；网口关闭前驱动仍可能持有 mbuf，所以池必须后释放。cleanup_* 是标签，goto 跳过去以后继续向下执行</div><p class="handoff"><strong>怎么接下一步：</strong>到这里形成一份完整地图；理解哪一段再对照那一段代码，不用重新遍历所有辅助函数</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">这里先关闭入口、通知停止，再等待。失败与恢复隔离有额外约束，本页先掌握正常退出的依赖顺序</p><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L700">app/dppd/main.c:700 · main</a></p><pre><code>    dppd_management_stop(&amp;management);
+    dppd_runtime_request_stop(&amp;runtime);
+    if (dppd_runtime_wait(&amp;runtime) != 0)
+        loop_error = -EIO;
+    dppd_runtime_stats_dump(&amp;runtime);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L277">lib/runtime/runtime.c:277 · dppd_runtime_wait</a></p><pre><code>        rc = rte_eal_wait_lcore(worker-&gt;lcore_id);
+        worker-&gt;launched = false;</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article></section>
+<section class="card" id="boundaries"><h2>每走完一段，程序到底变成了什么状态？</h2><div class="table-wrap"><table><thead><tr><th>走到哪里</th><th>已经完成什么</th><th>后面还要做什么</th></tr></thead><tbody>
+<tr><td>EAL 返回</td><td>DPDK 基础环境和设备探测完成</td><td>建立项目的池、队列和业务对象</td></tr>
+<tr><td>runtime_init 返回</td><td>worker 配置、池、队列就位，网口已启动</td><td>准备控制关联，再提交 worker 任务</td></tr>
+<tr><td>remote_launch 成功</td><td>启动任务提交成功</td><td>worker 完成读者注册并报告 RUNNING</td></tr>
+<tr><td>worker 为 RUNNING</td><td>工作函数已完成前置准备，进入业务循环</td><td>持续收包，直至停止或门禁生效</td></tr>
+<tr><td>request_stop 已调用</td><td>停止标记已设置</td><td>worker 退出循环，主线程等待返回</td></tr>
+<tr><td>worker 全部返回</td><td>不会再继续使用规则和设备</td><td>清理后端、关闭设备、释放池，最后清理 EAL</td></tr>
+</tbody></table></div></section>
+<section class="card" id="glossary"><h2>看到术语时，先用这张表翻译</h2><div class="table-wrap"><table class="glossary"><thead><tr><th>代码里的名字</th><th>在这份例子里怎么理解</th></tr></thead><tbody>
+<tr><td>网口 / port</td><td>程序收发报文的入口或出口，用 DPDK port ID 标识</td></tr>
+<tr><td>RX / TX 队列</td><td>RX 是接收通道，TX 是发送通道；不同网口的队列 0 是各自独立的队列</td></tr>
+<tr><td>mbuf / pool</td><td>mbuf 保存报文描述信息并关联数据缓冲；pool 把这些对象集中起来供反复取用和归还</td></tr>
+<tr><td>worker / lcore</td><td>worker 是项目的一份工作配置及其收包任务；lcore 是 DPDK 安排任务执行的编号，二者与队列分别编号</td></tr>
+<tr><td>EAL / PMD</td><td>EAL 准备 DPDK 基础环境；PMD 是具体设备的用户态驱动实现，负责队列配置和收发操作</td></tr>
+<tr><td>config / runtime</td><td>config 描述启动要求；runtime 保存按要求创建的设备、worker 及运行对象</td></tr>
+<tr><td>control / management</td><td>control 负责配置规则；management 通过 socket 接收请求并交给控制层</td></tr>
+<tr><td>RSS / QSBR</td><td>RSS 把报文分到 RX 队列；QSBR 帮助确认旧规则表何时不再被读者使用。二者解决不同问题</td></tr>
+</tbody></table></div></section>
+<section class="card"><h2>现在怎么学，不用重新背所有函数</h2><p>先只看全景和主线程/worker 分工，再从阶段 0 开始。每到一段，只说清“谁做、准备什么、结果放哪里、下一段用它做什么”，然后用该段的短代码核对。</p><p class="stop-note"><strong>当前停点：</strong>回到程序全貌重新建立理解。页面点击和源码已经讲过，都不表示你已经掌握；连接跟踪与 NAT 留到这张地图读顺后再展开。</p><p>配套材料：<a href="../packet-path/software-packet-learning.html">一个包的处理流程</a> · <a href="../diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html">mbuf 循环图</a> · <a href="../rule-management-principles.md">规则管理原理参考</a></p></section>
+<footer class="footer"><p>本页讲普通启动的成功主线，省略恢复隔离、受管理入口、热复位和可选协议功能的详细分支。源码片段由 build.py 从当前工作区提取，修改注释后重新构建即可刷新行号；本页不配置系统、不启动 DPDK，也不代表实机验收。</p><a href="#top" class="back-top">返回顶部 ↑</a></footer>
+</main><script>
+const toggler=document.getElementById('toggle-code');
+toggler.addEventListener('click',()=>{const open=toggler.getAttribute('aria-pressed')!=='true';document.querySelectorAll('details.source-detail').forEach(d=>d.open=open);toggler.setAttribute('aria-pressed',String(open));toggler.textContent=open?'收起全部源码片段':'展开全部源码片段';});
+document.querySelectorAll('details.source-detail').forEach(d=>d.addEventListener('toggle',()=>{const all=[...document.querySelectorAll('details.source-detail')].every(x=>x.open);toggler.setAttribute('aria-pressed',String(all));toggler.textContent=all?'收起全部源码片段':'展开全部源码片段';}));
+function markStage(){const id=location.hash;document.querySelectorAll('#stage-nav a').forEach(a=>{if(a.getAttribute('href')===id)a.setAttribute('aria-current','step');else a.removeAttribute('aria-current');});}
+window.addEventListener('hashchange',markStage);markStage();
+</script></body></html>

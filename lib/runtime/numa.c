@@ -4,6 +4,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/**
+ * 从 cpus 候选中选出 workers 个不同 lcore，将结果写入 selected，不创建或启动线程
+ * 优先与更多网口同 NUMA 节点，再比较该节点已选数量，最后按 lcore 编号决定
+ * 成功返回 0，候选不足返回 -ENOSPC，参数或重复 lcore 编号无效返回 -EINVAL
+ */
 int dppd_numa_select(const struct dppd_numa_cpu *cpus, uint32_t cpu_count, const int *port_sockets, uint16_t port_count,
     uint16_t workers, struct dppd_numa_cpu *selected)
 {

@@ -156,6 +156,16 @@ static void collect(struct dppd_conntrack *table, uint64_t now, uint32_t budget)
     }
 }
 
+/**
+ * 创建 IPv4/IPv6 共用的空会话表，通过 result 交回地址，不在启动时创建具体连接
+ * capacity 是两个地址族合计的会话容量，timeout_s 是已建立会话的空闲超时秒数
+ *
+ * 检查容量及 NAT 配置 → 分配会话数组、哈希桶和空闲槽位数组 → 初始化表锁
+ *   → 保存可选 SNAT/DNAT 配置，预留静态映射端口 → 交回空表
+ *
+ * 未启用 NAT 也可跟踪连接；运行时会话只保存在内存，重启后重新建立
+ * 成功返回 0，失败返回负错误码；表由 runtime 在全部 worker 退出后销毁
+ */
 int dppd_conntrack_create_dual(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
     const struct dppd_snat_config *snat, const struct dppd_snat_config *snat6, const struct dppd_dnat_rule *dnat,
     uint32_t dnat_count)

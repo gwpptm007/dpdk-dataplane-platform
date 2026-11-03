@@ -38,7 +38,7 @@ def step(s):
     related=[ref(*item) for item in s.get('related',[])]
     result={**s,**r,'related':related}; evidence.append(r); evidence.extend(related)
     return result
-allpages=LEGACY+[(c["id"],c["title"],OUT/("section-"+c["id"]+".html")) for c in chapters]
+allpages=LEGACY+[(c["id"],c["title"],OUT/("section-"+c["id"]+".html")) for c in chapters]+[("3.1","程序从启动到退出",OUT/"startup/index.html")]
 def nav(base,current):
     links=['<a href="'+H(rel(OUT/"index.html",base))+'">学习目录</a>']
     for id,title,path in allpages:
@@ -116,6 +116,23 @@ for i,c in enumerate(chapters):
     text=(OUT/"install-template.html").read_text(encoding="utf-8") if c["id"]=="2.1" else template
     for key,value in replacements.items(): text=text.replace("__"+key+"__",value)
     (OUT/("section-"+c["id"]+".html")).write_text(text.rstrip()+"\n",encoding="utf-8")
+# The startup guide keeps its plain-language overview visible; code is optional.
+startup=json.loads((OUT/"startup/guide.json").read_text(encoding="utf-8"))
+startup_sections=[]
+startup_nav=[]
+for number,s in enumerate(startup["steps"]):
+    source=ref(**s["code"])
+    related=[ref(*item) for item in s.get("related",[])]
+    evidence.extend([source,*related])
+    blocks=[]
+    for item in [source,*related]:
+        blocks.append('<div class="code-block"><p class="source"><a href="../'+H(item["sourceHref"])+'">'+H(item["file"])+':'+str(item["line"])+" · "+H(item["fn"])+'</a></p><pre><code>'+H(item["code"])+"</code></pre></div>")
+    extra_links='<p class="source"><a href="../../../scripts/bind_nic.sh">scripts/bind_nic.sh</a> · <a href="../../../scripts/run_platform.sh">scripts/run_platform.sh</a></p>' if number==0 else ''
+    startup_nav.append('<a href="#'+H(s["id"])+'">'+str(number)+" · "+H(s["title"])+"</a>")
+    startup_sections.append('<article class="card step-card" id="'+H(s["id"])+'"><div class="stage-label">阶段 '+str(number)+'</div><h2>'+H(s["title"])+'</h2><p class="question">'+H(s["question"])+'</p><p>'+H(s["plain"])+'</p><pre>'+H(s["flow"])+'</pre><div class="result"><strong>走到这里：</strong>'+H(s["result"])+'</div><div class="boundary">'+H(s["boundary"])+extra_links+'</div><p class="handoff"><strong>怎么接下一步：</strong>'+H(s["next"])+'</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">'+H(s["code_note"])+"</p>"+''.join(blocks)+'</details><a class="back-top" href="#overview">回到全景 ↑</a></article>')
+startup_html=(OUT/"startup/template.html").read_text(encoding="utf-8").replace("__STAGE_NAV__",''.join(startup_nav)).replace("__STAGES__",''.join(startup_sections))
+(OUT/"startup/index.html").write_text(startup_html.rstrip()+"\n",encoding="utf-8")
+
 # Resolve progress links from the current source instead of storing line numbers.
 current_ref=ref(progress["current"]["file"],progress["current"]["fn"])
 next_ref=ref(progress["next"]["file"],progress["next"]["fn"])
@@ -140,17 +157,17 @@ progress_panel='''<section class="card learning-progress" id="learning-progress"
 <h2 id="progress-title">当前停在：'''+H(progress["current"]["title"])+'''</h2>
 <p>'''+H(progress["summary"])+'''</p>
 <div class="progress-grid"><div><h3>刚读到哪里</h3><p>'''+H(progress["current"]["description"])+'''</p>
-<p><a href="'''+H(progress["current"]["review_href"])+'''">回顾 2.3 的规则记录</a> · <a href="'''+H(current_ref["sourceHref"])+'''">'''+H(current_ref["fn"])+''' 源码</a></p></div>
+<p><a href="'''+H(progress["current"]["review_href"])+'''">'''+H(progress["current"].get("review_label","回顾当前内容"))+'''</a> · <a href="'''+H(current_ref["sourceHref"])+'''">'''+H(current_ref["fn"])+''' 源码</a></p></div>
 <div class="next-reading"><h3>下一步：'''+H(progress["next"]["title"])+'''</h3><p>'''+H(progress["next"]["description"])+'''</p>
-<a class="resume-link" id="resume-learning" href="'''+H(progress["next"]["href"])+'''">继续学习 · 2.4 配置保存 →</a>
-<p class="progress-sources"><a href="'''+H(caller_ref["sourceHref"])+'''">control.c 的调用位置</a> · <a href="'''+H(next_ref["sourceHref"])+'''">'''+H(next_ref["fn"])+''' 源码</a></p></div></div>
+<a class="resume-link" id="resume-learning" href="'''+H(progress["next"]["href"])+'''">'''+H(progress["next"].get("link_label","继续学习"))+''' →</a>
+<p class="progress-sources"><a href="'''+H(caller_ref["sourceHref"])+'''">'''+H(progress["next"].get("caller_label","查看调用位置"))+'''</a> · <a href="'''+H(next_ref["sourceHref"])+'''">'''+H(next_ref["fn"])+''' 源码</a></p></div></div>
 <p class="progress-note">'''+H(progress["next"]["note"])+'''</p><details><summary>最近这轮走读的调用链</summary><pre>'''+H(progress["recent_flow"])+'''</pre></details>
 '''+material_links+'''<p class="progress-note">'''+H(progress["basis"])+'''；页面点击只切换内容，进度由学习记录维护</p></section>'''
 follow_up=''.join('<li><a href="'+H(s["href"])+'">'+H(s["title"])+'</a>：'+H(s["detail"])+'</li>' for s in progress["follow_up"])
 later='；'.join(H(s) for s in progress["later"])
 index='''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DPDK 源码学习目录</title><style>'''+style+'''
 .entries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:20px 0}.entry{text-decoration:none}.entry p{font-size:13px;color:var(--muted)}.entry .study-status{font-weight:700;color:var(--blue)}.flows{display:grid;grid-template-columns:1fr 1fr;gap:14px}.learning-progress{margin:20px 0;border-top:4px solid var(--blue)}.learning-progress h2{font-size:22px}.learning-progress h3{font-size:16px;margin:0 0 10px}.progress-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px;margin:20px 0}.next-reading{padding:18px;background:#eef4fb;border-radius:8px}.resume-link{display:inline-block;background:var(--blue);color:white;padding:10px 16px;border-radius:6px;text-decoration:none;font-weight:700}.progress-note,.progress-sources{font-size:13px;color:var(--muted)}.progress-sources a{overflow-wrap:anywhere}.learning-progress summary{cursor:pointer;color:var(--blue)}.learning-progress pre{white-space:pre-wrap;overflow-wrap:anywhere}.follow-up li{margin:10px 0}@media(max-width:800px){.entries,.flows,.progress-grid{grid-template-columns:1fr}main{padding:18px}} </style><main>
-<header><div><div class="eyebrow">源码学习 · 当前阶段整理</div><h1>一个包怎样处理，一条规则怎样生效</h1><p class="sub">从当前源码出发，按调用关系阅读；材料已整理与个人已经掌握是两件事</p></div></header>
+<header><div><div class="eyebrow">源码学习 · 当前阶段整理</div><h1>先看程序全貌，再读报文与规则</h1><p class="sub">先分清准备、运行和退出，再顺着调用关系读代码；材料已整理与个人已经掌握是两件事</p></div></header>
 '''+progress_panel+'''
 <section class="flows"><div class="card"><h2>第 1 章 · 报文处理</h2><pre>收包 → 逐包解析 → 软件规则匹配
   → 路由 / 端口配对 → 静态邻居 / ND

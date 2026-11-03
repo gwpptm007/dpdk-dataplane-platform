@@ -166,11 +166,15 @@ static enum dppd_drop_reason stateful_error(int error)
 }
 
 /**
- * 结合连接状态生成处理决定，完成报文校验、会话/NAT 准备及策略匹配
- * 流程：准备候选会话 → 构造 policy → routed_decide → 改写报文 → 提交或取消会话
- * policy 使用会话得到的逻辑地址和端口匹配规则，packet 保留原包字段供改写校验
- * decision 输出动作与出口，mbuf 可能被改写函数替换，实际发送与丢弃仍由 process_batch 执行
- * 放行且改写成功才提交会话，失败取消候选并归还临时 NAT 端口，不刷新会话超时
+ * 为启用连接跟踪的报文生成处理决定，按会话状态匹配策略，并完成必要的报文改写
+ *
+ * 校验报文 → conntrack_begin：查已有会话或准备新候选，取得连接状态
+ *   → policy：把连接状态和逻辑地址交给 routed_decide 匹配规则、选择出口
+ *   → 放行且出口可用：改写报文 → conntrack_finish 提交会话
+ *   → 拒绝或中途失败：取消候选，不刷新已有会话的超时
+ *
+ * packet 保留原包解析结果，policy 是策略匹配使用的副本，decision 输出动作和出口
+ * 本函数更新会话后才交回 process_batch 发送，提交会话不代表驱动已接收或对端已收到
  */
 static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **mbuf,
     int parsed, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision,
@@ -498,7 +502,9 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
 }
 
 /**
- * 从入口端口的当前 worker 队列收包，再交给本文件的 process_batch 处理
+ * 从当前网口的 worker->queue_id 队列收包，再交给 process_batch 处理
+ * queue_id 在 runtime_init 中分配，runtime_start 把同一份 worker 配置交给指定 lcore
+ * RSS 将包分到 RX 队列，本函数按相同编号取出；不同网口的同编号队列仍是各自独立的队列
  */
 static void process_ingress(struct dppd_worker *worker, const struct dppd_port *ingress)
 {
@@ -539,7 +545,15 @@ static void process_waiting(struct dppd_worker *worker)
     }
 }
 
-/** 工作线程先登记为规则读者，再循环处理端口；收到停止请求后注销并返回 */
+/**
+ * EAL 在选定 lcore 上执行的工作函数，arg 是 runtime_start 传入的 worker 地址
+ *
+ * 取得 worker 和 runtime → 注册软件规则、路由读者 → 发布 RUNNING 状态
+ *   → 循环：处理等待报文 → 扫描各网口的本 worker 队列 → 报告安全点和心跳
+ *   → 停止或设备门禁生效：退出循环 → 注销读者 → 发布 STOPPED，返回 0
+ *
+ * 参数或读者注册失败返回 -1，尚未进入正常收包循环
+ */
 int dppd_worker_main(void *arg)
 {
     struct dppd_worker *worker = arg;

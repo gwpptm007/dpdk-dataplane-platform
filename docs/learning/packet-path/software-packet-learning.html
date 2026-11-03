@@ -15,7 +15,7 @@ main{max-width:1280px;margin:auto;padding:26px 32px 32px}header{display:flex;jus
 <body>
 <main>
 <header><div><div class="eyebrow">第 1 章 · 报文处理流程 / 1.1 收发与归属</div><h1>先看包，再看 count 和 sent</h1><p class="sub">上面看三个包的去向，下面点步骤看对应代码</p></div><div style="text-align:right"><a href="../packet-parse/packet-parse-learning.html">下一节 · 1.2 报文解析 →</a><br><a href="../../../.archify/workflow-software-packet-path-20261020-143318/software-packet-path.html" class="small">打开完整流程图 ↗</a></div></header>
-<nav id="stage-nav" class="stage-nav" aria-label="完整章节导航"><a href="../index.html">学习目录</a> · <a aria-current="page" href="software-packet-learning.html">1.1 收发与归属</a> · <a href="../packet-parse/packet-parse-learning.html">1.2 报文解析</a> · <a href="../software-rules/software-rules-learning.html">1.3 软件规则</a> · <a href="../section-1.4.html">1.4 出口选择与 IPv6 邻居等待</a> · <a href="../section-1.5.html">1.5 报文改写、发送与归属</a> · <a href="../section-2.1.html">2.1 规则安装与事务回调</a> · <a href="../section-2.2.html">2.2 匹配表、快照发布与 QSBR</a> · <a href="../section-2.3.html">2.3 规则的保存、查找、修改与删除</a> · <a href="../section-2.4.html">2.4 删除、回滚与保存边界</a></nav>
+<nav id="stage-nav" class="stage-nav" aria-label="完整章节导航"><a href="../index.html">学习目录</a> · <a aria-current="page" href="software-packet-learning.html">1.1 收发与归属</a> · <a href="../packet-parse/packet-parse-learning.html">1.2 报文解析</a> · <a href="../software-rules/software-rules-learning.html">1.3 软件规则</a> · <a href="../section-1.4.html">1.4 出口选择与 IPv6 邻居等待</a> · <a href="../section-1.5.html">1.5 报文改写、发送与归属</a> · <a href="../section-2.1.html">2.1 规则安装与事务回调</a> · <a href="../section-2.2.html">2.2 匹配表、快照发布与 QSBR</a> · <a href="../section-2.3.html">2.3 规则的保存、查找、修改与删除</a> · <a href="../section-2.4.html">2.4 删除、回滚与保存边界</a> · <a href="../startup/index.html">3.1 程序从启动到退出</a></nav>
 <nav aria-label="章节导航" class="small" style="margin-top:12px"><strong style="color:var(--blue)">1.1 收发与归属（当前）</strong> → <a href="../packet-parse/packet-parse-learning.html">1.2 报文解析</a> → <a href="../software-rules/software-rules-learning.html">1.3 软件规则</a> <span>｜<a href="../section-1.4.html">继续 1.4 出口选择与 ND</a></span></nav>
 <div class="scope">本例：IPv4 端口配对转发，未启用连接跟踪 / NAT；假设 A 被规则丢弃，B、C 通过检查并走同一出口，提交前出口仍可用</div>
 <section class="journey" aria-label="三个包的完整去向">
@@ -49,21 +49,21 @@ main{max-width:1280px;margin:auto;padding:26px 32px 32px}header{display:flex;jus
 'use strict';
 const steps = [
 {title:'1 · 收到 3 个包，再交给 process_batch',
- location:"lib/dataplane/worker.c:503 · process_ingress",
+ location:"lib/dataplane/worker.c:509 · process_ingress",
  explain:'rte_eth_rx_burst 返回本次实际收到的数量。process_ingress 把报文指针数组和这个数量传给 process_batch，接下来逐包处理。',
  input:'网卡 RX 队列中可接收的报文',
  output:'rx = [A, B, C]，received = 3；三个 mbuf 都由 worker 持有',
  code:'uint16_t count = rte_eth_rx_burst(ingress->port_id,\n    worker->queue_id, packets, worker->runtime->config.burst_size);\nprocess_batch(worker, ingress, packets, count, false, 0);',
  note:'这里 process_ingress 的 count 是收包数量 3；后面 flush_egress 的 count 是某个出口的待发送数量，本例为 2'},
 {title:'2 · 逐包解析、生成决定；A 在这里释放',
- location:"lib/dataplane/worker.c:265 · process_batch → lib/dataplane/packet_mbuf.c:17 · dppd_packet_parse_mbuf → lib/dataplane/worker.c:102 · routed_decide → lib/dataplane/pipeline.c:13 · dppd_pipeline_decide_counted",
+ location:"lib/dataplane/worker.c:269 · process_batch → lib/dataplane/packet_mbuf.c:17 · dppd_packet_parse_mbuf → lib/dataplane/worker.c:102 · routed_decide → lib/dataplane/pipeline.c:13 · dppd_pipeline_decide_counted",
  explain:'循环对 A、B、C 分别解析并生成 decision。本例 A 命中丢弃规则，worker 释放 A 后 continue，接着处理 B、C。',
  input:'当前包 rx[i]，以及它解析出的 packet 字段',
  output:'A 已释放；B、C 得到 FORWARD，随后继续检查出口',
  code:'int parsed = dppd_packet_parse_mbuf(rx[i], &packet);\nrouted_decide(runtime, ingress->port_id, parsed,\n    &packet, &decision, &rule_counts);\n\nif (decision.action != DPPD_PACKET_FORWARD) {\n    /* 此处省略统计 */\n    rte_pktmbuf_free(rx[i]);\n    continue;\n}',
  note:'decision 决定怎么处理；真正释放 mbuf 的是 process_batch 中的 rte_pktmbuf_free。continue 只跳过当前包'},
 {title:'3 · 只把 B、C 加进出口的待发送数组',
- location:"lib/dataplane/worker.c:265 · process_batch",
+ location:"lib/dataplane/worker.c:269 · process_batch",
  explain:'B、C 通过出口等检查，依次追加到同一出口的 tx[index]。循环结束后，worker 把该出口数组和数量交给 flush_egress。',
  input:'允许转发的 B、C；本例两包走同一个出口',
  output:'packets = [B, C]，count = 2；此时 B、C 仍由 worker 持有',
@@ -134,7 +134,7 @@ window.addEventListener('hashchange',()=>{selected=stepFromHash();renderDetail()
 render();
 </script>
 <script id="review-source-script">
-(()=>{const refs=[[{"href": "../sources/lib__dataplane__worker.c.html#L503", "label": "lib/dataplane/worker.c · process_ingress · L503"}], [{"href": "../sources/lib__dataplane__worker.c.html#L265", "label": "lib/dataplane/worker.c · process_batch · L265"}, {"href": "../sources/lib__dataplane__packet_mbuf.c.html#L17", "label": "lib/dataplane/packet_mbuf.c · dppd_packet_parse_mbuf · L17"}, {"href": "../sources/lib__dataplane__worker.c.html#L102", "label": "lib/dataplane/worker.c · routed_decide · L102"}, {"href": "../sources/lib__dataplane__pipeline.c.html#L13", "label": "lib/dataplane/pipeline.c · dppd_pipeline_decide_counted · L13"}], [{"href": "../sources/lib__dataplane__worker.c.html#L265", "label": "lib/dataplane/worker.c · process_batch · L265"}], [{"href": "../sources/lib__dataplane__worker.c.html#L50", "label": "lib/dataplane/worker.c · flush_egress · L50"}], [{"href": "../sources/lib__dataplane__worker.c.html#L62", "label": "lib/dataplane/worker.c · flush_egress · L62"}]];const loc=document.getElementById('detail-location');const box=document.createElement('div');box.className='source-review';box.id='review-sources';loc.after(box);
+(()=>{const refs=[[{"href": "../sources/lib__dataplane__worker.c.html#L509", "label": "lib/dataplane/worker.c · process_ingress · L509"}], [{"href": "../sources/lib__dataplane__worker.c.html#L269", "label": "lib/dataplane/worker.c · process_batch · L269"}, {"href": "../sources/lib__dataplane__packet_mbuf.c.html#L17", "label": "lib/dataplane/packet_mbuf.c · dppd_packet_parse_mbuf · L17"}, {"href": "../sources/lib__dataplane__worker.c.html#L102", "label": "lib/dataplane/worker.c · routed_decide · L102"}, {"href": "../sources/lib__dataplane__pipeline.c.html#L13", "label": "lib/dataplane/pipeline.c · dppd_pipeline_decide_counted · L13"}], [{"href": "../sources/lib__dataplane__worker.c.html#L269", "label": "lib/dataplane/worker.c · process_batch · L269"}], [{"href": "../sources/lib__dataplane__worker.c.html#L50", "label": "lib/dataplane/worker.c · flush_egress · L50"}], [{"href": "../sources/lib__dataplane__worker.c.html#L62", "label": "lib/dataplane/worker.c · flush_egress · L62"}]];const loc=document.getElementById('detail-location');const box=document.createElement('div');box.className='source-review';box.id='review-sources';loc.after(box);
 function sync(){const b=document.querySelector('[data-step][aria-current=step]');const i=b?Number(b.dataset.step):0;box.replaceChildren();for(const r of refs[i]){const a=document.createElement('a');a.href=r.href;a.textContent=r.label;a.target='_blank';a.rel='noopener';box.append(a,document.createElement('br'));}}
 new MutationObserver(sync).observe(loc,{childList:true,characterData:true,subtree:true});sync();})();
 </script></body>

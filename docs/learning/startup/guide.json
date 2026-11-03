@@ -1,0 +1,82 @@
+{
+  "title": "程序从启动到退出",
+  "steps": [
+    {
+      "id": "stage-0",
+      "title": "先准备机器，程序还没运行",
+      "question": "调用 rte_eal_init 之前，大页和网卡由谁准备？",
+      "plain": "Linux 管理员或部署脚本先准备运行条件。采用大页和 VFIO 的物理网卡路径时，先预留大页、准备访问权限，再加载 VFIO 并绑定要使用的网卡。这里的操作在 dppd 进程之外。",
+      "flow": "Linux 主机\n  ├─ 预留大页、按环境准备挂载和权限\n  └─ 按 PMD 要求准备内核驱动与设备绑定\n       ↓\n  执行 dppd，进入 main",
+      "result": "机器具备运行条件，dppd 还没有创建自己的报文池或开始处理包",
+      "next": "接下来程序才进入 main，让 EAL 使用这些资源",
+      "boundary": "本项目没有自动预留大页的脚本；bind_nic.sh 只提供 VFIO 加载与绑定，run_platform.sh 只执行程序。mlx5 等驱动不照搬 VFIO 解绑步骤，--no-huge 和虚拟设备也有不同前提",
+      "code": {"file": "app/dppd/main.c", "fn": "main", "anchor": "eal_consumed = rte_eal_init(argc, argv);", "n": 5},
+      "code_note": "这行是程序内的 EAL 入口，启动前的主机准备不会出现在它前面的一组 C 调用里"
+    },
+    {
+      "id": "stage-1",
+      "title": "程序先读懂运行环境和启动要求",
+      "question": "哪些参数交给 DPDK，哪些交给本项目？",
+      "plain": "main 先做运行范围检查，然后调用 EAL，准备 DPDK 的线程环境、内存映射并探测设备。EAL 处理完自己的参数后，剩余参数交给项目解析器，填写 config。",
+      "flow": "dppd [DPDK 参数] -- [本项目参数]\n          │                  │\n          ▼                  ▼\n    rte_eal_init      dppd_config_parse\n    核心、内存、设备   网口、队列数、burst 等",
+      "result": "EAL 环境和 config 已准备好，worker 尚未执行业务收包循环",
+      "next": "接下来按 config 真正准备报文池、队列和 worker 配置",
+      "boundary": "EAL 初始化成功不等于业务开始收包；ethdev 是 DPDK 给应用使用的网口对象",
+      "code": {"file": "app/dppd/main.c", "fn": "main", "anchor": "argc -= eal_consumed;", "n": 3},
+      "related": [["app/dppd/main.c", "main", "eal_consumed = rte_eal_init(argc, argv);", 1]],
+      "code_note": "先由 EAL 消费参数，再把剩下的部分交给本项目，最终结果放进 config"
+    },
+    {
+      "id": "stage-2",
+      "title": "把收包需要的人和工具准备好",
+      "question": "网口、队列、mbuf 池和 worker 是怎样接起来的？",
+      "plain": "runtime_init 先给 worker 分配 lcore 和队列编号，再调用 devices_init 创建 mbuf 池、配置 RX/TX 队列并启动网口。此时准备的是工作配置和设备，业务循环还没有开始。",
+      "flow": "runtime_init\n  ├─ worker 0：queue_id 0，示例选中 lcore 1\n  ├─ worker 1：queue_id 1，示例选中 lcore 2\n  └─ devices_init\n       → 创建 mbuf 池\n       → 每个网口建立 RX/TX 队列 0、1\n       → RX 队列记录使用哪个池\n       → 启动网口",
+      "result": "收发资源就位、网口已启动；worker 配置仍为 IDLE，尚未进入业务循环",
+      "next": "接下来准备控制服务和管理入口，让 worker 启动后有规则可以读取",
+      "boundary": "nb_queues 是每网口的队列数，也决定 worker 数。描述符默认每队列请求 1024 个并由设备调整，burst 32 只是每次收包上限，不要求凑齐",
+      "code": {"file": "lib/runtime/runtime.c", "fn": "dppd_runtime_init", "anchor": "worker->runtime = runtime;", "n": 6},
+      "related": [["lib/runtime/runtime.c", "dppd_runtime_init", "rc = dppd_devices_init(&runtime->devices, cfg);", 3]],
+      "code_note": "worker 配置把 queue_id 和 lcore_id 放在同一个对象里；devices_init 根据相同的队列数量建立网口资源"
+    },
+    {
+      "id": "stage-3",
+      "title": "准备配置管理，把对象连接起来",
+      "question": "worker 从哪里取得规则？dppctl 怎样找到程序？",
+      "plain": "main 初始化 control，并把 control 持有的软件后端地址绑定到 runtime。随后按需恢复配置、创建管理 socket。worker 启动后通过 runtime 取得后端；dppctl 则通过 socket 发送管理请求。",
+      "flow": "control.software ──绑定地址──→ runtime.software_backend\n                                      ↑\n                                  worker 使用\n\ndppctl ──Unix socket──→ management ──处理请求──→ control",
+      "result": "数据面可以找到规则后端，管理入口也已建立，后续主线程循环负责处理请求",
+      "next": "资源和关联都准备好后，才能提交 worker 的业务任务",
+      "boundary": "此处只是准备和绑定对象；软件规则如何发布已经另有原理文档，不在这里重新展开",
+      "code": {"file": "app/dppd/main.c", "fn": "main", "anchor": "dppd_runtime_set_software_backend(&runtime, &control.software);", "n": 3},
+      "related": [["app/dppd/main.c", "main", "if (dppd_management_start(&management, &control, &runtime.devices, &runtime, config.control_socket) != 0)", 4]],
+      "code_note": "传递的是对象地址。控制服务持有后端，runtime 和 worker 借用它，退出时也必须考虑这个依赖"
+    },
+    {
+      "id": "stage-4",
+      "title": "开始运行：主线程管理，worker 收包",
+      "question": "调用 remote_launch 后，是谁在执行收包函数？",
+      "plain": "runtime_start 将工作函数和 worker 地址提交给选定 lcore。EAL 的工作线程执行 worker_main，完成规则读者注册后发布 RUNNING，再循环收包。主线程则继续执行管理循环，两边并行。",
+      "flow": "主线程：runtime_start → 提交 worker 任务 → 管理循环\n                           │\n                           ├─ lcore 1：worker 0，轮询各网口队列 0\n                           └─ lcore 2：worker 1，轮询各网口队列 1\n\nworker：RX burst → process_batch → 转发或释放 → 下一轮\n主线程：检查设备/worker → 处理管理请求、维护统计 → 休眠后下一轮",
+      "result": "worker 正在处理包，主线程维持管理和监控；主线程休眠不会让 worker 一起休眠",
+      "next": "收到退出信号或发生无法继续的错误时，主线程进入停止流程",
+      "boundary": "remote_launch 提交成功与 worker 已完成准备是两件事。STARTING 表示启动中，worker 完成注册后才报告 RUNNING；RSS 选择队列，runtime 决定哪个 lcore 的 worker 轮询它",
+      "code": {"file": "lib/runtime/runtime.c", "fn": "dppd_runtime_start", "anchor": "rc = rte_eal_remote_launch(dppd_worker_main, worker, worker->lcore_id);", "n": 1},
+      "related": [["lib/dataplane/worker.c", "process_ingress", "uint16_t count = rte_eth_rx_burst", 2]],
+      "code_note": "remote_launch 的三个参数分别是函数地址、传入的 worker 地址、目标 lcore；rx_burst 用同一份 worker 中的 queue_id 收包"
+    },
+    {
+      "id": "stage-5",
+      "title": "先等人停下来，再收走工具",
+      "question": "为什么发出停止请求后，不能马上释放内存？",
+      "plain": "request_stop 只设置停止标记。worker 观察到后退出循环、注销规则读者并返回；主线程必须通过 wait 确认任务结束，才继续清理规则、设备和内存池。",
+      "flow": "关闭管理入口\n  → request_stop：发出停止请求\n  → worker：退出循环、注销读者、返回\n  → wait：主线程确认任务已结束\n  → 清理 control\n  → 清理 runtime：关闭网口，再释放 mbuf 池\n  → 清理 EAL，进程退出",
+      "result": "正常清理后，业务线程、规则对象、设备和池依次释放，最后结束 DPDK 环境",
+      "next": "到这里形成一份完整地图；理解哪一段再对照那一段代码，不用重新遍历所有辅助函数",
+      "boundary": "STOP 请求不等于任务已退出；网口关闭前驱动仍可能持有 mbuf，所以池必须后释放。cleanup_* 是标签，goto 跳过去以后继续向下执行",
+      "code": {"file": "app/dppd/main.c", "fn": "main", "anchor": "dppd_management_stop(&management);", "n": 5},
+      "related": [["lib/runtime/runtime.c", "dppd_runtime_wait", "rc = rte_eal_wait_lcore(worker->lcore_id);", 3]],
+      "code_note": "这里先关闭入口、通知停止，再等待。失败与恢复隔离有额外约束，本页先掌握正常退出的依赖顺序"
+    }
+  ]
+}

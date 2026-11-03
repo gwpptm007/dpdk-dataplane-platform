@@ -3,7 +3,7 @@
     "title": "1 · 从 worker 进入决策流程",
     "short": "从解析结果进入决策",
     "fn": "process_batch → routed_decide → pipeline",
-    "location": "lib/dataplane/worker.c:333 · process_batch → lib/dataplane/worker.c:102 · routed_decide → lib/dataplane/pipeline.c:13 · dppd_pipeline_decide_counted",
+    "location": "lib/dataplane/worker.c:337 · process_batch → lib/dataplane/worker.c:102 · routed_decide → lib/dataplane/pipeline.c:13 · dppd_pipeline_decide_counted",
     "explain": "1.2 返回后，worker 已有 parsed 和 packet。本例未启用连接跟踪，因此调用 routed_decide，再由它调用 pipeline 生成 decision；这一段只计算处理结果，发送或释放仍由 worker 执行",
     "input": "parsed = OK；packet 中的目的端口 = {port}；入口端口 0",
     "output": "把 parsed、packet、入口及配置交给 pipeline，decision 作为结果区传入",
@@ -31,7 +31,7 @@
     "title": "3 · 读取已发布规则，取得两类匹配候选",
     "short": "读取规则并匹配 packet",
     "fn": "software_backend · active / ACL / exact",
-    "location": "lib/dataplane/software_backend.c:1278 · dppd_software_backend_decide_counted → lib/dataplane/acl.c:203 · dppd_acl_classify → lib/dataplane/exact.c:181 · dppd_exact_classify",
+    "location": "lib/dataplane/software_backend.c:1281 · dppd_software_backend_decide_counted → lib/dataplane/acl.c:203 · dppd_acl_classify → lib/dataplane/exact.c:181 · dppd_exact_classify",
     "explain": "软件后端读取已发布的规则快照 active。dppd_acl_classify 支持掩码、端口范围等条件，定位入口规则段后按优先顺序检查；dppd_exact_classify 用入口、地址族、TCP/UDP 类型及完整源/目的地址和端口组成键，做哈希查找。两者各返回本表选中的规则 tag，0 表示未命中，此时不执行动作",
     "input": "已发布的教学规则 R1：入口 0、IPv4/UDP、目的端口 9000 → DROP + COUNT",
     "output": {
@@ -51,7 +51,7 @@
     "title": "4 · 只选定一条规则，再处理它的动作",
     "short": "确定 selected 规则",
     "fn": "software_backend · rule_before / selected",
-    "location": "lib/dataplane/software_backend.c:1312 · dppd_software_backend_decide_counted → lib/dataplane/software_backend.c:1220 · rule_before",
+    "location": "lib/dataplane/software_backend.c:1315 · dppd_software_backend_decide_counted → lib/dataplane/software_backend.c:1223 · rule_before",
     "explain": "先看本例：tag = 1、exact_tag = 0，保留 ACL 候选，再取 active->objects[0]。两类都命中时，rule_before 按 group、priority、id、tag 的顺序比较，前项相等才比较下一项，数值小的优先",
     "input": {
       "hit": "tag = 1，exact_tag = 0；假设 R1 位于 active->objects[0]",
@@ -74,7 +74,7 @@
     "title": "5 · 动作填写 software_decision，并累计 COUNT",
     "short": "处理 DROP / COUNT 动作",
     "fn": "software_backend · action 循环",
-    "location": "lib/dataplane/software_backend.c:1317 · dppd_software_backend_decide_counted → lib/dataplane/software_backend.c:1249 · count_packet → lib/dataplane/worker.c:480 · process_batch",
+    "location": "lib/dataplane/software_backend.c:1320 · dppd_software_backend_decide_counted → lib/dataplane/software_backend.c:1252 · count_packet → lib/dataplane/worker.c:484 · process_batch",
     "explain": {
       "hit": "选中 R1 后，matched 设为 true。DROP 把 drop 设为 true，但不会退出动作循环；同一规则中的 COUNT 仍会执行。本例不是重试包，COUNT 暂存本包的 1 次命中和 60 字节",
       "miss": "没有选中规则，整个动作循环跳过。software_decision 保持清零后的结果：matched = false，drop = false；本包没有 COUNT 增量"
@@ -97,7 +97,7 @@
     "title": "6 · 回到 pipeline，决定丢弃还是继续选出口",
     "short": "返回 pipeline → 衔接出口选择",
     "fn": "pipeline · software_decision.drop",
-    "location": "lib/dataplane/pipeline.c:41 · dppd_pipeline_decide_counted → lib/dataplane/worker.c:356 · process_batch",
+    "location": "lib/dataplane/pipeline.c:41 · dppd_pipeline_decide_counted → lib/dataplane/worker.c:360 · process_batch",
     "explain": {
       "hit": "pipeline 看到 software_decision.drop = true，填写最终 DROP 和 POLICY 原因，然后返回。对本例 IPv4，routed_decide 随后返回 worker，由 worker 执行释放并处理下一个包",
       "miss": "pipeline 看到 software_decision.drop = false，不进入策略丢弃分支，继续后面的出口选择。未命中规则不会直接产生最终 FORWARD；出口仍可能不存在或不可用"

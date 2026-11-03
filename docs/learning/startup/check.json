@@ -1,0 +1,479 @@
+{
+  "scope": "Startup guide, directory navigation, source anchors and responsive rendering",
+  "passed": true,
+  "checks": [
+    {
+      "name": "Link exists: docs\\learning\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\rule-management-principles.md",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\diagrams\\mbuf-cycle-20261103-182926\\mbuf-cycle.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #stage-0",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #stage-1",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #stage-2",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #stage-3",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #stage-4",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #stage-5",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #boundaries",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #glossary",
+      "passed": true
+    },
+    {
+      "name": "Link exists: scripts\\bind_nic.sh",
+      "passed": true
+    },
+    {
+      "name": "Link exists: scripts\\run_platform.sh",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L394",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L400",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L394",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L74",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L89",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L483",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L525",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L186",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__dataplane__worker.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L515",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L700",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L277",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\packet-path\\software-packet-learning.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\diagrams\\mbuf-cycle-20261103-182926\\mbuf-cycle.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\rule-management-principles.md",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #top",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L343",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #stage-0",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L394",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L343",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\rule-management-principles.md",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\diagrams\\mbuf-cycle-20261103-182926\\mbuf-cycle.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.1.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.1.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.2.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.3.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.1.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\packet-path\\software-packet-learning.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\packet-parse\\packet-parse-learning.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\software-rules\\software-rules-learning.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-1.4.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-1.5.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.1.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.2.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.3.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\section-2.4.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #stage-0",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #boundaries",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\review.html",
+      "passed": true
+    },
+    {
+      "name": "Directory points to the restart of learning",
+      "passed": true
+    },
+    {
+      "name": "Directory does not claim mastery",
+      "passed": true
+    },
+    {
+      "name": "Directory button opens startup guide",
+      "passed": true
+    },
+    {
+      "name": "All six explanations visible without clicking",
+      "passed": true
+    },
+    {
+      "name": "Only code is initially collapsed",
+      "passed": true
+    },
+    {
+      "name": "Expand all source excerpts",
+      "passed": true
+    },
+    {
+      "name": "Collapse all source excerpts",
+      "passed": true
+    },
+    {
+      "name": "Stage 0 navigation",
+      "passed": true
+    },
+    {
+      "name": "Stage 1 navigation",
+      "passed": true
+    },
+    {
+      "name": "Stage 2 navigation",
+      "passed": true
+    },
+    {
+      "name": "Stage 3 navigation",
+      "passed": true
+    },
+    {
+      "name": "Stage 4 navigation",
+      "passed": true
+    },
+    {
+      "name": "Stage 5 navigation",
+      "passed": true
+    },
+    {
+      "name": "Source page scrolls to the current line",
+      "passed": true
+    },
+    {
+      "name": "No horizontal overflow at 1440px",
+      "passed": true
+    },
+    {
+      "name": "Main explanations readable at 1440px",
+      "passed": true
+    },
+    {
+      "name": "No horizontal overflow at 800px",
+      "passed": true
+    },
+    {
+      "name": "Main explanations readable at 800px",
+      "passed": true
+    },
+    {
+      "name": "No horizontal overflow at 390px",
+      "passed": true
+    },
+    {
+      "name": "Main explanations readable at 390px",
+      "passed": true
+    },
+    {
+      "name": "No browser script exceptions",
+      "passed": true
+    }
+  ],
+  "runtimeErrors": [],
+  "screenshots": [
+    "preview-1440.png",
+    "preview-390.png"
+  ]
+}

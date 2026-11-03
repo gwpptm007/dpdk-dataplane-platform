@@ -1020,14 +1020,14 @@ void dppd_software_backend_latency(const struct dppd_software_backend *backend,
 }
 
 /**
- * 按 rule_id 和 generation 删除一个规则版本，返回 0 表示新快照发布成功，负值表示失败
- * backend 提供当前快照和写锁；版本必须同时匹配，避免删除同 ID 的其他版本
+ * 从软件匹配配置中移除 rule_id、generation 同时匹配的规则，成功返回 0，失败返回负错误码
+ * 既用于撤销已发布的安装，也可供正常删除调用；不修改控制面的 service->rules 或配置文件
  *
  * 例：当前 B 含 R1、R2，本次撤销 R2
  * B：[R1, R2] → 复制出 C：[R1, R2] → 清空 C 中 R2 的槽位并归还其计数器引用
  * 发布成功：active → C：[R1]，旧 B 交给 QSBR，已有读者仍可完成对 B 的访问
  * 发布失败：销毁 C，active 仍指向 B：[R1, R2]，调用方收到删除错误
- * 回滚通过发布新版本撤销规则，不把 active 直接切回某个历史快照
+ * 新快照保留当前其他规则，只移除目标版本；旧快照等读者使用完后再回收
  */
 int dppd_software_backend_remove_version(struct dppd_software_backend *backend, uint64_t rule_id, uint64_t generation)
 {
@@ -1037,6 +1037,7 @@ int dppd_software_backend_remove_version(struct dppd_software_backend *backend, 
 
     if (backend == NULL || rule_id == 0 || generation == 0)
         return -EINVAL;
+    /** 写锁让查找、复制和发布期间不被其他配置写入打断；worker 读包不需要取得这把锁 */
     (void)pthread_mutex_lock(&backend->writer_lock);
     active = atomic_load_explicit(&backend->active, memory_order_acquire);
     index = snapshot_find(active, backend->capacity, rule_id, generation);
@@ -1044,14 +1045,15 @@ int dppd_software_backend_remove_version(struct dppd_software_backend *backend, 
         (void)pthread_mutex_unlock(&backend->writer_lock);
         return -ENOENT;
     }
-    /** 删除也经由新 snapshot 发布；旧 snapshot 仍保留被删除规则直到 QSBR 放行 */
+    /** 复制当前快照，只修改副本；已有 worker 可能仍在读取原快照中的规则 */
     next = snapshot_clone(active, backend->capacity);
     if (next == NULL) {
         (void)pthread_mutex_unlock(&backend->writer_lock);
         return -ENOMEM;
     }
-    /** 只放弃副本持有的计数器引用，旧快照仍持有自己的引用，不能在此强行释放 */
+    /** 例如计数器原有 1 个引用，复制后为 2，此处归还副本引用后为 1，原快照仍可使用 */
     metrics_put(next->objects[index].metrics);
+    /** 清空整个槽位并减少有效规则数；不搬动其他槽位，发布时据此重建 exact/ACL 匹配表 */
     memset(&next->objects[index], 0, sizeof(next->objects[index]));
     next->count--;
     int publish_error = publish_locked(backend, next);

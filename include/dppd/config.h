@@ -44,42 +44,66 @@ struct dppd_dnat_rule {
     uint8_t public_address6[16], private_address6[16];
 };
 
+/** 程序启动配置：描述收发资源、可选协议功能和文件路径，由配置解析器填写，runtime 按此创建资源 */
 struct dppd_config {
-    /* ports 按相邻两项组成双向转发对，例如 0,1,2,3 表示 0↔1、2↔3 */
+    /** 使用的 DPDK 网口 ID 列表，默认 [0, 1]；未启用路由时，相邻两项配对，如 0↔1、2↔3 */
     uint16_t ports[DPPD_MAX_PORTS];
+    /** ports 中有效网口的数量，默认 2，最多 DPPD_MAX_PORTS 个 */
     uint16_t nb_ports;
+    /** 每个网口的 RX/TX 队列数，也是 worker 数量，默认 1；每个 worker 处理各网口的同编号队列 */
     uint16_t nb_queues;
+    /** 每次 RX burst 最多接收多少个包，默认 32，范围 1～DPPD_MAX_BURST；不要求凑满才处理 */
     uint16_t burst_size;
+    /** 每个使用的 NUMA 节点创建多少个 mbuf 对象，默认 32768；这是对象数量，不是大页数量 */
     uint32_t mbufs_per_socket;
+    /** 每个 lcore 的内存池本地缓存规模，单位为 mbuf 个数，默认 256，0 表示关闭缓存 */
     uint16_t mbuf_cache;
+    /** 控制台定期输出统计的间隔，单位毫秒，默认 1000 */
     uint32_t stats_period_ms;
-    /** 显式管理模式的线程进度超时，零表示关闭，旧模式在初始化时禁用 */
+    /** worker 无进度的超时阈值，单位毫秒；受管理模式默认 5000，普通模式强制为 0，表示关闭 */
     uint32_t worker_timeout_ms;
+    /** 启动 worker 后运行多少秒再退出，默认 0，表示持续运行直到收到停止信号或发生错误 */
     uint32_t duration_s;
-    /* desired rule repository 的逻辑容量，不等价于 NIC rte_flow 硬件容量 */
+
+    /** 控制面最多保存多少条规则，默认 DPPD_DEFAULT_RULE_CAPACITY；不代表网卡硬件规则容量 */
     uint32_t rule_capacity;
-    uint32_t conntrack_capacity, conntrack_timeout_s;
+    /** 连接跟踪最多容纳多少条会话，默认 0 表示禁用；启用时要求配置三层路由 */
+    uint32_t conntrack_capacity;
+    /** 已建立会话的空闲超时，单位秒，默认 300；仅启用连接跟踪时使用 */
+    uint32_t conntrack_timeout_s;
+    /** IPv4 源地址转换配置，包括内外网口、公网地址和转换端口池，默认不启用 */
     struct dppd_snat_config snat;
+    /** IPv6 源地址转换配置，使用独立于 IPv4 的地址和端口池，默认不启用 */
     struct dppd_snat_config snat6;
+    /** dnat 数组中有效映射的数量，IPv4/IPv6 合计，默认 0 */
     uint32_t dnat_count;
+    /** 静态目的地址和端口转换规则，只读取前 dnat_count 项，最多 DPPD_MAX_DNAT_RULES 条 */
     struct dppd_dnat_rule dnat[DPPD_MAX_DNAT_RULES];
-    uint32_t nd6_count, nd6_reachable_ms;
+    /** nd6 数组中本机 IPv6 地址配置的数量，默认 0 表示不启用动态邻居发现 */
+    uint32_t nd6_count;
+    /** IPv6 邻居可达状态的基础保持时间，单位毫秒，默认 30000；启用 ND 时使用 */
+    uint32_t nd6_reachable_ms;
+    /** 本机 IPv6 地址及所属网口、VLAN 配置，只读取前 nd6_count 项；启用时要求三层路由 */
     struct dppd_nd6_local nd6[DPPD_ND6_LOCAL_LIMIT];
-    /* Unix 管理 socket 的文件系统路径，长度包含末尾 '\0' */
+
+    /** 接收 dppctl 请求的 Unix socket 路径，默认 /tmp/dppd-control.sock */
     char control_socket[DPPD_CONTROL_SOCKET_PATH_CAPACITY];
-    /* 为空表示禁用持久化；非空时启动必须成功恢复或创建该 snapshot */
+    /** 普通模式的规则配置文件路径，空字符串表示不保存；非空时启动恢复，变更后保存 */
     char state_path[DPPD_STATE_PATH_CAPACITY];
-    /** 显式启用 M4 管理实例，完整配置由此文件恢复，与旧控制面互斥 */
+    /** 受管理模式的完整配置文件路径，非空时进入 dppd_managed_run，与普通 state/routing/recovery 路径互斥 */
     char flow_state_path[DPPD_STATE_PATH_CAPACITY];
-    /** 非空时显式启用双栈路由并使用独立配置快照，默认仍为固定端口对转发 */
+    /** 双栈路由与静态邻居的配置文件路径，非空时启用三层路由；空字符串表示静态端口配对转发 */
     char routing_path[DPPD_STATE_PATH_CAPACITY];
-    /** 显式启用跨进程安装保护，须与 state_path 配对，默认不创建额外文件 */
+    /** 硬件安装恢复保护记录的文件路径，与 state_path 配合，防止异常退出后未经核对就重装；默认关闭 */
     char recovery_path[DPPD_STATE_PATH_CAPACITY];
-    /** 显式绑定独立监护会话，启动和每次硬件安装都必须得到新鲜回复 */
+    /** 独立监护会话的文件路径，需同时设置 recovery_path；启用后启动和硬件安装前必须检查监护状态 */
     char recovery_monitor[DPPD_STATE_PATH_CAPACITY];
-    /** 显式启用适配后的 TAP 原生标识，必须同时配置恢复保护 */
+
+    /** 是否要求 TAP 驱动提供规则归属标识，默认 false；需要适配后的驱动及 recovery_path */
     bool tap_owner_cookie;
+    /** 是否启用网口混杂接收模式，默认 false，由设备初始化调用 PMD 设置 */
     bool promiscuous;
+    /** 是否初始化 DPDK pdump 抓包服务，默认 false；启用服务不等于自动将报文写入文件 */
     bool enable_pdump;
 };
 
