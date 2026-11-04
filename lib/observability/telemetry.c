@@ -542,7 +542,7 @@ static int add_latency_scope(struct rte_tel_data *data, enum dppd_rule_latency_s
     return 0;
 }
 
-/** 从完整发布副本读取历史，过滤只选分组，不触发后端访问或新的计时 */
+/** 从完整发布副本读取历史，只筛选分组，不查询实际规则，也不重新计时 */
 static int latency_callback(const char *command, const char *parameters, struct rte_tel_data *data)
 {
     struct dppd_rule_latency_report report;
@@ -668,7 +668,7 @@ int dppd_telemetry_publish_rules(const struct dppd_control_service *control)
     capacity = active.capacity;
     previous = active.summary;
     pthread_mutex_unlock(&active.lock);
-    /** 后端自身的成功提交也可能没有改变账本，显式对比历史，避免副本漏掉这类变化 */
+    /** 规则安装操作的成功提交也可能没有改变账本，显式对比历史，避免副本漏掉这类变化 */
     dppd_control_rule_latency(control, &latency);
     if (previous.metrics.operations == control->observation.metrics.operations &&
         previous.history.revision == control->observation.history.revision &&

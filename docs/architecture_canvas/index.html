@@ -369,7 +369,7 @@
           <div class="num">00</div>
           <div class="title">
             <h1>DPDK Dataplane Platform · 平台总览</h1>
-            <p>声明式意图 → 能力感知规划 → 事务提交 → 多后端执行 → 持续收敛</p>
+            <p>声明式意图 → 能力感知规划 → 事务提交 → 由软件表或网卡执行规则 → 持续收敛</p>
           </div>
           <div class="tag">平台，而不是增强版 l2fwd</div>
         </header>
@@ -399,7 +399,7 @@
               </div>
               <div class="down-arr"></div>
               <div class="layer">
-                <div class="layer-label"><strong>执行后端</strong><small>BACKENDS</small></div>
+                <div class="layer-label"><strong>规则执行位置</strong><small>BACKENDS</small></div>
                 <div class="layer-modules cols-3">
                   <div class="module green"><strong>Software Backend</strong><small>immutable snapshot</small></div>
                   <div class="module orange"><strong>rte_flow Backend</strong><small>validate · create · query</small></div>
@@ -453,7 +453,7 @@
       <section class="canvas">
         <header class="head">
           <div class="num">08</div>
-          <div class="title"><h1>Backend Framework · 多执行后端</h1><p>用统一生命周期承载软件快照、rte_flow 对象和未来 vendor backend</p></div>
+          <div class="title"><h1>Backend Framework · 多种规则执行方式</h1><p>用统一生命周期承载软件快照、rte_flow 对象和未来 vendor backend</p></div>
           <div class="tag">统一语义，不强行统一能力</div>
         </header>
         <div class="stage">
@@ -511,7 +511,7 @@
             <div class="side-head"><small>MODULE G</small><strong>Backend Framework</strong></div>
             <div class="insight"><b>统一部分</b><p>能力查询、prepare/apply/observe/delete、错误分类、对象归属和幂等语义。</p></div>
             <div class="insight orange"><b>差异保留</b><p>软件快照、rte_flow 和 vendor 对象的原子性、容量与可查询能力可以不同。</p></div>
-            <div class="insight blue"><b>事务参与者</b><p>backend 是 Transaction Engine 的 participant，不拥有跨后端提交顺序。</p></div>
+            <div class="insight blue"><b>事务参与者</b><p>backend 是 Transaction Engine 的 participant，不拥有软件规则与网卡规则之间的提交顺序。</p></div>
             <div class="insight violet"><b>可恢复性</b><p>进程重启后可用稳定资源 ID 和 native metadata 重新关联实际对象。</p></div>
             <div class="insight red"><b>禁止泄漏</b><p>PMD errno、handle 和 vendor SDK 结构必须转换为平台错误与 opaque reference。</p></div>
           </aside>
@@ -880,7 +880,7 @@
         <div class="stage">
           <div class="main-panel">
             <div class="panel-kicker">Normalize → Expand → Place → Compile → Validate Plan</div>
-            <div class="panel-desc">Planner 产生确定性的执行计划；Compiler 只负责从 canonical IR 生成后端对象。</div>
+            <div class="panel-desc">Planner 产生确定性的执行计划；Compiler 只负责从 canonical IR 生成软件规则表条目或网卡规则。</div>
 
             <div class="section-label">规划输入</div>
             <div class="grid-4">
@@ -930,7 +930,7 @@
           <aside class="side-panel">
             <div class="side-head"><small>MODULE D</small><strong>Planner / Compiler Registry</strong></div>
             <div class="insight"><b>确定性</b><p>相同 Desired、Topology、Capabilities 和 Allocation 必须产生相同计划。</p></div>
-            <div class="insight blue"><b>可解释</b><p>每个 placement 都记录命中的约束、候选后端和未选择原因。</p></div>
+            <div class="insight blue"><b>可解释</b><p>每个 placement 都记录命中的约束、候选规则执行位置和未选择原因。</p></div>
             <div class="insight orange"><b>验证时机</b><p>具体硬件规则在 prepare 阶段调用 validate；失败可触发重新规划，而不是静默降级。</p></div>
             <div class="insight violet"><b>扩展机制</b><p>新 backend 注册 capability matcher、compiler、validator 与 lifecycle adapter。</p></div>
             <div class="insight red"><b>关键边界</b><p>Planner 不直接创建 rte_flow；backend 不自行改变上层策略语义。</p></div>
@@ -1292,7 +1292,7 @@
       <section class="canvas">
         <header class="head">
           <div class="num">13</div>
-          <div class="title"><h1>二级细分 · Canonical Resource Model</h1><p>所有资源使用统一外壳、稳定身份和显式依赖；平台状态与后端对象分层保存</p></div>
+          <div class="title"><h1>二级细分 · Canonical Resource Model</h1><p>所有资源使用统一外壳、稳定身份和显式依赖；平台状态与软件表／网卡规则分层保存</p></div>
           <div class="tag">领域模型，不绑定 DPDK 原生结构</div>
         </header>
         <div class="stage">
@@ -1454,7 +1454,7 @@
           <aside class="side-panel">
             <div class="side-head"><small>DETAIL B · PLACEMENT ENGINE</small><strong>选择是可解释的约束求解</strong></div>
             <div class="insight"><b>硬约束示例</b><p>match/action 支持、switch domain 可达、租户隔离、容量、数据包可达性、必需原子性。</p></div>
-            <div class="insight blue"><b>软目标示例</b><p>延迟、CPU 开销、硬件资源碎片、可恢复性、可观测性、后端风险与策略偏好。</p></div>
+            <div class="insight blue"><b>软目标示例</b><p>延迟、CPU 开销、硬件资源碎片、可恢复性、可观测性、所选执行方式的风险与策略偏好。</p></div>
             <div class="insight orange"><b>最终验证</b><p>H1 只是在规划时可行；prepare 仍要由 <span class="mono">rte_flow_validate()</span> 或 vendor validate 最终确认。</p></div>
             <div class="insight violet"><b>重新规划</b><p>准备阶段失败时，保留失败原因并在相同输入快照或新 capability snapshot 上创建新的 Plan 分支。</p></div>
             <div class="insight red"><b>禁止静默降级</b><p>只有 Policy 显式允许且软件候选通过硬约束时，才可从硬件计划切换到软件计划。</p></div>
@@ -1474,7 +1474,7 @@
         <div class="stage">
           <div class="main-panel">
             <div class="panel-kicker">Transaction T92 · serialized mutation + dependency DAG + compensation</div>
-            <div class="panel-desc">Transaction 是跨软件快照、rte_flow 和未来后端的一致性边界；它不是单个 backend 的 API 包装。</div>
+            <div class="panel-desc">Transaction 是跨软件快照、rte_flow 和未来新增的规则处理方式的一致性边界；它不是单个 backend 的 API 包装。</div>
 
             <div class="section-label">主状态机 · 成功路径</div>
             <div class="flow">

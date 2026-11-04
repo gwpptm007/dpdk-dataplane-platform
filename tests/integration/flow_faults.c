@@ -59,7 +59,7 @@ static int fail(struct rte_flow_error *error, int code, const char *message)
 /**
  * 测试开启时允许规则进入创建阶段，以便后续精确注入事务错误
  * 这不是硬件能力探测，传入的匹配条件和动作不会被用于任何真实网卡安装
- * 未开启测试场景时返回不支持，避免把没有配置的测试库误当成可用后端
+ * 未开启测试场景时返回不支持，避免把没有配置的测试库误当成可用的网卡规则安装实现
  */
 int rte_flow_validate(uint16_t port, const struct rte_flow_attr *attr, const struct rte_flow_item pattern[],
     const struct rte_flow_action actions[], struct rte_flow_error *error)

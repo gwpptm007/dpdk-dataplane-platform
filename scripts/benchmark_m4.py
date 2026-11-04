@@ -105,7 +105,7 @@ def main():
                         ("software", min(args.rules, 1024), 1)]
             if (result["hardware_acceptance"] != "not_run" or len(cases) != 3 or
                     [(case["path"], case["rules"], case["batch"]) for case in cases] != expected):
-                raise RuntimeError("基准返回了不同规模或后端，不能与已固定契约比较")
+                raise RuntimeError("基准返回了不同规模或规则安装方式，不能与已固定契约比较")
             for case in cases:
                 if any(case[key] <= 0 for key in ("install_ns", "rules_per_second", "request_p99_ns", "remove_ns")):
                     raise RuntimeError("基准包含无效计时")

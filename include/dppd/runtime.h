@@ -28,7 +28,7 @@ enum dppd_worker_state {
 };
 
 struct dppd_worker {
-    /** 借用所属 runtime，以取得设备、转发配置、软件后端和停止标记 */
+    /** 借用所属 runtime，以取得设备、转发配置、软件规则表和停止标记 */
     struct dppd_runtime *runtime;
     /** 执行业务循环的 DPDK lcore 编号，与 queue_id 分别编号 */
     unsigned int lcore_id;

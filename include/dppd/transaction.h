@@ -6,7 +6,7 @@
 #include "dppd/planner.h"
 #include "dppd/rule_observation.h"
 
-/** 一整批规则的处理进度；COMMITTED 表示后端安装完成，FINALIZED 表示已放弃事务回滚 */
+/** 一整批规则的处理进度；COMMITTED 表示实际规则安装完成，FINALIZED 表示已放弃事务回滚 */
 enum dppd_transaction_state {
     DPPD_TRANSACTION_NEW = 0,
     DPPD_TRANSACTION_VALIDATING,
@@ -36,11 +36,11 @@ enum dppd_transaction_item_state {
 struct dppd_transaction_item {
     /** 要安装的完整规则，版本号由控制层提前分配 */
     struct dppd_rule rule;
-    /** 规划出的目标后端、安装端口及选择原因 */
+    /** 规划出的规则执行位置、安装端口及选择原因 */
     struct dppd_execution_plan plan;
     /** 当前条目是否只校验过、已准备资源或已提交，独立于整批状态 */
     enum dppd_transaction_item_state state;
-    /** 后端交回的资源凭据，事务只保存和转交它，不解释其内部含义 */
+    /** 规则安装函数交回的资源凭据，事务只保存和转交它，不解释其内部含义 */
     uintptr_t backend_token;
     /** 当前条目校验、准备或提交时的错误，便于定位哪条规则首先失败 */
     int error_code;
@@ -48,7 +48,7 @@ struct dppd_transaction_item {
 
 
 /**
- * 事务后端接口：保存后端对象和各阶段函数的地址，供事务流程统一调用
+ * 规则安装操作接口：保存软件规则或网卡规则管理对象及各阶段函数的地址，供事务流程统一调用
  *
  * int (*operation)(int, int) → 函数指针，所指函数接收两个 int，返回 int
  * int *operation(int, int)   → 函数声明，函数返回 int 指针，括号的位置决定含义
@@ -57,13 +57,13 @@ struct dppd_transaction_item {
  * .prepare = transaction_prepare → 保存具体函数地址，此时不执行函数
  * backend->prepare(...) → 取出成员中的地址并调用，等价于 (*backend->prepare)(...)
  *
- * 这种由后端提供、由事务流程调用的函数称为回调，此处调用会等待函数返回
- * 成员名不会自动关联具体实现，软件和硬件后端分别初始化自己的函数指针
+ * 这种由规则安装模块提供、由事务流程调用的函数称为回调，此处调用会等待函数返回
+ * 成员名不会自动关联具体实现，软件规则安装和网卡规则下发分别设置自己的函数指针
  */
 struct dppd_transaction_backend {
-    /** 保存要操作的后端对象地址，调用时原样传回，由回调转换成具体对象指针 */
+    /** 保存要操作的软件规则或网卡规则管理对象的地址，调用时原样传回，由回调转换成具体对象指针 */
     void *context;
-    /** 只检查规则是否支持，不安装规则也不改变后端的资源占用 */
+    /** 只检查规则是否支持，不安装规则也不占用规则安装资源 */
     int (*validate)(void *context, const struct dppd_transaction_item *item);
     /**
      * 准备可撤销资源，通过 token 交回资源凭据，失败时也要保留待清理资源的凭据
@@ -77,15 +77,15 @@ struct dppd_transaction_backend {
         *rollback)(void *context, const struct dppd_transaction_item *item, uintptr_t token, bool commit_was_attempted);
     /**
      * 放弃回滚后释放临时资源，保留已安装规则；回调不返回错误
-     * 没有额外临时资源的后端可不提供此回调
+     * 没有额外临时资源的安装实现可不提供此回调
      */
     void (*finalize)(void *context, const struct dppd_transaction_item *item, uintptr_t token);
 };
 
 struct dppd_transaction_backends {
-    /** 软件后端的对象地址和各阶段回调 */
+    /** 软件规则安装使用的 context 和各阶段回调 */
     struct dppd_transaction_backend software;
-    /** rte_flow 后端的对象地址和各阶段回调 */
+    /** 网卡规则管理对象的地址和各阶段回调 */
     struct dppd_transaction_backend rte_flow;
 };
 

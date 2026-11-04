@@ -62,7 +62,7 @@ static void observe_transaction(struct dppd_control_service *service, const stru
     }
 }
 
-/** 后端实际规则与控制面记录可能不一致时，标记需要恢复并阻止后续普通修改，返回 -EUCLEAN */
+/** 软件表或网卡中的实际规则与控制面记录可能不一致时，标记需要恢复并阻止后续普通修改，返回 -EUCLEAN */
 static int isolate_control(struct dppd_control_service *service, int code)
 {
     service->recovery_state = DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED;
@@ -73,7 +73,7 @@ static int isolate_control(struct dppd_control_service *service, int code)
 /**
  * 收集共享计数器定义，再交给持久化模块保存完整配置；成功返回 0，失败返回错误码
  *
- * rte_flow 后端 → shared[]：共享计数器的 ID、版本、安装端口和作用域
+ * 网卡共享计数管理 → shared[]：共享计数器的 ID、版本、安装端口和作用域
  * service->rules          ：当前全部规则，部分规则可能按 ID 引用上述计数器
  *             ↓
  * 两者写入同一文件，恢复规则时才能找到它引用的共享计数器定义
@@ -140,7 +140,7 @@ static int persistence_write_preflight(struct dppd_control_service *service)
 static int recovery_write_preflight(const struct dppd_control_service *service)
 {
     /**
-     * 服务为 READY，且后端未被隔离、驱动就绪检查通过 → 允许继续
+     * 服务为 READY，且网卡规则操作未被隔离、驱动就绪检查通过 → 允许继续
      * 任一条件不满足 → 拒绝普通写入，避免继续修改尚未恢复的规则状态
      */
     return service->recovery_state == DPPD_CONTROL_RECOVERY_READY &&
@@ -267,8 +267,8 @@ int dppd_control_shared_count_list(const struct dppd_control_service *service, u
 }
 
 /**
- * 找出一条已发布规则究竟安装在硬件还是软件中，规则账本本身不记录后端类型
- * PREFER 只表达“优先硬件”的意图，驱动校验失败后实际规则可能已经落到软件后端
+ * 找出一条已发布规则究竟安装在硬件还是软件中，控制面规则记录本身不记录实际执行位置
+ * PREFER 只表达“优先硬件”的意图，驱动校验失败后实际规则可能已经改由 CPU 查表执行
  * 因此要在两个对象仓库中按同一个 ID 和版本查找，不能只根据策略字段猜测
  * 正常情况恰好找到一个；两个都有或两个都没有，都说明控制层约定已经被破坏
  */
@@ -289,8 +289,8 @@ static int actual_backend_for(const struct dppd_control_service *service, uint64
 }
 
 /**
- * 按 ID 和版本定位实际后端，调用软件或硬件的删除函数，返回该操作的结果
- * 只删除后端规则，service->rules 中的记录由调用方在确认成功后更新或移除
+ * 按 ID 和版本定位规则实际执行位置，调用软件或硬件的删除函数，返回该操作的结果
+ * 只删除软件表或网卡中的规则，service->rules 中的记录由调用方在确认成功后更新或移除
  */
 static int remove_actual_rule(struct dppd_control_service *service, uint64_t rule_id, uint64_t generation)
 {
@@ -298,7 +298,7 @@ static int remove_actual_rule(struct dppd_control_service *service, uint64_t rul
     enum dppd_plan_backend backend_kind;
     int rc;
 
-    /** 目标版本必须恰好存在于一个后端；两边都有或两边都没有时返回一致性错误 */
+    /** 目标版本必须恰好存在于软件表或网卡中的一处；两边都有或两边都没有时返回一致性错误 */
     rc = actual_backend_for(service, rule_id, generation, &backend_kind);
     if (rc != 0)
         return rc;
@@ -313,7 +313,7 @@ static int remove_actual_rule(struct dppd_control_service *service, uint64_t rul
 
 /**
  * 恢复批量删除或更新过程中已经删掉的那一部分旧对象
- * 账本尚未变化，所以要保留原 ID、版本、端口和后端，不能调用普通 apply 分配一个新版本
+ * 账本尚未变化，所以要保留原 ID、版本、端口和执行位置，不能调用普通 apply 分配一个新版本
  * 这里通过创建事务重建对象，count 为零表示还没有删掉任何旧对象，无需补偿
  * 恢复失败时把错误交回上层，由上层决定隔离，不能假装账本中的规则已经重新存在
  */
@@ -361,7 +361,7 @@ int dppd_control_init(struct dppd_control_service *service, const struct dppd_to
     if (rc != 0)
         return rc;
     /**
-     * 后端比规则账本多一个槽位，确保满表时仍可进行一次单规则的先建后删
+     * 软件表与网卡规则管理各比控制面规则记录多一个槽位，确保满表时仍可进行一次单规则的先建后删
      * 批量更新需要同时容纳多条新版本，仅多一个槽位并不保证满表时也能完成批量更新
      */
     rc = dppd_rte_flow_backend_init(&service->rte_flow, rule_capacity + 1U, flow_api);
@@ -391,7 +391,7 @@ int dppd_control_init(struct dppd_control_service *service, const struct dppd_to
 
 /**
  * 先检查完整规则和端口拓扑，再做无安装副作用的驱动探测
- * 硬件探测会忽略用户的后端偏好，因此 software 规则也能询问相同内容的驱动支持情况
+ * 硬件探测会忽略用户选择的规则执行策略，因此 software 规则也能询问相同内容的驱动支持情况
  */
 int dppd_control_probe_rule(struct dppd_control_service *service, uint16_t install_port_id,
     const struct dppd_rule *rule, bool refresh, struct dppd_flow_probe_result *result)
@@ -769,19 +769,19 @@ static int control_reconcile_impl(struct dppd_control_service *service)
 }
 
 /**
- * 创建或更新一条规则，依次完成状态与版本检查、后端安装、内存规则记录更新和配置保存
+ * 创建或更新一条规则，依次完成状态与版本检查、实际规则安装、内存规则记录更新和配置保存
  * rule 提供规则内容，install_port_id 指定安装端口，expected_generation 用于检查版本冲突
  * result 返回执行计划、事务编号及规则状态和版本；返回 0 表示本次请求成功，负值表示错误
  *
- * 新增软件规则的成功路径，假设规划结果选中软件后端：
+ * 新增软件规则的成功路径，假设规划结果选择 CPU 查表处理：
  * candidate → item.rule，执行计划 → item.plan
  *   → dppd_transaction_run → 软件 prepare / commit → active 已发布新规则
  *   → dppd_rule_repository_apply → service->rules 登记规则内容和版本
  *   → dppd_transaction_finalize → 释放 pending 准备记录，保留已安装规则
  *   → persist_current_repository → 配置了路径时保存当前完整规则配置
  *
- * worker 查软件后端的 active 快照；控制面用 service->rules 查询、管理和保存规则
- * 后端安装成功后还需更新内存记录、保存文件，保存失败也不会撤回已生效规则
+ * worker 查软件规则表的 active 快照；控制面用 service->rules 查询、管理和保存规则
+ * 实际规则安装成功后还需更新内存记录、保存文件，保存失败也不会撤回已生效规则
  */
 static int control_apply_impl(struct dppd_control_service *service, uint16_t install_port_id,
     const struct dppd_rule *rule, uint64_t expected_generation, struct dppd_control_apply_result *result)
@@ -865,13 +865,13 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
      * 此处只填写 candidate，安装成功后才更新 service->rules 中的版本
      */
     candidate.generation = dppd_rule_repository_generation(&service->rules) + 1U;
-    /** 汇总端口、已启用功能和后端能力，供 planner 判断这条规则应在哪里执行 */
+    /** 汇总端口、已启用功能以及 CPU 与网卡支持的规则能力，供 planner 判断这条规则应在哪里执行 */
     planner_context.topology = service->topology;
     planner_context.ipv4_routing = service->routing != NULL;
     planner_context.connection_tracking = service->conntrack != NULL;
     planner_context.neighbor_discovery = service->nd6 != NULL;
     planner_context.install_port_id = install_port_id;
-    /** 允许考虑硬件后端，具体规则能否安装仍需后续驱动校验 */
+    /** 允许尝试向网卡下发规则，具体规则能否安装仍需后续驱动校验 */
     planner_context.hardware_available = true;
     planner_context.software_equivalent = dppd_software_backend_rule_supported(&candidate);
     observe_rule(service, DPPD_RULE_STAGE_PLAN, &candidate, install_port_id, NULL);
@@ -884,7 +884,7 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
     memset(&item, 0, sizeof(item));
     item.rule = candidate;
     item.plan = result->plan;
-    /** 取得两套后端回调表；执行时按 item.plan.backend 选择，本例只调用软件后端 */
+    /** 取得软件规则安装和网卡规则下发的回调表；按 item.plan.backend 选择，本例只调用软件规则安装函数 */
     memset(&backends, 0, sizeof(backends));
     backends.software = dppd_software_transaction_backend(&service->software);
     backends.rte_flow = dppd_rte_flow_transaction_backend(&service->rte_flow);
@@ -893,7 +893,7 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
     service->observation.context.transaction_id = result->transaction_id;
     /**
      * transaction.items → 本地 item，nb_items = 1 表示本次只安装一条规则
-     * init 记录地址并重置进度，run 才调用后端执行校验、准备和提交
+     * init 记录地址并重置进度，run 才调用所选规则安装函数执行校验、准备和提交
      * 返回控制层，先更新规则记录
      */
     rc = dppd_transaction_init(&transaction, result->transaction_id, &item, 1);
@@ -922,7 +922,7 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
     /**
      * run 返回安装错误前，已经对 prepare/commit 占用的资源尝试回滚
      *   rollback_code = 0 → 没有清理错误，返回本次安装错误
-     *   rollback_code ≠ 0 → 仍可能残留后端规则，进入恢复隔离，阻止继续修改
+     *   rollback_code ≠ 0 → 仍可能残留软件表或网卡中的规则，进入恢复隔离，阻止继续修改
      * 此分支直接返回，不再更新 service->rules，也不执行后面的保存配置
      */
     if (rc != 0) {
@@ -937,7 +937,7 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
 
         /**
          * 更新示例：ID 20 的旧版本为 7，本次候选版本为 13
-         * 后端：[20/7] → 安装新版本 → [20/7, 20/13] → 删除旧版本 → [20/13]
+         * 实际安装版本：[20/7] → 安装新版本 → [20/7, 20/13] → 删除旧版本 → [20/13]
          * 控制面记录在后面 repository_apply 成功时才由 7 改为 13
          *
          * 删除旧版本失败 → 尝试删除新版本 13，控制面记录保持为 7
@@ -955,7 +955,7 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
     }
 
     /**
-     * 后端安装完成，将内容和版本登记到 service->rules
+     * 实际规则安装完成，将内容和版本登记到 service->rules
      *   active         → worker 用来匹配报文
      *   service->rules → 控制面用来查询和保存配置
      */
@@ -963,7 +963,7 @@ static int control_apply_impl(struct dppd_control_service *service, uint16_t ins
     rc = dppd_rule_repository_apply(&service->rules, &candidate, updating ? existing.generation : expected_generation,
         &repository_result);
     if (rc != 0) {
-        /** 后端已生效而内存记录更新失败，停止普通写入并进入恢复隔离 */
+        /** 实际规则已生效而内存记录更新失败，停止普通写入并进入恢复隔离 */
         dppd_rule_observation_fault(&service->observation, rc);
         return isolate_control(service, rc);
     }
@@ -1020,7 +1020,7 @@ static int control_create_batch_impl(struct dppd_control_service *service,
         return -ENOMEM;
     /**
      * 先检查整批规则，再开始安装；硬件优先的规则在此询问驱动是否支持
-     * 任一条检查失败时，后端都还没有安装本批规则
+     * 任一条检查失败时，本批规则都还没有写入软件表或下发到网卡
      */
     for (i = 0; i < request_count; ++i) {
         struct dppd_planner_context planner_context;
@@ -1094,7 +1094,7 @@ static int control_create_batch_impl(struct dppd_control_service *service,
     rc = dppd_transaction_init(&transaction, transaction_id, items, request_count);
     if (rc != 0)
         goto cleanup;
-    /** 先完成本批后端安装，再按请求顺序登记内存中的规则记录 */
+    /** 先完成本批实际规则安装，再按请求顺序登记内存中的规则记录 */
     rc = dppd_transaction_run(&transaction, &backends);
     if (rc != 0) {
         observe_transaction(service, &transaction);
@@ -1108,7 +1108,7 @@ static int control_create_batch_impl(struct dppd_control_service *service,
     }
 
     /**
-     * 登记结果应为 CREATED，版本应与规划时一致；异常时撤回本批记录并回滚后端
+     * 登记结果应为 CREATED，版本应与规划时一致；异常时撤回本批记录并撤销实际规则安装
      * 调用方先检查函数返回值，再读取 results，避免把已填好的前几项当成整批成功
      */
     for (i = 0; i < request_count; ++i) {
@@ -1123,7 +1123,7 @@ static int control_create_batch_impl(struct dppd_control_service *service,
             dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);
             /**
              * 逆序移除本批已登记的 published_count 条记录，删除仍会增加集合版本
-             * 记录撤回或后端回滚失败时进入恢复隔离
+             * 记录撤回或撤销实际规则安装失败时进入恢复隔离
              */
             while (published_count > 0) {
                 bool removed;
@@ -1153,7 +1153,7 @@ static int control_create_batch_impl(struct dppd_control_service *service,
         results[i].plan = items[i].plan;
     }
     service->observation.applied = true;
-    /** 后端和内存记录均已更新，释放事务临时资源后保存配置 */
+    /** 实际规则和内存记录均已更新，释放事务临时资源后保存配置 */
     rc = dppd_transaction_finalize(&transaction, &backends);
     if (rc != 0) {
         rc = -EUCLEAN;
@@ -1169,8 +1169,8 @@ cleanup:
 /**
  * 按精确版本批量删除规则，将删除结果写入 results
  *
- * 备份旧规则和后端位置 → 删除后端规则 → 移除内存记录 → 保存配置
- * 后端删除中途失败 → 用创建事务恢复已删除的旧规则
+ * 备份旧规则及其执行位置 → 删除软件表或网卡中的规则 → 移除内存记录 → 保存配置
+ * 实际规则删除中途失败 → 用创建事务恢复已删除的旧规则
  *
  * 返回 0 表示成功，负值表示错误；保存失败时，删除已经生效
  */
@@ -1200,8 +1200,8 @@ static int control_remove_batch_impl(struct dppd_control_service *service,
         return -ENOMEM;
 
     /**
-     * 删除任何实际对象前先检查整批：旧版本必须精确、ID 不重复、对应对象只存在于一个后端
-     * 同时把规则和后端归属保存下来，后续即使对象已删除也知道应该怎样重建
+     * 删除任何实际对象前先检查整批：旧版本必须精确、ID 不重复、对应规则只存在于软件表或网卡中的一处
+     * 同时把规则及其执行位置保存下来，后续即使对象已删除也知道应该怎样重建
      */
     for (i = 0; i < request_count; ++i) {
         uint32_t previous;
@@ -1260,7 +1260,7 @@ static int control_remove_batch_impl(struct dppd_control_service *service,
     }
 
     /**
-     * 后端规则全部删完后，逐条移除内存记录并增加集合版本
+     * 软件表或网卡中的规则全部删完后，逐条移除内存记录并增加集合版本
      * 此处若失败，记录可能已部分删除，交给恢复流程处理
      */
     for (i = 0; i < request_count; ++i) {
@@ -1293,7 +1293,7 @@ cleanup:
  *
  * 新旧规则均为软件 → 在副本中替换本批规则 → 一次发布新快照
  * 包含硬件规则 → 安装新版本 → 删除旧版本，失败时撤新并恢复旧规则
- * 后端替换完成 → 整批更新内存记录 → 保存配置
+ * 实际规则替换完成 → 整批更新内存记录 → 保存配置
  *
  * 管理主线程串行调用；含硬件时，报文可能先看到部分新规则
  * 返回 0 表示成功；-EUCLEAN 需区分恢复异常和保存失败，规则可能已经生效
@@ -1305,7 +1305,7 @@ static int control_update_batch_impl(struct dppd_control_service *service,
     /**
      * 同一下标 i 对应同一条请求
      *   items[i] / candidates[i] → 新规则的安装条目 / 待保存的规则内容
-     *   old[i] / expected[i]     → 旧规则及原后端 / 调用方预期的旧版本
+     *   old[i] / expected[i]     → 旧规则及原执行位置 / 调用方预期的旧版本
      */
     struct dppd_transaction_item items[DPPD_CONTROL_BATCH_UPDATE_MAX] = {0};
     struct dppd_transaction_item old[DPPD_CONTROL_BATCH_UPDATE_MAX] = {0};
@@ -1369,8 +1369,8 @@ static int control_update_batch_impl(struct dppd_control_service *service,
         if (old[i].rule.generation != requests[i].expected_generation)
             return -ESTALE;
         /**
-         * 旧规则必须恰好存在于一个实际后端中，不能仅根据“优先硬件”策略猜归属
-         * 两个后端都有或都没有该版本，说明内存记录与后端安装状态不一致
+         * 旧规则必须恰好存在于软件表或网卡中的一处，不能仅根据“优先硬件”策略猜归属
+         * 软件表与网卡都有或都没有该版本，说明内存记录与实际安装状态不一致
          * 此时进入隔离，不能继续更新并掩盖原来的问题
          */
         rc = actual_backend_for(service, old[i].rule.id, old[i].rule.generation, &old[i].plan.backend);
@@ -1511,7 +1511,7 @@ static int control_update_batch_impl(struct dppd_control_service *service,
 
             dppd_rule_observation_fault(&service->observation, rc);
             /**
-             * 撤销新版本 → 按原版本、原后端恢复已删除的旧规则，前一步失败也继续恢复
+             * 撤销新版本 → 按原版本、原执行位置恢复已删除的旧规则，前一步失败也继续恢复
              * 两步均成功时返回原始删除错误，否则进入恢复隔离
              */
             rollback_rc = dppd_transaction_rollback_committed(&transaction, &backends);
@@ -1525,14 +1525,14 @@ static int control_update_batch_impl(struct dppd_control_service *service,
     }
 
     /**
-     * 后端替换完成，再一次更新整批内存记录；接口先检查全部条件，替换时不分配内存
+     * 实际规则替换完成，再一次更新整批内存记录；接口先检查全部条件，替换时不分配内存
      * 本批所有规则使用连续的新版本，包括内容未变的规则
      */
     observe_batch(service, DPPD_RULE_STAGE_PUBLISH);
     rc = dppd_rule_repository_update_batch(&service->rules, candidates, expected, request_count);
     if (rc != 0) {
         /**
-         * 旧规则已从后端删除，内存记录却未更新成功，释放临时资源后进入恢复隔离
+         * 旧规则已从软件表或网卡删除，内存记录却未更新成功，释放临时资源后进入恢复隔离
          */
         (void)dppd_transaction_finalize(&transaction, &backends);
         goto isolate;
@@ -1557,7 +1557,7 @@ committed:
 
 isolate:
     /**
-     * 后端与内存记录无法保持一致时，拒绝普通写入，由主循环停止软件转发并处理恢复
+     * 实际规则与内存记录无法保持一致时，拒绝普通写入，由主循环停止软件转发并处理恢复
      * recovery_last_error 保存本次失败原因
      */
     dppd_rule_observation_fault(&service->observation, rc);
@@ -1568,7 +1568,7 @@ isolate:
 
 /**
  * 处理用户的单条删除请求，按 rule_id 查记录并检查 expected_generation
- * 查当前版本 → 删除后端规则 → 删除 service->rules 中的记录和索引 → 保存配置
+ * 查当前版本 → 删除软件表或网卡中的规则 → 删除 service->rules 中的记录和索引 → 保存配置
  * removed 表示是否实际删除了记录，generation 返回规则集合的整体版本
  * 返回 0 表示成功，负值表示错误；保存失败时删除仍已完成
  */
@@ -1600,13 +1600,13 @@ static int control_remove_impl(struct dppd_control_service *service, uint64_t ru
     if (dppd_rule_repository_generation(&service->rules) >= UINT64_MAX - 1U)
         return -EOVERFLOW;
     observe_rule(service, DPPD_RULE_STAGE_REMOVE, &existing, existing.install_port_id, NULL);
-    /** 先删除精确版本的后端规则，失败就返回，控制面记录仍保留 */
+    /** 先按精确版本删除软件表或网卡中的规则，失败就返回，控制面记录仍保留 */
     rc = remove_actual_rule(service, rule_id, existing.generation);
     if (rc != 0)
         return rc;
     observe_stage(service, DPPD_RULE_STAGE_PUBLISH);
     rc = dppd_rule_repository_remove(&service->rules, rule_id, existing.generation, removed, generation);
-    /** 后端已删除，记录却未能删除，两边状态不一致，必须进入恢复隔离 */
+    /** 实际规则已删除，记录却未能删除，两边状态不一致，必须进入恢复隔离 */
     if (rc != 0 || !*removed) {
         dppd_rule_observation_fault(&service->observation, rc != 0 ? rc : -EUCLEAN);
         return isolate_control(service, rc != 0 ? rc : -EUCLEAN);
@@ -1616,7 +1616,7 @@ static int control_remove_impl(struct dppd_control_service *service, uint64_t ru
 }
 
 /**
- * 先以规则账本确定当前版本，再读取两个后端的安装记录，不能仅凭 prefer 策略猜测实际位置
+ * 先以规则账本确定当前版本，再读取软件表与网卡规则的安装记录，不能仅凭 prefer 策略猜测实际位置
  * 缺失或重复安装都属于账本与实际对象失配，保留原状态并报告错误，由已有恢复流程处理
  */
 int dppd_control_rule_status(const struct dppd_control_service *service, uint64_t rule_id, uint64_t expected_generation,
@@ -1763,7 +1763,7 @@ static int finish_observed(struct dppd_control_service *service, bool observed, 
  *
  * 报文入口：worker.c/process_batch → routed_decide → pipeline → 软件规则匹配 → 读取 active
  * 规则配置入口：本函数 → control_apply_impl → transaction_run → 软件 commit → publish_locked
- * 联系点是软件后端的 active：配置路径提前发布规则，报文路径读取已发布结果
+ * 联系点是软件规则表的 active：配置路径提前发布规则，报文路径读取已发布结果
  * 从报文匹配转来阅读本函数，是追查规则来源，不是 process_batch 调用了规则配置入口
  * 单条 apply 的计数涵盖新建、更新和幂等重放，保存失败时已生效规则仍可能保留
  */
@@ -1870,7 +1870,7 @@ int dppd_control_rule_history(const struct dppd_control_service *service, uint64
         expected_revision, page);
 }
 
-/** 查询只从后端历史值生成摘要，不校验驱动、读取 COUNT、保存文件或重新安装规则 */
+/** 查询只从规则安装耗时的历史值生成摘要，不校验驱动、读取 COUNT、保存文件或重新安装规则 */
 void dppd_control_rule_latency(const struct dppd_control_service *service, struct dppd_rule_latency_report *report)
 {
     struct dppd_rule_latency_histogram single, batch;

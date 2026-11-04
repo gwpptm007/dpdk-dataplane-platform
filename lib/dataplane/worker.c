@@ -613,7 +613,7 @@ int dppd_worker_main(void *arg)
             heartbeat_cycle = cycle;
         }
     }
-    /** 停止读取规则后注销；主线程还需等待本线程返回，之后才能销毁共享后端 */
+    /** 停止读取规则后注销；主线程还需等待本线程返回，之后才能销毁共享的软件规则表和计数器 */
     dppd_ipv4_router_reader_unregister(runtime->ipv4_router, worker->queue_id);
     dppd_software_backend_worker_unregister(runtime->software_backend, worker->queue_id);
     /** 先注销借用的规则读者，再发布已结束状态，资源释放仍须由主线程等待返回 */

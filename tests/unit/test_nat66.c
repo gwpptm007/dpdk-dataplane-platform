@@ -115,7 +115,7 @@ static void reservations(void)
     dppd_conntrack_destroy(table);
 }
 
-/** DNAT 按相同偏移映射端口，ACL 看后端逻辑地址，回包恢复公网身份 */
+/** DNAT 按相同偏移映射端口，ACL 看内网服务器逻辑地址，回包恢复公网身份 */
 static void destination_nat(void)
 {
     struct dppd_dnat_rule rules[2] = {{.ipv6 = true,

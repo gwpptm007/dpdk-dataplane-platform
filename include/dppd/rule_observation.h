@@ -76,7 +76,7 @@ struct dppd_rule_failure_event {
     uint16_t install_port_id;
     bool port_known;
     bool backend_known;
-    /** 规则账本完整发布后才保存失败时为真，false 也不能证明后端没有部分副作用 */
+    /** 规则账本完整发布后才保存失败时为真，false 也不能证明规则安装操作没有部分副作用 */
     bool applied;
 };
 
@@ -172,7 +172,7 @@ static inline const char *dppd_rule_failure_kind_name(enum dppd_rule_failure_kin
     return (unsigned int)value < DPPD_RULE_FAILURE_KIND_COUNT ? names[value] : "unknown";
 }
 
-/** 阶段名称描述失败边界，不表示后端已完成对应动作 */
+/** 阶段名称描述失败边界，不表示规则安装函数已完成对应动作 */
 static inline const char *dppd_rule_failure_stage_name(enum dppd_rule_failure_stage value)
 {
     static const char *const names[] = {"none", "preflight", "plan", "validate", "prepare", "commit", "remove",

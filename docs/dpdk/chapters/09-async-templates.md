@@ -145,13 +145,13 @@ create 的操作记录被 collect 回收，不表示已安装的 flow 也应该�
 原生队列操作本身不提供“多个线程任意同时调用就安全”的承诺；本项目还用队列归属与锁组织调用。
 硬件接口异步不等于应用不需要同步设计。
 
-## 版本与后端边界
+## DPDK 版本与软件实现的能力边界
 
 [原生模板适配](../../../lib/offload/flow_template.c) 和 [原生异步适配](../../../lib/offload/async_flow.c)
 以 `RTE_VERSION >= RTE_VERSION_NUM(24, 11, 0, 0)` 选择实现，旧分支返回 `-ENOTSUP`。
 这是项目当前支持策略，不是在宣称所有相关 API 都首次出现在 24.11。
 
-[software_async_flow.c](../../../lib/dataplane/software_async_flow.c) 提供软件后端。
+[software_async_flow.c](../../../lib/dataplane/software_async_flow.c) 实现软件规则的异步安装、更新和删除。
 它让同一类业务流程可以在软件环境中验证，但软件完成结果不是某张实体网卡的硬件完成通知。
 端口配置与原生 flow queue 配置的具体时序见
 [rte_flow_configure API](https://doc.dpdk.org/api-24.11/rte__flow_8h.html)，应结合设备支持读取。

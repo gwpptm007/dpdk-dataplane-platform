@@ -314,7 +314,7 @@ static int allocate_port(struct dppd_conntrack *table, bool ipv6, uint8_t protoc
     return -EADDRNOTAVAIL;
 }
 
-/** 只为显式外口的静态服务新建入站会话，旧后端回包不能被重新解释成动态出站连接 */
+/** 只为显式外口的静态服务新建入站会话，旧内网服务器的回包不能被重新解释成动态出站连接 */
 static int new_destination(struct dppd_conntrack *table, const struct dppd_flow_tuple *key, uint16_t ingress,
     uint32_t *rule_id)
 {
@@ -457,7 +457,7 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
     table->pending.view.seen_reply |= attempt->reply;
     attempt->state = table->pending.view.seen_reply ? DPPD_CT_ESTABLISHED : DPPD_CT_NEW;
     attempt->nat = table->pending.view.nat;
-    /** ACL 看 DNAT 后的后端地址，也看 SNAT 前的内网地址，正反向保持同一逻辑身份 */
+    /** ACL 看 DNAT 转换后的内网服务器地址，也看 SNAT 前的内网地址，正反向保持同一逻辑身份 */
     struct dppd_flow_tuple logical =
         table->pending.view.dnat_rule_id != 0 ? table->pending.view.translated : table->pending.view.original;
     attempt->policy = attempt->reply ? reverse(logical) : logical;

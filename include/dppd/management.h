@@ -71,7 +71,7 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_STATS_QUERY,
     /** 健康快照可在恢复隔离期间查询，不执行规则操作、网卡探测或磁盘保存 */
     DPPD_MANAGEMENT_HEALTH_GET,
-    /** 按当前版本读取实际后端和安装记录，追加编号以保留旧操作的含义 */
+    /** 按当前版本读取实际执行位置和安装记录，追加编号以保留旧操作的含义 */
     DPPD_MANAGEMENT_RULE_STATUS,
     /** 只读取设备启动信息和累计校验记录，恢复隔离期间也可使用 */
     DPPD_MANAGEMENT_CAPABILITY_GET,
@@ -81,7 +81,7 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_CAPABILITY_CLEAR,
     /** 请求累计值与最近失败只读查询，恢复隔离仍可响应 */
     DPPD_MANAGEMENT_RULE_METRICS,
-    /** 只读的后端提交耗时历史，恢复隔离仍可查询，不改变规则或累计值 */
+    /** 只读的规则安装提交耗时历史，恢复隔离仍可查询，不改变规则或累计值 */
     DPPD_MANAGEMENT_RULE_LATENCY,
     /** 只读最近失败历史，完整分页在恢复隔离期间仍可使用 */
     DPPD_MANAGEMENT_RULE_HISTORY,
@@ -479,7 +479,7 @@ struct dppd_management_response {
         } delete_batch;
         /**
          * 只有整个响应的 status 为零时，这组结果才有效
-         * 每条结果按请求顺序给出新版本和实际后端，所有结果共享同一个 transaction_id
+         * 每条结果按请求顺序给出新版本和实际执行位置，所有结果共享同一个 transaction_id
          * 失败响应不会提供可当作部分成功使用的回执，客户端应根据错误查询相关状态
          */
         struct {

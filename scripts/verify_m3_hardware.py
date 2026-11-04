@@ -628,7 +628,7 @@ def _create_graph(ctl, graph, modifiers, owned, report, stage):
         current = rule_identity(ctl("get", rid)["stdout"], rid)
         owned[rid] = current["generation"]
         if fields(ctl("rule-status", rid, owned[rid])["stdout"]).get("backend") != "rte_flow":
-            raise RuntimeError("生命周期阶段规则实际后端不是 rte_flow")
+            raise RuntimeError("生命周期阶段规则未通过 rte_flow 安装")
     return True
 
 
@@ -880,7 +880,7 @@ def reset_rule_evidence(ctl, owned, shared_id=None, shared_generation=None):
         if rule_identity(current, rid).get("generation") != str(generation):
             raise RuntimeError("复位规则精确代次发生变化")
         if fields(ctl("rule-status", rid, generation)["stdout"]).get("backend") != "rte_flow":
-            raise RuntimeError("复位恢复使用了非硬件后端")
+            raise RuntimeError("复位恢复未使用 rte_flow 向网卡下发规则")
         rules[str(rid)] = current
     evidence = {"rules": rules, "repository": header_fields(ctl("list")["stdout"]),
                 "shared_list": header_fields(ctl("shared-count-list")["stdout"]),
@@ -1262,7 +1262,7 @@ def live_run(root, build, destination, config, report):
         installed_generation = fields(apply["stdout"])["generation"]
         status = fields(ctl("rule-status", rid, installed_generation)["stdout"])
         if status.get("backend") != "rte_flow":
-            raise RuntimeError("规则的实际后端不是硬件 rte_flow")
+            raise RuntimeError("规则未通过 rte_flow 安装")
         before = {key: int(number) for key, number in fields(ctl("count", rid, installed_generation)["stdout"]).items()
                   if key in ("hits", "bytes")}
         workers_before = {key: int(number) for key, number in fields(ctl("stats")["stdout"]).items()}

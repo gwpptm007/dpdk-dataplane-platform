@@ -39,7 +39,7 @@ void dppd_software_backend_decide_counted(struct dppd_software_backend *backend,
     const struct dppd_packet *packet, struct dppd_software_decision *decision, struct dppd_software_count_batch *batch);
 
 /**
- * 软件规则后端通过发布新快照更新规则，worker 从 active 取得规则表进行匹配
+ * 软件规则通过发布新快照更新，worker 从 active 取得规则表进行匹配
  *
  * QSBR = Quiescent State Based Reclamation，基于静默状态的内存回收
  * 用途：控制面替换规则表时，避免释放 worker 仍在读取的旧表

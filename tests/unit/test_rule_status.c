@@ -80,7 +80,7 @@ static int fake_create(uint16_t port_id, const struct dppd_rule *rule, struct dp
     return 0;
 }
 
-/** 模拟删除，清空 handle 表示后端不再持有实际对象 */
+/** 模拟删除，清空 handle 表示网卡规则管理已释放实际对象 */
 static int fake_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *error)
 {
     (void)error;
@@ -99,7 +99,7 @@ static const struct dppd_topology topology = {
     .endpoints = {{.ethdev_port_id = 5}, {.ethdev_port_id = 6}},
 };
 
-/** 生成最小的合法入口 DROP 规则，是否有 COUNT 与后端选择分别由用例决定 */
+/** 生成最小的合法入口 DROP 规则，是否有 COUNT 与规则执行位置分别由用例决定 */
 static struct dppd_rule make_rule(uint64_t id, enum dppd_fallback_policy fallback, bool has_count)
 {
     struct dppd_rule rule = {0};
@@ -264,7 +264,7 @@ static void test_batch_clock_failure(void)
     }
 }
 
-/** 准备占位、重复安装、后端缺失和错误端口分别构造，不能混成成功状态 */
+/** 准备占位、重复安装、实际安装规则缺失和错误端口分别构造，不能混成成功状态 */
 static void test_inconsistency(void)
 {
     struct dppd_control_service service;
@@ -316,7 +316,7 @@ static void test_inconsistency(void)
     assert(dppd_rte_flow_backend_remove_version(&service.rte_flow, 300, 1, &error) == 0);
     assert(dppd_control_rule_status(&service, 300, 1, &status) == -EUCLEAN);
 
-    /** 后端自身可以自洽，但安装端口与规则账本不同，控制层仍必须拒绝 */
+    /** 网卡规则安装记录自身可以自洽，但安装端口与规则账本不同，控制层仍必须拒绝 */
     item.plan.backend = DPPD_PLAN_BACKEND_RTE_FLOW;
     item.plan.install_port_id = 6;
     assert(hardware.prepare(hardware.context, &item, &token) == 0);

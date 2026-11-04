@@ -363,7 +363,7 @@ static void monitor_policy(const char *path, const char *state)
     dppd_recovery_guard_close(&guard);
 }
 
-/** 突然退出保留真实落盘的意图或结果，后继进程必须阻断重放而非当作空后端 */
+/** 突然退出保留真实落盘的意图或结果，后继进程必须阻断重放而非当作没有规则的网卡 */
 static void crash_windows(const char *path, const char *state)
 {
     assert(unlink(path) == 0);

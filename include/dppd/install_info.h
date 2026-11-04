@@ -12,7 +12,7 @@
 struct dppd_rule_install_info {
     uint64_t rule_id;
     uint64_t generation;
-    /** 后端提交阶段的耗时，单位为纳秒，不包含规划、能力校验或保存磁盘快照 */
+    /** 实际规则安装阶段的耗时，单位为纳秒，不包含规划、能力校验或保存磁盘快照 */
     uint64_t install_duration_ns;
     uint16_t install_port_id;
     /** 是否配置了 COUNT 动作，状态查询不会读取或清零计数器 */

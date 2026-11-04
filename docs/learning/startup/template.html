@@ -30,7 +30,14 @@ RSS → 网口 0 的 RX 队列 0 → worker 0 → 示例 lcore 1
 RSS → 网口 0 的 RX 队列 1 → worker 1 → 示例 lcore 2
 
 RSS 选择 RX 队列；runtime 把 queue_id 与 lcore_id 放在 worker 配置中
-启动时将这份配置传给工作函数，收包时按同一个 queue_id 读取</pre></section>
+启动时将这份配置传给工作函数，收包时按同一个 queue_id 读取</pre><pre>EAL 初始化：准备线程并设置 CPU 亲和性
+runtime_init：记录哪个 worker 用哪个 lcore、哪个队列
+runtime_start：让选定线程开始执行业务收包任务
+
+本例使用 -l 0-2 --main-lcore 0：
+逻辑 CPU 0 → 主线程，初始化、管理和监控
+逻辑 CPU 1 → worker 0，处理各网口队列 0
+逻辑 CPU 2 → worker 1，处理各网口队列 1</pre><p class="small">逻辑 CPU 编号不保证对应独立物理核心；绑定 CPU 限制线程运行位置，不代表独占 CPU。使用 --lcores 等其他映射方式时，lcore 编号也不一定等于 Linux CPU 编号。</p></section>
 <nav class="stage-nav" id="stage-nav" aria-label="启动阶段导航">__STAGE_NAV__</nav>
 <div class="tools"><button id="toggle-code" type="button" aria-pressed="false">展开全部源码片段</button><a href="#boundaries">直接看几个容易混淆的状态</a><a href="#glossary">查看术语对照</a></div>
 <section id="walkthrough" aria-label="分阶段源码对照">__STAGES__</section>
@@ -40,7 +47,7 @@ RSS 选择 RX 队列；runtime 把 queue_id 与 lcore_id 放在 worker 配置中
 <tr><td>remote_launch 成功</td><td>启动任务提交成功</td><td>worker 完成读者注册并报告 RUNNING</td></tr>
 <tr><td>worker 为 RUNNING</td><td>工作函数已完成前置准备，进入业务循环</td><td>持续收包，直至停止或门禁生效</td></tr>
 <tr><td>request_stop 已调用</td><td>停止标记已设置</td><td>worker 退出循环，主线程等待返回</td></tr>
-<tr><td>worker 全部返回</td><td>不会再继续使用规则和设备</td><td>清理后端、关闭设备、释放池，最后清理 EAL</td></tr>
+<tr><td>worker 全部返回</td><td>不会再继续使用规则和设备</td><td>释放软件规则表与网卡规则、关闭设备、释放池，最后清理 EAL</td></tr>
 </tbody></table></div></section>
 <section class="card" id="glossary"><h2>看到术语时，先用这张表翻译</h2><div class="table-wrap"><table class="glossary"><thead><tr><th>代码里的名字</th><th>在这份例子里怎么理解</th></tr></thead><tbody>
 <tr><td>网口 / port</td><td>程序收发报文的入口或出口，用 DPDK port ID 标识</td></tr>

@@ -622,7 +622,7 @@ int dppd_persistence_save_with_shared(const char *path, const struct dppd_rule_r
     /**
      * count 是本次预计保存的规则总数，generation 是读取前取得的整体版本
      * repository->records[槽位].rule → rules[] → 后续编码为文件字节
-     * rules[] 保存规则内容的副本，不借用原记录地址，也不包含后端驱动句柄
+     * rules[] 保存规则内容的副本，不借用原记录地址，也不包含网卡驱动句柄
      */
     if (count != 0) {
         rules = calloc(count, sizeof(*rules));

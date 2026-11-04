@@ -221,7 +221,7 @@ static int create(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_
     return 0;
 }
 
-/** 无故障清理实际对象，测试退出时不遗留后端槽位 */
+/** 无故障清理实际对象，测试退出时不遗留网卡规则槽位 */
 static int remove_flow(struct dppd_flow_handle *handle, struct dppd_flow_error *error)
 {
     (void)error;
@@ -429,7 +429,7 @@ int main(void)
     assert(pthread_join(writer, NULL) == 0);
     assert(query(2, "500") == 0 && query(3, NULL) == 0 && output.operations == operations + 1);
     assert(query(4, NULL) == 0 && output.rte_flow_samples == 1);
-    /** 即使没有新的账本请求，后端历史变化也必须使显式发布得到新副本 */
+    /** 即使没有新的账本请求，规则安装耗时的历史变化也必须使显式发布得到新副本 */
     dppd_rule_latency_record(&control.rte_flow.latency, true, 100, 1);
     assert(dppd_telemetry_publish_rules(&control) == 0);
     assert(query(4, NULL) == 0 && output.rte_flow_samples == 2);

@@ -90,7 +90,7 @@ static int fake_remove(struct dppd_flow_handle *handle, struct dppd_flow_error *
     return 0;
 }
 
-/** 即使接口在返回错误前写坏结果，后端也必须保留调用方上次有效的答复 */
+/** 即使接口在返回错误前写坏结果，网卡规则查询也必须保留调用方上次有效的答复 */
 static int fake_query(const struct dppd_flow_handle *handle, struct dppd_flow_age_result *result,
     struct dppd_flow_error *error)
 {

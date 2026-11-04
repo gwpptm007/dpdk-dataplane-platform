@@ -25,20 +25,20 @@
     "note": "decision 是 process_batch 传入的结果区，本函数返回后会逐层回到 process_batch。默认 DROP 不代表已经释放报文，只有后续规则允许并选出出口才改为 FORWARD",
     "progress": "基础检查通过，等待规则匹配",
     "fields": "decision.action = DROP（默认值）\n尚未选出口\n原始 mbuf 仍由 worker 持有",
-    "handoff": "本例软件后端存在，下一步进入 software_backend.c"
+    "handoff": "本例已将 control.software 的地址保存到 runtime，下一步进入 software_backend.c"
   },
   {
     "title": "3 · 读取已发布规则，取得两类匹配候选",
     "short": "读取规则并匹配 packet",
     "fn": "software_backend · active / ACL / exact",
     "location": "lib/dataplane/software_backend.c:1281 · dppd_software_backend_decide_counted → lib/dataplane/acl.c:203 · dppd_acl_classify → lib/dataplane/exact.c:181 · dppd_exact_classify",
-    "explain": "软件后端读取已发布的规则快照 active。dppd_acl_classify 支持掩码、端口范围等条件，定位入口规则段后按优先顺序检查；dppd_exact_classify 用入口、地址族、TCP/UDP 类型及完整源/目的地址和端口组成键，做哈希查找。两者各返回本表选中的规则 tag，0 表示未命中，此时不执行动作",
+    "explain": "软件规则匹配函数读取已发布的规则快照 active。dppd_acl_classify 支持掩码、端口范围等条件，定位入口规则段后按优先顺序检查；dppd_exact_classify 用入口、地址族、TCP/UDP 类型及完整源/目的地址和端口组成键，做哈希查找。两者各返回本表选中的规则 tag，0 表示未命中，此时不执行动作",
     "input": "已发布的教学规则 R1：入口 0、IPv4/UDP、目的端口 9000 → DROP + COUNT",
     "output": {
       "hit": "目的端口 9000 命中 R1：本例 ACL tag = 1，exact_tag = 0",
       "miss": "目的端口 53 不命中 R1：tag = 0，exact_tag = 0"
     },
-    "code": "/* pipeline.c · 调用软件后端，单独保存规则结果 */\nstruct dppd_software_decision software_decision;\ndppd_software_backend_decide_counted(software_backend,\n    ingress_port, packet, &software_decision, counts);\n\n/* software_backend.c · 此处 decision 指向上面的 software_decision */\nmemset(decision, 0, sizeof(*decision));\n/* 省略空指针检查；同一规则快照供两类匹配使用，候选 0 表示未命中 */\nactive = atomic_load_explicit(&backend->active, memory_order_acquire);\n/** ACL：支持掩码、端口范围等条件，返回候选 tag */\nuint32_t tag = dppd_acl_classify(\n    snapshot_acl(active, backend->capacity), ingress_port, packet);\n/** exact：用完整地址和端口组合查哈希表，返回候选 tag */\nuint32_t exact_tag = dppd_exact_classify(\n    snapshot_exact(active, backend->capacity), ingress_port, packet);",
+    "code": "/* pipeline.c · 匹配软件规则，单独保存结果 */\nstruct dppd_software_decision software_decision;\ndppd_software_backend_decide_counted(software_backend,\n    ingress_port, packet, &software_decision, counts);\n\n/* software_backend.c · 此处 decision 指向上面的 software_decision */\nmemset(decision, 0, sizeof(*decision));\n/* 省略空指针检查；同一规则快照供两类匹配使用，候选 0 表示未命中 */\nactive = atomic_load_explicit(&backend->active, memory_order_acquire);\n/** ACL：支持掩码、端口范围等条件，返回候选 tag */\nuint32_t tag = dppd_acl_classify(\n    snapshot_acl(active, backend->capacity), ingress_port, packet);\n/** exact：用完整地址和端口组合查哈希表，返回候选 tag */\nuint32_t exact_tag = dppd_exact_classify(\n    snapshot_exact(active, backend->capacity), ingress_port, packet);",
     "note": "规则发布时先尝试编入精确表，不支持的条件再编入 ACL。本例 R1 只限定目的端口 9000，源/目的地址和源端口通配，因此走 ACL；假设槽位对应 tag = 1，精确表为空。页面仅演示，不向项目安装规则",
     "progress": "已取得匹配候选",
     "fields": {
@@ -91,7 +91,7 @@
       "hit": "software_decision.matched = true\nsoftware_decision.drop = true\n本包 COUNT 增量：1 次 / 60 字节",
       "miss": "software_decision.matched = false\nsoftware_decision.drop = false\n本包 COUNT 增量：0"
     },
-    "handoff": "软件后端函数结束，返回 pipeline，检查 software_decision.drop"
+    "handoff": "软件规则处理函数结束，返回 pipeline，检查 software_decision.drop"
   },
   {
     "title": "6 · 回到 pipeline，决定丢弃还是继续选出口",
@@ -111,7 +111,7 @@
       "miss": "通过软件规则阶段，进入 1.4 出口选择；最终 action 尚未完成"
     },
     "code": "/**\n * 软件规则 → software_decision；drop 为真时将最终 decision 设为 DROP/POLICY\n * 本例 IPv4 返回路径：本函数 → worker.c/routed_decide → process_batch\n *   → 更新丢弃统计 → 释放当前 mbuf → continue 下一个包\n * 未丢弃时携带 MARK 继续选出口；COUNT 按命中累计，后续失败不撤销\n */\ndppd_software_backend_decide_counted(software_backend,\n    ingress_port, packet, &software_decision, counts);\nif (software_decision.drop) {\n    decision->action = DPPD_PACKET_DROP;\n    decision->drop_reason = DPPD_DROP_POLICY;\n    return;\n}\ndecision->has_mark = software_decision.has_mark;\ndecision->mark_id = software_decision.mark_id;\n/* 不丢弃时继续后面的路由或端口配对，见 1.4 */",
-    "note": "软件后端的 drop 标志由 pipeline 转为最终 DROP/POLICY，process_batch 才释放 mbuf。规则 COUNT 记录命中，delta.rule_drops 记录按规则丢弃的包，两者含义不同；本批结尾仍会提交 COUNT 增量",
+    "note": "软件规则处理结果中的 drop 标志由 pipeline 转为最终 DROP/POLICY，process_batch 才释放 mbuf。规则 COUNT 记录命中，delta.rule_drops 记录按规则丢弃的包，两者含义不同；本批结尾仍会提交 COUNT 增量",
     "progress": {
       "hit": "规则判定 DROP → 返回 worker 执行",
       "miss": "规则未丢弃 → 等待出口选择"

@@ -110,7 +110,7 @@ int dppd_rule_repository_list(const struct dppd_rule_repository *repository, uin
 }
 
 /**
- * 将 rule 新增或更新到 records 数组，检查预期版本并分配新版本，不安装后端规则或写文件
+ * 将 rule 新增或更新到 records 数组，检查预期版本并分配新版本，不修改软件表、网卡规则或文件
  * expected_generation 是调用方预期的旧版本，0 用于期望新建，ANY 表示跳过版本冲突检查
  * 成功返回 0，result 给出 CREATED、UPDATED 或 UNCHANGED 及规则版本；失败返回负错误码
  * 调用方须串行访问这些规则记录，本函数不加锁
@@ -347,7 +347,7 @@ int dppd_rule_repository_update_batch(struct dppd_rule_repository *repository, c
             return -ESTALE;
     }
     /**
-     * 全部检查通过后才开始写入，这一阶段不申请内存、不调用后端，也不删除记录
+     * 全部检查通过后才开始写入，这一阶段不申请内存、不操作软件表或网卡规则，也不删除记录
      * 单条 apply 遇到相同内容会返回 UNCHANGED，无法满足批量更新连续分配新版本的约定
      * 因此这里直接替换完整规则内容，并按请求顺序推进仓库的全局版本号
      */
@@ -364,7 +364,7 @@ int dppd_rule_repository_update_batch(struct dppd_rule_repository *repository, c
 /**
  * 删除控制面按 rule_id 保存的记录，检查预期版本后移除索引、清空槽位并推进整体版本
  * 成功返回 0，removed 表示是否实际删除，generation 返回操作后的整体版本；失败返回负错误码
- * 后端规则须由控制层先删除，本函数不操作 worker 快照或硬件对象
+ * 软件表或网卡中的规则须由控制层先删除，本函数不操作 worker 快照或硬件对象
  * rule_id → 找到 record → slot_index_erase 归还索引槽位 → 清空 record → count 减 1
  */
 int dppd_rule_repository_remove(struct dppd_rule_repository *repository, uint64_t rule_id, uint64_t expected_generation,

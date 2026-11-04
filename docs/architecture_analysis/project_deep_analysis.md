@@ -212,12 +212,12 @@ sequenceDiagram
     Mgmt->>Ctrl: dppd_control_apply()
 
     Ctrl->>Repo: 查找 rule_id + 检查 generation
-    Ctrl->>Plan: dppd_planner_decide()<br/>根据 domain/fallback 规划后端
+    Ctrl->>Plan: dppd_planner_decide()<br/>根据 domain/fallback 选择规则执行位置
 
-    alt 硬件后端 (REQUIRE/PREFER)
+    alt 网卡规则下发 (REQUIRE/PREFER)
         Plan->>HW: rte_flow_validate() → rte_flow_create()
         Note over HW: validate/prepare/commit/rollback<br/>事务引擎
-    else 软件后端 (SOFTWARE_ONLY 或 PREFER 回退)
+    else 软件规则表与报文匹配 (SOFTWARE_ONLY 或 PREFER 回退)
         Plan->>SW: 复制快照 → 添加规则 → 原子发布<br/>旧快照交给 QSBR 回收
     end
 
@@ -243,7 +243,7 @@ struct dppd_rule {
 };
 ```
 
-### 软件后端 QSBR 无锁发布机制
+### 软件规则表的 QSBR 发布与回收机制
 
 ```mermaid
 stateDiagram-v2
@@ -339,7 +339,7 @@ flowchart LR
 - `RULE_UPDATE_BATCH` — 2-4 条原子替换
 - `RULE_GET` / `RULE_LIST` — 查询
 - `RULE_COUNT_QUERY` — 硬件/软件计数
-- `RULE_STATUS` — 实际后端+安装记录
+- `RULE_STATUS` — 实际规则执行位置+安装记录
 - `RULE_METRICS` / `RULE_LATENCY` / `RULE_HISTORY`
 <!-- slide -->
 **网络功能**
@@ -416,7 +416,7 @@ flowchart TD
 Worker 通过原子指针读取不可变 snapshot，QSBR 保障旧版本安全回收，报文处理路径无 mutex/spinlock。
 
 ### 2. 统一规则 IR + 可解释 Planner
-一份 `dppd_rule` 定义同时支持硬件 (`rte_flow`) 和软件 (classifier snapshot) 两条路径，Planner 给出可审计的后端选择理由。
+一份 `dppd_rule` 定义同时支持硬件 (`rte_flow`) 和软件 (classifier snapshot) 两条路径，Planner 给出可审计的规则执行位置的选择理由。
 
 ### 3. 事务引擎 + 乐观并发
 每个规则有稳定 ID + monotonic generation，validate → prepare → commit / rollback 四阶段事务，补偿失败进入恢复隔离而非静默丢数据。

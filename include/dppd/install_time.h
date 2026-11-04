@@ -15,14 +15,14 @@ struct dppd_install_timer {
     bool available;
 };
 
-/** 在真正的后端提交开始前采样，准备和能力校验阶段不计入此次耗时 */
+/** 在实际规则安装开始前采样，准备和能力校验阶段不计入此次耗时 */
 static inline void dppd_install_timer_start(struct dppd_install_timer *timer)
 {
     timer->available = clock_gettime(CLOCK_MONOTONIC, &timer->started) == 0;
 }
 
 /**
- * 后端提交成功后计算纳秒差值，返回值说明这次测量是否有效
+ * 规则安装提交成功后计算纳秒差值，返回值说明这次测量是否有效
  * 借位处理跨秒情况，拒绝倒退或超出整数范围的结果，失败时统一输出零
  */
 static inline bool dppd_install_timer_finish(const struct dppd_install_timer *timer, uint64_t *duration_ns)

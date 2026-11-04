@@ -254,7 +254,7 @@ sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 `dppd-recovery plan-monitored PATH REVISION SESSION_PATH`，该命令保持交接租约直到计划完成。
 使用 systemd 部署时，可按[恢复服务命名空间与权限边界](recovery_namespace_deployment.md)
 让业务、监护和恢复查询共享只含项目 TAP 的网络命名空间，并仅向业务服务授予
-`CAP_NET_ADMIN`。DPDK 端口后端可能还需要额外资源权限，需按实际部署单独配置。
+`CAP_NET_ADMIN`。DPDK 端口所用的 PMD可能还需要额外资源权限，需按实际部署单独配置。
 
 ## 本机规则管理
 
@@ -286,8 +286,8 @@ sudo ./build/dppd-recovery inspect /var/lib/dppd/hardware.recovery 2
 
 `apply-drop` 参数依次为 rule id、安装 ethdev port id、期望 generation、可选 priority 和 `prefer|require`。创建新规则时期望 generation 使用 `0`；更新、删除应传上次响应的 generation；需要无条件操作时可显式写 `any`。非默认路径通过 `--socket PATH` 指定。
 
-`rule-status RULE_ID [EXPECTED_GENERATION]` 查询当前规则的实际后端、安装端口、COUNT 配置、
-后端提交耗时和整个账本的保存状态。版本默认 `any`，也可指定精确非零版本，过期返回
+`rule-status RULE_ID [EXPECTED_GENERATION]` 查询当前规则的实际规则执行位置、安装端口、COUNT 配置、
+规则安装提交耗时和整个账本的保存状态。版本默认 `any`，也可指定精确非零版本，过期返回
 `ESTALE`。纯软件批量更新的各成员共享一次整批耗时，输出 `install-scope=batch` 和条数。
 查询不访问驱动、不清零计数、不保存快照；时钟不可用时显示 `install-ns=unknown`。
 规则状态和耗时不写入快照，重放会测量本次安装，详见 [规则安装状态](rule_status.md)。

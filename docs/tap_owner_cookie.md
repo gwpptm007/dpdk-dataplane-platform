@@ -19,7 +19,7 @@ Linux 6.8.0-138、DPDK 21.11.9、GCC 11.4、Meson 0.61.2。
 - v4 阶段实际验证 ETH/DROP 与 IPv4/QUEUE，当前 v5 的支持范围及 priority 限制见上述内容核验文档
 - 不支持 `remote=`、egress、transfer、RSS、COUNT、MARK 或多个业务动作
 - 同时配置 `--state-path`、独立的 `--recovery-path` 和 `--tap-owner-cookie`
-- 默认关闭，普通模式继续支持系统 DPDK；软件后端不调用原生标识接口
+- 默认关闭，普通模式继续支持系统 DPDK；软件规则安装不调用网卡原生标识接口
 
 启用时，每次硬件创建前先执行带私有动作的无副作用校验。未打补丁的 TAP 驱动会
 明确拒绝，在此情况下没有逐次意图、没有规则创建，也没有业务快照发布。

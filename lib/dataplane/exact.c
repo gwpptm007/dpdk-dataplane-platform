@@ -220,6 +220,6 @@ uint32_t dppd_exact_classify(const struct dppd_exact *table, uint16_t ingress, c
             selected = row;
         index = row->next;
     }
-    /** 返回本精确表选出的候选 tag，无命中返回 0，交由软件后端与 ACL 候选比较 */
+    /** 返回本精确表选出的候选 tag，无命中返回 0，交由软件规则处理函数与 ACL 候选比较 */
     return selected == NULL ? 0 : selected->tag;
 }

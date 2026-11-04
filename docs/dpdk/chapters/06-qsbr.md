@@ -139,7 +139,7 @@ stateDiagram-v2
 4. 即使没有包，也继续报告进度
 5. 停止时先停止读取，再下线、注销，最后返回线程入口
 
-主线程仍须 `rte_eal_wait_lcore` 确认 worker 返回，然后才能销毁共享后端。
+主线程仍须 `rte_eal_wait_lcore` 确认 worker 返回，然后才能销毁共享的软件规则表和计数器。
 某个读者下线，不代表所有其他读者也下线了。
 
 路由器采用类似方法，入口是 [ipv4_router.c](../../../lib/dataplane/ipv4_router.c) 的 `dppd_ipv4_router_reader_register`、
@@ -201,5 +201,5 @@ meson test -C build 'atomic software create replace delete and allocation failur
 ## 继续阅读
 
 - [DPDK v24.11 QSBR 定义与实现](https://github.com/DPDK/dpdk/blob/v24.11/lib/rcu/rte_rcu_qsbr.h)：各生命周期函数的调用约束
-- [项目软件后端接口](../../../include/dppd/software_backend.h)：对象关系与调用者契约
+- [项目软件规则管理接口](../../../include/dppd/software_backend.h)：对象关系与调用者契约
 - [规则卸载](07-rte-flow.md)：把软件快照与硬件安装行为分开理解

@@ -333,7 +333,7 @@ static int setup_ipv4_routing(struct dppd_runtime *runtime, struct dppd_control_
  *   ├─ 配置 flow_state_path → dppd_managed_run，使用独立的受管理流程
  *   └─ 普通启动路径
  *       → 恢复保护检查 → runtime_init：准备 worker 配置、网口、队列和内存池
- *       → control_init：创建控制服务 → 绑定软件后端、路由等运行时对象
+ *       → control_init：创建控制服务 → 将 control.software 和路由的地址交给 runtime
  *       → 按需恢复规则 → management_start：创建管理入口
  *       → runtime_start：启动 worker → RX burst → 已学过的 process_batch
  *       → 主线程循环处理管理请求、设备事件和统计
@@ -378,7 +378,8 @@ int main(int argc, char **argv)
      *    scripts/run_platform.sh 只启动程序，不预留大页，也不调用网卡绑定脚本
      *
      * 2）下面的 rte_eal_init 在 DPDK 库内部完成基础初始化
-     *    解析 DPDK 参数，准备 lcore 线程环境和内存映射
+     *    解析 DPDK 参数，准备线程并设置 CPU 亲和性，建立内存映射
+     *      → 绑核限制线程可在哪些逻辑 CPU 上运行，不代表独占 CPU，也不代表已开始业务收包
      *      → 大页模式使用已预留的大页；--no-huge 使用非大页模式
      *    根据设备参数由对应 PMD（用户态轮询驱动）探测设备，建立 ethdev 网口对象
      *    VFIO 提供内核侧设备访问，PMD 负责具体网卡操作，两者不是同一个驱动
@@ -397,6 +398,14 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    /**
+     * 参数分工示例：dppd -l 0-2 --main-lcore 0 -- --ports 0,1 --queues 2 --burst 32
+     *   EAL 处理：启用 lcore 0、1、2，指定主 lcore 为 0
+     *   本例对应逻辑 CPU 0、1、2：主线程使用 0，两个 worker 后续分别使用 1、2
+     *   逻辑 CPU 是操作系统可调度的处理单元，不保证这三个编号对应三个独立物理核心
+     *   本项目处理：选择网口 0、1，每网口两组 RX/TX 队列，单次最多收 32 个包
+     * 先跳过 EAL 已处理的参数，再填写 config；此时只确定要求，尚未创建这些业务资源
+     */
     argc -= eal_consumed;
     argv += eal_consumed;
     parse_result = dppd_config_parse(argc, argv, &config);
@@ -459,12 +468,19 @@ int main(int argc, char **argv)
             printf("[dppd] recovery monitor bound; fresh replies required for hardware installation\n");
         }
     }
-    /*
-     * 初始化依赖顺序：先发现并启动 ethdev，得到拓扑；control 引用该拓扑；
-     * management 再引用 control。goto 清理标签严格按相反顺序释放
+    /**
+     * 初始化顺序：runtime 准备设备和拓扑 → control 创建规则管理对象 → management 建立请求入口
+     * control 使用 runtime 的设备拓扑判断规则安装位置，management 保存这些对象的引用
+     * 退出时先停止 worker，再按依赖释放 control 和 runtime
      */
     if (dppd_runtime_init(&runtime, &config) != 0)
         goto cleanup_eal;
+    /**
+     * control.software 管理软件规则表、快照和计数器，worker 查表后执行规则动作
+     * control.rte_flow 通过 PMD 向网卡下发规则，记录驱动句柄和安装状态
+     * 例如“UDP 目的端口 9000 丢弃”：软件路径由 worker 判断并释放，硬件路径由网卡匹配后丢弃
+     * 创建这些对象只是准备规则管理能力，具体规则安装时才选择执行位置
+     */
     if (dppd_control_init(&control, &runtime.devices.topology, config.rule_capacity, NULL) != 0) {
         fprintf(stderr, "[dppd] control service initialization failed\n");
         goto cleanup_runtime;
@@ -475,10 +491,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "[dppd] device event tracking refused: %d\n", device_binding);
         goto cleanup_control;
     }
-    /*
-     * worker 只借用 control 持有的 backend；退出时 main 的清理顺序会先停止并 wait 所有
-     * worker（使其注销 QSBR reader），再调用 control_fini 释放 snapshot/QSBR。这里不能
-     * 绑定临时对象，也不能在 runtime_start 后替换该地址
+    /**
+     * 将 control.software 的地址保存到 runtime，worker 收包时沿此指针查软件规则表
+     * worker->runtime → runtime.software_backend → control.software
+     * 管理请求更新 control.software 中的规则快照，worker 读取已发布的快照
+     * 启动 worker 前完成绑定；退出时先等待 worker 返回，再释放规则表和计数器
      */
     dppd_runtime_set_software_backend(&runtime, &control.software);
     control.conntrack = runtime.conntrack;
@@ -522,6 +539,10 @@ int main(int argc, char **argv)
             printf("[dppd] rule snapshot ready: path=%s generation=%" PRIu64 " rules=%u\n", config.state_path,
                 dppd_rule_repository_generation(&control.rules), dppd_rule_repository_count(&control.rules));
     }
+    /**
+     * 创建并监听管理 socket，默认 /tmp/dppd-control.sock，同时保存 control、devices 和 runtime 的引用
+     * 后续主线程循环调用 management_poll：接收 dppctl 请求 → 使用这些对象处理 → 返回响应
+     */
     if (dppd_management_start(&management, &control, &runtime.devices, &runtime, config.control_socket) != 0) {
         fprintf(stderr, "[dppd] management socket initialization failed: %s\n", config.control_socket);
         goto cleanup_control;
@@ -695,7 +716,7 @@ int main(int argc, char **argv)
     /**
      * 正常退出主线：关闭管理入口 → 请求 worker 停止 → 等待工作函数返回 → 释放共享资源
      * request_stop 只写停止标记，wait 才确认任务已结束，不能发送通知后就立即释放规则或设备
-     * worker 退出前会注销规则和路由读者，等待成功后才能销毁这些后端
+     * worker 退出前会注销规则和路由读者，等待成功后才能销毁规则和路由对象
      */
     dppd_management_stop(&management);
     dppd_runtime_request_stop(&runtime);
@@ -707,7 +728,7 @@ int main(int argc, char **argv)
         rc = EXIT_SUCCESS;
 
     /**
-     * 按资源依赖释放：查询与管理入口 → control 的规则后端和路由 → runtime 的协议与设备 → EAL
+     * 按资源依赖释放：查询与管理入口 → control 的规则管理对象和路由 → runtime 的协议与设备 → EAL
      * 网口关闭后才能释放 mbuf 池，避免驱动仍持有接收或发送缓冲
      * cleanup_* 是跳转标签，执行后会继续向下清理；启动失败只跳到已完成初始化的那一层
      */
@@ -719,7 +740,7 @@ cleanup_management:
 cleanup_control:
     /** 退出窗口也可能收到复位事件，未知句柄不能落入普通 fini 的逐项删除 */
     (void)dppd_runtime_device_poll(&runtime);
-    if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)//清理路由、规则后端、控制面记录
+    if (dppd_control_fini(&control) != 0 && rc == EXIT_SUCCESS)//清理路由、软件表与网卡规则、控制面记录
         rc = EXIT_FAILURE;
     /** backend 真正释放才证明已删除所有本进程 handle，失败时保留磁盘标记等待下次核对 */
     if (recovery_guard.fd >= 0 && control.rte_flow.objects == NULL && dppd_recovery_guard_clean(&recovery_guard) != 0) {

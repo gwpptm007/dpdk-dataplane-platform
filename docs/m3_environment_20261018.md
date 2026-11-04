@@ -6,7 +6,7 @@
 | 环境 | 实测结果 | 对 M3 的影响 |
 | --- | --- | --- |
 | Windows 宿主机 | Lenovo 82WM；物理网卡为 Realtek PCIe GbE `10ec:8168` 和 RZ616 Wi-Fi `14c3:0616`；VMware Workstation 17 运行两个虚拟机 | 未发现可见的 Mellanox/BlueField/SmartNIC |
-| `192.168.65.135` | VMware 虚拟机；Ubuntu 22.04.5；kernel `6.8.0-138-generic`；8 vCPU、7.7 GiB 内存 | 可继续进行构建、TAP、软件和模拟后端测试 |
+| `192.168.65.135` | VMware 虚拟机；Ubuntu 22.04.5；kernel `6.8.0-138-generic`；8 vCPU、7.7 GiB 内存 | 可继续进行构建、TAP、软件和模拟网卡规则管理测试 |
 | `192.168.65.134` | 用户更正凭据后已成功登录；VMware 虚拟机 `wanqi-vm`；Ubuntu 23.10；kernel `6.5.0-42-generic`；8 vCPU、7.7 GiB 内存 | 已完成普通用户只读盘点，仍无可用于 M3 实机卸载验收的物理设备 |
 
 ## 135 的可见网络设备

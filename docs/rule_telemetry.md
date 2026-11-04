@@ -45,7 +45,7 @@
 例如第二条创建返回 `EIO`，撤销第一条又返回 `EFAULT`，最终 API 返回 `EUCLEAN`：
 主错误仍保留 `EIO`，补偿错误另存 `EFAULT`，并进入恢复隔离。
 这时 `last_applied=false`，但可能还有残留对象，必须使用 `reconcile-status/reconcile-retry`。
-**false 只表示没有完整发布，不能证明后端没有副作用或已经全部回滚。**
+**false 只表示没有完整发布，不能证明规则安装没有副作用或已经全部回滚。**
 
 若文件保存返回 `ENOTDIR`，规则已经完整发布，则主错误是 `ENOTDIR`，最终修改 API
 返回 `EUCLEAN`，`last_applied=true`，`failed_after_apply` 增加。显式 flush 直接返回
@@ -76,7 +76,7 @@
 `persist`、`load`、`reconcile` 和 `isolation`。补偿单独保存，不能覆盖最初失败阶段。
 `compensate` 保留为明确的阶段枚举，当前内部补偿使用独立错误字段。
 
-最近失败保留 operation、规则 ID、版本、事务 ID、请求条数、端口和后端是否已知。
+最近失败保留 operation、规则 ID、版本、事务 ID、请求条数、端口和规则执行位置是否已知。
 版本预检失败记录用户提交的期望版本，规划和安装失败记录候选或旧对象的实际版本。
 整体容量检查、整批软件发布、整批账本发布和完整批量文件保存无法定位单个成员，
 此时 ID/版本为零并明确标记未知身份，不把最后检查的成员当成罪因。
@@ -105,8 +105,8 @@ DPDK 使用 Unix socket 和 JSON，逗号分隔命令参数；EAL 的 `--no-tele
 | `/dppd/stats` | 原有软件报文累计统计 |
 | `/dppd/rule_failures` | 完成态累计值、失败分类与最近失败 |
 | `/dppd/rules[,AFTER_ID[,GENERATION]]` | 规则汇总和最多 64 个升序 ID |
-| `/dppd/rule,RULE_ID` | 当前发布副本中指定规则的实际后端与安装记录 |
-| `/dppd/rule_latency[,SCOPE]` | 本进程成功后端提交的三组历史耗时、均值、区间与分位数上界 |
+| `/dppd/rule,RULE_ID` | 当前发布副本中指定规则的实际规则执行位置与安装记录 |
+| `/dppd/rule_latency[,SCOPE]` | 本进程成功的规则安装的三组历史耗时、均值、区间与分位数上界 |
 | `/dppd/rule_history[,AFTER_EVENT_ID[,EXPECTED_REVISION]]` | 最近 64 次完成态失败，每页 4 条，独立历史版本和覆盖缺口提示 |
 
 规则汇总包含 repository generation、软件/硬件/不可用规则数、本地实际对象数、

@@ -199,7 +199,7 @@ flowchart TB
             TX_BACKEND["<b>transaction_backend 回调</b><br/>• validate(item) — 能力检查<br/>• prepare(item) → token — 预留资源<br/>• commit(item, token) — 正式安装<br/>• rollback(item, token, attempted) — 撤销<br/>• finalize(item, token) — 释放临时资源"]
         end
 
-        subgraph SWBackend["⑤ 软件后端 (software_backend.h)"]
+        subgraph SWBackend["⑤ 软件规则表与报文匹配 (software_backend.h)"]
             direction TB
             SW_STRUCT["<b>dppd_software_backend</b><br/>• active — 原子 snapshot 指针<br/>• retired — 退役 snapshot 链表<br/>• qsbr — DPDK RCU 回收器<br/>• writer_lock — 控制面互斥锁<br/>• capacity — 最大规则数<br/>• shared_counts — 共享计数库<br/>• latency_single/batch — 耗时直方图"]
             SW_SNAP["<b>classifier_snapshot</b><br/>• objects[] — 规则+动作+计数<br/>• exact — 精确匹配哈希表<br/>• acl — ACL 编译表"]
@@ -207,7 +207,7 @@ flowchart TB
             SW_FLOW["<b>无锁发布流程</b><br/>1. writer_lock 内复制 snapshot<br/>2. 修改副本(添加/删除规则)<br/>3. 原子替换 active 指针<br/>4. 旧 snapshot → retired 链表<br/>5. QSBR 确认全部读者越界后释放"]
         end
 
-        subgraph HWBackend["⑥ 硬件后端 (rte_flow_backend.h)"]
+        subgraph HWBackend["⑥ 网卡规则下发 (rte_flow_backend.h)"]
             direction TB
             HW_STRUCT["<b>dppd_rte_flow_backend</b><br/>• objects[] — flow 对象数组<br/>• slot_index — 版本索引<br/>• shared_counts[] — 共享计数对象<br/>• capacity / count<br/>• quarantined — 隔离标记<br/>• api — 驱动接口集合<br/>• probes — 能力探测缓存<br/>• latency — 安装耗时直方图"]
             HW_API["<b>dppd_flow_api 接口</b><br/>• validate(port, rule, error)<br/>• create(port, rule) → handle<br/>• remove(handle)<br/>• query_count(handle) → hits/bytes<br/>• query_age(handle) → age_result<br/>• create_owned(port, rule, cookie)<br/>• shared_count_create/query/destroy<br/>• simulate_reset"]
@@ -305,7 +305,7 @@ flowchart TB
             OP_R6["RULE_GET — 查询完整规则"]
             OP_R7["RULE_LIST — 分页列表 (4 条/页)"]
             OP_R8["RULE_COUNT_QUERY — 查询 COUNT"]
-            OP_R9["RULE_STATUS — 实际后端+安装记录"]
+            OP_R9["RULE_STATUS — 实际规则执行位置+安装记录"]
             OP_R10["RULE_METRICS — 累计指标+失败分类"]
             OP_R11["RULE_LATENCY — 安装耗时 P50/P95/P99"]
             OP_R12["RULE_HISTORY — 最近 64 次失败历史"]

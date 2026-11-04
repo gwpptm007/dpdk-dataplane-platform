@@ -107,7 +107,7 @@ static bool overlaps(uint32_t first, uint32_t last, uint32_t other_first, uint32
     return first <= other_last && other_first <= last;
 }
 
-/** 同一公网入口不能有重叠规则，同一后端也不能有两种回包无法区分的公网身份 */
+/** 同一公网入口不能有重叠规则，同一内网服务也不能有两种回包无法区分的公网身份 */
 int dppd_nat_validate(const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t count)
 {
     if (count > DPPD_MAX_DNAT_RULES || (count != 0 && dnat == NULL))

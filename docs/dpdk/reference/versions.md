@@ -7,7 +7,7 @@
 | 内容 | 本项目的边界 |
 | --- | --- |
 | 原生 flow template / async | [flow_template.c](../../../lib/offload/flow_template.c) 与 [async_flow.c](../../../lib/offload/async_flow.c) 用 >=24.11 条件编译，旧分支 ENOTSUP |
-| 共享对象与软件异步 | 平台自己的状态机与软件后端不能当成旧 DPDK 已具有原生硬件能力 |
+| 共享对象与软件异步 | 平台自己的状态机与软件规则实现不能当成旧 DPDK 已具有原生硬件能力 |
 | transfer 的 ingress 标志 | [rte_flow.c](../../../lib/offload/rte_flow.c) 对 <22.11 保留历史组合，按实际编译分支阅读 |
 | rte_flow 支持 | 函数存在不意味着 PMD 支持所需 pattern/action 组合或具有足够资源 |
 | VFIO 与 mlx5 | bifurcated 驱动与内核协作，不能按通用 VFIO 步骤把其端口全部解绑 |

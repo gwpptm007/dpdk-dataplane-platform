@@ -83,7 +83,7 @@ static void setup(struct dppd_control_service *control, uint32_t capacity)
     assert(dppd_control_init(control, &topology, capacity, &api) == 0);
 }
 
-/** 构造最小合法规则，只通过参数改变后端策略 */
+/** 构造最小合法规则，只通过参数改变规则执行策略 */
 static struct dppd_rule rule(uint64_t id, enum dppd_fallback_policy policy)
 {
     struct dppd_rule value = {.id = id, .fallback = policy, .nb_matches = 1, .nb_actions = 1};
@@ -93,7 +93,7 @@ static struct dppd_rule rule(uint64_t id, enum dppd_fallback_policy policy)
     return value;
 }
 
-/** 历史只数成功的后端提交，时钟不可用也算提交，但不能作为零耗时测量 */
+/** 历史只数成功的规则安装提交，时钟不可用也算提交，但不能作为零耗时测量 */
 static uint64_t successful_commits(const struct dppd_control_service *control, enum dppd_rule_latency_scope scope)
 {
     struct dppd_rule_latency_report report;

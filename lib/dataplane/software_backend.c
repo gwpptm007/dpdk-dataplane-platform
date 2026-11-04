@@ -470,7 +470,7 @@ void dppd_software_backend_fini(struct dppd_software_backend *backend)
 }
 
 /**
- * 检查条目是否选择软件后端，且匹配条件、动作均受支持
+ * 检查条目是否选择由 CPU 查表执行，且匹配条件、动作均受支持
  * 通过返回 0，否则返回 -ENOTSUP；此阶段不分配资源或发布规则
  */
 static int transaction_validate(void *context, const struct dppd_transaction_item *item)
@@ -492,7 +492,7 @@ static int transaction_validate(void *context, const struct dppd_transaction_ite
  */
 static int transaction_prepare(void *context, const struct dppd_transaction_item *item, uintptr_t *token)
 {
-    /** context 是初始化接口时保存的软件后端对象地址，在这里恢复具体类型以访问其字段 */
+    /** context 原为 struct dppd_software_backend *，转回该类型后访问规则表和计数器 */
     struct dppd_software_backend *backend = context;
     struct dppd_software_pending_rule *pending;
     struct dppd_software_classifier_snapshot *active;
@@ -636,7 +636,7 @@ static int transaction_commit(void *context, const struct dppd_transaction_item 
  * pending 未发布 → 释放准备记录
  * pending 已发布 → 删除同 ID、同版本的规则，再释放准备记录
  *
- * 软件后端不使用 item 和 commit_was_attempted，尝试过提交不代表已经发布
+ * 软件规则回滚函数不使用 item 和 commit_was_attempted，尝试过提交不代表已经发布
  * 成功返回 0，参数或规则删除失败返回负错误码；删除失败时仍释放 pending
  */
 static int transaction_rollback(void *context, const struct dppd_transaction_item *item, uintptr_t token,
@@ -676,7 +676,7 @@ static void transaction_finalize(void *context, const struct dppd_transaction_it
 }
 
 /**
- * 返回软件后端的事务接口，将对象地址和各阶段函数地址交给控制层
+ * 返回软件规则安装的事务接口，将对象地址和各阶段函数地址交给控制层
  * 回调函数的 static 限制函数名的可见范围，其他文件仍可通过传出的函数指针调用
  */
 struct dppd_transaction_backend dppd_software_transaction_backend(struct dppd_software_backend *backend)
@@ -684,7 +684,7 @@ struct dppd_transaction_backend dppd_software_transaction_backend(struct dppd_so
     const struct dppd_transaction_backend operations = {
         /**
          * .成员名 = 初始值 是 C 的指定初始化语法
-         * .context = backend             → 保存要操作的软件后端对象地址
+         * .context = backend             → 保存传入的指针，回调通过它访问规则表和计数器
          * .prepare = transaction_prepare → 保存本文件的函数地址，此时不执行函数
          *
          * 这里 transaction_prepare 与 &transaction_prepare 都表示函数地址
@@ -1198,7 +1198,7 @@ int dppd_software_backend_worker_register(struct dppd_software_backend *backend,
 /**
  * 工作线程确认不再使用先前读取的规则指针后报告安全点，允许控制面推进回收
  * 此函数只报告进度，不直接释放快照；即使本轮没有收到报文也应报告
- * backend->qsbr 跟踪本后端的读者，worker_id 指定本次报告者；完整 A/B 示例见 software_backend.h
+ * backend->qsbr 跟踪本软件规则表的读者，worker_id 指定本次报告者；完整 A/B 示例见 software_backend.h
  */
 void dppd_software_backend_worker_quiescent(struct dppd_software_backend *backend, unsigned int worker_id)
 {

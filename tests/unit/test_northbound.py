@@ -162,7 +162,7 @@ class NorthboundTests(unittest.TestCase):
             for _ in range(2):
                 self.assertEqual(self.request()[0], 200)
                 finished.get(timeout=2)
-            # 两个槽都占用时准入直接关闭连接，不应创建第三个后端请求
+            # 两个槽都占用时准入直接关闭连接，不应创建第三个发往 dppd 的请求
             with self.assertRaises((http.client.RemoteDisconnected, ConnectionResetError)):
                 self.request()
             self.assertEqual(len(self.backend.calls), 2)

@@ -180,13 +180,13 @@ load + validate snapshot
     → restore repository global generation
 ```
 
-`software` 规则恢复到软件后端；`prefer` 仅在 PMD validate 失败且软件语义等价时回退；
+`software` 规则恢复到软件规则表；`prefer` 仅在 PMD validate 失败且软件语义等价时回退；
 `require` 不允许软件回退。任一规则无法在当前环境恢复时，默认 fail closed 并回滚
 本次已创建对象；只有全部对象提交成功后，才一次性发布 snapshot 中保留的逐规则 generation 和
 repository global generation。文件不存在时会原子创建一个空 v2 snapshot；目录不可写
 或空快照创建失败时同样拒绝启动，不会静默退化为内存模式。
 
-恢复入口仅接受全新空服务：规则账本、硬件和软件后端都必须为空，已有实际软件对象
+恢复入口仅接受全新空服务：控制面规则记录、网卡规则和软件规则表都必须为空，已有实际软件对象
 但账本为空时也返回 `EBUSY`。恢复保留规则内容、安装端口和版本，COUNT 不存入快照，
 软件计数器从零开始。2026-10-01 已验证非空软件快照的两次 daemon 重启、恢复后的
 批量更新、损坏快照拒绝启动，以及恢复后实际 RX/TX，见 [验证记录](validation_batch_update.md)。

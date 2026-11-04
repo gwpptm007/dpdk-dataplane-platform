@@ -24,18 +24,18 @@ rule-status rule=100 generation=7 port=1 backend=software fallback=prefer-hardwa
 | 字段 | 含义 |
 |---|---|
 | `rule`、`generation`、`port` | 当前安装对象的 ID、规则版本和 DPDK 安装端口 |
-| `backend` | 实际对象所在的 `software` 或 `rte_flow` 后端 |
-| `fallback` | 用户要求的后端策略，与实际后端分别显示 |
+| `backend` | 实际执行位置：`software` 表示 CPU 查表，`rte_flow` 表示由网卡执行 |
+| `fallback` | 用户要求的规则执行策略，与实际规则执行位置分别显示 |
 | `count` | 规则是否配置 COUNT，不表示已查询计数器或已有命中 |
 | `install-scope`、`commit-rules` | 本次提交安装单条规则，还是一次发布的整个软件更新批次 |
-| `install-ns` | 后端成功提交的测量耗时，单位纳秒；时钟不可用时显示 `unknown` |
+| `install-ns` | 规则安装成功的测量耗时，单位纳秒；时钟不可用时显示 `unknown` |
 | `persistence`、`dirty` | 整个规则账本是否启用保存、最近保存是否失败 |
 | `persisted-generation`、`repository-generation` | 整个账本的磁盘版本和当前内存版本 |
 | `last-error` | 最近保存错误，零表示没有保存错误 |
 
-`prefer-hardware` 表示优先尝试驱动，不证明实际使用了驱动对象。查询分别检查两个后端的
-精确 ID/版本，必须恰好找到一个对象；还核对安装端口、COUNT 配置及后端策略。驱动对象的
-handle 身份与记录不符、两个后端都有同一版本、或者都没有对应对象时，返回 `EUCLEAN`，
+`prefer-hardware` 表示优先尝试驱动，不证明实际使用了驱动对象。查询分别检查软件表与网卡规则的
+精确 ID/版本，必须恰好找到一个对象；还核对安装端口、COUNT 配置及规则执行策略。驱动对象的
+handle 身份与记录不符、软件表与网卡都有同一版本、或者都没有对应对象时，返回 `EUCLEAN`，
 不返回可当作成功使用的状态。
 
 ## 耗时边界
@@ -46,7 +46,7 @@ handle 身份与记录不符、两个后端都有同一版本、或者都没有�
 - 不包含规划、prepare、规则账本提交、磁盘保存或管理 socket 往返
 
 批量成员的 `commit-rules` 为批次条数，不能将成员耗时相加或理解为各自的单条耗时。
-批量创建、硬件更新和混合更新仍逐条调用后端提交，因此对应记录的范围为单条。
+批量创建、硬件更新和混合更新仍逐条调用规则安装函数提交，因此对应记录的范围为单条。
 计时只发生在控制面提交阶段，逐包处理路径没有增加时钟调用或锁。
 
 同一版本随着其他规则变更而复制软件快照时保留原记录。单规则幂等 apply 不重装，也不

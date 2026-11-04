@@ -127,7 +127,7 @@ static void finish(struct dppd_control_service *service)
 
 /**
  * 验证失败补偿后的状态与两条基线规则一致，包括规则数、旧版本、优先级和端口
- * 同时检查对象确实存在于原后端，防止仅恢复账本却没有恢复实际安装对象
+ * 同时检查对象确实恢复到原来的软件表或网卡中，防止仅恢复账本却没有恢复实际安装对象
  */
 static void assert_old(struct dppd_control_service *service, bool software)
 {
@@ -151,7 +151,7 @@ static void assert_old(struct dppd_control_service *service, bool software)
 
 /**
  * 覆盖两条或四条更新、强制软件执行，以及硬件校验失败后的软件回退
- * 成功后旧版本在两个后端都应消失，所有新版本按请求顺序连续分配并共享事务编号
+ * 成功后旧版本应从软件表与网卡中全部删除，所有新版本按请求顺序连续分配并共享事务编号
  */
 static void test_success(uint32_t count, bool software, bool fallback)
 {
@@ -259,7 +259,7 @@ static void test_preflight(bool software)
 /**
  * 按实际执行顺序在创建、删除和补偿阶段注入错误
  * 可完整补偿的故障必须保留全部旧规则，补偿也失败的故障必须进入隔离并拒绝继续写入
- * 后半部分还检查 PREFER 的回退限制，以及硬件与软件混合时能否恢复原后端
+ * 后半部分还检查 PREFER 的回退限制，以及硬件与软件混合时能否恢复到原来的规则执行位置
  */
 static void test_failures(void)
 {
@@ -316,7 +316,7 @@ static void test_failures(void)
     assert_old(&service, false);
     finish(&service);
 
-    /** 新规则已经装入软件后端，但旧硬件删除失败，必须撤销新软件规则并恢复原硬件规则 */
+    /** 新规则已经写入软件规则表，但旧硬件删除失败，必须撤销新软件规则并恢复原硬件规则 */
     setup(&service, requests, 4, 2, false);
     requests[0].rule.fallback = requests[1].rule.fallback = DPPD_FALLBACK_SOFTWARE_ONLY;
     fake.fail_remove = 2;
@@ -376,7 +376,7 @@ static void test_persistence(bool software)
     assert(dppd_control_update_batch(&service, requests, 2, results) == -EUCLEAN);
     /**
      * 退出会重试保存 dirty 快照，磁盘故障仍在时应返回底层 ENOTDIR
-     * 即使报告保存失败，也必须释放仓库、路径和后端对象，不能把错误处理变成内存泄漏
+     * 即使报告保存失败，也必须释放规则记录、路径以及软件表和网卡规则，不能把错误处理变成内存泄漏
      */
     fake.observed = NULL;
     assert(dppd_control_fini(&service) == -ENOTDIR);

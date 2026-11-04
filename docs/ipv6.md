@@ -71,7 +71,7 @@ neighbor6 1 fe80::1 02:00:00:00:20:01
 一组 `acl6-set` 参数但不写命令名。纯软件批量更新仍只发布一次快照，错误或旧版本
 不能覆盖新表。规则查询、COUNT、删除和持久化复用原有接口。
 
-IPv6 ACL 当前强制使用软件后端，不承诺硬件等价执行，`require` 硬件请求会拒绝。
+IPv6 ACL 当前强制由 worker 查软件规则表处理，不承诺硬件等价执行，`require` 硬件请求会拒绝。
 未启用跟踪时 IPv6 为 UNTRACKED。后续双栈跟踪支持 NEW、ESTABLISHED 和 INVALID，
 状态条件、使用边界和 NAT66 见 [有状态阶段](nat66.md)。仅配置 IPv4 NAT 不会转换 IPv6 地址。
 

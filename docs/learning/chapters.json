@@ -225,7 +225,7 @@
     "id": "2.1",
     "title": "规则安装与事务回调",
     "status": "从入口重新复习 · 完整过程分为四段",
-    "scope": "只演示普通 RULE_APPLY 的单条新增路径：已有 R1，ID 20 尚不存在，端口 0 可用，控制状态允许修改。acl-set 明确选择软件后端；文件保存仅讲入口，不展开启动恢复、硬件和 NAT",
+    "scope": "只演示普通 RULE_APPLY 的单条新增路径：已有 R1，ID 20 尚不存在，端口 0 可用，控制状态允许修改。acl-set 明确选择由 worker 匹配报文并执行规则；文件保存仅讲入口，不展开启动恢复、硬件和 NAT",
     "example": "dppctl acl-set 20 0 0 100 udp any any any 9000 drop count",
     "flow": "命令参数 → request → Unix socket → 服务端分发\n→ 检查 / 规划 → validate → prepare → commit\n→ 新快照与匹配表 → 发布 active\n→ 保存规则记录 → finalize → 保存入口 → 响应客户端\nworker 后续匹配读取新快照，旧快照交给 QSBR",
     "steps": [
@@ -464,14 +464,14 @@
           },
           {
             "title": "context 指向对象，prepare 指向函数",
-            "text": "control.c 取得软件接口后，事务按计划选择 backends.software。backend_for 返回的是操作接口地址；其中 context 保存实际软件后端对象地址。回调将 void *context 转回具体类型后才能访问对象字段。文件内的 static 函数也能通过传出的地址调用。",
+            "text": "control.c 取得软件接口后，事务按计划选择 backends.software。backend_for 返回的是操作接口地址；其中 context 保存实际软件规则管理结构的地址。回调将 void *context 转回具体类型后才能访问对象字段。文件内的 static 函数也能通过传出的地址调用。",
             "flow": "dppd_software_transaction_backend(&service->software)\n  → backends.software.context = &service->software\n  → backends.software.prepare = 本文件 transaction_prepare\n\nbackend_for 选中软件接口\n  → backend->prepare(backend->context, item, &item->backend_token)\n  → 软件 transaction_prepare(&service->software, item, &item->backend_token)\n\nrte_flow 接口保存另一组函数地址，同名 static 函数各自独立"
           }
         ]
       },
       {
         "phase": 2,
-        "title": "validate：检查所选后端能否执行",
+        "title": "validate：检查所选处理方式是否支持该规则",
         "file": "lib/control/transaction.c",
         "fn": "dppd_transaction_run",
         "anchor": "transaction->state = DPPD_TRANSACTION_VALIDATING;",
@@ -497,7 +497,7 @@
         "principles": [
           {
             "title": "检查通过后返回哪里",
-            "text": "软件 transaction_validate 检查计划确实选择软件后端，并确认匹配条件和动作受支持。返回 0 后，事务将该条目标记为 VALIDATED；所有条目都通过后才开始 prepare。回调在这里同步执行，必须等它返回再继续。",
+            "text": "软件 transaction_validate 检查计划确实选择由 worker 匹配报文并执行规则，并确认匹配条件和动作受支持。返回 0 后，事务将该条目标记为 VALIDATED；所有条目都通过后才开始 prepare。回调在这里同步执行，必须等它返回再继续。",
             "flow": "transaction.c：backend->validate(...)\n  → software_backend.c：transaction_validate\n  → 返回 0\n  → item.state = VALIDATED\n全部条目通过 → 进入 PREPARING"
           },
           {
@@ -513,7 +513,7 @@
         "file": "lib/dataplane/software_backend.c",
         "fn": "transaction_prepare",
         "anchor": "pending = calloc",
-        "input": "软件后端、item.rule(ID20/gen8)、token输出地址",
+        "input": "control.software、item.rule(ID20/gen8)、token输出地址",
         "output": "pending 保存规则；item.backend_token 得到它的地址",
         "explain": "prepare 分配 pending，在写锁内复查版本重复和容量，然后将规则复制进去。它不发布规则，也不实际占住一个规则槽位。通用事务保存 token，稍后原样传给 commit。",
         "state": "token 参数 → item.backend_token 这个字段\n*token 写入 pending 的地址\nitem.backend_token → pending\n  ├─ rule = ID20/gen8\n  └─ published = false\nactive 仍指向旧快照 A",
@@ -681,7 +681,7 @@
           "request": "事务安装成功",
           "pending": "published=true，尚未释放",
           "snapshot": "active → B；ID20 已可匹配",
-          "response": "后端成功，控制层继续收尾"
+          "response": "规则安装成功，控制层继续收尾"
         },
         "related": [
           [
@@ -706,10 +706,10 @@
         "fn": "control_apply_impl",
         "anchor": "rc = dppd_rule_repository_apply",
         "n": 17,
-        "input": "新规则已在后端生效，控制层持有成功事务",
+        "input": "新规则已生效，控制层持有成功事务",
         "output": "内存规则记录更新，pending释放，保存入口执行",
         "explain": "控制层先将 candidate 的内容和版本写入 service->rules，再调用 dppd_transaction_finalize。通用事务选中软件接口，经 finalize 回调释放 pending，随后清零 backend_token。最后才进入配置保存入口；保存成功与否不能只看事务是否 FINALIZED。",
-        "state": "后端已生效 → records保存ID20/gen8\n→ finalize释放pending\n→ 配置路径存在时保存文件",
+        "state": "实际规则已生效 → records保存ID20/gen8\n→ finalize释放pending\n→ 配置路径存在时保存文件",
         "note": "本次已复习规则记录与 finalize；配置保存仅在这里标出衔接，下一步进入 2.4 的保存步骤展开",
         "handoff": "控制函数返回 rc，服务端写入 response.status 并把响应发送回客户端",
         "values": {
@@ -1025,9 +1025,9 @@
         "fn": "control_apply_impl",
         "anchor": "rc = dppd_rule_repository_apply",
         "n": 17,
-        "input": "软件后端已发布 ID20/version13；candidate 是待登记的规则副本",
+        "input": "软件规则表已发布 ID20/version13；candidate 是待登记的规则副本",
         "output": "service->rules 保存完整记录，随后 finalize 释放 pending，再进入配置保存",
-        "explain": "从 control_apply_impl 的安装成功分支进入。这里把 candidate 交给 dppd_rule_repository_apply，更新控制面记录；worker 仍通过软件后端的 active 查表。记录更新成功后，才继续前面读过的 finalize",
+        "explain": "从 control_apply_impl 的安装成功分支进入。这里把 candidate 交给 dppd_rule_repository_apply，更新控制面记录；worker 仍通过软件规则表的 active 查表。记录更新成功后，才继续前面读过的 finalize",
         "state": "candidate → 复制到 records[4].rule\nrecords[4].occupied = true\nresult：CREATED，generation=13",
         "note": "这里只是在内存中登记规则；是否写入文件由后面的保存步骤处理",
         "handoff": "进入 dppd_rule_repository_apply，先按 ID 查记录，再决定新建、更新或保持不变",
@@ -1048,7 +1048,7 @@
         "principles": [
           {
             "title": "运行规则、控制记录和文件各有什么用途",
-            "text": "它们保存的内容有关联，但由不同路径使用。后端安装成功不代表磁盘文件已经保存成功",
+            "text": "它们保存的内容有关联，但由不同路径使用。实际规则安装成功不代表磁盘文件已经保存成功",
             "flow": "active → worker 匹配报文、执行动作\nservice->rules.records[] → 控制面查询、管理内容与版本\n配置文件 → 保存时写入，供后续恢复"
           },
           {
@@ -1100,7 +1100,7 @@
         "explain": "索引插入成功后返回 slot，函数在 records[slot] 中标记 occupied 并复制完整规则。随后把整个集合的 generation 加一，赋给新规则，再增加有效规则数。其他已有规则保留各自的版本",
         "state": "index：(20,0) → slot=4\nrecords[4].rule.id = 20\nrepository.generation：12 → 13\nrecords[4].rule.generation = 13\nrepository.count：3 → 4",
         "note": "索引键中的0固定占位，不是规则版本；实际版本保存在 records[slot].rule.generation",
-        "handoff": "接下来回看 dppd_slot_index_insert 如何给出槽位4；这是索引层的实现，不是再次安装后端规则",
+        "handoff": "接下来回看 dppd_slot_index_insert 如何给出槽位4；这是索引层的实现，不是再次安装软件表或网卡中的规则",
         "related": [
           [
             "lib/control/control.c",
@@ -1125,7 +1125,7 @@
           {
             "title": "已经安装版本13，为什么这里还要加一",
             "text": "控制层先用集合版本加一填写 candidate，此时没有修改集合版本。安装成功后，这里才正式推进集合版本；串行执行保证中间没有另一笔修改",
-            "flow": "安装前：集合版本12 → candidate.generation=12+1=13\n安装中：后端安装 ID20/version13，集合仍为12\n登记时：++repository.generation → 13\n        records[4].rule.generation → 13"
+            "flow": "安装前：集合版本12 → candidate.generation=12+1=13\n安装中：实际规则安装 ID20/version13，集合仍为12\n登记时：++repository.generation → 13\n        records[4].rule.generation → 13"
           },
           {
             "title": "更新已有规则时，数量不增加",
@@ -1178,7 +1178,7 @@
         "output": "order有效部分=[0,2,3]；空闲链4→1→NONE",
         "explain": "检查键存在后把后面的编号左移。keys[4] 清空ID和版本，同时 next_free 接住原空闲链；free_head 改为4。count减少后尾部旧编号无效。调用方 rule_repository.c还会清空 records[4]。",
         "state": "删20：[0,4,2,3] → [0,2,3]\n空闲链：1→NONE → 4→1→NONE\n再加25：取槽位4 → [0,4,2,3]\n对应ID：[10,25,30,40]",
-        "note": "槽位复用不是规则身份复用；外部仍用ID和版本。这里只维护索引，不负责删除后端规则",
+        "note": "槽位复用不是规则身份复用；外部仍用ID和版本。这里只维护索引，不负责删除软件表或网卡中的规则",
         "handoff": "进入2.4，把索引删除接回真正的规则删除和事务回滚",
         "related": [
           [
@@ -1195,20 +1195,20 @@
     "status": "此前讲过的收尾流程 · 本次连接索引删除",
     "scope": "只展开规则删除、事务收尾及保存入口。持久化文件格式、启动恢复、硬件实现、连接跟踪和 NAT 留待后续",
     "example": "正常删除按 id+generation 定位；回滚例：R1提交成功，R2失败，R3仅prepare；文件保存失败不等于规则回滚",
-    "flow": "正常删除：后端 remove → 内存账本 remove → 保存入口\n事务失败：逆序 rollback → 未发布清准备记录 / 已发布撤销规则\n成功收尾：finalize 保留规则 → 保存；失败标记 dirty",
+    "flow": "正常删除：从软件表或网卡 remove → 内存账本 remove → 保存入口\n事务失败：逆序 rollback → 未发布清准备记录 / 已发布撤销规则\n成功收尾：finalize 保留规则 → 保存；失败标记 dirty",
     "steps": [
       {
-        "title": "正常删除先处理后端，再删账本",
+        "title": "正常删除先撤销实际规则，再删控制面记录",
         "file": "lib/control/control.c",
         "fn": "control_remove_impl",
         "anchor": "rc = remove_actual_rule",
         "n": 13,
         "input": "当前账本中有目标ID和版本，版本检查通过",
-        "output": "后端删除成功后才删除账本，然后保存",
-        "explain": "control_remove_impl 先查账本确定版本并检查预期。后端删除失败就返回，账本保留；后端已删但账本删失败则进入隔离。账本删除内部才调用 slot_index_erase 归还槽位。",
-        "state": "控制请求 → remove_actual_rule\n后端成功 → repository_remove → erase + 清记录\n再 → persist_current_repository",
+        "output": "实际规则删除成功后才删除账本，然后保存",
+        "explain": "control_remove_impl 先查账本确定版本并检查预期。实际规则删除失败就返回，账本保留；实际规则已删但控制面记录删除失败则进入隔离。账本删除内部才调用 slot_index_erase 归还槽位。",
+        "state": "控制请求 → remove_actual_rule\n实际规则删除成功 → repository_remove → erase + 清记录\n再 → persist_current_repository",
         "note": "对外删除成功不表示旧 worker 手中的规则快照立即消失，旧表仍由 QSBR 保护",
-        "handoff": "软件后端通过新的快照撤销规则"
+        "handoff": "软件规则表通过新的快照撤销规则"
       },
       {
         "title": "删除规则也是发布一个新快照",
@@ -1231,7 +1231,7 @@
         "n": 12,
         "input": "R1提交成功，R2提交失败，R3仅准备",
         "output": "按R3→R2→R1逆序尝试清理",
-        "explain": "rollback_items 从最后一项开始，准备过的条目都要清理。commit_attempts 包括尝试提交但失败的那一条；软件后端进一步依据 pending.published 判断是否已安装。",
+        "explain": "rollback_items 从最后一项开始，准备过的条目都要清理。commit_attempts 包括尝试提交但失败的那一条；软件规则回滚函数进一步依据 pending.published 判断是否已安装。",
         "state": "R3：未发布 → 清pending\nR2：未发布 → 清pending\nR1：已发布 → 删规则 + 清pending",
         "note": "原始错误保存在 failure_code，首个回滚错误保存在 rollback_code；某项清理失败仍继续其他项",
         "handoff": "进入软件 rollback 看 published 标志的作用"
@@ -1244,7 +1244,7 @@
         "n": 5,
         "input": "prepare返回的pending，含rule和published",
         "output": "未发布只free；已发布先remove_version再free",
-        "explain": "调用过commit不代表发布成功，因此本后端不靠commit_was_attempted判断。即使删除失败，也会释放pending并返回错误；上层必须检查回滚结果，不能把准备记录已释放视为规则已撤回。",
+        "explain": "调用过commit不代表发布成功，因此软件规则回滚不靠 commit_was_attempted 判断。即使删除失败，也会释放pending并返回错误；上层必须检查回滚结果，不能把准备记录已释放视为规则已撤回。",
         "state": "published=false → free pending → 0\npublished=true → remove_version → free pending → rc",
         "note": "回滚失败时 residual 规则可能仍在，控制层有恢复隔离路径；本节不扩展恢复算法",
         "handoff": "成功事务则走finalize，保留规则"
@@ -1285,9 +1285,9 @@
         "fn": "persist_current_repository",
         "anchor": "if (service->persistence_path == NULL)",
         "n": 18,
-        "input": "后端和内存账本已更新，准备记录已释放",
+        "input": "实际规则和控制面记录已更新，准备记录已释放",
         "output": "无路径跳过；成功清dirty；失败dirty=true并返回-EUCLEAN",
-        "explain": "保存入口把当前账本写文件。写失败不会撤回后端规则，也不丢弃内存账本。下一次普通修改前，persistence_write_preflight 先尝试补写，仍失败就拒绝新的修改。",
+        "explain": "保存入口把当前账本写文件。写失败不会撤回软件表或网卡中的规则，也不丢弃内存账本。下一次普通修改前，persistence_write_preflight 先尝试补写，仍失败就拒绝新的修改。",
         "state": "active → 运行时软件规则快照\nservice->rules → 内存账本\n文件 → 最后成功保存的配置\n保存失败：前两者已更新，文件可能落后",
         "note": "后续待学：文件格式与恢复、硬件规划/rte_flow、连接跟踪/NAT、启动与接口；本阶段没有验证真实DPDK收发",
         "handoff": "回到学习目录复习两条主线，材料整理完成不代表已经掌握",

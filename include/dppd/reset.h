@@ -15,7 +15,7 @@ struct dppd_reset_status {
     bool pending;
 };
 
-/** 仅支持显式提供模拟回调的后端，真实驱动默认拒绝，成功后保持隔离直到显式恢复 */
+/** 仅支持显式提供模拟复位回调的网卡规则管理对象，真实驱动默认拒绝，成功后保持隔离直到显式恢复 */
 int dppd_control_simulate_reset(struct dppd_control_service *service);
 /** 核对原端点身份，先重建共享对象再重建同版本规则，失败保留计划供下次重试 */
 int dppd_control_reset_recover(struct dppd_control_service *service);

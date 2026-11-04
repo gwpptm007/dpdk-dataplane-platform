@@ -25,6 +25,7 @@ function localLinks(file) {
 async function main() {
   const page = path.join(__dirname,'index.html');
   const directory = path.resolve(__dirname,'../index.html');
+  const progress = JSON.parse(fs.readFileSync(path.resolve(__dirname,'../progress.json'),'utf8'));
   localLinks(page); localLinks(directory);
   const chrome = [process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES,'Google/Chrome/Application/chrome.exe'), process.env['PROGRAMFILES(X86)'] && path.join(process.env['PROGRAMFILES(X86)'],'Microsoft/Edge/Application/msedge.exe'), '/usr/bin/google-chrome','/usr/bin/chromium'].find(p=>p && fs.existsSync(p));
   if (!chrome) throw Error('Chrome/Edge is required for browser checks');
@@ -50,9 +51,9 @@ async function main() {
     async function open(file,fragment='') {const url=pathToFileURL(file).href+fragment;await cdp('Page.navigate',{url});await ready(url);}
     await cdp('Page.enable');await cdp('Runtime.enable');
     await open(directory);
-    check('Directory points to the restart of learning',await js("document.querySelector('#resume-learning').getAttribute('href')==='startup/index.html#stage-0'"));
+    check('Directory continuation matches recorded progress',await js(`document.querySelector('#resume-learning').getAttribute('href')===${JSON.stringify(progress.next.href)}`));
     check('Directory does not claim mastery',await js("document.body.innerText.includes('尚未确认理解')"));
-    await js("document.querySelector('#resume-learning').click()");await ready(pathToFileURL(page).href+'#stage-0');
+    await js("document.querySelector('#resume-learning').click()");await ready(new URL(progress.next.href,pathToFileURL(directory)).href);
     check('Directory button opens startup guide',await js("document.querySelectorAll('.step-card').length===6"));
     await open(page);
     check('All six explanations visible without clicking',await js("[...document.querySelectorAll('.step-card')].every(e=>getComputedStyle(e).display!=='none'&&e.getBoundingClientRect().height>0)"));

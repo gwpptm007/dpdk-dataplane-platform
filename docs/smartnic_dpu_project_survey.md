@@ -70,7 +70,7 @@ Memcached 相比 TAS 扩展性最高改善 38%，相比 Chelsio 节省最高 81%
 两项数字使用不同对照，不能合并为对同一基线的提升，也不能套用到当前环境。
 值得借鉴的是用应用负载、主机 CPU 和尾延迟来证明卸载效果，而不只是统计支持多少功能。
 
-[DPFS 项目说明](https://github.com/IBM/DPFS) 展示了主机使用标准文件设备、DPU 承担后端文件服务的分工。
+[DPFS 项目说明](https://github.com/IBM/DPFS) 展示了主机使用标准文件设备、DPU 承担文件存储服务的分工。
 其研究状态和专用依赖使它更适合架构学习，不能直接当作即装即用的生产替代方案。
 
 [Corundum 项目说明](https://github.com/corundum/corundum) 提供从 PCIe/驱动模型到以太网接口的仿真，

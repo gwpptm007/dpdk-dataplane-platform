@@ -165,7 +165,7 @@ def run_case(build, count):
 
 
 def run_rte_flow_case(build):
-    """用临时 TAP 的真实 rte_flow 创建验证后端记录，不把 TAP 当作物理网卡卸载证据"""
+    """用临时 TAP 的真实 rte_flow 创建验证网卡规则安装记录，不把 TAP 当作物理网卡卸载证据"""
     with tempfile.TemporaryDirectory(prefix="dppd-rule-status-tap-") as temporary:
         directory = Path(temporary)
         (directory / "storage").mkdir()
@@ -206,7 +206,7 @@ def run_rte_flow_case(build):
             check(state.read_bytes() == saved, "TAP query changed snapshot")
             ctl("count", 20000, 1, error=errno.ENODATA)
 
-            # 同一实例内同时安装平台软件规则，实际后端应逐条定位，不能按进程统一猜测
+            # 同一实例内同时安装平台软件规则，规则实际执行位置应逐条查询，不能按进程统一猜测
             ctl("apply-filter", 20001, 1, 0, "tcp", "any", "any", "any", 10000,
                 "drop", "count", "software")
             software = ctl("rule-status", 20001, 2)

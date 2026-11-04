@@ -113,7 +113,7 @@ worker 和持久化逻辑照常运行。测试库同样通过 `-Werror` 编译�
 ## 2026-10-01：非空软件快照恢复
 
 本轮在独立目录 `/tmp/dppd-software-replay-validation` 完成 `-Werror` 构建和
-15/15 单测。修复恢复前置检查遗漏软件后端的问题：即使账本为空，只要软件表已有
+15/15 单测。修复恢复前置检查遗漏软件规则表检查的问题：即使账本为空，只要软件表已有
 实际对象，也必须返回 EBUSY，不允许载入快照覆盖不一致状态。
 
 扩展 `test_software_batch`：对三条和五条非空软件快照，分别注入 14/22 个 calloc
@@ -125,7 +125,7 @@ worker 和持久化逻辑照常运行。测试库同样通过 `-Werror` 编译�
 
 - 每组实际停止并重启 daemon 两次，非空快照字节不变。
 - 保留 install-port=1、priority=25、fallback、逐条及全局 generation。
-- 无 COUNT 动作的规则返回 ENODATA，证明恢复对象存在于实际软件后端。
+- 无 COUNT 动作的规则返回 ENODATA，证明恢复对象确实已写入软件规则表。
 - 恢复状态 ready、持久化 clean；旧请求 ESTALE，后续满容量更新成功并连续推进版本。
 - 损坏 CRC 后拒绝启动，不开放管理 socket，快照文件保持原样。
 

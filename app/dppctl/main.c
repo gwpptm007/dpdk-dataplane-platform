@@ -1141,7 +1141,7 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
         return 0;
     }
     /**
-     * 批量更新命令前四项是命令名、端口、优先级和后端策略，后面每两项是一组 ID/旧版本
+     * 批量更新命令前四项是命令名、端口、优先级和规则执行策略，后面每两项是一组 ID/旧版本
      * 因此八到十二个参数恰好表达两到四条规则，奇数个尾部参数说明存在不完整的一组
      * 该命令构造完整的 Ethernet DROP 新规则，不会只改优先级而保留旧匹配条件或动作
      */
@@ -1215,7 +1215,7 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
             entry->rule.domain = DPPD_RULE_DOMAIN_INGRESS;
             /*
              * 优先走 rte_flow；仅 PMD 的无副作用 validate 明确失败且该 ETH/DROP 规则
-             * 由软件后端等价支持时，控制层才将本条降级为 software
+             * CPU 软件处理能保持相同规则语义时，控制层才将本条降级为 software
              */
             entry->rule.fallback = DPPD_FALLBACK_PREFER_HARDWARE;
             entry->rule.nb_matches = 1;
@@ -1669,7 +1669,7 @@ static int print_response(const struct dppd_management_response *response)
             const struct dppd_rule_history_entry *entry = &page->events[index];
             const struct dppd_rule_failure_event *failure = &entry->failure;
 
-            /** 每条保存独立身份和三个错误，未知端口/后端用标志表示，零值不冒充已知 */
+            /** 每条保存独立身份和三个错误，未知端口/规则执行位置用标志表示，零值不冒充已知 */
             printf("  event id=%" PRIu64 " sequence=%" PRIu64 " operation=%s stage=%s kind=%s"
                    " rule=%" PRIu64 " generation=%" PRIu64 " transaction=%" PRIu64 " rules=%u"
                    " port-known=%s port=%u backend-known=%s backend=%s cause-error=%d"

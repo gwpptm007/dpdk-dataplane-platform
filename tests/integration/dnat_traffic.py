@@ -43,7 +43,7 @@ class DnatFixture(StatefulFixture):
         return first + second
 
     def install_acl(self):
-        # 外口按转换后的后端地址与端口放行，公网五元组不应直接命中这些规则
+        # 外口按转换后的内网服务器地址与端口放行，公网五元组不应直接命中这些规则
         for identity, protocol, address, ports in (
             (1101, "udp", "10.10.0.9/32", "8000-8001"),
             (1102, "tcp", "10.10.0.9/32", "8443"),

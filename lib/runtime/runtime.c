@@ -65,9 +65,12 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         return rc;
     }
     /**
-     * --queues 2 → 创建两个 worker 配置，queue_id 依次为 0、1
-     * worker 0 轮询各网口的队列 0，worker 1 轮询各网口的队列 1，不按网口分别创建线程
-     * lcore_id 来自 selected，可能不连续；queue_id 连续分配，也用作软件 QSBR reader 编号
+     * EAL 已准备线程及其 CPU 亲和性，本循环只记录 worker 的队列与执行 lcore，不重新创建或绑核
+     * 例：-l 0-2 --main-lcore 0，应用配置 --queues 2
+     *   主线程：lcore 0，对应逻辑 CPU 0，负责初始化、管理和监控
+     *   worker 0：queue_id 0，选中 lcore 1，对应逻辑 CPU 1，处理各网口队列 0
+     *   worker 1：queue_id 1，选中 lcore 2，对应逻辑 CPU 2，处理各网口队列 1
+     * lcore_id 来自 selected，其他配置下可能不连续；queue_id 连续分配，也用作 QSBR reader 编号
      */
     for (uint16_t worker_index = 0; worker_index < cfg->nb_queues; ++worker_index) {
         struct dppd_worker *worker = &runtime->workers[worker_index];
@@ -132,7 +135,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
 
 void dppd_runtime_set_software_backend(struct dppd_runtime *runtime, struct dppd_software_backend *software_backend)
 {
-    /* 不加锁是刻意的：调用契约要求只在 runtime_start 前绑定，运行期禁止热替换 */
+    /** 保存 control.software 的地址供 worker 查表；启动前绑定，运行时不替换此指针 */
     if (runtime != NULL)
         runtime->software_backend = software_backend;
 }
@@ -174,6 +177,7 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
         atomic_store_explicit(&worker->state, DPPD_WORKER_STARTING, memory_order_release);
         /**
          * 把函数地址、worker 地址和目标 lcore 交给 EAL，在对应的已有工作线程上执行
+         * EAL 初始化时已准备线程和 CPU 亲和性，这里让线程开始执行业务任务
          * 例如 worker->lcore_id = 3：lcore 3 调用 dppd_worker_main(worker)
          * worker 地址原样成为工作函数的 arg，不复制结构体；主线程不等待整个收包循环结束
          *
@@ -347,7 +351,7 @@ void dppd_runtime_stats_dump(const struct dppd_runtime *runtime)
 /**
  * 释放 runtime 拥有的资源，成功返回 0，失败返回负错误码
  * 确认 worker 已退出 → 关闭抓包服务 → 释放邻居等待报文和连接会话 → 关闭设备、释放 mbuf 池
- * control 持有的软件后端和路由由调用方另行清理，runtime 只借用这些指针
+ * 软件规则表和路由由调用方清理，runtime 只通过指针使用它们
  */
 int dppd_runtime_destroy(struct dppd_runtime *runtime)
 {

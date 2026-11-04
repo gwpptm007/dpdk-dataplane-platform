@@ -63,7 +63,7 @@ struct dppd_rte_flow_backend {
     uint32_t count;
     /** 真实设备事件后旧句柄有效性未知，只保留诊断，不能再交给任何驱动接口 */
     bool quarantined;
-    /** 每次驱动调用前只读核对真实设备事件，失败时由 context 持有的可变后端锁存隔离 */
+    /** 每次驱动调用前只读核对真实设备事件，失败时由 context 持有的网卡规则管理对象记录隔离状态 */
     int (*driver_ready)(void *context);
     void *driver_context;
     /** 操作入口的副本，普通运行使用真实驱动调用 */
@@ -148,7 +148,7 @@ int dppd_rte_flow_backend_query_count(const struct dppd_rte_flow_backend *backen
 /** 只查指定已安装版本，没有 AGE 返回 ENODATA，没有查询接口返回 ENOTSUP，失败保留输出 */
 int dppd_rte_flow_backend_query_age(const struct dppd_rte_flow_backend *backend, uint64_t rule_id, uint64_t generation,
     struct dppd_flow_age_result *result, struct dppd_flow_error *error);
-/** 后端只安装调用方分配好版本的定义，不改变控制面的共享对象修订号 */
+/** 网卡规则安装函数只安装调用方分配好版本的定义，不改变控制面的共享对象修订号 */
 int dppd_rte_flow_backend_shared_count_create(struct dppd_rte_flow_backend *backend,
     const struct dppd_shared_count_spec *spec, struct dppd_flow_error *error);
 /** 只读入口允许 ANY，删除必须给出精确非零版本，失败保留所有输出 */

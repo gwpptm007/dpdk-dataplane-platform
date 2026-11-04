@@ -53,7 +53,7 @@ static int validate_transfer_domain(const struct dppd_planner_context *context, 
 }
 
 /**
- * 检查规则、安装端口及运行模式，为 rule 选择执行后端并写入 plan
+ * 检查规则、安装端口及运行模式，为 rule 选择规则执行位置并写入 plan
  * control_apply_impl → 本函数生成计划 → 返回后进入安装事务
  * 本例 acl-set：SOFTWARE_ONLY + 软件支持 → plan.backend = SOFTWARE
  * 成功返回 0，失败返回负错误码；选中硬件后仍需驱动校验

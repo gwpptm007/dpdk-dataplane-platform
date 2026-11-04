@@ -33,7 +33,7 @@ transaction 创建全部新 generation actual 对象
 finalize 新对象的 rollback token，并保存 snapshot
 ```
 
-上述硬件及混合流程的新旧 generation 暂时共存，需要临时槽位；后端容量仍为
+上述硬件及混合流程的新旧 generation 暂时共存，需要临时槽位；软件表与网卡规则管理的容量仍为
 `rule_capacity + 1`。纯软件快照替换复用旧槽位，满表也可更新。
 `PREFER_HARDWARE` 在 PMD validate 前仍保守检查硬件目标容量。旧规则全部在软件且
 所有目标都有软件执行可能时，可暂缓软件临时容量检查；如果最终计划是混合路径，
@@ -68,7 +68,7 @@ finalize 新对象的 rollback token，并保存 snapshot
 - 结果数组按请求顺序返回，每条结果共享同一 transaction ID。
 - 纯软件更新保证每次报文分类只使用完整旧表或完整新表，批次内不出现部分替换的快照。
   已持有旧表的线程可继续处理当前报文，不保证多个报文、线程或收包批次同时切换。
-- 硬件及混合更新仍只保证 desired-state 整批发布，实际后端可能暂时保留新旧版本。
+- 硬件及混合更新仍只保证 desired-state 整批发布，软件表或网卡中可能暂时保留新旧版本。
 - 新软件版本 COUNT 从零开始，未更新规则保留计数；发布前失败保留旧版本计数。
   硬件及混合路径的对象重建不承诺保留 COUNT。
 

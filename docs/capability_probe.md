@@ -40,7 +40,7 @@ flow-probe rule=100 port=0 hardware=unsupported software=yes cached=yes hardware
 | `hardware=unsupported` | 驱动返回 `ENOTSUP` 或 `ENOSYS` |
 | `hardware=rejected` | 驱动返回 `EINVAL` 或 `EEXIST`，不能据此判定永久不支持 |
 | `hardware=unavailable` | 内存不足、设备忙、设备错误等其他答复 |
-| `software=yes/no` | 当前平台软件后端是否能等价执行该规则；QUEUE 不会被静默模拟 |
+| `software=yes/no` | 本项目是否支持用软件规则表实现相同的匹配条件和动作；QUEUE 不会被静默模拟 |
 | `cached`、`age-ms` | 是否使用旧答复及答复的年龄；时钟失败时年龄为 `unknown` |
 | `hardware-error`、`detail` | 驱动原始返回码及附带说明 |
 | `epoch` | 该端口诊断缓存的失效版本，与规则 generation 无关 |
@@ -76,7 +76,7 @@ flow-probe rule=100 port=0 hardware=unsupported software=yes cached=yes hardware
 ## 缓存与正式安装的边界
 
 缓存键包含安装端口、完整 ID、domain、group、priority、全部有效 match/spec/mask 和
-action 参数。COUNT 编译使用规则 ID，因此不同 ID 不共享答复。generation 和后端偏好
+action 参数。COUNT 编译使用规则 ID，因此不同 ID 不共享答复。generation 和规则执行策略
 不影响探测语义，硬件校验统一使用 require 偏好；未使用的 union 字段与填充字节不参与比较。
 缓存保存完整规则并逐字段比较，不依赖哈希值相同就判断命中。
 
@@ -101,7 +101,7 @@ action 参数。COUNT 编译使用规则 ID，因此不同 ID 不共享答复。
 驱动探测。所有缓存操作由串行管理线程执行，逐包路径没有增加锁、分配或时钟调用。
 
 当前未提供任意 flow 能力矩阵、AGE/indirect/template/async 或资源容量探测，也未根据
-厂商字符串选择后端。静态 queue/RSS/offload 信息与完整规则校验必须分别解读。
+厂商字符串决定规则由 CPU 还是网卡处理。静态 queue/RSS/offload 信息与完整规则校验必须分别解读。
 
 ## 验证记录
 

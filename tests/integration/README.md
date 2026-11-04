@@ -272,7 +272,7 @@ sudo python3 tests/integration/rule_status.py --build-dir build --tap
 
 2026-10-03 三组场景及 20/20 单测通过。四组 `software_traffic.py` 同时验证 COUNT
 不会被状态查询清零，以及分配失败后的旧安装记录保持。隔离回归确认新增查询也被
-拒绝。耗时只代表后端提交，TAP 的 rte_flow 记录不证明物理硬件卸载，详见
+拒绝。耗时只代表规则安装提交，TAP 的 rte_flow 记录不证明物理硬件卸载，详见
 [规则安装状态与验证](../../docs/rule_status.md)。
 
 ## 健康与就绪

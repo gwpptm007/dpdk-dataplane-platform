@@ -431,7 +431,7 @@ shared_recovery_journal_test = executable('test_shared_recovery_journal', 'test_
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync', '-Wl,--wrap=pwrite', '-Wl,--wrap=pwrite64'])
 test('typed shared COUNT recovery journal', shared_recovery_journal_test)
 
-# 正式后端先写意图再创建，部分成功和日志故障保留句柄，退出按引用顺序删除
+# 网卡规则安装先写意图再创建，部分成功和日志故障保留句柄，退出按引用顺序删除
 shared_recovery_backend_test = executable('test_shared_recovery_backend', 'test_shared_recovery_backend.c',
   dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])
 test('shared COUNT durable backend lifecycle', shared_recovery_backend_test)

@@ -361,7 +361,7 @@ int dppd_rte_flow_backend_validate_rule(struct dppd_rte_flow_backend *backend, u
     return rc;
 }
 
-/** 先确认规划选择了硬件后端，再调用驱动检查规则能力，这一步不预留槽位也不创建对象 */
+/** 先确认规划选择向网卡下发规则，再调用驱动检查规则能力，这一步不预留槽位也不创建对象 */
 static int transaction_validate(void *context, const struct dppd_transaction_item *item)
 {
     struct dppd_rte_flow_backend *backend = context;
@@ -655,8 +655,8 @@ int dppd_rte_flow_backend_simulate_reset(struct dppd_rte_flow_backend *backend, 
 }
 
 /**
- * 返回硬件后端的对象地址和事务回调，供 transaction.c 调用
- * 此处 transaction_prepare 等函数名指向本文件的 static 函数，与软件后端的同名函数独立
+ * 返回网卡规则管理对象的地址和事务回调，供 transaction.c 调用
+ * 此处 transaction_prepare 等函数名指向本文件的 static 函数，与 software_backend.c 的同名函数独立
  * token 指向对象槽位，没有单独的准备记录需要释放，因此不提供 finalize
  */
 struct dppd_transaction_backend dppd_rte_flow_transaction_backend(struct dppd_rte_flow_backend *backend)
@@ -889,7 +889,7 @@ int dppd_rte_flow_backend_query_age(const struct dppd_rte_flow_backend *backend,
     return rc;
 }
 
-/** 共享对象由独立 ID 和版本标识，驱动指针只留在后端，不进入规则定义或快照 */
+/** 共享对象由独立 ID 和版本标识，驱动指针只保存在网卡规则管理对象中，不进入规则定义或快照 */
 int dppd_rte_flow_backend_shared_count_create(struct dppd_rte_flow_backend *backend,
     const struct dppd_shared_count_spec *spec, struct dppd_flow_error *error)
 {

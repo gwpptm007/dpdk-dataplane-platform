@@ -68,7 +68,7 @@ rule-history revision=70 capacity=64 total=64 returned=4 overwritten=6 oldest=7 
 | `operation` / `stage` / `kind` | 公开操作、最初失败阶段和错误分类 |
 | `rule` / `generation` / `transaction` / `rules` | 可定位的规则、版本、事务 ID 和请求条数 |
 | `port-known` / `port` | 失败端口是否已知及对应端口 |
-| `backend-known` / `backend` | 后端是否已知；名称为 `software`、`rte_flow` 或 `unknown` |
+| `backend-known` / `backend` | 规则执行位置是否已知；名称为 `software`、`rte_flow` 或 `unknown` |
 | `cause-error` / `response-error` | 最初原始负 errno / 控制 API 最终返回的负 errno |
 | `compensation-error` / `compensation-rule` | 第一处补偿失败的负 errno 和可定位的规则 ID，没有则为零 |
 | `applied` | 此请求是否已完整发布规则账本 |

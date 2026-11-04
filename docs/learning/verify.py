@@ -22,7 +22,7 @@ def review(passed=False):
     status="浏览器、源码引用和本地链接检查已通过" if passed else "页面已生成，浏览器与链接检查进行中"
     changed="".join("<li>"+html.escape(f)+"</li>" for f in audit["changed_files"])
     observation=("静态阅读发现一个需单独核实的异常路径：control_apply_impl 在事务提交成功后，"
-    "若更新旧版本的删除失败，会直接撤销新后端对象并返回；该分支未经过 transaction_finalize 或事务 rollback。"
+    "若更新旧版本的删除失败，会直接撤销新安装的规则对象并返回；该分支未经过 transaction_finalize 或事务 rollback。"
     "软件 prepare 的 pending 通常由这两个入口释放，因此这里存在准备记录未释放的疑点。"
     "已定位当前源码中的更新失败分支，未执行故障注入，也未修改运行逻辑；不把它写成已验证的运行故障。")
     text='''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>本阶段范围与验证</title>

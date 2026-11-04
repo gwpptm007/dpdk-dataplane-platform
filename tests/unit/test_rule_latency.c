@@ -70,7 +70,7 @@ static int validate(uint16_t port, const struct dppd_rule *rule, struct dppd_flo
     return 0;
 }
 
-/** 创建错误不构成成功提交样本，成功时填写正式后端需要的对象身份 */
+/** 创建错误不构成成功提交样本，成功时填写正式网卡规则管理所需的对象身份 */
 static int create(uint16_t port, const struct dppd_rule *rule, struct dppd_flow_handle *handle,
     struct dppd_flow_error *error)
 {
@@ -95,7 +95,7 @@ static int remove_flow(struct dppd_flow_handle *handle, struct dppd_flow_error *
     return 0;
 }
 
-/** 最小 ETH/DROP 规则用于软件与硬件，策略是唯一的后端选择条件 */
+/** 最小 ETH/DROP 规则同时支持软件与硬件，仅由策略决定执行位置 */
 static struct dppd_rule rule(uint64_t id, enum dppd_fallback_policy fallback)
 {
     struct dppd_rule value = {.id = id, .fallback = fallback, .nb_matches = 1, .nb_actions = 1};

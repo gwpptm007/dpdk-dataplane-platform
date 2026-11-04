@@ -16,7 +16,7 @@ enum dppd_rule_latency_scope {
 };
 
 /**
- * 后端成功提交的历史统计，之后删除或回滚不会扣掉已发生的成功提交
+ * 规则安装成功的历史统计，之后删除或回滚不会扣掉已发生的成功提交
  * samples 只数有效测量，unavailable 单独数时钟不可用的成功提交，rules 数两者涉及的规则
  * total_ns 溢出时饱和并标记，计数溢出时冻结整组，不能绕回零制造错误的均值或分位数
  */
@@ -84,10 +84,10 @@ static inline const char *dppd_rule_latency_scope_name(enum dppd_rule_latency_sc
     return (unsigned int)scope < DPPD_RULE_LATENCY_SCOPE_COUNT ? names[scope] : "unknown";
 }
 
-/** 只接收后端已有的成功提交测量，不新增计时、分配或逐包操作 */
+/** 只接收规则安装时已有的成功提交测量，不新增计时、分配或逐包操作 */
 void dppd_rule_latency_record(struct dppd_rule_latency_histogram *histogram, bool timing_available,
     uint64_t duration_ns, uint32_t rule_count);
-/** 复制历史并计算可用摘要，调用方负责与该后端的控制面写者串行 */
+/** 复制历史并计算可用摘要，调用方负责与该规则管理对象的控制面写入操作串行 */
 void dppd_rule_latency_summarize(const struct dppd_rule_latency_histogram *histogram,
     struct dppd_rule_latency_summary *summary);
 

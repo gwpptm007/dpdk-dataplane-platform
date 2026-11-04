@@ -27,10 +27,10 @@ __NAV__
 <section class="process" aria-label="完整过程，区分客户端和服务端">
 <button class="phase" data-phase="0" aria-current="true"><span class="number">01 / CLIENT</span><h3>命令变成请求</h3><p>dppctl 进程<br>main → build_request<br>→ exchange / send</p><span class="phase-state">当前阅读</span></button>
 <button class="phase" data-phase="1" aria-current="false"><span class="number">02 / DAEMON</span><h3>接收、检查与分发</h3><p>dppd 主线程<br>recv → management_handle<br>→ control_apply_impl</p><span class="phase-state">尚未到达</span></button>
-<button class="phase" data-phase="2" aria-current="false"><span class="number">03 / INSTALL</span><h3>准备并发布规则</h3><p>dppd 控制层 → 软件后端<br>validate → prepare → commit<br>→ exact / ACL → 发布 active</p><span class="phase-state">尚未到达</span></button>
+<button class="phase" data-phase="2" aria-current="false"><span class="number">03 / INSTALL</span><h3>准备并发布规则</h3><p>dppd 控制层 → CPU 软件规则处理<br>validate → prepare → commit<br>→ exact / ACL → 发布 active</p><span class="phase-state">尚未到达</span></button>
 <button class="phase" data-phase="3" aria-current="false"><span class="number">04 / RETURN</span><h3>收尾、响应与使用</h3><p>dppd → dppctl；worker 独立读表<br>规则记录 → finalize → 保存<br>→ response → worker 匹配</p><span class="phase-state">尚未到达</span></button>
 </section>
-<div class="example"><div><div class="kicker">贯穿本节的同一条示例命令 · 仅展示</div><div class="command">__EXAMPLE__</div><div class="tags"><span class="tag">ID 20</span><span class="tag">入口 0</span><span class="tag">新增 expected=0</span><span class="tag">优先级 100</span><span class="tag">UDP / dport 9000</span><span class="tag">DROP + COUNT</span></div></div><div><div class="kicker">用同一组状态，跟到最后</div><p>旧快照 A 已有 R1，新增 ID 20。示例假设当前规则记录修订号为 7，因此候选新版本为 8。端口、容量和控制状态检查均通过；acl-set 明确走软件后端。</p><p class="scope-line">普通 RULE_APPLY 路径 · 单条新增 · 文件保存只看入口</p></div></div>
+<div class="example"><div><div class="kicker">贯穿本节的同一条示例命令 · 仅展示</div><div class="command">__EXAMPLE__</div><div class="tags"><span class="tag">ID 20</span><span class="tag">入口 0</span><span class="tag">新增 expected=0</span><span class="tag">优先级 100</span><span class="tag">UDP / dport 9000</span><span class="tag">DROP + COUNT</span></div></div><div><div class="kicker">用同一组状态，跟到最后</div><p>旧快照 A 已有 R1，新增 ID 20。示例假设当前规则记录修订号为 7，因此候选新版本为 8。端口、容量和控制状态检查均通过；acl-set 明确走CPU 软件规则处理。</p><p class="scope-line">普通 RULE_APPLY 路径 · 单条新增 · 文件保存只看入口</p></div></div>
 <section class="state-board" aria-label="始终可见的四个对象状态">
 <div class="state-item"><b>管理请求 request</b><p id="request-value"></p></div><div class="state-item"><b>准备记录 pending</b><p id="pending-value"></p></div><div class="state-item" id="snapshot-card"><b>规则快照 active / next</b><p id="snapshot-value"></p></div><div class="state-item"><b>返回结果 response</b><p id="response-value"></p></div>
 </section>
@@ -50,7 +50,7 @@ __NAV__
 'use strict';
 const steps=__STEPS__;
 const phaseTitles=['命令变成请求','接收、检查与分发','准备并发布规则','收尾、响应与使用'];
-const roles=['dppctl · 客户端进程','dppd · 管理主线程','dppd · 软件规则后端','返回路径 / worker 读取'];
+const roles=['dppctl · 客户端进程','dppd · 管理主线程','dppd · 软件规则管理对象','返回路径 / worker 读取'];
 const get=id=>document.getElementById(id);
 let selected=0, selectedCode=0;
 function refs(s){return [s,...(s.related||[])];}

@@ -136,7 +136,7 @@ flowchart LR
 
 ## 回退必须保留含义
 
-[dppd_plan_rule](../../../lib/control/planner.c) 决定候选后端；后续校验与事务决定能否安装。
+[dppd_plan_rule](../../../lib/control/planner.c) 决定优先尝试 CPU 查表还是网卡执行；后续校验与事务决定能否安装。
 `REQUIRE_HARDWARE` 不能静默转为软件，`PREFER_HARDWARE` 也只有软件语义等价时才有回退资格。
 例如硬件 QUEUE 是 RX 分流，软件在包已被某个 worker 收到之后更换 TX 队列，不能完成同一件事。
 

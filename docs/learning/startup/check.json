@@ -91,7 +91,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L394",
+      "name": "Anchor exists: #L395",
       "passed": true
     },
     {
@@ -107,7 +107,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L400",
+      "name": "Anchor exists: #L409",
       "passed": true
     },
     {
@@ -115,55 +115,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L394",
-      "passed": true
-    },
-    {
-      "name": "Link exists: docs\\learning\\startup\\index.html",
-      "passed": true
-    },
-    {
-      "name": "Anchor exists: #overview",
-      "passed": true
-    },
-    {
-      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
-      "passed": true
-    },
-    {
-      "name": "Anchor exists: #L74",
-      "passed": true
-    },
-    {
-      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
-      "passed": true
-    },
-    {
-      "name": "Anchor exists: #L89",
-      "passed": true
-    },
-    {
-      "name": "Link exists: docs\\learning\\startup\\index.html",
-      "passed": true
-    },
-    {
-      "name": "Anchor exists: #overview",
-      "passed": true
-    },
-    {
-      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
-      "passed": true
-    },
-    {
-      "name": "Anchor exists: #L483",
-      "passed": true
-    },
-    {
-      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
-      "passed": true
-    },
-    {
-      "name": "Anchor exists: #L525",
+      "name": "Anchor exists: #L395",
       "passed": true
     },
     {
@@ -179,7 +131,55 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L186",
+      "name": "Anchor exists: #L77",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L92",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L500",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L546",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #overview",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L190",
       "passed": true
     },
     {
@@ -203,7 +203,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L700",
+      "name": "Anchor exists: #L721",
       "passed": true
     },
     {
@@ -211,7 +211,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L277",
+      "name": "Anchor exists: #L281",
       "passed": true
     },
     {
@@ -247,7 +247,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #overview",
+      "name": "Anchor exists: #stage-3",
       "passed": true
     },
     {
@@ -263,7 +263,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #stage-0",
+      "name": "Anchor exists: #stage-4",
       "passed": true
     },
     {
@@ -271,7 +271,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L394",
+      "name": "Anchor exists: #L604",
       "passed": true
     },
     {
@@ -387,7 +387,7 @@
       "passed": true
     },
     {
-      "name": "Directory points to the restart of learning",
+      "name": "Directory continuation matches recorded progress",
       "passed": true
     },
     {

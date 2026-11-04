@@ -118,7 +118,7 @@ int dppd_managed_run(const struct dppd_config *config, struct dppd_recovery_scop
             dppd_runtime_request_stop(&runtime);
             rc = wait_workers(&runtime, store);
         } else if (status.ready && !runtime.workers_started) {
-            /** 后端地址不变，旧读者已全部注销，显式修复成功后允许重新启动软件转发 */
+            /** runtime 查软件规则表所用的指针不变，旧读者已全部注销，显式修复成功后允许重新启动软件转发 */
             rc = dppd_runtime_start(&runtime);
             timeout_exit(rc, store);
         }

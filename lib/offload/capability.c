@@ -182,7 +182,7 @@ int dppd_flow_probe_cache_statistics(const struct dppd_flow_probe_cache *cache, 
 
 /**
  * 校验完整规则后查缓存，命中只返回诊断结果，未命中才询问驱动
- * 保留 ID 是因为 COUNT 编译会使用它，generation 和后端偏好不影响驱动规则语义
+ * 保留 ID 是因为 COUNT 编译会使用它，generation 和规则执行策略不影响驱动规则语义
  * 比较使用已有的逐字段规则比较器，不把哈希碰撞或无效字节当作命中
  */
 int dppd_flow_probe_cache_query(struct dppd_flow_probe_cache *cache, uint16_t port_id, const struct dppd_rule *rule,

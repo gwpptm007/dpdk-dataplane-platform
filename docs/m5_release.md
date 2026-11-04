@@ -144,7 +144,7 @@ python3 /var/lib/dppd-instance/current/libexec/dppd-api.py \
   --unix /var/lib/dppd-instance/run/api.sock
 ```
 
-网关每次请求选择当前版本 CLI，daemon 暂不可用或协议切换时返回后端错误，不自动重提有副作用的请求
+网关每次请求选择当前版本 CLI，daemon 暂不可用或协议切换时返回 dppd 服务错误，不自动重提有副作用的请求
 升级网关自身 Python 代码仍需服务守护器重启 companion，不把 daemon 切换描述成 API 进程已升级
 认证文件和 TLS 私钥保持在私有配置目录，详情见 [北向 API](m5_northbound.md)
 本机管理 socket 与脚本入口属于可信管理员边界，不能直接暴露给未授权网络客户端

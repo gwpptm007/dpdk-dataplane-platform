@@ -31,8 +31,9 @@ struct dppd_control_service {
     const struct dppd_topology *topology;
     /* desired state 的唯一真源；只有 backend actual state 已提交后才允许写入 */
     struct dppd_rule_repository rules;
-    /* 硬件 rte_flow 与等价软件 classifier 分别保存 actual state，同一版本只能存在其一 */
+    /** 通过 rte_flow/PMD 向网卡下发规则，记录驱动句柄和安装状态 */
     struct dppd_rte_flow_backend rte_flow;
+    /** 管理软件规则快照、匹配表和计数器，供 worker 查询和执行规则 */
     struct dppd_software_backend software;
     /** 可选三层配置由控制面拥有，runtime 只借用其中的路由器 */
     struct dppd_routing_service *routing;
@@ -170,7 +171,7 @@ struct dppd_control_persistence_status {
 };
 
 /**
- * 一条当前已发布规则的安装状态，实际后端来自对象仓库，fallback 仍表示用户的选择策略
+ * 一条当前已发布规则的安装状态，实际执行位置通过查询软件表与网卡规则确定，fallback 仍表示用户的选择策略
  * persistence 描述整个规则账本的保存状态，不代表某一条规则独立保存了一个文件
  */
 struct dppd_control_rule_status {
@@ -279,7 +280,7 @@ int dppd_control_query_count(struct dppd_control_service *service, uint64_t rule
 
 /**
  * 查询当前账本版本的安装状态，expected_generation 为精确非零版本或 ANY
- * 同一版本必须恰好安装在一个后端中，身份、端口或 COUNT 配置失配时返回 EUCLEAN
+ * 同一版本必须恰好安装在软件表或网卡中的一处，身份、端口或 COUNT 配置失配时返回 EUCLEAN
  * 查询只读内存，不调用驱动、不查询计数、不保存磁盘，恢复隔离期间仍拒绝普通规则查询
  */
 int dppd_control_rule_status(const struct dppd_control_service *service, uint64_t rule_id, uint64_t expected_generation,

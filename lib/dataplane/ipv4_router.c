@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <rte_common.h>
-/** 与既有软件后端保持相同的 DPDK 21.11 实验头文件诊断边界 */
+/** 与软件规则模块保持相同的 DPDK 21.11 实验头文件诊断边界 */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
 #pragma GCC diagnostic ignored "-Wpedantic"

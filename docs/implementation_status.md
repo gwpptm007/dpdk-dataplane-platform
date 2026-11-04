@@ -211,7 +211,7 @@ IPv4 ACL/SNAT/DNAT 保持可用。两套构建各 45/45 单测、十一项相关
 分片重组、ICMPv6 错误生成、隧道和硬件/性能目标仍未完成。
 
 2026-10-17 完成 M2 [IPv4 静态 DNAT 与端口转发](dnat.md)：TCP/UDP 整地址映射、
-单端口和等长端口段、后端回包公网还原、逻辑地址 ACL/路由、跨队列共用会话、静态
+单端口和等长端口段、内网服务器回包公网还原、逻辑地址 ACL/路由、跨队列共用会话、静态
 端口与 SNAT 池隔离、配置冲突和管理分页查询接通。两套构建各 43/43 单测、七项相关
 sanitizer、单双队列正式 worker 和真实三 TAP 独立/共存/老化验收通过。管理协议 v19，
 静态策略由部署保留启动参数，重启清空会话。IPv6 解析、ACL、转发与 NAT 已在上述阶段补齐；hairpin、ICMP/RELATED、运行时
@@ -351,8 +351,8 @@ ring/TAP 保护与原隔离/健康回归、五项 sanitizer 通过，见 [逐次
 worker 收发回归通过，三个相关单测通过 AddressSanitizer/UBSan，见
 [能力画像与验证](capability_probe.md)。资源容量、任意组合矩阵和高级 flow 能力仍未探测。
 
-2026-10-03 新增 management v11 的 `rule-status`，按当前规则版本定位实际后端、安装端口、
-COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批量更新显示共享的整批耗时，
+2026-10-03 新增 management v11 的 `rule-status`，按当前规则版本定位规则实际执行位置、安装端口、
+COUNT 配置和规则安装提交耗时，核对账本与安装记录。纯软件批量更新显示共享的整批耗时，
 查询不调用驱动、不改变计数、快照或版本；重放重新测量。`-Werror` 构建、20/20 单测、
 两组 ring 状态/存储/重放场景、真实 TAP rte_flow 生命周期、四组 worker 收发及隔离和
 健康回归通过，详见 [规则安装状态与验证](rule_status.md)。该版本尚未提供失败分类与规则 telemetry，已在上述 v13 补齐。
@@ -396,7 +396,7 @@ COUNT 配置和后端提交耗时，核对账本与安装记录。纯软件批�
 | 批量事务/回滚 | 已接双 backend；单测和 net_ring 已验证 | 新建、精确删除及 2–4 条精确版本更新；更新先建全部新对象、再删旧对象、整批发布 repository；失败补偿保留原 generation，补偿失败进入 recovery isolation |
 | control service | 已实现单规则与批量闭环 | 创建、幂等重放、generation replacement、查询、删除；在线隔离停止软件 worker，清理重试成功后退出 |
 | management API | 本机 v27 | 增加 device-status、精确事件代次 device-reset 与完整组端口/阶段诊断；保留共享 COUNT、AGE、角色身份与图规划/安装、隧道、动态 ND/DAD/NUD、IPv6 会话与 NAT66、IPv6 ACL、双栈路由与邻居及原规则诊断和健康；旧版本客户端被拒绝 |
-| 规则安装观测 | 已实现状态、失败分类、失败事件、耗时历史与规则 telemetry | 精确版本核对后端、端口与 COUNT 配置；三组耗时、整批不重复计数、分位数上界与未知/溢出标志；最近 64 条完整失败的版本分页、覆盖提示和编号耗尽冻结；不提供持久化审计日志 |
+| 规则安装观测 | 已实现状态、失败分类、失败事件、耗时历史与规则 telemetry | 精确版本核对规则执行位置、端口与 COUNT 配置；三组耗时、整批不重复计数、分位数上界与未知/溢出标志；最近 64 条完整失败的版本分页、覆盖提示和编号耗尽冻结；不提供持久化审计日志 |
 | health/readiness | 已实现本机最小闭环 | 实际线程、端口与链路、移除、恢复隔离和持久化 dirty；未就绪原因与 CLI 退出码；未提供远程探针、心跳或主动网络探测 |
 | flow template/async | 未实现 | 规模化与高频更新能力待实现 |
 | ACL/LPM/NAT/conntrack | IPv4/IPv6 ACL、LPM/rewrite/neighbor；双栈 TCP/UDP 跟踪、SNAT/静态 DNAT、IPv6 动态 ND 已接通 | 原子规则更新、持久重放、易失会话和映射回收、双向收发及静态端口保留已验证；hairpin、NPTv6、RELATED/ICMP、HA 与硬件有状态处理未实现 |

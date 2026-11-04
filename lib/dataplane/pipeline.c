@@ -27,7 +27,7 @@ void dppd_pipeline_decide_counted(const struct dppd_forwarding_snapshot *snapsho
         decision->drop_reason = DPPD_DROP_MALFORMED;
         return;
     }
-    /** 软件后端存在时检查规则动作，后端为空则继续后面的出口选择 */
+    /** software_backend 非空时匹配软件规则，否则直接选择出口 */
     if (software_backend != NULL && packet != NULL) {
         struct dppd_software_decision software_decision;
 

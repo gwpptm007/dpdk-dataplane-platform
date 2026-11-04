@@ -180,7 +180,7 @@ int main(void)
     assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
     tracking[8] = "0,0,203.0.113.1,40000-40001";
     assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_ERROR);
-    /** NAT66 必须使用完整普通单播地址，端口池、依赖关系和后端冲突都不能绕过 */
+    /** NAT66 必须使用完整普通单播地址，端口池、依赖关系和内网服务映射冲突都不能绕过 */
     tracking[7] = "--snat6";
     tracking[8] = "0,1,2001:db8:100::9,40000-40001";
     assert(dppd_config_parse(9, tracking, &config) == DPPD_CONFIG_OK);

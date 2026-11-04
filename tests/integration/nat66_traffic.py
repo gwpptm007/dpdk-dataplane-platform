@@ -140,7 +140,7 @@ def validate(build, directory, nat66):
         check("tcp=closed" in fixture.cli("conntrack-list"), "IPv6 RST did not close TCP")
         fixture.flush()
         if nat66:
-            # ACL 匹配 DNAT 后的后端地址和端口，而不是线缆上的公网服务地址
+            # ACL 匹配 DNAT 后的内网服务器地址和端口，而不是线缆上的公网服务地址
             inbound = replace(original.reverse(), destination="2001:db8:100::9", destination_port=40000)
             backend = replace(inbound, destination="2001:db8:1::8", destination_port=8000)
             fixture.exchange(inbound, ingress=1, reason="rule_drops")
