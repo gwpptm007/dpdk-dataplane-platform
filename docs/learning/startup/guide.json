@@ -98,7 +98,7 @@
       "title": "开始运行：主线程管理，worker 收包",
       "question": "调用 remote_launch 后，是谁在执行收包函数？",
       "plain": "runtime_start 将工作函数和 worker 地址提交给选定 lcore。EAL 的工作线程执行 worker_main，完成规则读者注册后发布 RUNNING，再循环收包。主线程则继续执行管理循环，两边并行。",
-      "flow": "主线程：runtime_start → 提交 worker 任务 → 管理循环\n                           │\n                           ├─ lcore 1：worker 0，轮询各网口队列 0\n                           └─ lcore 2：worker 1，轮询各网口队列 1\n\nworker：RX burst → process_batch → 转发或释放 → 下一轮\n主线程：检查设备/worker → 处理管理请求、维护统计 → 休眠后下一轮",
+      "flow": "沿用示例：主线程在 lcore 0，worker 0/1 分别使用 lcore 1/2\n\n主线程：runtime_start\n  ├─ worker 0 设为 STARTING → 向 lcore 1 提交收包函数和 worker 0 地址\n  ├─ worker 1 设为 STARTING → 向 lcore 2 提交收包函数和 worker 1 地址\n  └─ 全部提交成功 → 返回 main → 管理循环\n\n工作线程：dppd_worker_main(arg)\n  arg → 对应 worker → runtime 和 queue_id\n  注册规则表、路由表读者 → 发布 RUNNING\n  → 依次轮询各网口的同号队列 → process_batch\n  → 报告安全点和心跳 → 下一轮\n\n两边并行，没有“等 worker 收完全部包再回 main”这一步",
       "result": "worker 正在处理包，主线程维持管理和监控；主线程休眠不会让 worker 一起休眠",
       "next": "收到退出信号或发生无法继续的错误时，主线程进入停止流程",
       "boundary": "remote_launch 提交成功与 worker 已完成准备是两件事。STARTING 表示启动中，worker 完成注册后才报告 RUNNING；RSS 选择队列，runtime 决定哪个 lcore 的 worker 轮询它",
@@ -110,6 +110,18 @@
       },
       "related": [
         [
+          "app/dppd/main.c",
+          "main",
+          "if (dppd_runtime_start(&runtime) != 0)",
+          2
+        ],
+        [
+          "lib/dataplane/worker.c",
+          "dppd_worker_main",
+          "struct dppd_worker *worker = arg;",
+          6
+        ],
+        [
           "lib/dataplane/worker.c",
           "process_ingress",
           "uint16_t count = rte_eth_rx_burst",
@@ -120,13 +132,13 @@
     },
     {
       "id": "stage-5",
-      "title": "先等人停下来，再收走工具",
+      "title": "停止收包任务，再释放资源",
       "question": "为什么发出停止请求后，不能马上释放内存？",
-      "plain": "request_stop 只设置停止标记。worker 观察到后退出循环、注销规则读者并返回；主线程必须通过 wait 确认任务结束，才继续清理规则、设备和内存池。",
-      "flow": "关闭管理入口\n  → request_stop：发出停止请求\n  → worker：退出循环、注销读者、返回\n  → wait：主线程确认任务已结束\n  → 清理 control\n  → 清理 runtime：关闭网口，再释放 mbuf 池\n  → 清理 EAL，进程退出",
-      "result": "正常清理后，业务线程、规则对象、设备和池依次释放，最后结束 DPDK 环境",
-      "next": "到这里形成一份完整地图；理解哪一段再对照那一段代码，不用重新遍历所有辅助函数",
-      "boundary": "STOP 请求不等于任务已退出；网口关闭前驱动仍可能持有 mbuf，所以池必须后释放。cleanup_* 是标签，goto 跳过去以后继续向下执行",
+      "plain": "按 Ctrl+C 后，信号处理函数设置 stop_signal，让主线程结束管理循环。主线程随后调用 request_stop，设置 runtime.stop_requested，worker 才能看到停止请求。worker 退出循环、注销读者并返回后，主线程通过 wait 确认工作函数已经结束，再清理资源。",
+      "flow": "正常退出示例：按 Ctrl+C\n  → handle_signal：stop_signal = 1\n  → 主线程结束管理循环，关闭管理 socket\n  → request_stop：runtime.stop_requested = true\n       │\n       └─ worker_io_quiesced 读到 true\n            → 退出收包循环 → 注销规则和路由读者\n            → 发布 STOPPED → dppd_worker_main 返回\n  → wait：逐个等待已提交的工作函数返回，取得结果\n  → 清理 control：规则表、计数器、网卡规则和路由\n  → 清理 runtime：等待报文、会话与设备；网口关闭后释放 mbuf 池\n  → 清理 EAL，进程退出",
+      "result": "正常路径中，所有工作函数先返回，规则、设备和池再依次清理，最后结束 DPDK 环境",
+      "next": "接下来用同一个启动例子，串起参数、线程、队列、报文处理和停止顺序，核对各部分的联系",
+      "boundary": "stop_signal、停止请求、STOPPED 标记和工作函数返回是不同步骤；wait 超时仍不能证明任务结束。网口关闭前驱动可能持有 mbuf，池必须后释放。cleanup_* 是跳转标签，执行后会继续向下清理",
       "code": {
         "file": "app/dppd/main.c",
         "fn": "main",
@@ -134,6 +146,20 @@
         "n": 5
       },
       "related": [
+        [
+          "lib/runtime/runtime.c",
+          "dppd_runtime_request_stop"
+        ],
+        [
+          "lib/dataplane/worker.c",
+          "worker_io_quiesced"
+        ],
+        [
+          "lib/dataplane/worker.c",
+          "dppd_worker_main",
+          "dppd_ipv4_router_reader_unregister(runtime->ipv4_router, worker->queue_id);",
+          5
+        ],
         [
           "lib/runtime/runtime.c",
           "dppd_runtime_wait",

@@ -502,16 +502,12 @@ static void publish_port_configuration(struct dppd_port *port, const struct port
 }
 
 /**
- * 按 plan 配置网口，为每个队列编号分别建立 RX 和 TX 队列，RX 使用传入的 mbuf 池
- * configure 网口 → 调整描述符数量 → 逐队列 RX setup、TX setup
- * 成功返回 0，失败返回负错误码；本函数不启动网口，实际描述符数量写入 plan->identity
- * @param port 网口结构体指针
- * @param cfg 配置结构体指针
- * @param pool mbuf 池指针
- * @param plan 端口配置计划结构体指针
- * @param devices 设备集合指针
- * @param sequence 事件序列号
- * @return 成功返回 0，失败返回负错误码
+ * 将 plan 中的网口配置交给 PMD，建立 cfg 指定数量的 RX/TX 队列
+ * pool 是该网口 RX 队列共用的 mbuf 池，调整后的描述符数量记入 plan->identity
+ *
+ * 提交端口配置 → 调整描述符数量 → 按 queue 编号分别建立 RX 和 TX 队列
+ * 本函数不启动网口，后续由 start_configured_port 完成
+ * 普通启动 devices 为 NULL；复位时 devices 和 sequence 用于检测设备事件
  */
 static int configure_port_queues(struct dppd_port *port, const struct dppd_config *cfg, struct rte_mempool *pool,
     struct port_configuration *plan, const struct dppd_device_set *devices, uint64_t sequence)
@@ -520,6 +516,12 @@ static int configure_port_queues(struct dppd_port *port, const struct dppd_confi
     struct rte_eth_txconf tx_conf;
     int rc;
 
+    /** 提交 RX/TX 队列数和 RSS 等端口配置，具体队列随后由 setup 建立
+     *  网口编号：0
+        RX 队列数：2
+        TX 队列数：2
+        端口配置：plan->conf，包含前面准备的 RSS 设置
+     */
     rc = rte_eth_dev_configure(port->port_id, cfg->nb_queues, cfg->nb_queues, &plan->conf);
     if (rc != 0)
         return rc;
@@ -545,12 +547,20 @@ static int configure_port_queues(struct dppd_port *port, const struct dppd_confi
     rx_conf.offloads = plan->conf.rxmode.offloads;
     tx_conf = plan->info.default_txconf;
     tx_conf.offloads = plan->conf.txmode.offloads;
+    /**
+     * 例：当前网口按 queue 0、1 分别建立 RX 0/TX 0、RX 1/TX 1
+     * 各 RX 队列关联同一个传入的 pool，不为每个队列另建池
+     *
+     *  queue = 0 → 建立网口 0 的 RX 0、TX 0
+     *  queue = 1 → 建立网口 0 的 RX 1、TX 1
+     */
     for (uint16_t queue = 0; queue < cfg->nb_queues; ++queue) {
         rc = rte_eth_rx_queue_setup(port->port_id, queue, rx_desc, port->socket_id, &rx_conf, pool);
         if (rc != 0)
             return rc;
         if (devices != NULL && (rc = reset_event_fence(devices, sequence, false, NULL)) != 0)
             return rc;
+        /** TX 使用应用在发送时提交的 mbuf，因此这里无需绑定接收池 */
         rc = rte_eth_tx_queue_setup(port->port_id, queue, tx_desc, port->socket_id, &tx_conf);
         if (rc != 0)
             return rc;
@@ -561,15 +571,12 @@ static int configure_port_queues(struct dppd_port *port, const struct dppd_confi
 }
 
 /**
- * 启动已配置好队列的网口，按需启用混杂或全组播接收，并取得 MAC 地址
- * 成功返回 0，任一步失败返回负错误码；已完成的启动由 port->started 记录，供调用方清理
+ * 启动已配置好队列的网口，按 cfg 设置接收模式，将网口 MAC 保存到 plan
  *
- * @param port 网口结构体指针
- * @param cfg 配置结构体指针
- * @param plan 端口配置计划结构体指针
- * @param devices 设备集合指针
- * @param sequence 事件序列号
- * @return 成功返回 0，失败返回负错误码
+ * 启动网口 → 按需启用混杂或全组播接收 → 读取 MAC
+ * 普通启动 devices 为 NULL；复位时还要核对设备事件及原 MAC
+ * started 记录驱动启动成功，不代表物理链路已连通或 worker 已开始收包
+ * 成功返回 0，失败返回负错误码；后续设置失败时也保留 started，供上层关闭已启动网口
  */
 static int start_configured_port(struct dppd_port *port, const struct dppd_config *cfg, struct port_configuration *plan,
     const struct dppd_device_set *devices, uint64_t sequence)
@@ -577,20 +584,23 @@ static int start_configured_port(struct dppd_port *port, const struct dppd_confi
     int rc = rte_eth_dev_start(port->port_id);
     if (rc != 0)
         return rc;
+    /** 后续接收模式或 MAC 读取失败时，清理路径仍需关闭这个已启动的网口 */
     port->started = true;
     if (devices != NULL && (rc = reset_event_fence(devices, sequence, false, NULL)) != 0)
         return rc;
 
     if (cfg->promiscuous) {
+        /** 混杂模式放宽目的 MAC 过滤，允许接收发给其他 MAC 的帧 */
         rc = rte_eth_promiscuous_enable(port->port_id);
         if (rc != 0)
             return rc;
         if (devices != NULL && (rc = reset_event_fence(devices, sequence, false, NULL)) != 0)
             return rc;
     }
-    /** ND 需要接收本链路的 solicited-node 和 all-nodes 组播，失败不能冒充已启用 */
+    /** 当前网口配置 ND6 时启用全组播接收，让 IPv6 邻居发现的组播报文进入接收路径 */
     for (uint32_t i = 0; i < cfg->nd6_count; ++i)
         if (cfg->nd6[i].port_id == port->port_id) {
+            // 开启指定网口的“全组播接收模式”
             rc = rte_eth_allmulticast_enable(port->port_id);
             if (rc != 0)
                 return rc;
@@ -598,6 +608,7 @@ static int start_configured_port(struct dppd_port *port, const struct dppd_confi
                 return rc;
             break;
         }
+    /** MAC 先存入 plan，整套配置成功后由 publish_port_configuration 写入 port->mac */
     rc = rte_eth_macaddr_get(port->port_id, &plan->mac);
     if (rc != 0)
         return rc;
@@ -833,7 +844,7 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
         port->socket_id = port_socket(port->port_id);
     }
 
-    // mbuf 池按 NUMA 节点创建
+    /** 按 NUMA 节点准备 mbuf 池，后面的网口循环按 socket_id 取用 */
     rc = create_socket_pools(devices, cfg);
     if (rc != 0)
         goto fail;
@@ -851,7 +862,10 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
             rc = -ENODEV;
             goto fail;
         }
-        // 把池交给网口配置
+        /**
+         * 按当前网口的 NUMA 节点取池，交给其 RX 队列
+         * 例：网口 0、1 的 socket_id 都为 0，两轮均传 pools[0]，各自队列仍独立
+         */
         rc = configure_port(port, cfg, devices->pools[port->socket_id]);
         if (rc != 0) {
             fprintf(stderr, "[dppd] failed to configure port %u: %s (%d)\n", port->port_id, rte_strerror(-rc), rc);
@@ -869,10 +883,16 @@ int dppd_devices_init(struct dppd_device_set *devices, const struct dppd_config 
     return 0;
 
 fail:
+    /** 任一网口准备失败都进入统一清理，已经启动的其他网口也在清理范围内 */
     (void)dppd_devices_stop(devices);
     return rc;
 }
 
+/**
+ * 检查已启动网口是否仍有效，查询链路并保存到 port->link_state，供 worker 发送前读取
+ * 初次不支持链路查询的网口记为 UNSUPPORTED，后续仍检查移除状态，但跳过链路 API
+ * 返回 0 表示本轮检查完成，不要求所有链路都为 UP；设备失效或查询错误返回负错误码
+ */
 int dppd_devices_poll_links(struct dppd_device_set *devices)
 {
     if (devices == NULL || devices->nb_ports > DPPD_MAX_PORTS)
@@ -916,6 +936,7 @@ int dppd_devices_poll_links(struct dppd_device_set *devices)
         previous = atomic_load_explicit(&port->link_state, memory_order_acquire);
         if (previous == DPPD_LINK_UNSUPPORTED)
             continue;
+        /** 读取当前链路结果写入 link，不在这里等待链路变为 UP */
         rc = rte_eth_link_get_nowait(port->port_id, &link);
         /** 主动暂停时仍可查询链路，但查询中出现新事件就停止，不访问下一口旧实例 */
         if (tracking && (result = reset_event_fence(devices, sequence, false, NULL)) != 0)
@@ -923,12 +944,14 @@ int dppd_devices_poll_links(struct dppd_device_set *devices)
         if (rc == -ENOTSUP && previous == DPPD_LINK_UNKNOWN) {
             next = DPPD_LINK_UNSUPPORTED;
         } else if (rc != 0) {
+            /** 查询失败先将状态置为 DOWN，阻止 worker 继续向此口发送，再返回原错误 */
             atomic_store_explicit(&port->link_state, DPPD_LINK_DOWN, memory_order_release);
             fprintf(stderr, "[dppd] port=%u link query failed: %d\n", port->port_id, rc);
             return rc;
         } else {
             next = link.link_status == RTE_ETH_LINK_UP ? DPPD_LINK_UP : DPPD_LINK_DOWN;
         }
+        /** 主线程更新状态供 worker 读取，只在状态变化时记录日志 */
         atomic_store_explicit(&port->link_state, next, memory_order_release);
         if (previous != next)
             fprintf(stderr, "[dppd] port=%u link=%s\n", port->port_id, dppd_link_state_name(next));

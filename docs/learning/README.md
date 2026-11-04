@@ -10,7 +10,9 @@
 
 [规则增删改：技术原理、方案选择与实现](rule-management-principles.md) 将已经走读的规则管理主线集中整理，包含版本检查、规则安装回调、分阶段事务、快照发布与 QSBR、索引与匹配表，以及配置保存和失败处理。以后遇到相同机制可以直接查阅，不必重复逐函数学习。
 
-[mbuf 内存池与收发循环图](diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html) 将“创建池、RX 队列绑定、收包处理、worker/PMD 分别归还”连在一起；[图的阅读说明与源码位置](diagrams/mbuf-cycle-20261103-182926/README.md)。
+[程序启动、运行与停止总图](startup/startup-stop.md) 用嵌套分区串起启动准备、主线程与 worker 并行运行，以及停止清理。
+
+[mbuf 内存池与收发循环图](startup/mbuf-cycle.md) 沿用分区 Mermaid 排版，将“创建池、RX 队列关联、收包处理、worker/PMD 分别归还”连起来，包含 `count = 3、sent = 2` 的例子与源码位置。两份材料均为 Markdown，在支持 Mermaid 的预览中查看。
 
 ## 目录与维护方式
 
@@ -19,6 +21,7 @@
 | `index.html` | 学习总目录，由 `build.py` 生成 |
 | `progress.json` | 经对话确认的各节进度、当前停点、下一步与记录日期 |
 | `startup/guide.json`、`startup/template.html` | 3.1 的六阶段讲解、全景、分工与源码锚点；`startup/index.html` 由构建生成 |
+| `startup/startup-stop.md`、`startup/mbuf-cycle.md` | 启动到停止的分区 Mermaid 总图，以及 mbuf 收发与归还流程 |
 | `packet-path/` | 1.1 收发与归属，页面本身也是后续章节共用样式的来源 |
 | `packet-parse/` | 1.2 报文解析，内容在 `lesson.json`，布局在 `lesson-template.html` |
 | `software-rules/` | 1.3 软件规则，内容在 `section.json`，布局在 `section-template.html` |

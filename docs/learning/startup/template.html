@@ -15,7 +15,7 @@
 </style>
 </head>
 <body><main id="top">
-<nav class="top-links" aria-label="返回入口"><a href="../index.html">← 学习总目录</a><a href="../rule-management-principles.md">规则原理参考</a><a href="../diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html">mbuf 循环图</a></nav>
+<nav class="top-links" aria-label="返回入口"><a href="../index.html">← 学习总目录</a><a href="../rule-management-principles.md">规则原理参考</a><a href="mbuf-cycle.md">mbuf 循环图</a></nav>
 <header><p class="eyebrow">第 3 章 · 程序全貌 / 3.1 从启动到退出</p><h1>dppd 从准备到收包，再到退出</h1><p class="lead">用网口 0 ↔ 网口 1 转发的例子，先看四段全景和两类分工，再对照源码。主线全部显示，源码可以按需展开。</p></header>
 <section class="card notice" aria-label="当前学习状态"><strong>当前先重新梳理整体关系，连接跟踪与 NAT 暂缓。</strong><p>下面按阶段 0～5 看“谁来做、准备什么、做完多了什么”。代码讲过和页面打开过，都不作为已经掌握的依据。</p></section>
 <section class="card" id="overview"><h2>全景只分四段：准备机器 → 准备程序 → 持续运行 → 安全退出</h2><div class="phase-grid">
@@ -59,7 +59,7 @@ runtime_start：让选定线程开始执行业务收包任务
 <tr><td>control / management</td><td>control 负责配置规则；management 通过 socket 接收请求并交给控制层</td></tr>
 <tr><td>RSS / QSBR</td><td>RSS 把报文分到 RX 队列；QSBR 帮助确认旧规则表何时不再被读者使用。二者解决不同问题</td></tr>
 </tbody></table></div></section>
-<section class="card"><h2>现在怎么学，不用重新背所有函数</h2><p>先只看全景和主线程/worker 分工，再从阶段 0 开始。每到一段，只说清“谁做、准备什么、结果放哪里、下一段用它做什么”，然后用该段的短代码核对。</p><p class="stop-note"><strong>当前停点：</strong>回到程序全貌重新建立理解。页面点击和源码已经讲过，都不表示你已经掌握；连接跟踪与 NAT 留到这张地图读顺后再展开。</p><p>配套材料：<a href="../packet-path/software-packet-learning.html">一个包的处理流程</a> · <a href="../diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html">mbuf 循环图</a> · <a href="../rule-management-principles.md">规则管理原理参考</a></p></section>
+<section class="card"><h2>现在怎么学，不用重新背所有函数</h2><p>先只看全景和主线程/worker 分工，再从阶段 0 开始。每到一段，只说清“谁做、准备什么、结果放哪里、下一段用它做什么”，然后用该段的短代码核对。</p><p class="stop-note"><strong>当前停点：</strong>回到程序全貌重新建立理解。页面点击和源码已经讲过，都不表示你已经掌握；连接跟踪与 NAT 留到这张地图读顺后再展开。</p><p>配套材料：<a href="../packet-path/software-packet-learning.html">一个包的处理流程</a> · <a href="mbuf-cycle.md">mbuf 循环图</a> · <a href="../rule-management-principles.md">规则管理原理参考</a></p></section>
 <footer class="footer"><p>本页讲普通启动的成功主线，省略恢复隔离、受管理入口、热复位和可选协议功能的详细分支。源码片段由 build.py 从当前工作区提取，修改注释后重新构建即可刷新行号；本页不配置系统、不启动 DPDK，也不代表实机验收。</p><a href="#top" class="back-top">返回顶部 ↑</a></footer>
 </main><script>
 const toggler=document.getElementById('toggle-code');

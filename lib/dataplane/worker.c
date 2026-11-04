@@ -18,7 +18,10 @@ static void free_packets(struct rte_mbuf **packets, uint16_t count)
         rte_pktmbuf_free(packets[i]);
 }
 
-/** 每次准备调用驱动前都重新检查，事件不能等到整轮端口扫描结束后才阻止下一次收发 */
+/**
+ * stop_requested 为真或设备已禁止收发时返回 true，供收包循环和各收发检查点判断是否停止
+ * worker 读取的是 runtime 中的停止请求，主线程的 stop_signal 不在这里检查
+ */
 static bool worker_io_quiesced(const struct dppd_worker *worker)
 {
     return atomic_load_explicit(&worker->runtime->stop_requested, memory_order_acquire) ||
@@ -556,6 +559,7 @@ static void process_waiting(struct dppd_worker *worker)
  */
 int dppd_worker_main(void *arg)
 {
+    /** arg 就是 runtime_start 传入的 worker 指针，通过它取得队列编号和所属 runtime */
     struct dppd_worker *worker = arg;
     struct dppd_runtime *runtime;
 
@@ -616,7 +620,7 @@ int dppd_worker_main(void *arg)
     /** 停止读取规则后注销；主线程还需等待本线程返回，之后才能销毁共享的软件规则表和计数器 */
     dppd_ipv4_router_reader_unregister(runtime->ipv4_router, worker->queue_id);
     dppd_software_backend_worker_unregister(runtime->software_backend, worker->queue_id);
-    /** 先注销借用的规则读者，再发布已结束状态，资源释放仍须由主线程等待返回 */
+    /** 注销读者后发布 STOPPED，下面才返回；主线程仍须 wait 确认工作函数已经返回 */
     atomic_store_explicit(&worker->state, DPPD_WORKER_STOPPED, memory_order_release);
     return 0;
 }

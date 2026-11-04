@@ -15,7 +15,7 @@
 </style>
 </head>
 <body><main id="top">
-<nav class="top-links" aria-label="返回入口"><a href="../index.html">← 学习总目录</a><a href="../rule-management-principles.md">规则原理参考</a><a href="../diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html">mbuf 循环图</a></nav>
+<nav class="top-links" aria-label="返回入口"><a href="../index.html">← 学习总目录</a><a href="../rule-management-principles.md">规则原理参考</a><a href="mbuf-cycle.md">mbuf 循环图</a></nav>
 <header><p class="eyebrow">第 3 章 · 程序全貌 / 3.1 从启动到退出</p><h1>dppd 从准备到收包，再到退出</h1><p class="lead">用网口 0 ↔ 网口 1 转发的例子，先看四段全景和两类分工，再对照源码。主线全部显示，源码可以按需展开。</p></header>
 <section class="card notice" aria-label="当前学习状态"><strong>当前先重新梳理整体关系，连接跟踪与 NAT 暂缓。</strong><p>下面按阶段 0～5 看“谁来做、准备什么、做完多了什么”。代码讲过和页面打开过，都不作为已经掌握的依据。</p></section>
 <section class="card" id="overview"><h2>全景只分四段：准备机器 → 准备程序 → 持续运行 → 安全退出</h2><div class="phase-grid">
@@ -38,7 +38,7 @@ runtime_start：让选定线程开始执行业务收包任务
 逻辑 CPU 0 → 主线程，初始化、管理和监控
 逻辑 CPU 1 → worker 0，处理各网口队列 0
 逻辑 CPU 2 → worker 1，处理各网口队列 1</pre><p class="small">逻辑 CPU 编号不保证对应独立物理核心；绑定 CPU 限制线程运行位置，不代表独占 CPU。使用 --lcores 等其他映射方式时，lcore 编号也不一定等于 Linux CPU 编号。</p></section>
-<nav class="stage-nav" id="stage-nav" aria-label="启动阶段导航"><a href="#stage-0">0 · 先准备机器，程序还没运行</a><a href="#stage-1">1 · 程序先读懂运行环境和启动要求</a><a href="#stage-2">2 · 把收包需要的人和工具准备好</a><a href="#stage-3">3 · 准备配置管理，把对象连接起来</a><a href="#stage-4">4 · 开始运行：主线程管理，worker 收包</a><a href="#stage-5">5 · 先等人停下来，再收走工具</a></nav>
+<nav class="stage-nav" id="stage-nav" aria-label="启动阶段导航"><a href="#stage-0">0 · 先准备机器，程序还没运行</a><a href="#stage-1">1 · 程序先读懂运行环境和启动要求</a><a href="#stage-2">2 · 把收包需要的人和工具准备好</a><a href="#stage-3">3 · 准备配置管理，把对象连接起来</a><a href="#stage-4">4 · 开始运行：主线程管理，worker 收包</a><a href="#stage-5">5 · 停止收包任务，再释放资源</a></nav>
 <div class="tools"><button id="toggle-code" type="button" aria-pressed="false">展开全部源码片段</button><a href="#boundaries">直接看几个容易混淆的状态</a><a href="#glossary">查看术语对照</a></div>
 <section id="walkthrough" aria-label="分阶段源码对照"><article class="card step-card" id="stage-0"><div class="stage-label">阶段 0</div><h2>先准备机器，程序还没运行</h2><p class="question">调用 rte_eal_init 之前，大页和网卡由谁准备？</p><p>Linux 管理员或部署脚本先准备运行条件。采用大页和 VFIO 的物理网卡路径时，先预留大页、准备访问权限，再加载 VFIO 并绑定要使用的网卡。这里的操作在 dppd 进程之外。</p><pre>Linux 主机
   ├─ 预留大页、按环境准备挂载和权限
@@ -90,24 +90,54 @@ dppctl ──Unix socket──→ management ──处理请求──→ control
     control.nd6 = runtime.nd6;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L546">app/dppd/main.c:546 · main</a></p><pre><code>    if (dppd_management_start(&amp;management, &amp;control, &amp;runtime.devices, &amp;runtime, config.control_socket) != 0) {
         fprintf(stderr, &quot;[dppd] management socket initialization failed: %s\n&quot;, config.control_socket);
         goto cleanup_control;
-    }</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-4"><div class="stage-label">阶段 4</div><h2>开始运行：主线程管理，worker 收包</h2><p class="question">调用 remote_launch 后，是谁在执行收包函数？</p><p>runtime_start 将工作函数和 worker 地址提交给选定 lcore。EAL 的工作线程执行 worker_main，完成规则读者注册后发布 RUNNING，再循环收包。主线程则继续执行管理循环，两边并行。</p><pre>主线程：runtime_start → 提交 worker 任务 → 管理循环
-                           │
-                           ├─ lcore 1：worker 0，轮询各网口队列 0
-                           └─ lcore 2：worker 1，轮询各网口队列 1
+    }</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-4"><div class="stage-label">阶段 4</div><h2>开始运行：主线程管理，worker 收包</h2><p class="question">调用 remote_launch 后，是谁在执行收包函数？</p><p>runtime_start 将工作函数和 worker 地址提交给选定 lcore。EAL 的工作线程执行 worker_main，完成规则读者注册后发布 RUNNING，再循环收包。主线程则继续执行管理循环，两边并行。</p><pre>沿用示例：主线程在 lcore 0，worker 0/1 分别使用 lcore 1/2
 
-worker：RX burst → process_batch → 转发或释放 → 下一轮
-主线程：检查设备/worker → 处理管理请求、维护统计 → 休眠后下一轮</pre><div class="result"><strong>走到这里：</strong>worker 正在处理包，主线程维持管理和监控；主线程休眠不会让 worker 一起休眠</div><div class="boundary">remote_launch 提交成功与 worker 已完成准备是两件事。STARTING 表示启动中，worker 完成注册后才报告 RUNNING；RSS 选择队列，runtime 决定哪个 lcore 的 worker 轮询它</div><p class="handoff"><strong>怎么接下一步：</strong>收到退出信号或发生无法继续的错误时，主线程进入停止流程</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">remote_launch 的三个参数分别是函数地址、传入的 worker 地址、目标 lcore；rx_burst 用同一份 worker 中的 queue_id 收包</p><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L190">lib/runtime/runtime.c:190 · dppd_runtime_start</a></p><pre><code>        rc = rte_eal_remote_launch(dppd_worker_main, worker, worker-&gt;lcore_id);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L515">lib/dataplane/worker.c:515 · process_ingress</a></p><pre><code>    uint16_t count = rte_eth_rx_burst(ingress-&gt;port_id, worker-&gt;queue_id, packets, worker-&gt;runtime-&gt;config.burst_size);
-    process_batch(worker, ingress, packets, count, false, 0);</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-5"><div class="stage-label">阶段 5</div><h2>先等人停下来，再收走工具</h2><p class="question">为什么发出停止请求后，不能马上释放内存？</p><p>request_stop 只设置停止标记。worker 观察到后退出循环、注销规则读者并返回；主线程必须通过 wait 确认任务结束，才继续清理规则、设备和内存池。</p><pre>关闭管理入口
-  → request_stop：发出停止请求
-  → worker：退出循环、注销读者、返回
-  → wait：主线程确认任务已结束
-  → 清理 control
-  → 清理 runtime：关闭网口，再释放 mbuf 池
-  → 清理 EAL，进程退出</pre><div class="result"><strong>走到这里：</strong>正常清理后，业务线程、规则对象、设备和池依次释放，最后结束 DPDK 环境</div><div class="boundary">STOP 请求不等于任务已退出；网口关闭前驱动仍可能持有 mbuf，所以池必须后释放。cleanup_* 是标签，goto 跳过去以后继续向下执行</div><p class="handoff"><strong>怎么接下一步：</strong>到这里形成一份完整地图；理解哪一段再对照那一段代码，不用重新遍历所有辅助函数</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">这里先关闭入口、通知停止，再等待。失败与恢复隔离有额外约束，本页先掌握正常退出的依赖顺序</p><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L721">app/dppd/main.c:721 · main</a></p><pre><code>    dppd_management_stop(&amp;management);
+主线程：runtime_start
+  ├─ worker 0 设为 STARTING → 向 lcore 1 提交收包函数和 worker 0 地址
+  ├─ worker 1 设为 STARTING → 向 lcore 2 提交收包函数和 worker 1 地址
+  └─ 全部提交成功 → 返回 main → 管理循环
+
+工作线程：dppd_worker_main(arg)
+  arg → 对应 worker → runtime 和 queue_id
+  注册规则表、路由表读者 → 发布 RUNNING
+  → 依次轮询各网口的同号队列 → process_batch
+  → 报告安全点和心跳 → 下一轮
+
+两边并行，没有“等 worker 收完全部包再回 main”这一步</pre><div class="result"><strong>走到这里：</strong>worker 正在处理包，主线程维持管理和监控；主线程休眠不会让 worker 一起休眠</div><div class="boundary">remote_launch 提交成功与 worker 已完成准备是两件事。STARTING 表示启动中，worker 完成注册后才报告 RUNNING；RSS 选择队列，runtime 决定哪个 lcore 的 worker 轮询它</div><p class="handoff"><strong>怎么接下一步：</strong>收到退出信号或发生无法继续的错误时，主线程进入停止流程</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">remote_launch 的三个参数分别是函数地址、传入的 worker 地址、目标 lcore；rx_burst 用同一份 worker 中的 queue_id 收包</p><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L188">lib/runtime/runtime.c:188 · dppd_runtime_start</a></p><pre><code>        rc = rte_eal_remote_launch(dppd_worker_main, worker, worker-&gt;lcore_id);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L604">app/dppd/main.c:604 · main</a></p><pre><code>    if (dppd_runtime_start(&amp;runtime) != 0)
+        goto cleanup_telemetry;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L563">lib/dataplane/worker.c:563 · dppd_worker_main</a></p><pre><code>    struct dppd_worker *worker = arg;
+    struct dppd_runtime *runtime;
+
+    if (worker == NULL || worker-&gt;runtime == NULL)
+        return -1;
+    runtime = worker-&gt;runtime;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L518">lib/dataplane/worker.c:518 · process_ingress</a></p><pre><code>    uint16_t count = rte_eth_rx_burst(ingress-&gt;port_id, worker-&gt;queue_id, packets, worker-&gt;runtime-&gt;config.burst_size);
+    process_batch(worker, ingress, packets, count, false, 0);</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-5"><div class="stage-label">阶段 5</div><h2>停止收包任务，再释放资源</h2><p class="question">为什么发出停止请求后，不能马上释放内存？</p><p>按 Ctrl+C 后，信号处理函数设置 stop_signal，让主线程结束管理循环。主线程随后调用 request_stop，设置 runtime.stop_requested，worker 才能看到停止请求。worker 退出循环、注销读者并返回后，主线程通过 wait 确认工作函数已经结束，再清理资源。</p><pre>正常退出示例：按 Ctrl+C
+  → handle_signal：stop_signal = 1
+  → 主线程结束管理循环，关闭管理 socket
+  → request_stop：runtime.stop_requested = true
+       │
+       └─ worker_io_quiesced 读到 true
+            → 退出收包循环 → 注销规则和路由读者
+            → 发布 STOPPED → dppd_worker_main 返回
+  → wait：逐个等待已提交的工作函数返回，取得结果
+  → 清理 control：规则表、计数器、网卡规则和路由
+  → 清理 runtime：等待报文、会话与设备；网口关闭后释放 mbuf 池
+  → 清理 EAL，进程退出</pre><div class="result"><strong>走到这里：</strong>正常路径中，所有工作函数先返回，规则、设备和池再依次清理，最后结束 DPDK 环境</div><div class="boundary">stop_signal、停止请求、STOPPED 标记和工作函数返回是不同步骤；wait 超时仍不能证明任务结束。网口关闭前驱动可能持有 mbuf，池必须后释放。cleanup_* 是跳转标签，执行后会继续向下清理</div><p class="handoff"><strong>怎么接下一步：</strong>接下来用同一个启动例子，串起参数、线程、队列、报文处理和停止顺序，核对各部分的联系</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">这里先关闭入口、通知停止，再等待。失败与恢复隔离有额外约束，本页先掌握正常退出的依赖顺序</p><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L726">app/dppd/main.c:726 · main</a></p><pre><code>    dppd_management_stop(&amp;management);
     dppd_runtime_request_stop(&amp;runtime);
     if (dppd_runtime_wait(&amp;runtime) != 0)
         loop_error = -EIO;
-    dppd_runtime_stats_dump(&amp;runtime);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L281">lib/runtime/runtime.c:281 · dppd_runtime_wait</a></p><pre><code>        rc = rte_eal_wait_lcore(worker-&gt;lcore_id);
+    dppd_runtime_stats_dump(&amp;runtime);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L247">lib/runtime/runtime.c:247 · dppd_runtime_request_stop</a></p><pre><code>void dppd_runtime_request_stop(struct dppd_runtime *runtime)
+{
+    if (runtime != NULL)
+        atomic_store_explicit(&amp;runtime-&gt;stop_requested, true, memory_order_release);
+}</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L25">lib/dataplane/worker.c:25 · worker_io_quiesced</a></p><pre><code>static bool worker_io_quiesced(const struct dppd_worker *worker)
+{
+    return atomic_load_explicit(&amp;worker-&gt;runtime-&gt;stop_requested, memory_order_acquire) ||
+        dppd_devices_io_quiesced(&amp;worker-&gt;runtime-&gt;devices);
+}</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L621">lib/dataplane/worker.c:621 · dppd_worker_main</a></p><pre><code>    dppd_ipv4_router_reader_unregister(runtime-&gt;ipv4_router, worker-&gt;queue_id);
+    dppd_software_backend_worker_unregister(runtime-&gt;software_backend, worker-&gt;queue_id);
+    /** 注销读者后发布 STOPPED，下面才返回；主线程仍须 wait 确认工作函数已经返回 */
+    atomic_store_explicit(&amp;worker-&gt;state, DPPD_WORKER_STOPPED, memory_order_release);
+    return 0;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L280">lib/runtime/runtime.c:280 · dppd_runtime_wait</a></p><pre><code>        rc = rte_eal_wait_lcore(worker-&gt;lcore_id);
         worker-&gt;launched = false;</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article></section>
 <section class="card" id="boundaries"><h2>每走完一段，程序到底变成了什么状态？</h2><div class="table-wrap"><table><thead><tr><th>走到哪里</th><th>已经完成什么</th><th>后面还要做什么</th></tr></thead><tbody>
 <tr><td>EAL 返回</td><td>DPDK 基础环境和设备探测完成</td><td>建立项目的池、队列和业务对象</td></tr>
@@ -127,7 +157,7 @@ worker：RX burst → process_batch → 转发或释放 → 下一轮
 <tr><td>control / management</td><td>control 负责配置规则；management 通过 socket 接收请求并交给控制层</td></tr>
 <tr><td>RSS / QSBR</td><td>RSS 把报文分到 RX 队列；QSBR 帮助确认旧规则表何时不再被读者使用。二者解决不同问题</td></tr>
 </tbody></table></div></section>
-<section class="card"><h2>现在怎么学，不用重新背所有函数</h2><p>先只看全景和主线程/worker 分工，再从阶段 0 开始。每到一段，只说清“谁做、准备什么、结果放哪里、下一段用它做什么”，然后用该段的短代码核对。</p><p class="stop-note"><strong>当前停点：</strong>回到程序全貌重新建立理解。页面点击和源码已经讲过，都不表示你已经掌握；连接跟踪与 NAT 留到这张地图读顺后再展开。</p><p>配套材料：<a href="../packet-path/software-packet-learning.html">一个包的处理流程</a> · <a href="../diagrams/mbuf-cycle-20261103-182926/mbuf-cycle.html">mbuf 循环图</a> · <a href="../rule-management-principles.md">规则管理原理参考</a></p></section>
+<section class="card"><h2>现在怎么学，不用重新背所有函数</h2><p>先只看全景和主线程/worker 分工，再从阶段 0 开始。每到一段，只说清“谁做、准备什么、结果放哪里、下一段用它做什么”，然后用该段的短代码核对。</p><p class="stop-note"><strong>当前停点：</strong>回到程序全貌重新建立理解。页面点击和源码已经讲过，都不表示你已经掌握；连接跟踪与 NAT 留到这张地图读顺后再展开。</p><p>配套材料：<a href="../packet-path/software-packet-learning.html">一个包的处理流程</a> · <a href="mbuf-cycle.md">mbuf 循环图</a> · <a href="../rule-management-principles.md">规则管理原理参考</a></p></section>
 <footer class="footer"><p>本页讲普通启动的成功主线，省略恢复隔离、受管理入口、热复位和可选协议功能的详细分支。源码片段由 build.py 从当前工作区提取，修改注释后重新构建即可刷新行号；本页不配置系统、不启动 DPDK，也不代表实机验收。</p><a href="#top" class="back-top">返回顶部 ↑</a></footer>
 </main><script>
 const toggler=document.getElementById('toggle-code');

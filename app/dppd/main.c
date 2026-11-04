@@ -714,9 +714,14 @@ int main(int argc, char **argv)
     }
 
     /**
-     * 正常退出主线：关闭管理入口 → 请求 worker 停止 → 等待工作函数返回 → 释放共享资源
-     * request_stop 只写停止标记，wait 才确认任务已结束，不能发送通知后就立即释放规则或设备
-     * worker 退出前会注销规则和路由读者，等待成功后才能销毁规则和路由对象
+     * 正常停止以工作函数返回为界，之后才释放它使用的规则表和设备
+     *
+     * Ctrl+C → handle_signal 设置 stop_signal → 主线程跳出管理循环
+     *   → 关闭管理入口 → request_stop 设置 runtime.stop_requested
+     *   → worker 检查到停止请求 → 退出收包循环、注销读者、返回
+     *   → wait 确认所有工作函数返回 → 进入下面的资源清理
+     *
+     * stop_signal 供主线程检查，stop_requested 供 worker 检查；发出请求时任务可能还未结束
      */
     dppd_management_stop(&management);
     dppd_runtime_request_stop(&runtime);

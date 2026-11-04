@@ -11,7 +11,7 @@
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\diagrams\\mbuf-cycle-20261103-182926\\mbuf-cycle.html",
+      "name": "Link exists: docs\\learning\\startup\\mbuf-cycle.md",
       "passed": true
     },
     {
@@ -179,7 +179,15 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L190",
+      "name": "Anchor exists: #L188",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L604",
       "passed": true
     },
     {
@@ -187,7 +195,15 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L515",
+      "name": "Anchor exists: #L563",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__dataplane__worker.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L518",
       "passed": true
     },
     {
@@ -203,7 +219,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L721",
+      "name": "Anchor exists: #L726",
       "passed": true
     },
     {
@@ -211,7 +227,31 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L281",
+      "name": "Anchor exists: #L247",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__dataplane__worker.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L25",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__dataplane__worker.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L621",
+      "passed": true
+    },
+    {
+      "name": "Link exists: docs\\learning\\sources\\lib__runtime__runtime.c.html",
+      "passed": true
+    },
+    {
+      "name": "Anchor exists: #L280",
       "passed": true
     },
     {
@@ -227,7 +267,7 @@
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\diagrams\\mbuf-cycle-20261103-182926\\mbuf-cycle.html",
+      "name": "Link exists: docs\\learning\\startup\\mbuf-cycle.md",
       "passed": true
     },
     {
@@ -243,19 +283,15 @@
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\startup\\index.html",
+      "name": "Link exists: docs\\learning\\startup\\startup-stop.md",
       "passed": true
     },
     {
-      "name": "Anchor exists: #stage-3",
+      "name": "Link exists: docs\\learning\\sources\\lib__device__device.c.html",
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
-      "passed": true
-    },
-    {
-      "name": "Anchor exists: #L343",
+      "name": "Anchor exists: #L896",
       "passed": true
     },
     {
@@ -263,23 +299,23 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #stage-4",
+      "name": "Anchor exists: #stage-2",
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "name": "Link exists: docs\\learning\\sources\\lib__device__topology.c.html",
       "passed": true
     },
     {
-      "name": "Anchor exists: #L604",
+      "name": "Anchor exists: #L510",
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\sources\\app__dppd__main.c.html",
+      "name": "Link exists: docs\\learning\\sources\\lib__device__topology.c.html",
       "passed": true
     },
     {
-      "name": "Anchor exists: #L343",
+      "name": "Anchor exists: #L508",
       "passed": true
     },
     {
@@ -291,11 +327,15 @@
       "passed": true
     },
     {
+      "name": "Link exists: docs\\learning\\startup\\startup-stop.md",
+      "passed": true
+    },
+    {
       "name": "Link exists: docs\\learning\\rule-management-principles.md",
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\diagrams\\mbuf-cycle-20261103-182926\\mbuf-cycle.html",
+      "name": "Link exists: docs\\learning\\startup\\mbuf-cycle.md",
       "passed": true
     },
     {

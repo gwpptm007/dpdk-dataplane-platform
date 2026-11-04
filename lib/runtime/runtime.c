@@ -163,7 +163,7 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
 
     if (runtime == NULL || runtime->workers_started)
         return -EINVAL;
-    /** 普通停止后可以重新启动线程，但设备移除后必须重建整个运行实例 */
+    /** 普通停止后可以重新提交收包任务，设备移除后必须重建整个运行实例 */
     if (dppd_devices_io_quiesced(&runtime->devices))
         return dppd_devices_removal_requested(&runtime->devices) ? -ENODEV : -EUCLEAN;
 
@@ -176,16 +176,14 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
         atomic_store_explicit(&worker->heartbeat_ms, dppd_monotonic_ms(), memory_order_release);
         atomic_store_explicit(&worker->state, DPPD_WORKER_STARTING, memory_order_release);
         /**
-         * 把函数地址、worker 地址和目标 lcore 交给 EAL，在对应的已有工作线程上执行
-         * EAL 初始化时已准备线程和 CPU 亲和性，这里让线程开始执行业务任务
-         * 例如 worker->lcore_id = 3：lcore 3 调用 dppd_worker_main(worker)
-         * worker 地址原样成为工作函数的 arg，不复制结构体；主线程不等待整个收包循环结束
+         * 通知指定 lcore 的 EAL 工作线程执行收包函数，线程和 CPU 亲和性已由 EAL 准备
          *
-         * | 参数 | 含义 |
-            |---|---|
-            | `dppd_worker_main` | 要执行的函数地址 |
-            | `worker` | 传给工作函数的参数地址 |
-            | `worker->lcore_id` | 在哪个 DPDK lcore 上执行 |
+         * dppd_worker_main  → 要执行的函数
+         * worker            → 原样传给工作函数的 arg，不复制结构体
+         * worker->lcore_id  → 执行任务的 lcore
+         *
+         * 例：worker 0 选中 lcore 1，则该线程执行 dppd_worker_main(&runtime->workers[0])
+         * 主线程提交后继续启动下一个 worker，不等待收包循环结束
          */
         rc = rte_eal_remote_launch(dppd_worker_main, worker, worker->lcore_id);
         if (rc != 0) {
@@ -196,7 +194,7 @@ int dppd_runtime_start(struct dppd_runtime *runtime)
             return waited == -ETIMEDOUT ? waited : rc;
         }
         worker->launched = true;
-        /** 已有启动成功的任务，后面即使再启动失败，清理时也必须先等待这些任务退出 */
+        /** 已有任务提交成功，清理时必须等待其退出；是否进入 RUNNING 由工作线程自行报告 */
         runtime->workers_started = true;
     }
     runtime->workers_started = true;
@@ -245,7 +243,7 @@ bool dppd_runtime_worker_stalled(const struct dppd_runtime *runtime, uint16_t wo
     return heartbeat == 0 || (now_ms >= heartbeat && now_ms - heartbeat > runtime->config.worker_timeout_ms);
 }
 
-/** 设置共享停止标记，worker 观察到后退出循环；本函数不等待线程结束，也不释放资源 */
+/** 设置 stop_requested，供各 worker 的循环和收发检查点读取；返回时收包任务可能仍在执行 */
 void dppd_runtime_request_stop(struct dppd_runtime *runtime)
 {
     if (runtime != NULL)
@@ -278,6 +276,7 @@ int dppd_runtime_wait(struct dppd_runtime *runtime)
             struct timespec pause = {.tv_nsec = 1000000L};
             nanosleep(&pause, NULL);
         }
+        /** 等待该 lcore 上的 dppd_worker_main 返回，并取得其返回值；STOPPED 标记不能代替这一步 */
         rc = rte_eal_wait_lcore(worker->lcore_id);
         worker->launched = false;
         /** 等待结果是最终依据，保留失败状态供清理前的诊断读取 */
