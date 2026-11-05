@@ -141,12 +141,37 @@ static void test_routing_arguments(void)
     assert(build_request(3, replace, &request) == 0);
     assert(request.payload.routing_replace.configuration.route_count == 1);
     assert(request.payload.routing_replace.configuration.neighbor_count == 1);
+    /** 持久整表替换复用文件解析，零是合法统一版本，不能被独立路由的代次校验误拒绝 */
+    const char dual[] = "route6 2001:db8::/64 2 fe80::1\nneighbor6 2 fe80::1 02:00:00:00:00:08\n";
+    assert(write(fd, dual, sizeof(dual) - 1) == sizeof(dual) - 1);
+    char *durable[] = {"request-submit", "81", "7", "routing-replace", path, "0"};
+    assert(build_request(6, durable, &request) == 0);
+    assert(request.operation == DPPD_MANAGEMENT_REQUEST_SUBMIT);
+    assert(request.payload.durable_request.operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE);
+    assert(request.payload.durable_request.key.client == 81 && request.payload.durable_request.key.sequence == 7);
+    assert(request.payload.durable_request.count == 1 && request.payload.durable_request.expected_revision == 0);
+    const struct dppd_ipv4_configuration *configuration = &request.payload.durable_request.payload.routing;
+    assert(configuration->route_count == 1 && configuration->neighbor_count == 1);
+    assert(configuration->route6_count == 1 && configuration->neighbor6_count == 1);
+    assert(configuration->neighbors[0].port_id == 2 && configuration->neighbors[0].mac[5] == 7);
+    assert(configuration->neighbors6[0].port_id == 2 && configuration->neighbors6[0].mac[5] == 8);
+    durable[5] = "9007199254740993";
+    assert(build_request(6, durable, &request) == 0);
+    assert(request.payload.durable_request.expected_revision == UINT64_C(9007199254740993));
+    for (size_t i = 0; i < 3; ++i) {
+        const char *invalid[] = {"any", "-1", "18446744073709551615"};
+        durable[5] = (char *)invalid[i];
+        assert(build_request(6, durable, &request) == -EINVAL);
+    }
+    durable[5] = "0";
+    assert(build_request(5, durable, &request) == -EINVAL);
     assert(write(fd, "broken\n", 7) == 7);
     assert(build_request(3, replace, &request) == -EINVAL);
+    assert(build_request(6, durable, &request) == -EINVAL);
     assert(ftruncate(fd, 0) == 0 && lseek(fd, 0, SEEK_SET) == 0);
     assert(write(fd, "\0", 1) == 1);
     assert(build_request(3, replace, &request) == -EINVAL);
-    assert(ftruncate(fd, 65537) == 0);
+    assert(ftruncate(fd, 131073) == 0);
     assert(build_request(3, replace, &request) != 0);
     close(fd);
     assert(unlink(path) == 0);

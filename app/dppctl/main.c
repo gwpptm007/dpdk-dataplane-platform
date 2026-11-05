@@ -24,9 +24,11 @@ static void print_usage(const char *program)
     fprintf(stderr, "usage:\n");
     fprintf(stderr, "  global options: --socket PATH --json (versioned management output)\n");
     fprintf(stderr,
-        "  %s [--socket PATH] request-submit CLIENT SEQUENCE flow-create|flow-update|flow-remove|flow-config-apply ...\n",
+        "  %s [--socket PATH] request-submit CLIENT SEQUENCE "
+        "flow-create|flow-update|flow-remove|flow-config-apply|routing-replace ...\n",
         program);
     fprintf(stderr, "  %s [--socket PATH] request-get CLIENT SEQUENCE\n", program);
+    fprintf(stderr, "  managed routing: request-submit CLIENT SEQUENCE routing-replace FILE EXACT_REVISION\n");
     fprintf(stderr, "  %s [--socket PATH] flow-config-get [REVISION [AFTER_TABLE AFTER_COUNT]]\n", program);
     fprintf(stderr, "  %s [--socket PATH] flow-config-apply EXACT_REVISION FILE\n", program);
     fprintf(stderr, "  managed rule constructors accept a final shared:ID:GENERATION modifier\n");
@@ -841,8 +843,22 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
         if (argc < 4 || parse_u64(argv[1], 1, UINT64_MAX, &key.client) != 0 ||
             parse_u64(argv[2], 1, UINT64_MAX, &key.sequence) != 0 ||
             (strcmp(argv[3], "flow-create") != 0 && strcmp(argv[3], "flow-update") != 0 &&
-                strcmp(argv[3], "flow-remove") != 0 && strcmp(argv[3], "flow-config-apply") != 0))
+                strcmp(argv[3], "flow-remove") != 0 && strcmp(argv[3], "flow-config-apply") != 0 &&
+                strcmp(argv[3], "routing-replace") != 0))
             return -EINVAL;
+        /** 路由请求检查统一配置版本，初始版本可以为零，不能套用独立路由的代次规则 */
+        if (strcmp(argv[3], "routing-replace") == 0) {
+            uint64_t revision;
+            if (argc != 6 || parse_u64(argv[5], 0, UINT64_MAX - 1U, &revision) != 0)
+                return -EINVAL;
+            initialize_request(request, DPPD_MANAGEMENT_REQUEST_SUBMIT);
+            struct dppd_flow_request *routing = &request->payload.durable_request;
+            routing->key = key;
+            routing->operation = DPPD_FLOW_REQUEST_ROUTING_REPLACE;
+            routing->expected_revision = revision;
+            routing->count = 1;
+            return dppctl_routing_read(argv[4], &routing->payload.routing);
+        }
         struct dppd_management_request inner;
         int rc = build_request(argc - 3, argv + 3, &inner);
         if (rc != 0)
@@ -1576,8 +1592,11 @@ static int print_response(const struct dppd_management_response *response)
                " phase=%s status=%d applied=%s durable=%s revision=%" PRIu64 "\n",
             r->key.client, r->key.sequence, r->phase == DPPD_FLOW_REQUEST_DONE ? "done" : "pending", r->status,
             r->applied ? "yes" : "no", r->durable ? "yes" : "no", r->revision);
-        for (uint32_t i = 0; i < r->count; ++i)
-            printf("id=%" PRIu64 " generation=%" PRIu64 "\n", r->ids[i], r->generations[i]);
+        if (r->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE)
+            printf("routing-generation=%" PRIu64 "\n", r->generations[0]);
+        else
+            for (uint32_t i = 0; i < r->count; ++i)
+                printf("id=%" PRIu64 " generation=%" PRIu64 "\n", r->ids[i], r->generations[i]);
         return r->status;
     }
     case DPPD_MANAGEMENT_FLOW_STATUS:

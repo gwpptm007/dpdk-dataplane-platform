@@ -1,5 +1,6 @@
 #include "flow_request_io.h"
 #include "persistence_codec.h"
+#include "flow_routing_io.h"
 
 #include <errno.h>
 #include <string.h>
@@ -38,13 +39,25 @@ static int rule_bytes(uint8_t *data, uint32_t *offset, const struct dppd_rule *i
 int dppd_flow_request_encode(const struct dppd_flow_request *r, uint8_t *data, uint32_t *length)
 {
     if (r == NULL || data == NULL || length == NULL || r->key.client == 0 || r->key.sequence == 0 ||
-        r->operation < DPPD_FLOW_REQUEST_CREATE || r->operation > DPPD_FLOW_REQUEST_CONFIGURE || r->count == 0 ||
+        r->operation < DPPD_FLOW_REQUEST_CREATE || r->operation > DPPD_FLOW_REQUEST_ROUTING_REPLACE || r->count == 0 ||
         r->count > (r->operation == DPPD_FLOW_REQUEST_CONFIGURE ? 8U : 4U))
         return -EINVAL;
     uint32_t offset = 0;
     number(data, &offset, r->operation);
     number(data, &offset, r->count);
-    number(data, &offset, r->operation == DPPD_FLOW_REQUEST_CONFIGURE ? r->expected_revision : r->queue);
+    number(data, &offset, r->operation >= DPPD_FLOW_REQUEST_CONFIGURE ? r->expected_revision : r->queue);
+    if (r->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE) {
+        if (r->count != 1 || r->queue != 0)
+            return -EINVAL;
+        /** 路由代次由服务分配，输入里的代次和未使用数组不影响同键请求的内容比较 */
+        struct dppd_ipv4_configuration configuration = r->payload.routing;
+        configuration.generation = 0;
+        size_t size;
+        int rc = dppd_flow_routing_encode(&configuration, data + offset, DPPD_REQUEST_BYTES - offset, &size);
+        if (rc == 0)
+            *length = offset + size;
+        return rc;
+    }
     for (uint32_t i = 0; i < r->count; ++i) {
         int rc = 0;
         if (r->operation == DPPD_FLOW_REQUEST_CONFIGURE) {
@@ -98,10 +111,11 @@ int dppd_flow_request_ledger_validate(const struct dppd_flow_request_ledger *led
         if (r->key.client == 0)
             continue;
         if (r->key.sequence == 0 || r->operation < DPPD_FLOW_REQUEST_CREATE ||
-            r->operation > DPPD_FLOW_REQUEST_CONFIGURE || r->phase < DPPD_FLOW_REQUEST_PENDING ||
+            r->operation > DPPD_FLOW_REQUEST_ROUTING_REPLACE || r->phase < DPPD_FLOW_REQUEST_PENDING ||
             r->phase > DPPD_FLOW_REQUEST_DONE || r->count == 0 ||
             r->count > (r->operation == DPPD_FLOW_REQUEST_CONFIGURE ? 8U : 4U) || r->revision > revision ||
             r->status > 0 || r->status < -4095 || record->length == 0 || record->length > DPPD_REQUEST_BYTES ||
+            (r->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE && r->count != 1) ||
             (r->phase == DPPD_FLOW_REQUEST_PENDING && (r->applied || r->status != 0)))
             return -EINVAL;
         bool client = false;

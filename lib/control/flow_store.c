@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "flow_state_io.h"
 #include "flow_request_io.h"
+#include "flow_routing_io.h"
 #include "dppd/software_shared.h"
 
 #include <errno.h>
@@ -35,6 +36,8 @@ struct dppd_flow_store {
     bool configuration_residual;
     struct dppd_flow_job_id request_jobs[DPPD_REQUEST_RECEIPTS];
     bool requests_dirty;
+    struct dppd_ipv4_router *router;
+    uint64_t durable_routing_generation;
 };
 
 /** 在保存配置前收齐持久任务的完整结果，避免策略已经落盘而回执仍停留在受理态 */
@@ -206,6 +209,7 @@ static int flush(struct dppd_flow_store *s)
     s->status.last_error = rc;
     if (rc == 0) {
         s->status.durable_revision = s->state->revision;
+        s->durable_routing_generation = s->state->routing == NULL ? 0 : s->state->routing->configuration.generation;
         s->requests_dirty = false;
     }
     if (rc == 0)
@@ -218,6 +222,13 @@ static int teardown(struct dppd_flow_store *s)
 {
     struct dppd_flow_job_result result;
     int rc;
+    /** 路由读者尚未退出时保持整个实例可用，不先拆掉仍被 worker 使用的其他对象 */
+    if (s->router != NULL) {
+        rc = dppd_ipv4_router_destroy(s->router);
+        if (rc != 0)
+            return rc;
+        s->router = NULL;
+    }
     s->status.ready = false;
     s->status.closing = true;
     if (cleanup_configuration(s) != 0)
@@ -498,6 +509,12 @@ int dppd_flow_store_open(const char *path, const struct dppd_flow_store_runtime 
         return -rc;
     }
     rc = build(s, runtime);
+    if (rc == 0 && state->routing != NULL) {
+        uint16_t ports[DPPD_MAX_PORTS];
+        for (uint16_t i = 0; i < state->routing->binding_count; ++i)
+            ports[i] = state->routing->bindings[i].port_id;
+        rc = dppd_ipv4_router_create(&s->router, ports, state->routing->binding_count, &state->routing->configuration);
+    }
     if (rc == 0 && state->requests != NULL) {
         /** 文件中未完成的请求没有已提交策略结果，重启后明确中止，旧键不能重新执行 */
         bool changed = false;
@@ -526,6 +543,7 @@ int dppd_flow_store_open(const char *path, const struct dppd_flow_store_runtime 
     }
     s->status.ready = true;
     s->status.durable_revision = state->revision;
+    s->durable_routing_generation = state->routing == NULL ? 0 : state->routing->configuration.generation;
     *output = s;
     return 0;
 }
@@ -581,6 +599,121 @@ int dppd_flow_store_config(struct dppd_flow_store *s, struct dppd_flow_state_con
         return -EINVAL;
     pthread_mutex_lock(&s->lock);
     *config = s->state->config;
+    pthread_mutex_unlock(&s->lock);
+    return 0;
+}
+
+int dppd_flow_store_routing_bind(struct dppd_flow_store *s, const struct dppd_routing_binding *bindings, uint16_t count)
+{
+    if (s == NULL || bindings == NULL || count == 0 || count > DPPD_MAX_PORTS)
+        return -EINVAL;
+    struct dppd_flow_routing_state *next = calloc(1, sizeof(*next));
+    if (next == NULL)
+        return -ENOMEM;
+    next->binding_count = count;
+    memcpy(next->bindings, bindings, count * sizeof(*bindings));
+    next->configuration.generation = 1;
+    int rc = dppd_flow_routing_validate(next);
+    if (rc != 0) {
+        free(next);
+        return rc;
+    }
+    pthread_mutex_lock(&s->lock);
+    rc = writable(s);
+    if (rc == 0 && s->state->config.mode != DPPD_FLOW_STATE_SOFTWARE)
+        rc = -ENOTSUP;
+    if (rc != 0)
+        goto done;
+    if (s->state->routing != NULL) {
+        /** 重启时按身份逐项匹配，调用者改变端口排列不能改变原来的绑定关系 */
+        const struct dppd_flow_routing_state *old = s->state->routing;
+        if (old->binding_count != count) {
+            rc = -ESTALE;
+            goto done;
+        }
+        for (uint16_t i = 0; i < count; ++i) {
+            bool found = false;
+            for (uint16_t j = 0; j < count; ++j) {
+                const struct dppd_routing_binding *a = &old->bindings[i], *b = &bindings[j];
+                found |= a->port_id == b->port_id && strcmp(a->device, b->device) == 0 &&
+                    strcmp(a->driver, b->driver) == 0 && strcmp(a->ifname, b->ifname) == 0;
+            }
+            if (!found) {
+                rc = -ESTALE;
+                goto done;
+            }
+        }
+        goto done;
+    }
+    uint16_t ports[DPPD_MAX_PORTS];
+    bool install_present = false;
+    for (uint16_t i = 0; i < count; ++i) {
+        ports[i] = bindings[i].port_id;
+        install_present |= ports[i] == s->state->config.port_id;
+    }
+    if (!install_present) {
+        rc = -EINVAL;
+        goto done;
+    }
+    rc = dppd_ipv4_router_create(&s->router, ports, count, &next->configuration);
+    if (rc == 0)
+        rc = dppd_flow_service_config_revision(s->service, s->state->revision);
+    if (rc != 0) {
+        if (s->router != NULL) {
+            (void)dppd_ipv4_router_destroy(s->router);
+            s->router = NULL;
+        }
+        goto done;
+    }
+    s->state->routing = next;
+    next = NULL;
+    /** 启用模式也属于持久配置变更，保存失败时保留 dirty，不能启动报文线程 */
+    rc = flush(s);
+    if (rc != 0)
+        rc = -EUCLEAN;
+done:
+    pthread_mutex_unlock(&s->lock);
+    free(next);
+    return rc;
+}
+
+struct dppd_ipv4_router *dppd_flow_store_router(struct dppd_flow_store *s)
+{
+    if (s == NULL)
+        return NULL;
+    pthread_mutex_lock(&s->lock);
+    struct dppd_ipv4_router *router = s->router;
+    pthread_mutex_unlock(&s->lock);
+    return router;
+}
+
+int dppd_flow_store_routing_get(struct dppd_flow_store *s, struct dppd_ipv4_configuration *configuration,
+    uint64_t *revision, uint64_t *durable_revision)
+{
+    if (s == NULL || configuration == NULL || revision == NULL || durable_revision == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = s->router == NULL ? -ENOTSUP : dppd_ipv4_router_get(s->router, configuration);
+    *revision = s->state->revision;
+    *durable_revision = s->status.durable_revision;
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_routing_status(struct dppd_flow_store *s, struct dppd_routing_status *status)
+{
+    if (s == NULL || status == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    memset(status, 0, sizeof(*status));
+    if (s->state->routing != NULL) {
+        const struct dppd_ipv4_configuration *c = &s->state->routing->configuration;
+        *status = (struct dppd_routing_status){.enabled = true,
+            .dirty = s->status.dirty || s->requests_dirty, .last_error = s->status.last_error,
+            .generation = c->generation, .persisted_generation = s->durable_routing_generation,
+            .route_count = c->route_count, .neighbor_count = c->neighbor_count,
+            .route6_count = c->route6_count, .neighbor6_count = c->neighbor6_count};
+    }
     pthread_mutex_unlock(&s->lock);
     return 0;
 }
@@ -1098,6 +1231,47 @@ int dppd_flow_store_request_get(struct dppd_flow_store *s, struct dppd_flow_requ
     return rc;
 }
 
+/** 候选表已经完整构建才推进统一版本，此回调成功后路由发布不再进行可能失败的分配 */
+static int routing_publish(void *context, const struct dppd_ipv4_configuration *candidate)
+{
+    struct dppd_flow_store *s = context;
+    int rc = dppd_flow_service_config_revision(s->service, s->state->revision);
+    if (rc == 0) {
+        s->state->routing->configuration = *candidate;
+        ++s->state->revision;
+    }
+    return rc;
+}
+
+/** 路由和静态邻居一次发布，终态回执随后和完整配置一起落盘，失败时沿用 managed 的停转发保护 */
+static void routing_replace_locked(struct dppd_flow_store *s, const struct dppd_flow_request *request,
+    struct dppd_flow_request_record *record)
+{
+    struct dppd_flow_service_status status;
+    int rc = writable(s);
+    if (rc == 0 && s->router == NULL)
+        rc = -ENOTSUP;
+    if (rc == 0)
+        rc = dppd_flow_service_status(s->service, &status);
+    if (rc == 0 && (status.jobs != 0 || status.isolated))
+        rc = -EBUSY;
+    if (rc == 0 && request->expected_revision != status.revision)
+        rc = -ESTALE;
+    if (rc == 0 && status.revision >= UINT64_MAX - 1U)
+        rc = -EOVERFLOW;
+    if (rc == 0)
+        rc = dppd_ipv4_router_replace(s->router, s->state->routing->configuration.generation,
+            &request->payload.routing, routing_publish, s);
+    record->result.phase = DPPD_FLOW_REQUEST_DONE;
+    record->result.status = rc;
+    record->result.applied = rc == 0;
+    record->result.revision = s->state->revision;
+    if (s->state->routing != NULL)
+        record->result.generations[0] = s->state->routing->configuration.generation;
+    s->requests_dirty = true;
+    (void)flush(s);
+}
+
 /** 持久受理在进入异步队列前完成，掉电后最多保留明确中止，不能重复执行原键 */
 int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_request *request, uint64_t now,
     struct dppd_flow_request_result *result)
@@ -1124,6 +1298,11 @@ int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_re
         rc = -ENOTSUP;
     if (rc != 0)
         goto done;
+    /** 普通端口对实例不写入新路由请求类型，避免一次不支持的请求破坏旧版文件的兼容性 */
+    if (request->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE && s->router == NULL) {
+        rc = -ENOTSUP;
+        goto done;
+    }
     if (s->state->requests == NULL) {
         s->state->requests = calloc(1, sizeof(*s->state->requests));
         if (s->state->requests == NULL) {
@@ -1182,7 +1361,9 @@ int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_re
         rc = request_result(s, (uint32_t)slot, result);
         goto done;
     }
-    if (request->operation == DPPD_FLOW_REQUEST_CONFIGURE) {
+    if (request->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE) {
+        routing_replace_locked(s, request, record);
+    } else if (request->operation == DPPD_FLOW_REQUEST_CONFIGURE) {
         for (uint32_t i = 0; i < request->count; ++i)
             record->result.ids[i] = request->payload.configuration[i].key;
         struct dppd_flow_config_result configured;

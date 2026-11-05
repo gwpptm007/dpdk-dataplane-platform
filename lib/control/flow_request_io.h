@@ -5,7 +5,7 @@
 
 #define DPPD_REQUEST_CLIENTS 32U
 #define DPPD_REQUEST_RECEIPTS 128U
-#define DPPD_REQUEST_BYTES 8192U
+#define DPPD_REQUEST_BYTES 32768U
 
 struct dppd_flow_request_record {
     struct dppd_flow_request_result result;

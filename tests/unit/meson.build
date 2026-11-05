@@ -359,6 +359,11 @@ flow_request_test = executable('test_flow_request', 'test_flow_request.c', depen
   link_args: ['-Wl,--wrap=fsync', '-Wl,--wrap=dppd_flow_service_process', '-Wl,--wrap=dppd_async_flow_process'])
 test('M5 persistent request idempotency crash receipts and stale key protection', flow_request_test, timeout: 120)
 
+# 双栈路由与持久请求共用配置，覆盖设备绑定、写盘失败、读者回收和满容量重启
+flow_routing_test = executable('test_flow_routing', 'test_flow_routing.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=fsync'])
+test('M5 managed dual-stack routing persistence requests and reader lifetime', flow_routing_test, timeout: 120)
+
 test('M5 northbound authentication parsing and resource limits', find_program('python3'),
   args: [files('test_northbound.py')], timeout: 60)
 

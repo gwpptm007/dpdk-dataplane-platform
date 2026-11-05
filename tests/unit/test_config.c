@@ -89,10 +89,57 @@ static void test_worker_timeout(void)
     assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
 }
 
+/** 统一路由必须显式启用，允许奇数网口，但不能接入第二份路由文件或尚未持久化的协议策略 */
+static void test_managed_routing(void)
+{
+    struct dppd_config config;
+    char error[160];
+    char *arguments[] = {"dppd", "--flow-state", "/private/state", "--managed-routing", "--ports", "0,2,7"};
+    assert(dppd_config_parse(6, arguments, &config) == DPPD_CONFIG_OK);
+    assert(config.managed_routing && dppd_config_uses_routing(&config));
+    assert(config.routing_path[0] == '\0' && config.nb_ports == 3);
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    config.nb_ports = 1;
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    config.managed_routing = false;
+    assert(!dppd_config_uses_routing(&config));
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.managed_routing = true;
+    config.flow_state_path[0] = '\0';
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    strcpy(config.flow_state_path, "/private/state");
+    strcpy(config.routing_path, "/private/second-routes");
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.routing_path[0] = '\0';
+    config.conntrack_capacity = 8;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.conntrack_capacity = 0;
+    config.snat.enabled = true;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.snat.enabled = false;
+    config.snat6.enabled = true;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.snat6.enabled = false;
+    config.dnat_count = 1;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.dnat_count = 0;
+    config.nd6_count = 1;
+    assert(dppd_config_validate(&config, error, sizeof(error)) != 0);
+    config.nd6_count = 0;
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    /** 重新解析会清除受管理标记，旧三层入口继续使用自己的文件和校验 */
+    char *legacy[] = {"dppd", "--ip-routing", "/private/routes", "--ports", "0"};
+    assert(dppd_config_parse(5, legacy, &config) == DPPD_CONFIG_OK);
+    assert(!config.managed_routing && dppd_config_uses_routing(&config));
+    assert(dppd_config_validate(&config, error, sizeof(error)) == 0);
+    assert(!dppd_config_uses_routing(NULL));
+}
+
 int main(void)
 {
     test_dnat_config();
     test_worker_timeout();
+    test_managed_routing();
     struct dppd_config config;
     char error[128];
     char *defaults[] = {"dppd"};

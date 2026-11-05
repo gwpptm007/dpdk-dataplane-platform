@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "flow_state_io.h"
 #include "flow_request_io.h"
+#include "flow_routing_io.h"
 #include "persistence_codec.h"
 
 #include <errno.h>
@@ -138,6 +139,23 @@ int dppd_flow_state_validate(const struct dppd_flow_state *state)
         (required[DPPD_RESOURCE_COUNTER] > c->native_counters ||
             required[DPPD_RESOURCE_AGING_OBJECT] > c->native_aging))
         return -ENOSPC;
+    if (state->routing != NULL) {
+        if (c->mode != DPPD_FLOW_STATE_SOFTWARE)
+            return -ENOTSUP;
+        rc = dppd_flow_routing_validate(state->routing);
+        if (rc != 0)
+            return rc;
+        bool present = false;
+        for (uint16_t i = 0; i < state->routing->binding_count; ++i)
+            present |= state->routing->bindings[i].port_id == c->port_id;
+        if (!present)
+            return -EINVAL;
+    }
+    if (state->routing == NULL && state->requests != NULL)
+        for (uint32_t i = 0; i < DPPD_REQUEST_RECEIPTS; ++i)
+            if (state->requests->receipts[i].result.key.client != 0 &&
+                state->requests->receipts[i].result.operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE)
+                return -EINVAL;
     return dppd_flow_request_ledger_validate(state->requests, state->revision);
 }
 
@@ -260,13 +278,64 @@ static int wire_requests(struct codec *c, struct dppd_flow_request_ledger *ledge
     return c->error;
 }
 
-/** 所有数字显式编码为小端，模板示例允许零代次，单独保存后再复用已提交规则的规范编码 */
+/** 第三版把端口身份和双栈表嵌入原配置，继续使用原文件的校验和、写锁和原子替换 */
+static int wire_routing(struct codec *c, struct dppd_flow_routing_state *routing, bool writing)
+{
+    uint64_t count = routing->binding_count;
+    if (writing)
+        put(c, count);
+    else
+        count = get(c);
+    if (c->error != 0 || count == 0 || count > DPPD_MAX_PORTS)
+        return -EBADMSG;
+    routing->binding_count = count;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (c->offset > c->size || c->size - c->offset < DPPD_FLOW_BINDING_BYTES)
+            return -EBADMSG;
+        struct dppd_routing_binding *b = &routing->bindings[i];
+        if (writing) {
+            put(c, b->port_id);
+            memcpy(c->data + c->offset, b->device, strlen(b->device));
+            memcpy(c->data + c->offset + 128, b->driver, strlen(b->driver));
+            memcpy(c->data + c->offset + 192, b->ifname, strlen(b->ifname));
+        } else {
+            b->port_id = get(c);
+            memcpy(b->device, c->data + c->offset, 128);
+            memcpy(b->driver, c->data + c->offset + 128, 64);
+            memcpy(b->ifname, c->data + c->offset + 192, 16);
+        }
+        c->offset += 208;
+    }
+    if (writing) {
+        size_t length;
+        if (c->offset > c->size || c->size - c->offset < 8)
+            return -EBADMSG;
+        int rc = dppd_flow_routing_encode(&routing->configuration, c->data + c->offset + 8,
+            c->size - c->offset - 8, &length);
+        if (rc != 0)
+            return rc;
+        put(c, length);
+        c->offset += length;
+    } else {
+        uint64_t length = get(c);
+        if (c->error != 0 || c->offset > c->size || length > c->size - c->offset)
+            return -EBADMSG;
+        int rc = dppd_flow_routing_decode(c->data + c->offset, length, &routing->configuration);
+        if (rc != 0)
+            return rc;
+        c->offset += length;
+    }
+    return c->error;
+}
+
 static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *size)
 {
     size_t capacity = 4096U + DPPD_MAX_PORTS * 80U + s->shared_count * 32U +
         s->table_count * (48U + DPPD_PERSISTENCE_RULE_BYTES) + s->rule_count * (16U + DPPD_PERSISTENCE_RULE_BYTES);
     if (s->requests != NULL)
         capacity += 4096U + DPPD_REQUEST_RECEIPTS * (256U + DPPD_REQUEST_BYTES);
+    if (s->routing != NULL)
+        capacity += 32U + DPPD_MAX_PORTS * DPPD_FLOW_BINDING_BYTES + DPPD_FLOW_ROUTING_BYTES;
     struct codec w = {.data = calloc(1, capacity), .size = capacity, .offset = 32};
     if (w.data == NULL)
         return -ENOMEM;
@@ -327,7 +396,11 @@ static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *siz
             return rc;
         }
     }
-    if (s->requests != NULL)
+    if (s->routing != NULL) {
+        w.error = wire_routing(&w, s->routing, true);
+        put(&w, s->requests != NULL);
+    }
+    if (s->requests != NULL && w.error == 0)
         w.error = wire_requests(&w, s->requests, true);
     if (w.error != 0) {
         free(w.data);
@@ -336,7 +409,7 @@ static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *siz
     *size = w.offset;
     memcpy(w.data, "DPPM4CFG", 8);
     w.offset = 8;
-    put(&w, s->requests == NULL ? 1 : 2);
+    put(&w, s->routing != NULL ? 3 : s->requests == NULL ? 1 : 2);
     put(&w, *size);
     put(&w, checksum(w.data, *size));
     *output = w.data;
@@ -349,7 +422,7 @@ static int decode(uint8_t *data, size_t size, struct dppd_flow_state **output)
     if (size < 32 || memcmp(data, "DPPM4CFG", 8) != 0)
         return -EBADMSG;
     uint64_t version = get(&r);
-    if (version != 1 && version != 2)
+    if (version != 1 && version != 2 && version != 3)
         return -EPROTONOSUPPORT;
     if (get(&r) != size || get(&r) != checksum(data, size))
         return -EBADMSG;
@@ -426,7 +499,21 @@ static int decode(uint8_t *data, size_t size, struct dppd_flow_state **output)
         if (wire_rule(&r, &s->rules[i].rule, false) != 0)
             goto fail;
     }
-    if (version == 2) {
+    bool has_requests = version == 2;
+    if (version == 3) {
+        s->routing = calloc(1, sizeof(*s->routing));
+        if (s->routing == NULL) {
+            rc = -ENOMEM;
+            goto fail;
+        }
+        if (wire_routing(&r, s->routing, false) != 0)
+            goto fail;
+        uint64_t present = get(&r);
+        if (present > 1)
+            goto fail;
+        has_requests = present != 0;
+    }
+    if (has_requests) {
         s->requests = calloc(1, sizeof(*s->requests));
         if (s->requests == NULL) {
             rc = -ENOMEM;
@@ -467,6 +554,7 @@ void dppd_flow_state_free(struct dppd_flow_state **state)
     if (state != NULL && *state != NULL) {
         free((*state)->rules);
         free((*state)->requests);
+        free((*state)->routing);
         free(*state);
         *state = NULL;
     }

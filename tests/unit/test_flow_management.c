@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
@@ -26,6 +27,64 @@ static struct dppd_management_response exchange(struct dppd_flow_management *flo
     assert(dppd_flow_management_handle(flows, NULL, request, &response) == 0);
     assert(response.version == DPPD_MANAGEMENT_VERSION && response.request_id == request->request_id);
     return response;
+}
+
+/** 双栈整表只能通过持久键提交，读到的统一版本用于下一次修改，路由代次只表示表本身 */
+static void test_managed_routing(struct dppd_flow_management *flows)
+{
+    const struct dppd_routing_binding binding = {.port_id = 7, .device = "test7", .driver = "net_ring"};
+    assert(dppd_flow_store_routing_bind(flows->store, &binding, 1) == 0);
+    struct dppd_management_request query = {.version = DPPD_MANAGEMENT_VERSION,
+        .size = sizeof(query), .operation = DPPD_MANAGEMENT_ROUTING_GET, .request_id = 101};
+    struct dppd_management_response before = exchange(flows, &query);
+    assert(before.status == 0 && before.payload.flow_routing.configuration.route_count == 0);
+    uint64_t generation = before.payload.flow_routing.configuration.generation;
+    uint64_t revision = before.payload.flow_routing.revision;
+    assert(before.payload.flow_routing.durable_revision == revision);
+    query.operation = DPPD_MANAGEMENT_ROUTING_STATUS;
+    assert(exchange(flows, &query).payload.routing_status.enabled);
+    query.operation = DPPD_MANAGEMENT_ROUTING_REPLACE;
+    assert(exchange(flows, &query).status == -ENOTSUP);
+
+    struct dppd_management_request request = {.version = DPPD_MANAGEMENT_VERSION,
+        .size = sizeof(request), .operation = DPPD_MANAGEMENT_REQUEST_SUBMIT, .request_id = 102};
+    struct dppd_flow_request *write_request = &request.payload.durable_request;
+    *write_request = (struct dppd_flow_request){.key = {82, 1}, .operation = DPPD_FLOW_REQUEST_ROUTING_REPLACE,
+        .count = 1, .expected_revision = revision};
+    struct dppd_ipv4_configuration *configuration = &write_request->payload.routing;
+    configuration->route_count = configuration->neighbor_count = 1;
+    configuration->routes[0] = (struct dppd_ipv4_route){.prefix_be = htonl(0xc0000200),
+        .gateway_be = htonl(0xc0000201), .port_id = 7, .depth = 24};
+    configuration->neighbors[0] = (struct dppd_ipv4_neighbor){.address_be = htonl(0xc0000201),
+        .port_id = 7, .mac = {2, 0, 0, 0, 0, 1}};
+    configuration->route6_count = configuration->neighbor6_count = 1;
+    configuration->routes6[0].port_id = 7;
+    configuration->routes6[0].depth = 64;
+    assert(inet_pton(AF_INET6, "2001:db8::", configuration->routes6[0].prefix) == 1);
+    assert(inet_pton(AF_INET6, "fe80::1", configuration->routes6[0].gateway) == 1);
+    configuration->neighbors6[0].port_id = 7;
+    configuration->neighbors6[0].mac[0] = 2;
+    configuration->neighbors6[0].mac[5] = 2;
+    assert(inet_pton(AF_INET6, "fe80::1", configuration->neighbors6[0].address) == 1);
+    struct dppd_management_response response = exchange(flows, &request);
+    assert(response.status == 0 && response.payload.durable_result.phase == DPPD_FLOW_REQUEST_DONE);
+    assert(response.payload.durable_result.applied && response.payload.durable_result.durable);
+    assert(response.payload.durable_result.status == 0 && response.payload.durable_result.revision == revision + 1);
+    assert(response.payload.durable_result.ids[0] == 0 && response.payload.durable_result.generations[0] == generation + 1);
+    assert(exchange(flows, &request).payload.durable_result.generations[0] == generation + 1);
+    configuration->neighbors[0].mac[5] = 9;
+    assert(exchange(flows, &request).status == -EEXIST);
+    query.operation = DPPD_MANAGEMENT_ROUTING_GET;
+    response = exchange(flows, &query);
+    assert(response.status == 0 && response.payload.flow_routing.revision == revision + 1);
+    assert(response.payload.flow_routing.configuration.route_count == 1);
+    assert(response.payload.flow_routing.configuration.neighbor6_count == 1);
+    assert(response.payload.flow_routing.configuration.neighbors[0].mac[5] == 1);
+    query.operation = DPPD_MANAGEMENT_ROUTING_STATUS;
+    response = exchange(flows, &query);
+    assert(response.status == 0 && !response.payload.routing_status.dirty);
+    assert(response.payload.routing_status.generation == generation + 1);
+    assert(response.payload.routing_status.persisted_generation == generation + 1);
 }
 
 int main(void)
@@ -170,6 +229,7 @@ int main(void)
     assert(response.status == 0 && response.payload.durable_result.phase == DPPD_FLOW_REQUEST_DONE);
     assert(response.payload.durable_result.status == -ECANCELED && response.payload.durable_result.durable);
     assert(exchange(flows, &request).status == 0);
+    test_managed_routing(flows);
     assert(dppd_flow_store_close(&store) == 0);
     free(flows);
     dppd_flow_state_free(&state);

@@ -313,6 +313,7 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
         {"nd6-reachable-ms", required_argument, NULL, 1016},
         {"flow-state", required_argument, NULL, 1017},
         {"worker-timeout-ms", required_argument, NULL, 1018},
+        {"managed-routing", no_argument, NULL, 1019},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -445,6 +446,9 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
                 return DPPD_CONFIG_ERROR;
             worker_timeout_selected = true;
             break;
+        case 1019:
+            cfg->managed_routing = true;
+            break;
         case 'h':
             return DPPD_CONFIG_HELP;
         default:
@@ -473,6 +477,11 @@ int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg)
     return DPPD_CONFIG_OK;
 }
 
+bool dppd_config_uses_routing(const struct dppd_config *cfg)
+{
+    return cfg != NULL && (cfg->routing_path[0] != '\0' || cfg->managed_routing);
+}
+
 int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t error_len)
 {
     uint16_t i;
@@ -488,6 +497,12 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
         (cfg->state_path[0] != '\0' || cfg->recovery_path[0] != '\0' || cfg->routing_path[0] != '\0' ||
             cfg->recovery_monitor[0] != '\0' || cfg->tap_owner_cookie)) {
         snprintf(error, error_len, "flow-state requires exclusive managed mode without legacy state/routing/recovery");
+        return -1;
+    }
+    /** 本轮只接入静态三层配置，不能顺带启用尚未纳入统一持久化的会话、NAT 或动态邻居策略 */
+    if (cfg->managed_routing && (cfg->flow_state_path[0] == '\0' || cfg->conntrack_capacity != 0 ||
+            cfg->snat.enabled || cfg->snat6.enabled || cfg->dnat_count != 0 || cfg->nd6_count != 0)) {
+        snprintf(error, error_len, "managed-routing requires flow-state and does not support conntrack, NAT or ND");
         return -1;
     }
     if (cfg->nd6_count > DPPD_ND6_LOCAL_LIMIT ||
@@ -566,9 +581,9 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
     }
 
     if (cfg->nb_ports == 0 || cfg->nb_ports > DPPD_MAX_PORTS ||
-        (cfg->routing_path[0] == '\0' && (cfg->nb_ports < 2 || (cfg->nb_ports & 1U) != 0))) {
-        if (cfg->routing_path[0] != '\0')
-            snprintf(error, error_len, "IPv4 routing requires between 1 and %u ports", DPPD_MAX_PORTS);
+        (!dppd_config_uses_routing(cfg) && (cfg->nb_ports < 2 || (cfg->nb_ports & 1U) != 0))) {
+        if (dppd_config_uses_routing(cfg))
+            snprintf(error, error_len, "IP routing requires between 1 and %u ports", DPPD_MAX_PORTS);
         else
             snprintf(error, error_len, "ports must contain an even number of entries between 2 and %u", DPPD_MAX_PORTS);
         return -1;
@@ -623,6 +638,7 @@ void dppd_config_print_usage(const char *program)
     printf("  --enable-pdump      initialize the packet capture service\n");
     printf("  --control-socket P  management socket path (default %s)\n", DPPD_MANAGEMENT_DEFAULT_SOCKET);
     printf("  --flow-state P      restore complete M4 software configuration in exclusive managed mode\n");
+    printf("  --managed-routing   enable dual-stack routes and static neighbors in the same flow-state file\n");
     printf("  --worker-timeout-ms N  managed worker progress timeout, 0 disables, 100..600000 (default 5000)\n");
     printf("  --rule-capacity N   maximum number of desired rules (default %u)\n", DPPD_DEFAULT_RULE_CAPACITY);
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");
@@ -659,6 +675,8 @@ void dppd_config_dump(const struct dppd_config *cfg)
         cfg->promiscuous ? "on" : "off", cfg->enable_pdump ? "on" : "off");
     if (cfg->routing_path[0] != '\0')
         printf("[dppd] forwarding=ipv4-routing routing-path=%s\n", cfg->routing_path);
+    if (cfg->managed_routing)
+        printf("[dppd] forwarding=managed-routing flow-state=%s\n", cfg->flow_state_path);
     if (cfg->conntrack_capacity != 0)
         printf("[dppd] conntrack capacity=%u timeout=%us snat=%s snat6=%s dnat-rules=%u\n", cfg->conntrack_capacity,
             cfg->conntrack_timeout_s, cfg->snat.enabled ? "on" : "off", cfg->snat6.enabled ? "on" : "off",

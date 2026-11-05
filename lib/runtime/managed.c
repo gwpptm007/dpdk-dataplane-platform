@@ -4,10 +4,13 @@
 #include "dppd/production.h"
 
 #include <errno.h>
+#include <net/if.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include <rte_ethdev.h>
 
 static volatile sig_atomic_t stopped;
 
@@ -34,6 +37,33 @@ static int wait_workers(struct dppd_runtime *runtime, struct dppd_flow_store *st
     int rc = dppd_runtime_wait(runtime);
     timeout_exit(rc, store);
     return rc;
+}
+
+/** EAL 已发现端口后读取真实设备名和驱动，TAP 还要核对当前命名空间中的接口名 */
+static int routing_bindings(const struct dppd_config *config, struct dppd_routing_binding *bindings)
+{
+    memset(bindings, 0, DPPD_MAX_PORTS * sizeof(*bindings));
+    for (uint16_t i = 0; i < config->nb_ports; ++i) {
+        struct rte_eth_dev_info information;
+        char name[RTE_ETH_NAME_MAX_LEN] = {0};
+        int rc = rte_eth_dev_info_get(config->ports[i], &information);
+        if (rc == 0)
+            rc = rte_eth_dev_get_name_by_port(config->ports[i], name);
+        if (rc != 0)
+            return rc;
+        if (information.driver_name == NULL || information.driver_name[0] == '\0' || name[0] == '\0' ||
+            strnlen(information.driver_name, sizeof(bindings[i].driver)) >= sizeof(bindings[i].driver) ||
+            strnlen(name, sizeof(name)) == sizeof(name) ||
+            strnlen(name, sizeof(name)) >= sizeof(bindings[i].device))
+            return -ENODEV;
+        bindings[i].port_id = config->ports[i];
+        strcpy(bindings[i].device, name);
+        strcpy(bindings[i].driver, information.driver_name);
+        if (strcmp(information.driver_name, "net_tap") == 0 &&
+            if_indextoname(information.if_index, bindings[i].ifname) == NULL)
+            return -errno;
+    }
+    return 0;
 }
 
 int dppd_managed_run(const struct dppd_config *config, struct dppd_recovery_scope *scope)
@@ -71,10 +101,40 @@ int dppd_managed_run(const struct dppd_config *config, struct dppd_recovery_scop
         rc = -ENOTSUP;
         goto finish;
     }
+    /** 已保存的路由模式不能因为漏写启动参数而退回端口配对，否则同一配置会产生不同的报文路径 */
+    if (!config->managed_routing && dppd_flow_store_router(store) != NULL) {
+        rc = -EINVAL;
+        goto finish;
+    }
+    if (config->managed_routing) {
+        struct dppd_routing_binding bindings[DPPD_MAX_PORTS];
+        rc = routing_bindings(config, bindings);
+        if (rc == 0)
+            rc = dppd_flow_store_routing_bind(store, bindings, config->nb_ports);
+        if (rc != 0)
+            goto finish;
+    }
     /** 取得独占写锁并完成恢复后再配置网卡，启动失败不会留下第二个控制面 */
     rc = dppd_runtime_init(&runtime, config);
     if (rc != 0)
         goto finish;
+    if (config->managed_routing) {
+        /** 设备配置可能改变接口状态，开放收包前再次核对身份并检查可用于三层改写的源 MAC */
+        struct dppd_routing_binding bindings[DPPD_MAX_PORTS];
+        rc = routing_bindings(config, bindings);
+        for (uint16_t i = 0; rc == 0 && i < runtime.devices.nb_ports; ++i)
+            if (!rte_is_valid_assigned_ether_addr(&runtime.devices.ports[i].mac))
+                rc = -ENODEV;
+        if (rc == 0)
+            rc = dppd_flow_store_routing_bind(store, bindings, config->nb_ports);
+        struct dppd_ipv4_router *router = dppd_flow_store_router(store);
+        if (rc != 0 || router == NULL) {
+            if (rc == 0)
+                rc = -EUCLEAN;
+            goto destroy;
+        }
+        dppd_runtime_set_ipv4_router(&runtime, router);
+    }
     rc = dppd_flow_management_init(flows, store);
     if (rc != 0)
         goto destroy;

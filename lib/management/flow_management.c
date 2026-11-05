@@ -110,6 +110,14 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
         return 0;
     }
     switch (request->operation) {
+    case DPPD_MANAGEMENT_ROUTING_GET:
+        response->payload.flow_routing.managed = true;
+        rc = dppd_flow_store_routing_get(flows->store, &response->payload.flow_routing.configuration,
+            &response->payload.flow_routing.revision, &response->payload.flow_routing.durable_revision);
+        break;
+    case DPPD_MANAGEMENT_ROUTING_STATUS:
+        rc = dppd_flow_store_routing_status(flows->store, &response->payload.routing_status);
+        break;
     case DPPD_MANAGEMENT_REQUEST_SUBMIT:
         rc = dppd_flow_store_request(flows->store, &request->payload.durable_request,
             dppd_monotonic_ms() * UINT64_C(1000000), &response->payload.durable_result);
@@ -154,6 +162,10 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
         break;
     case DPPD_MANAGEMENT_HEALTH_GET:
         health(runtime, &status, &response->payload.health);
+        rc = dppd_flow_store_routing_status(flows->store, &response->payload.health.routing);
+        if (response->payload.health.routing.dirty)
+            response->payload.health.blockers |= DPPD_HEALTH_ROUTING_DIRTY;
+        response->payload.health.ready = response->payload.health.blockers == 0;
         break;
     case DPPD_MANAGEMENT_FLOW_STATUS:
         response->payload.flow_status.session = flows->session;

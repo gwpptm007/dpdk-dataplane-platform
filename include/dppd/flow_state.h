@@ -2,6 +2,14 @@
 #define DPPD_FLOW_STATE_H
 
 #include "dppd/flow_service.h"
+#include "dppd/routing.h"
+
+/** 路由表和实际端口身份一起保存，重启时不能把同一编号误认成原来的设备 */
+struct dppd_flow_routing_state {
+    uint16_t binding_count;
+    struct dppd_routing_binding bindings[DPPD_MAX_PORTS];
+    struct dppd_ipv4_configuration configuration;
+};
 
 enum dppd_flow_state_mode { DPPD_FLOW_STATE_SOFTWARE = 1, DPPD_FLOW_STATE_NATIVE = 2 };
 
@@ -35,6 +43,8 @@ struct dppd_flow_state {
     struct dppd_flow_state_rule *rules;
     /** 请求历史与期望配置放在同一个原子文件，旧配置没有历史时保持空指针 */
     struct dppd_flow_request_ledger *requests;
+    /** 空指针保持原端口对模式，非空表示路由和规则使用同一文件与写锁 */
+    struct dppd_flow_routing_state *routing;
 };
 
 /** 独立版本的完整配置文件，规则使用既有 v5 编码，不保存任何实际句柄和运行时计数 */
@@ -64,6 +74,15 @@ struct dppd_flow_store_status {
 };
 
 struct dppd_flow_store;
+
+/** 启动时核对完整端口身份，首次启用建立空路由表并可靠保存，之后不允许换绑设备 */
+int dppd_flow_store_routing_bind(struct dppd_flow_store *store,
+    const struct dppd_routing_binding *bindings, uint16_t count);
+/** 返回本实例长期持有的路由器，使用者必须在关闭 store 前停止并注销全部读者 */
+struct dppd_ipv4_router *dppd_flow_store_router(struct dppd_flow_store *store);
+int dppd_flow_store_routing_get(struct dppd_flow_store *store, struct dppd_ipv4_configuration *configuration,
+    uint64_t *revision, uint64_t *durable_revision);
+int dppd_flow_store_routing_status(struct dppd_flow_store *store, struct dppd_routing_status *status);
 
 #define DPPD_FLOW_CONFIG_OPERATIONS 8U
 enum dppd_flow_config_operation {

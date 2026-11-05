@@ -143,7 +143,7 @@ static int neighbor6_entry(char **arguments, struct dppd_ipv6_neighbor *neighbor
 }
 
 /** 整表文件只接受有界普通文件，每行一条 route 或 neighbor，任何一行错误都不发请求 */
-static int read_configuration(const char *path, struct dppd_ipv4_configuration *configuration)
+int dppctl_routing_read(const char *path, struct dppd_ipv4_configuration *configuration)
 {
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
@@ -154,11 +154,13 @@ static int read_configuration(const char *path, struct dppd_ipv4_configuration *
         close(fd);
         return rc;
     }
-    if (!S_ISREG(info.st_mode) || info.st_size > 65536) {
+    /** 满容量双栈表可能超过 64 KiB，仍用固定上限限制文件和读取内存 */
+    const size_t maximum = 131072;
+    if (!S_ISREG(info.st_mode) || info.st_size > (off_t)maximum) {
         close(fd);
         return -EINVAL;
     }
-    char *text = malloc(65537);
+    char *text = malloc(maximum + 1U);
     if (text == NULL) {
         close(fd);
         return -ENOMEM;
@@ -166,7 +168,7 @@ static int read_configuration(const char *path, struct dppd_ipv4_configuration *
     size_t used = 0;
     int read_error = 0;
     for (;;) {
-        ssize_t size = read(fd, text + used, 65537 - used);
+        ssize_t size = read(fd, text + used, maximum + 1U - used);
         if (size < 0 && errno == EINTR)
             continue;
         if (size <= 0) {
@@ -174,7 +176,7 @@ static int read_configuration(const char *path, struct dppd_ipv4_configuration *
             break;
         }
         used += (size_t)size;
-        if (used > 65536) {
+        if (used > maximum) {
             read_error = -E2BIG;
             break;
         }
@@ -269,7 +271,7 @@ int dppctl_routing_build(int argc, char **argv, struct dppd_management_request *
         if (argc != 3)
             return -EINVAL;
         request->payload.routing_replace.expected_generation = generation;
-        return read_configuration(argv[1], &request->payload.routing_replace.configuration);
+        return dppctl_routing_read(argv[1], &request->payload.routing_replace.configuration);
     }
     if (operation == DPPD_MANAGEMENT_ROUTE6_SET || operation == DPPD_MANAGEMENT_ROUTE6_DELETE) {
         request->payload.route6.expected_generation = generation;
@@ -310,6 +312,9 @@ bool dppctl_routing_print(const struct dppd_management_response *response)
         return true;
     }
     const struct dppd_ipv4_configuration *configuration = &response->payload.routing;
+    if (response->payload.flow_routing.managed)
+        printf("managed revision=%" PRIu64 " durable-revision=%" PRIu64 "\n",
+            response->payload.flow_routing.revision, response->payload.flow_routing.durable_revision);
     printf("routing generation=%" PRIu64 " routes=%u neighbors=%u routes6=%u neighbors6=%u\n",
         configuration->generation, configuration->route_count, configuration->neighbor_count,
         configuration->route6_count, configuration->neighbor6_count);

@@ -92,7 +92,9 @@ struct dppd_config {
     char state_path[DPPD_STATE_PATH_CAPACITY];
     /** 受管理模式的完整配置文件路径，非空时进入 dppd_managed_run，与普通 state/routing/recovery 路径互斥 */
     char flow_state_path[DPPD_STATE_PATH_CAPACITY];
-    /** 双栈路由与静态邻居的配置文件路径，非空时启用三层路由；空字符串表示静态端口配对转发 */
+    /** 显式启用受管理双栈路由，路由与静态邻居保存到 flow_state_path，不另开路由文件 */
+    bool managed_routing;
+    /** 普通模式的双栈路由与静态邻居文件路径，非空时启用独立路由控制面 */
     char routing_path[DPPD_STATE_PATH_CAPACITY];
     /** 硬件安装恢复保护记录的文件路径，与 state_path 配合，防止异常退出后未经核对就重装；默认关闭 */
     char recovery_path[DPPD_STATE_PATH_CAPACITY];
@@ -114,6 +116,8 @@ enum dppd_config_result {
 };
 
 void dppd_config_defaults(struct dppd_config *cfg);
+/** 两种路由入口共用收发准备逻辑，判断时不把统一配置文件伪装成旧路由文件 */
+bool dppd_config_uses_routing(const struct dppd_config *cfg);
 /** 共用同一份 NAT 校验，直接构造配置和命令行启动都不能绕过冲突检查 */
 int dppd_nat_validate(const struct dppd_snat_config *snat, const struct dppd_dnat_rule *dnat, uint32_t count);
 int dppd_config_parse(int argc, char **argv, struct dppd_config *cfg);

@@ -26,6 +26,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 MAX_BODY = 65536
+MAX_ROUTING_BODY = 262144
 MAX_OUTPUT = 131072
 MAX_HEADER_BYTES = 16384
 U64 = (1 << 64) - 1
@@ -232,6 +233,73 @@ def configuration_lines(changes):
     return "\n".join(lines) + "\n"
 
 
+def routing_address(value, version):
+    """下一跳和邻居必须是无作用域后缀的同族单播地址，出口编号另外表示链路范围"""
+    if not isinstance(value, str) or len(value) > 45 or "%" in value:
+        raise Failure(400, "invalid_routing_address")
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError:
+        raise Failure(400, "invalid_routing_address") from None
+    if parsed.version != version:
+        raise Failure(400, "routing_address_family_mismatch")
+    if version == 4:
+        valid = parsed.packed[0] not in (0, 127) and parsed.packed[0] < 224
+    else:
+        valid = not (parsed.is_unspecified or parsed.is_loopback or parsed.is_multicast or parsed.ipv4_mapped)
+    if not valid:
+        raise Failure(400, "routing_unicast_required")
+    return str(parsed)
+
+
+def routing_lines(value):
+    """四张表一起替换，显式空数组才表示清空；先核验全部内容再生成受控临时文件"""
+    lines = []
+    for name, version, route in (("routes", 4, True), ("neighbors", 4, False),
+                                 ("routes6", 6, True), ("neighbors6", 6, False)):
+        entries = value[name]
+        if not isinstance(entries, list) or len(entries) > 256:
+            raise Failure(400, "invalid_routing_table")
+        keys, table = set(), []
+        for entry in entries:
+            fields(entry, ("prefix", "port", "next_hop") if route else ("address", "port", "mac"))
+            port = integer(entry["port"], 0, 65534)
+            if route:
+                prefix = entry["prefix"]
+                if not isinstance(prefix, str) or len(prefix) > 49 or "%" in prefix or "/" not in prefix:
+                    raise Failure(400, "invalid_routing_prefix")
+                try:
+                    network = ipaddress.ip_network(prefix, strict=True)
+                except ValueError:
+                    raise Failure(400, "invalid_routing_prefix") from None
+                if network.version != version:
+                    raise Failure(400, "routing_address_family_mismatch")
+                next_hop = entry["next_hop"]
+                if next_hop != "direct":
+                    next_hop = routing_address(next_hop, version)
+                key = (int(network.network_address), network.prefixlen)
+                command = "route" if version == 4 else "route6"
+                line = f"{command} {network} {port} {next_hop}"
+            else:
+                address = routing_address(entry["address"], version)
+                mac = entry["mac"]
+                if not isinstance(mac, str) or re.fullmatch(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}", mac) is None:
+                    raise Failure(400, "invalid_routing_mac")
+                octets = bytes.fromhex(mac.replace(":", ""))
+                if octets[0] & 1 or not any(octets):
+                    raise Failure(400, "routing_unicast_mac_required")
+                key = (int(port), int(ipaddress.ip_address(address)))
+                command = "neighbor" if version == 4 else "neighbor6"
+                line = f"{command} {port} {address} {mac.lower()}"
+            if key in keys:
+                raise Failure(400, "duplicate_routing_entry")
+            keys.add(key)
+            table.append((key, line))
+        # 相同集合使用相同顺序，JSON 排列变化不会制造另一份持久请求内容
+        lines.extend(line for _, line in sorted(table))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 class Backend:
     def __init__(self, program, control_socket, timeout=10.0):
         self.program, self.control_socket, self.timeout = str(program), str(control_socket), timeout
@@ -315,12 +383,13 @@ class Application:
             raise Failure(400, "duplicate_query")
         query = {key: value[0] for key, value in query.items()}
         path = url.path
-        arguments, content = None, None
+        arguments, content, routing_revision = None, None, None
         if method == "GET":
             if body:
                 raise Failure(400, "unexpected_body")
             simple = {"/v1/health": "health", "/v1/ready": "health", "/v1/status": "flow-status",
-                      "/v1/persistence": "persistence-status"}
+                      "/v1/persistence": "persistence-status", "/v1/routing": "routing-show",
+                      "/v1/routing/status": "routing-status"}
             if path in simple:
                 fields(query)
                 arguments = [simple[path]]
@@ -368,6 +437,13 @@ class Application:
                 content = configuration_lines(value["changes"])
                 arguments = ["request-submit", principal.client, integer(value["sequence"], 1), "flow-config-apply",
                              integer(value["revision"])]
+            elif path == "/v1/requests":
+                require(principal, "admin")
+                fields(value, ("operation", "sequence", "revision", "routes", "neighbors", "routes6", "neighbors6"))
+                choice(value["operation"], ("routing_replace",))
+                routing_revision = integer(value["revision"], 0, U64 - 2)
+                content = routing_lines(value)
+                arguments = ["request-submit", principal.client, integer(value["sequence"], 1), "routing-replace"]
             elif path in ("/v1/rules/create", "/v1/rules/update"):
                 require(principal, "operator")
                 fields(value, ("sequence", "table", "queue", "rule"), ("generation",))
@@ -395,7 +471,9 @@ class Application:
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
                     stream.write(content)
-                result = self.backend.execute([*arguments, name])
+                # 路由命令沿用 FILE VERSION 顺序，模板配置命令沿用 VERSION FILE 顺序
+                suffix = [name, routing_revision] if routing_revision is not None else [name]
+                result = self.backend.execute([*arguments, *suffix])
             finally:
                 os.unlink(name)
         else:
@@ -571,7 +649,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.headers.get("Transfer-Encoding") is not None or self.headers.get("Expect") is not None:
                 raise Failure(400, "unsupported_framing")
             principal = self.server.credentials.authenticate(self.headers.get("Authorization"))
-            length = int(integer(self.headers.get("Content-Length", "0"), 0, MAX_BODY))
+            # 只有完整双栈替换入口需要更大的有界请求体，其他接口仍保留原有容量门槛
+            maximum = MAX_ROUTING_BODY if self.command == "POST" and self.path == "/v1/requests" else MAX_BODY
+            length = int(integer(self.headers.get("Content-Length", "0"), 0, maximum))
             if self.command == "POST" and self.headers.get("Content-Type", "").lower() != "application/json":
                 raise Failure(415, "json_required")
             body = self.rfile.read(length)

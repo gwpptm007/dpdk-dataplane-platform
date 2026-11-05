@@ -4,6 +4,10 @@
 `dppctl --json` 访问正式 `dppd --flow-state` 实例。网关不直接打开状态文件，也不创建第二个
 classifier 写入者。本机 C ABI 只存在于配套 CLI 与 daemon 之间，外部客户使用明确版本的 JSON。
 
+新增路由接口见 [统一管理的双栈路由](managed_routing.md#http-管理)：reader 可读 `GET /v1/routing` 和
+`GET /v1/routing/status`，admin 通过 `POST /v1/requests` 的 `routing_replace` 提交完整静态双栈表
+该入口使用统一配置修订号及既有持久请求键，最大请求体为 256 KiB；其他入口保留原有界限
+
 ## 启动与部署
 
 默认部署采用独立 Unix socket，文件权限为 `0600`，服务端不会删除已有 socket。与 daemon

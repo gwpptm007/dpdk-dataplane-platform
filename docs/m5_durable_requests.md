@@ -1,5 +1,8 @@
 # M5 持久请求与幂等重试
 
+后续 v31 增加 [managed 双栈路由整表替换](managed_routing.md)，同样使用本页的持久请求机制
+含路由的完整配置使用 v3，无路由配置继续保持 v1/v2；下面保留最初 v30 交付记录
+
 管理协议 v30 增加 `request-submit` 和 `request-get`，用于受管理软件模式的规则增删改及在线定义事务
 旧 `flow-create/update/remove` 的进程内 token 接口保留原语义，新入口使用客户端长期保存的 `(client, sequence)`
 

@@ -33,6 +33,8 @@ class FakeBackend:
         self.calls.append(arguments)
         if "flow-config-apply" in arguments:
             self.configuration = Path(arguments[-1]).read_text(encoding="utf-8")
+        elif "routing-replace" in arguments:
+            self.configuration = Path(arguments[-2]).read_text(encoding="utf-8")
         return {"api_version": "v1", "status": 0, "data": {"ready": True}}
 
 
@@ -85,6 +87,96 @@ class NorthboundTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/v1/recovery/flush", {"command": "bad"}, role="admin")[0], 400)
         self.assertEqual(self.request("DELETE")[0], 405)
         self.assertEqual(self.backend.calls, [])
+
+    @staticmethod
+    def routing_request():
+        """同一请求包含两种地址族，避免测试只验证一张表而遗漏另一张表被清空"""
+        return {"operation": "routing_replace", "sequence": "9007199254740993", "revision": "0",
+                "routes": [{"prefix": "192.0.2.0/24", "port": 1, "next_hop": "192.0.2.1"}],
+                "neighbors": [{"address": "192.0.2.1", "port": 1, "mac": "02:11:22:33:44:55"}],
+                "routes6": [{"prefix": "2001:db8::/64", "port": 1, "next_hop": "fe80::1"}],
+                "neighbors6": [{"address": "FE80::1", "port": 1, "mac": "02:AA:BB:CC:DD:EE"}]}
+
+    def test_managed_routing_permissions_and_complete_file(self):
+        self.assertEqual(self.request(path="/v1/routing")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["routing-show"])
+        self.assertEqual(self.request(path="/v1/routing/status")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["routing-status"])
+        self.backend.calls.clear()
+        body = self.routing_request()
+        for role in ("reader", "operator"):
+            self.assertEqual(self.request("POST", "/v1/requests", body, role=role)[0], 403)
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        self.assertEqual(self.backend.calls[-1][:-2], ["request-submit", "3", "9007199254740993", "routing-replace"])
+        self.assertEqual(self.backend.calls[-1][-1], "0")
+        self.assertFalse(Path(self.backend.calls[-1][-2]).exists())
+        self.assertEqual(self.backend.configuration, "route 192.0.2.0/24 1 192.0.2.1\n"
+                         "neighbor 1 192.0.2.1 02:11:22:33:44:55\n"
+                         "route6 2001:db8::/64 1 fe80::1\nneighbor6 1 fe80::1 02:aa:bb:cc:dd:ee\n")
+
+    def test_managed_routing_rejects_invalid_content_before_dispatch(self):
+        changes = [
+            ("routes", "prefix", "192.0.2.1/24"), ("routes", "prefix", "2001:db8::/64"),
+            ("routes", "next_hop", "fe80::1"), ("routes", "next_hop", "224.0.0.1"),
+            ("routes", "port", True), ("routes6", "next_hop", "fe80::1%eth0"),
+            ("neighbors", "mac", "01:11:22:33:44:55"), ("neighbors", "mac", "00:00:00:00:00:00"),
+            ("neighbors", "address", "192.0.2.1\nroute 0.0.0.0/0 1 direct"),
+            ("neighbors6", "address", "::ffff:192.0.2.1")]
+        for table, field, value in changes:
+            body = self.routing_request()
+            body[table][0][field] = value
+            with self.subTest(table=table, field=field, value=value):
+                self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for field, value in (("client", "7"), ("revision", str(api.U64 - 1)), ("routes", {}),
+                             ("operation", "arbitrary_command")):
+            body = self.routing_request()
+            body[field] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for name in ("routes", "neighbors", "routes6", "neighbors6"):
+            body = self.routing_request()
+            body[name] *= 2
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+            body[name] *= 129
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+            body.pop(name)
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        self.assertEqual(self.backend.calls, [])
+
+    def test_managed_routing_order_and_explicit_clear(self):
+        body = self.routing_request()
+        body["routes"].append({"prefix": "198.51.100.0/24", "port": 0, "next_hop": "direct"})
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        expected = self.backend.configuration
+        body["routes"].reverse()
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        self.assertEqual(self.backend.configuration, expected)
+        for name in ("routes", "neighbors", "routes6", "neighbors6"):
+            body[name] = []
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        self.assertEqual(self.backend.configuration, "")
+
+    def test_managed_routing_maximum_tables_have_bounded_http_space(self):
+        """满容量双栈 JSON 可以超过旧上限，只有新入口允许更大但仍有限的正文"""
+        body = self.routing_request()
+        body["routes"] = [{"prefix": f"192.0.{index}.0/24", "port": 1, "next_hop": "192.0.2.1"}
+                          for index in range(256)]
+        body["neighbors"] = [{"address": f"192.0.2.{index}", "port": 1, "mac": "02:11:22:33:44:55"}
+                             for index in range(256)]
+        body["routes6"] = [{"prefix": f"2001:db8:{index:x}::/64", "port": 1, "next_hop": "fe80::1"}
+                           for index in range(256)]
+        body["neighbors6"] = [{"address": f"2001:db8::{index:x}", "port": 1, "mac": "02:11:22:33:44:55"}
+                              for index in range(256)]
+        self.assertGreater(len(json.dumps(body)), api.MAX_BODY)
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        self.assertEqual(len(self.backend.configuration.splitlines()), 1024)
+        self.assertLess(len(self.backend.configuration), 131072)
+        with socket.create_connection(self.server.server_address, timeout=2) as connection:
+            request = ("POST /v1/requests HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+                       + self.tokens["admin"] + "\r\nContent-Type: application/json\r\nContent-Length: "
+                       + str(api.MAX_ROUTING_BODY + 1) + "\r\n\r\n")
+            connection.sendall(request.encode())
+            self.assertTrue(connection.recv(2048).startswith(b"HTTP/1.1 400"))
 
     def test_request_identity_is_bound_to_credential(self):
         self.assertEqual(self.request(path="/v1/requests/9007199254740993", role="operator")[0], 200)

@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 
 static const char *boolean(bool value)
 {
@@ -110,6 +111,52 @@ static void shared(const struct dppd_shared_count_spec *spec)
         spec->generation, spec->install_port_id, (unsigned int)spec->domain);
 }
 
+/** 路由查询完整输出四张表，版本单独标明，调用方不能把缺少的另一地址族当作空表 */
+static void routing(const struct dppd_ipv4_configuration *value)
+{
+    char prefix[INET6_ADDRSTRLEN];
+    const uint8_t zero[16] = {0};
+    printf("\"generation\":\"%" PRIu64 "\",\"routes\":[", value->generation);
+    for (uint32_t i = 0; i < value->route_count; ++i) {
+        const struct dppd_ipv4_route *entry = &value->routes[i];
+        (void)inet_ntop(AF_INET, &entry->prefix_be, prefix, sizeof(prefix));
+        printf("%s{\"prefix\":\"%s/%u\",\"port\":%u", i == 0 ? "" : ",", prefix, entry->depth, entry->port_id);
+        if (entry->gateway_be == 0)
+            printf(",\"next_hop\":\"direct\"");
+        else
+            address("next_hop", AF_INET, &entry->gateway_be);
+        putchar('}');
+    }
+    printf("],\"neighbors\":[");
+    for (uint32_t i = 0; i < value->neighbor_count; ++i) {
+        const struct dppd_ipv4_neighbor *entry = &value->neighbors[i];
+        printf("%s{\"port\":%u", i == 0 ? "" : ",", entry->port_id);
+        address("address", AF_INET, &entry->address_be);
+        printf(",\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\"}", entry->mac[0], entry->mac[1], entry->mac[2],
+            entry->mac[3], entry->mac[4], entry->mac[5]);
+    }
+    printf("],\"routes6\":[");
+    for (uint32_t i = 0; i < value->route6_count; ++i) {
+        const struct dppd_ipv6_route *entry = &value->routes6[i];
+        (void)inet_ntop(AF_INET6, entry->prefix, prefix, sizeof(prefix));
+        printf("%s{\"prefix\":\"%s/%u\",\"port\":%u", i == 0 ? "" : ",", prefix, entry->depth, entry->port_id);
+        if (memcmp(entry->gateway, zero, sizeof(zero)) == 0)
+            printf(",\"next_hop\":\"direct\"");
+        else
+            address("next_hop", AF_INET6, entry->gateway);
+        putchar('}');
+    }
+    printf("],\"neighbors6\":[");
+    for (uint32_t i = 0; i < value->neighbor6_count; ++i) {
+        const struct dppd_ipv6_neighbor *entry = &value->neighbors6[i];
+        printf("%s{\"port\":%u", i == 0 ? "" : ",", entry->port_id);
+        address("address", AF_INET6, entry->address);
+        printf(",\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\"}", entry->mac[0], entry->mac[1], entry->mac[2],
+            entry->mac[3], entry->mac[4], entry->mac[5]);
+    }
+    putchar(']');
+}
+
 bool dppctl_json_supported(enum dppd_management_operation operation)
 {
     switch (operation) {
@@ -129,6 +176,8 @@ bool dppctl_json_supported(enum dppd_management_operation operation)
     case DPPD_MANAGEMENT_SHARED_COUNT_QUERY:
     case DPPD_MANAGEMENT_FLOW_CONFIG_GET:
     case DPPD_MANAGEMENT_FLOW_CONFIG_APPLY:
+    case DPPD_MANAGEMENT_ROUTING_GET:
+    case DPPD_MANAGEMENT_ROUTING_STATUS:
         return true;
     default:
         return false;
@@ -143,8 +192,17 @@ static bool rule_bounds(const struct dppd_rule *value)
 /** 长度错误必须整体拒绝，不能把截断后的列表当作完整的成功响应 */
 static bool response_bounds(const struct dppd_management_response *value)
 {
-    if (value->operation == DPPD_MANAGEMENT_REQUEST_SUBMIT || value->operation == DPPD_MANAGEMENT_REQUEST_GET)
-        return value->payload.durable_result.count <= 8;
+    if (value->operation == DPPD_MANAGEMENT_REQUEST_SUBMIT || value->operation == DPPD_MANAGEMENT_REQUEST_GET) {
+        const struct dppd_flow_request_result *result = &value->payload.durable_result;
+        return result->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE ? result->count == 1 : result->count <= 8;
+    }
+    if (value->operation == DPPD_MANAGEMENT_ROUTING_GET) {
+        const struct dppd_ipv4_configuration *configuration = &value->payload.flow_routing.configuration;
+        return configuration->route_count <= DPPD_IPV4_ROUTE_LIMIT &&
+            configuration->route6_count <= DPPD_IPV4_ROUTE_LIMIT &&
+            configuration->neighbor_count <= DPPD_IPV4_NEIGHBOR_LIMIT &&
+            configuration->neighbor6_count <= DPPD_IPV4_NEIGHBOR_LIMIT;
+    }
     if (value->operation == DPPD_MANAGEMENT_RULE_GET)
         return rule_bounds(&value->payload.rule);
     if (value->operation == DPPD_MANAGEMENT_RULE_LIST)
@@ -177,18 +235,34 @@ int dppctl_json_response(const struct dppd_management_request *request, const st
     case DPPD_MANAGEMENT_REQUEST_SUBMIT:
     case DPPD_MANAGEMENT_REQUEST_GET: {
         const struct dppd_flow_request_result *value = &response->payload.durable_result;
-        static const char *operations[] = {"unknown", "create", "update", "remove", "configure"};
+        static const char *operations[] = {"unknown", "create", "update", "remove", "configure", "routing_replace"};
         printf("\"client\":\"%" PRIu64 "\",\"sequence\":\"%" PRIu64
                "\",\"operation\":\"%s\",\"state\":\"%s\",\"status\":%d,\"applied\":%s,\"durable\":%s,"
                "\"blocked\":%s,\"revision\":\"%" PRIu64 "\",\"rules\":[",
             value->key.client, value->key.sequence,
-            (unsigned int)value->operation <= 4 ? operations[value->operation] : "unknown",
+            (unsigned int)value->operation <= 5 ? operations[value->operation] : "unknown",
             value->phase == DPPD_FLOW_REQUEST_DONE ? "complete" : "pending", value->status, boolean(value->applied),
             boolean(value->durable), boolean(response->status == -EUCLEAN), value->revision);
-        for (uint32_t i = 0; i < value->count && i < 8; ++i)
+        for (uint32_t i = 0; value->operation != DPPD_FLOW_REQUEST_ROUTING_REPLACE && i < value->count && i < 8; ++i)
             printf("%s{\"id\":\"%" PRIu64 "\",\"generation\":\"%" PRIu64 "\"}", i == 0 ? "" : ",", value->ids[i],
                 value->generations[i]);
         putchar(']');
+        if (value->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE)
+            printf(",\"routing_generation\":\"%" PRIu64 "\"", value->generations[0]);
+        break;
+    }
+    case DPPD_MANAGEMENT_ROUTING_GET:
+        routing(&response->payload.flow_routing.configuration);
+        printf(",\"managed\":%s,\"revision\":\"%" PRIu64 "\",\"durable_revision\":\"%" PRIu64 "\"",
+            boolean(response->payload.flow_routing.managed), response->payload.flow_routing.revision,
+            response->payload.flow_routing.durable_revision);
+        break;
+    case DPPD_MANAGEMENT_ROUTING_STATUS: {
+        const struct dppd_routing_status *value = &response->payload.routing_status;
+        printf("\"enabled\":%s,\"dirty\":%s,\"generation\":\"%" PRIu64 "\",\"persisted_generation\":\"%" PRIu64
+               "\",\"routes\":%u,\"neighbors\":%u,\"routes6\":%u,\"neighbors6\":%u,\"last_error\":%d",
+            boolean(value->enabled), boolean(value->dirty), value->generation, value->persisted_generation,
+            value->route_count, value->neighbor_count, value->route6_count, value->neighbor6_count, value->last_error);
         break;
     }
     case DPPD_MANAGEMENT_PING:
@@ -200,11 +274,13 @@ int dppctl_json_response(const struct dppd_management_request *request, const st
         printf("\"live\":true,\"ready\":%s,\"blockers\":%u,\"workers_running\":%u,\"workers_expected\":%u,"
                "\"workers_failed\":%u,\"ports_started\":%u,\"ports_expected\":%u,\"links_up\":%u,\"links_down\":%u,"
                "\"links_unknown\":%u,\"links_unsupported\":%u,\"dirty\":%s,\"revision\":\"%" PRIu64
-               "\",\"durable_revision\":\"%" PRIu64 "\",\"rules\":%u",
+               "\",\"durable_revision\":\"%" PRIu64 "\",\"rules\":%u,\"routing_enabled\":%s,"
+               "\"routing_generation\":\"%" PRIu64 "\"",
             boolean(value->ready), value->blockers, value->workers_running, value->workers_expected,
             value->workers_failed, value->ports_started, value->ports_expected, value->links_up, value->links_down,
             value->links_unknown, value->links_unsupported, boolean(value->persistence_dirty),
-            value->repository_generation, value->persisted_generation, value->rule_count);
+            value->repository_generation, value->persisted_generation, value->rule_count,
+            boolean(value->routing.enabled), value->routing.generation);
         break;
     }
     case DPPD_MANAGEMENT_STATS_QUERY: {

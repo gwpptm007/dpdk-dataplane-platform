@@ -86,7 +86,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     }
     runtime->nb_workers = cfg->nb_queues;
 
-    rc = cfg->routing_path[0] == '\0' ? dppd_snapshot_build_port_pairs(cfg, &runtime->snapshot) : 0;
+    rc = dppd_config_uses_routing(cfg) ? 0 : dppd_snapshot_build_port_pairs(cfg, &runtime->snapshot);
     if (rc != 0)
         return rc;
     rc = dppd_devices_init(&runtime->devices, cfg);

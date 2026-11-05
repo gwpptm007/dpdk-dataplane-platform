@@ -30,7 +30,8 @@
 /** v28 增加独占 M4 配置模式，受理凭据与持久完成回执分开查询 */
 /** v29 增加在线模板与共享定义的整批配置事务和精确修订号分页 */
 /** v30 增加持久客户端请求键，回执与策略一起原子保存，重启后仍可查询 */
-#define DPPD_MANAGEMENT_VERSION 30U
+/** v31 将双栈路由整表纳入持久请求，查询同时返回路由代次和统一配置修订号 */
+#define DPPD_MANAGEMENT_VERSION 31U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -449,6 +450,12 @@ struct dppd_management_response {
         struct dppd_dnat_page dnat;
         struct dppd_routing_status routing_status;
         struct dppd_ipv4_configuration routing;
+        /** 首成员保持旧路由查询布局，后两项只表示 managed 配置的统一版本 */
+        struct {
+            struct dppd_ipv4_configuration configuration;
+            uint64_t revision, durable_revision;
+            bool managed;
+        } flow_routing;
         struct {
             /* repository 的全局单调 generation，可用于快速判断 desired state 是否变化 */
             uint64_t repository_generation;
