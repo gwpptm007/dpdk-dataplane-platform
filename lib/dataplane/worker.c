@@ -171,15 +171,16 @@ static enum dppd_drop_reason stateful_error(int error)
 /**
  * 为启用连接跟踪的报文生成处理决定，按会话状态匹配策略，并完成必要的报文改写
  *
- * 校验报文 → conntrack_begin：查已有会话或准备新候选，取得连接状态
+ * conntrack_begin：确认是否启用、查会话或准备候选 → 校验报文
  *   → policy：把连接状态和逻辑地址交给 routed_decide 匹配规则、选择出口
  *   → 放行且出口可用：改写报文 → conntrack_finish 提交会话
  *   → 拒绝或中途失败：取消候选，不刷新已有会话的超时
  *
  * packet 保留原包解析结果，policy 是策略匹配使用的副本，decision 输出动作和出口
  * 本函数更新会话后才交回 process_batch 发送，提交会话不代表驱动已接收或对端已收到
+ * 返回 false 表示跟踪已关闭，调用方继续普通决策和改写，返回 true 表示本函数已完成决策
  */
-static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **mbuf,
+static bool stateful_decide(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **mbuf,
     int parsed, const struct dppd_packet *packet, struct dppd_pipeline_decision *decision,
     struct dppd_software_count_batch *counts)
 {
@@ -187,13 +188,14 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
     struct dppd_connection_attempt attempt = {0};
     struct dppd_packet policy = *packet;
     int rc = 0;
-    /** 先校验 TCP/UDP 报文，再准备候选会话，并将连接状态交给后面的策略匹配 */
+    /** 表锁内决定此包是否跟踪，关闭时直接旁路，不能因为保留了容器就额外校验普通转发报文 */
     if (parsed != DPPD_PARSE_MALFORMED) {
-        if (packet->l4_type == DPPD_L4_TCP || packet->l4_type == DPPD_L4_UDP)
+        rc = dppd_conntrack_begin(runtime->conntrack, ingress->port_id, packet, dppd_monotonic_ms(), &attempt);
+        if (rc == 0 && !attempt.tracking)
+            return false;
+        if (rc == 0 && (packet->l4_type == DPPD_L4_TCP || packet->l4_type == DPPD_L4_UDP))
             rc = packet->l3_type == DPPD_L3_IPV6 ? dppd_ipv6_transport_validate(*mbuf, packet)
                                                  : dppd_ipv4_transport_validate(*mbuf, packet);
-        if (rc == 0)
-            rc = dppd_conntrack_begin(runtime->conntrack, ingress->port_id, packet, dppd_monotonic_ms(), &attempt);
         policy.connection_state = rc == 0 ? attempt.state : DPPD_CT_INVALID;
         if (rc == 0) {
             memcpy(policy.ipv6_src, attempt.policy.source6, 16);
@@ -212,13 +214,13 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
         memset(decision, 0, sizeof(*decision));
         decision->drop_reason = policy_result.drop ? DPPD_DROP_POLICY : stateful_error(rc);
         dppd_conntrack_finish(&attempt, 0, false);
-        return;
+        return true;
     }
     /** 用带连接状态和逻辑地址的 policy，复用通用软件规则与出口选择 */
     routed_decide(runtime, ingress->port_id, parsed, &policy, decision, counts);
     if (decision->action != DPPD_PACKET_FORWARD) {
         dppd_conntrack_finish(&attempt, 0, false);
-        return;
+        return true;
     }
     if (rc == 0) {
         const struct dppd_port *egress = dppd_devices_find(&runtime->devices, decision->egress_port);
@@ -226,7 +228,7 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
             decision->action = DPPD_PACKET_DROP;
             decision->drop_reason = DPPD_DROP_EGRESS;
             dppd_conntrack_finish(&attempt, 0, false);
-            return;
+            return true;
         }
         /** 出口可用后改写实际报文，调整 MAC、TTL/HopLimit，并按需应用 NAT 和更新校验和 */
         rc = packet->l3_type == DPPD_L3_IPV6 ? dppd_ipv6_rewrite_flow(mbuf, packet, &decision->ipv4,
@@ -242,6 +244,7 @@ static void stateful_decide(struct dppd_worker *worker, const struct dppd_port *
         decision->action = DPPD_PACKET_DROP;
         decision->drop_reason = stateful_error(rc);
     }
+    return true;
 }
 
 /**
@@ -329,14 +332,14 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
          *
          * 启用连接跟踪
          *   → stateful_decide
-         *       校验、准备候选会话
+         *       确认启用、准备候选并校验报文
          *         → routed_decide
          *         → 检查出口、改写实际报文
          *         → 成功提交会话，失败取消候选
          */
-        if (runtime->conntrack != NULL)
+        bool tracked = runtime->conntrack != NULL &&
             stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);
-        else
+        if (!tracked)
             routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);
 
         /**
@@ -425,7 +428,7 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
          * &packet 提供已解析的头部信息，decision.ipv4 是 IPv4/IPv6 共用的转发结果
          * 改写失败则释放当前包；成功后继续加入出口发送批次，此处尚未交给网卡
          */
-        if (decision.routed && runtime->conntrack == NULL) {
+        if (decision.routed && !tracked) {
             bool ipv6 = packet.l3_type == DPPD_L3_IPV6;
             int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)
                           : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);

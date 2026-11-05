@@ -87,6 +87,70 @@ static void test_managed_routing(struct dppd_flow_management *flows)
     assert(response.payload.routing_status.persisted_generation == generation + 1);
 }
 
+/** 策略修改留下持久回执，会话清空仍是运行态操作，两类版本必须分别核对 */
+static void test_managed_conntrack(struct dppd_flow_management *flows)
+{
+    struct dppd_management_request query = {.version = DPPD_MANAGEMENT_VERSION,
+        .size = sizeof(query), .operation = DPPD_MANAGEMENT_CONNTRACK_POLICY_GET, .request_id = 103};
+    struct dppd_management_response before = exchange(flows, &query);
+    assert(before.status == 0 && before.payload.conntrack_policy.policy.capacity == 0);
+    const struct dppd_flow_conntrack_view initial = before.payload.conntrack_policy;
+    assert(initial.session_epoch != 0 && initial.session_revision != 0);
+    struct dppd_management_request request = {.version = DPPD_MANAGEMENT_VERSION,
+        .size = sizeof(request), .operation = DPPD_MANAGEMENT_REQUEST_SUBMIT, .request_id = 104};
+    struct dppd_flow_request *replacement = &request.payload.durable_request;
+    *replacement = (struct dppd_flow_request){.key = {83, 1}, .operation = DPPD_FLOW_REQUEST_CONNTRACK_REPLACE,
+        .count = 1, .expected_revision = initial.revision};
+    replacement->payload.conntrack.expected_session_epoch = initial.session_epoch;
+    replacement->payload.conntrack.expected_session_revision = initial.session_revision;
+    replacement->payload.conntrack.policy = (struct dppd_conntrack_policy){.capacity = 8, .timeout_s = 60};
+    struct dppd_management_response response = exchange(flows, &request);
+    assert(response.status == 0 && response.payload.durable_result.status == 0);
+    assert(response.payload.durable_result.applied && response.payload.durable_result.durable);
+    assert(response.payload.durable_result.generations[0] == initial.generation + 1);
+    assert(response.payload.durable_result.revision == initial.revision + 1);
+    assert(exchange(flows, &request).payload.durable_result.revision == initial.revision + 1);
+    replacement->payload.conntrack.policy.capacity = 9;
+    assert(exchange(flows, &request).status == -EEXIST);
+    response = exchange(flows, &query);
+    assert(response.status == 0 && response.payload.conntrack_policy.policy.capacity == 8);
+    assert(response.payload.conntrack_policy.session_epoch == initial.session_epoch);
+    assert(response.payload.conntrack_policy.revision == initial.revision + 1);
+    query.operation = DPPD_MANAGEMENT_NAT_STATUS;
+    response = exchange(flows, &query);
+    assert(response.status == 0 && response.payload.conntrack.enabled && response.payload.conntrack.active == 0);
+
+    struct dppd_packet packet = {.l3_type = DPPD_L3_IPV4, .l4_type = DPPD_L4_UDP, .ip_protocol = 17,
+        .ipv4_src_be = htonl(0x0a000001), .ipv4_dst_be = htonl(0xc6336401),
+        .l4_src_port_be = htons(1234), .l4_dst_port_be = htons(443), .packet_len = 64};
+    struct dppd_connection_attempt attempt;
+    assert(dppd_conntrack_begin(dppd_flow_store_conntrack(flows->store), 7, &packet, dppd_monotonic_ms(), &attempt) == 0);
+    assert(dppd_conntrack_finish(&attempt, 7, true) == 0);
+    query.operation = DPPD_MANAGEMENT_CONNTRACK_LIST;
+    response = exchange(flows, &query);
+    assert(response.status == 0 && response.payload.connections.count == 1);
+    uint64_t epoch = response.payload.connections.epoch, revision = response.payload.connections.revision;
+    query.payload.conntrack.expected_revision = revision;
+    assert(exchange(flows, &query).status == -EINVAL);
+    query.payload.conntrack.expected_epoch = epoch == 1 ? 2 : 1;
+    assert(exchange(flows, &query).status == -ESTALE);
+    query.payload.conntrack.expected_epoch = epoch;
+    assert(exchange(flows, &query).status == 0);
+    query.operation = DPPD_MANAGEMENT_CONNTRACK_FLUSH;
+    query.payload.conntrack.expected_epoch = 0;
+    assert(exchange(flows, &query).status == -EINVAL);
+    query.payload.conntrack.expected_epoch = epoch == 1 ? 2 : 1;
+    assert(exchange(flows, &query).status == -ESTALE);
+    query.payload.conntrack.expected_epoch = epoch;
+    response = exchange(flows, &query);
+    assert(response.status == 0 && response.payload.conntrack.active == 0 && response.payload.conntrack.flushed == 1);
+    assert(exchange(flows, &query).status == -ESTALE);
+    query.operation = DPPD_MANAGEMENT_CONNTRACK_POLICY_GET;
+    response = exchange(flows, &query);
+    assert(response.status == 0 && response.payload.conntrack_policy.revision == initial.revision + 1);
+    assert(response.payload.conntrack_policy.generation == initial.generation + 1);
+}
+
 int main(void)
 {
     char directory[] = "/tmp/dppd-flow-management-XXXXXX", path[128], lock[140];
@@ -230,6 +294,7 @@ int main(void)
     assert(response.payload.durable_result.status == -ECANCELED && response.payload.durable_result.durable);
     assert(exchange(flows, &request).status == 0);
     test_managed_routing(flows);
+    test_managed_conntrack(flows);
     assert(dppd_flow_store_close(&store) == 0);
     free(flows);
     dppd_flow_state_free(&state);

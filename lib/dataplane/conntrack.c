@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <time.h>
 
 struct connection {
@@ -149,11 +150,67 @@ static void collect(struct dppd_conntrack *table, uint64_t now, uint32_t budget)
         table->clock_ms = now;
     if (budget > table->status.capacity)
         budget = table->status.capacity;
-    for (uint32_t i = 0; i < budget; ++i) {
+    /** 修订号用尽后保留现场，不能回绕成旧值让过期清空请求重新匹配 */
+    for (uint32_t i = 0; i < budget && table->status.revision != UINT64_MAX; ++i) {
         uint32_t slot = table->cursor++ % table->status.capacity;
         if (table->entries[slot].view.id != 0 && table->entries[slot].view.expires_ms <= table->clock_ms)
             remove_connection(table, slot, true);
     }
+}
+
+static bool empty_snat(const struct dppd_snat_config *nat)
+{
+    const uint8_t zero[16] = {0};
+    return !nat->enabled && !nat->ipv6 && nat->inside_port == 0 && nat->outside_port == 0 && nat->first_port == 0 &&
+        nat->last_port == 0 && nat->address_be == 0 && memcmp(nat->address6, zero, sizeof(zero)) == 0;
+}
+
+int dppd_conntrack_policy_validate(const struct dppd_conntrack_policy *policy)
+{
+    if (policy == NULL || policy->capacity > 65536 || policy->dnat_count > DPPD_MAX_DNAT_RULES)
+        return -EINVAL;
+    if (policy->capacity == 0) {
+        if (policy->timeout_s != 0 || policy->dnat_count != 0 || !empty_snat(&policy->snat) ||
+            !empty_snat(&policy->snat6))
+            return -EINVAL;
+        const uint8_t zero[16] = {0};
+        /** 逐字段检查而不比较整个结构体，C 编译器的填充字节不属于用户配置 */
+        for (uint32_t i = 0; i < DPPD_MAX_DNAT_RULES; ++i) {
+            const struct dppd_dnat_rule *rule = &policy->dnat[i];
+            if (rule->public_address_be != 0 || rule->private_address_be != 0 || rule->outside_port != 0 ||
+                rule->inside_port != 0 || rule->public_first != 0 || rule->public_last != 0 ||
+                rule->private_first != 0 || rule->protocol != 0 || rule->ipv6 ||
+                memcmp(rule->public_address6, zero, sizeof(zero)) != 0 ||
+                memcmp(rule->private_address6, zero, sizeof(zero)) != 0)
+                return -EINVAL;
+        }
+        return 0;
+    }
+    if (policy->timeout_s == 0 || policy->timeout_s > 86400 || (policy->snat.enabled && policy->snat.ipv6) ||
+        (policy->snat6.enabled && !policy->snat6.ipv6))
+        return -EINVAL;
+    int rc = dppd_nat_validate(&policy->snat, policy->dnat, policy->dnat_count);
+    return rc == 0 ? dppd_nat_validate(&policy->snat6, policy->dnat, policy->dnat_count) : rc;
+}
+
+/** 随机身份只在创建容器时生成，不能用重启后会从头计数的 revision 代替 */
+static int create_epoch(uint64_t *epoch)
+{
+    do {
+        size_t received = 0;
+        while (received < sizeof(*epoch)) {
+            ssize_t count = getrandom((uint8_t *)epoch + received, sizeof(*epoch) - received, 0);
+            if (count < 0) {
+                if (errno == EINTR)
+                    continue;
+                return -errno;
+            }
+            if (count == 0)
+                return -EIO;
+            received += (size_t)count;
+        }
+    } while (*epoch == 0);
+    return 0;
 }
 
 /**
@@ -166,39 +223,39 @@ static void collect(struct dppd_conntrack *table, uint64_t now, uint32_t budget)
  * 未启用 NAT 也可跟踪连接；运行时会话只保存在内存，重启后重新建立
  * 成功返回 0，失败返回负错误码；表由 runtime 在全部 worker 退出后销毁
  */
-int dppd_conntrack_create_dual(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
+static int create_table(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
     const struct dppd_snat_config *snat, const struct dppd_snat_config *snat6, const struct dppd_dnat_rule *dnat,
     uint32_t dnat_count)
 {
-    if (result == NULL || *result != NULL || capacity == 0 || capacity > 65536 || timeout_s == 0 || timeout_s > 86400)
+    if (result == NULL || *result != NULL)
         return -EINVAL;
-    if ((snat != NULL && snat->enabled && snat->ipv6) || (snat6 != NULL && snat6->enabled && !snat6->ipv6))
-        return -EINVAL;
-    int validation = dppd_nat_validate(snat, dnat, dnat_count);
-    if (validation == 0)
-        validation = dppd_nat_validate(snat6, dnat, dnat_count);
-    if (validation != 0)
-        return validation;
     struct dppd_conntrack *table = calloc(1, sizeof(*table));
     if (table == NULL)
         return -ENOMEM;
     table->bucket_count = 4;
     while (table->bucket_count < capacity * 4)
         table->bucket_count *= 2;
-    table->entries = calloc(capacity, sizeof(*table->entries));
-    table->buckets = calloc(table->bucket_count, sizeof(*table->buckets));
-    table->free_slots = calloc(capacity, sizeof(*table->free_slots));
-    if (table->entries == NULL || table->buckets == NULL || table->free_slots == NULL) {
-        dppd_conntrack_destroy(table);
-        return -ENOMEM;
+    if (capacity != 0) {
+        table->entries = calloc(capacity, sizeof(*table->entries));
+        table->buckets = calloc(table->bucket_count, sizeof(*table->buckets));
+        table->free_slots = calloc(capacity, sizeof(*table->free_slots));
+        if (table->entries == NULL || table->buckets == NULL || table->free_slots == NULL) {
+            dppd_conntrack_destroy(table);
+            return -ENOMEM;
+        }
     }
     if (pthread_mutex_init(&table->lock, NULL) != 0) {
         dppd_conntrack_destroy(table);
         return -EIO;
     }
     table->initialized = true;
-    table->status =
-        (struct dppd_conntrack_status){.enabled = true, .capacity = capacity, .timeout_s = timeout_s, .revision = 1};
+    table->status = (struct dppd_conntrack_status){
+        .enabled = capacity != 0, .capacity = capacity, .timeout_s = timeout_s, .revision = 1};
+    int rc = create_epoch(&table->status.epoch);
+    if (rc != 0) {
+        dppd_conntrack_destroy(table);
+        return rc;
+    }
     if (snat != NULL)
         table->status.snat = *snat;
     if (snat6 != NULL)
@@ -221,6 +278,82 @@ int dppd_conntrack_create_dual(struct dppd_conntrack **result, uint32_t capacity
         table->free_slots[i] = capacity - i - 1;
     *result = table;
     return 0;
+}
+
+int dppd_conntrack_create_policy(struct dppd_conntrack **result, const struct dppd_conntrack_policy *policy)
+{
+    int rc = dppd_conntrack_policy_validate(policy);
+    return rc == 0 ? create_table(result, policy->capacity, policy->timeout_s, &policy->snat, &policy->snat6,
+                         policy->dnat, policy->dnat_count)
+                   : rc;
+}
+
+int dppd_conntrack_create_dual(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
+    const struct dppd_snat_config *snat, const struct dppd_snat_config *snat6, const struct dppd_dnat_rule *dnat,
+    uint32_t dnat_count)
+{
+    if (capacity == 0 || capacity > 65536 || timeout_s == 0 || timeout_s > 86400 ||
+        (snat != NULL && snat->enabled && snat->ipv6) || (snat6 != NULL && snat6->enabled && !snat6->ipv6))
+        return -EINVAL;
+    int rc = dppd_nat_validate(snat, dnat, dnat_count);
+    if (rc == 0)
+        rc = dppd_nat_validate(snat6, dnat, dnat_count);
+    return rc == 0 ? create_table(result, capacity, timeout_s, snat, snat6, dnat, dnat_count) : rc;
+}
+
+int dppd_conntrack_replace(struct dppd_conntrack *table, const struct dppd_conntrack_policy *policy,
+    bool reset_sessions, uint64_t expected_epoch, uint64_t expected_revision, int (*publish)(void *), void *context)
+{
+    if (table == NULL)
+        return -ENODEV;
+    if (expected_epoch == 0 || expected_revision == 0)
+        return -EINVAL;
+    struct dppd_conntrack *candidate = NULL;
+    int rc = dppd_conntrack_create_policy(&candidate, policy);
+    if (rc != 0)
+        return rc;
+    pthread_mutex_lock(&table->lock);
+    if (expected_epoch != table->status.epoch || expected_revision != table->status.revision)
+        rc = -ESTALE;
+    else if (!reset_sessions && table->status.active != 0)
+        rc = -EBUSY;
+    else if (table->status.revision == UINT64_MAX || UINT64_MAX - table->status.flushed < table->status.active)
+        rc = -EOVERFLOW;
+    else if (publish != NULL)
+        rc = publish(context);
+    if (rc == 0) {
+        /** 外部一直借用 table，只交换其内部存储，旧数组由候选对象在解锁后回收 */
+        struct connection *entries = table->entries;
+        uint32_t *buckets = table->buckets, *free_slots = table->free_slots;
+        table->entries = candidate->entries;
+        table->buckets = candidate->buckets;
+        table->free_slots = candidate->free_slots;
+        candidate->entries = entries;
+        candidate->buckets = buckets;
+        candidate->free_slots = free_slots;
+        table->bucket_count = candidate->bucket_count;
+        table->free_count = candidate->free_count;
+        table->cursor = table->pending_slot = table->pending_bytes = 0;
+        table->pending_new = false;
+        table->full_gc_after_ms = 0;
+        memset(&table->pending, 0, sizeof(table->pending));
+        memcpy(table->ports, candidate->ports, sizeof(table->ports));
+        memset(table->port_cursor, 0, sizeof(table->port_cursor));
+        memcpy(table->dnat, candidate->dnat, sizeof(table->dnat));
+        /** 保留累计诊断值、会话 ID 水位和容器身份，替换策略也让旧分页失效 */
+        table->status.flushed += table->status.active;
+        table->status.active = 0;
+        table->status.enabled = candidate->status.enabled;
+        table->status.capacity = candidate->status.capacity;
+        table->status.timeout_s = candidate->status.timeout_s;
+        table->status.snat = candidate->status.snat;
+        table->status.snat6 = candidate->status.snat6;
+        table->status.dnat_count = candidate->status.dnat_count;
+        table->status.revision++;
+    }
+    pthread_mutex_unlock(&table->lock);
+    dppd_conntrack_destroy(candidate);
+    return rc;
 }
 
 int dppd_conntrack_create(struct dppd_conntrack **result, uint32_t capacity, uint32_t timeout_s,
@@ -363,19 +496,33 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
     attempt->policy = attempt->rewrite = tuple(packet);
     if (table == NULL)
         return 0;
+    pthread_mutex_lock(&table->lock);
+    if (!table->status.enabled) {
+        pthread_mutex_unlock(&table->lock);
+        return 0;
+    }
+    attempt->tracking = true;
     bool ipv6 = packet->l3_type == DPPD_L3_IPV6;
     bool nat_enabled = source_nat(table, ipv6)->enabled;
     for (uint32_t i = 0; i < table->status.dnat_count; ++i)
         nat_enabled |= table->dnat[i].ipv6 == ipv6;
     /** 不支持的扩展头不是普通未跟踪流量，不能借 UNTRACKED 策略隐藏协议拒绝原因 */
-    if (ipv6 && packet->ipv6_unsupported)
+    if (ipv6 && packet->ipv6_unsupported) {
+        pthread_mutex_unlock(&table->lock);
         return -ENOTSUP;
+    }
     if ((packet->l3_type != DPPD_L3_IPV4 && !ipv6) ||
-        (packet->l4_type != DPPD_L4_TCP && packet->l4_type != DPPD_L4_UDP))
+        (packet->l4_type != DPPD_L4_TCP && packet->l4_type != DPPD_L4_UDP)) {
+        pthread_mutex_unlock(&table->lock);
         return nat_enabled || packet->l4_type == DPPD_L4_FRAGMENT ? -ENOTSUP : 0;
-    pthread_mutex_lock(&table->lock);
+    }
     table->pending_bytes = packet->packet_len;
     collect(table, now_ms, 8);
+    if (table->status.revision == UINT64_MAX) {
+        attempt->state = DPPD_CT_INVALID;
+        pthread_mutex_unlock(&table->lock);
+        return -EOVERFLOW;
+    }
     uint32_t source = ntohl(packet->ipv4_src_be), destination = ntohl(packet->ipv4_dst_be);
     bool invalid_address = ipv6
         ? (!dppd_ipv6_unicast(packet->ipv6_src, false) || !dppd_ipv6_unicast(packet->ipv6_dst, false))
@@ -421,7 +568,7 @@ int dppd_conntrack_begin(struct dppd_conntrack *table, uint16_t ingress, const s
                 rc = -ENOSPC;
             }
         }
-        if (rc == 0 && table->next_id == UINT64_MAX)
+        if (rc == 0 && (table->next_id == UINT64_MAX || table->status.revision == UINT64_MAX))
             rc = -EOVERFLOW;
         memset(&table->pending, 0, sizeof(table->pending));
         table->pending.view = (struct dppd_connection_view){.id = table->next_id + 1,
@@ -485,6 +632,8 @@ int dppd_conntrack_finish(struct dppd_connection_attempt *attempt, uint16_t egre
         struct dppd_flow_tuple reply = reverse(view->translated);
         if (find(table, &reply, egress) != 0)
             rc = -EEXIST;
+        if (table->status.revision == UINT64_MAX)
+            rc = -EOVERFLOW;
     }
     if (accept && rc == 0) {
         uint32_t seconds = table->status.timeout_s;
@@ -544,15 +693,21 @@ void dppd_conntrack_status(struct dppd_conntrack *table, uint64_t now_ms, struct
 }
 
 /** 页内按不会复用的会话 ID 排序，修订号只保护成员集合，流量计数和状态允许继续前进 */
-int dppd_conntrack_list(struct dppd_conntrack *table, uint64_t now_ms, uint64_t after_id, uint64_t expected_revision,
-    struct dppd_connection_page *page)
+static int list_connections(struct dppd_conntrack *table, uint64_t now_ms, uint64_t after_id,
+    uint64_t expected_epoch, uint64_t expected_revision, bool guarded, struct dppd_connection_page *page)
 {
     if (table == NULL || page == NULL)
         return -ENODEV;
+    if (guarded && ((expected_epoch == 0) != (expected_revision == 0) || (after_id != 0 && expected_epoch == 0)))
+        return -EINVAL;
     pthread_mutex_lock(&table->lock);
     collect(table, now_ms, table->status.capacity);
-    int rc = expected_revision != 0 && expected_revision != table->status.revision ? -ESTALE : 0;
+    int rc = (expected_revision != 0 && expected_revision != table->status.revision) ||
+            (guarded && expected_epoch != 0 && expected_epoch != table->status.epoch)
+        ? -ESTALE
+        : 0;
     memset(page, 0, sizeof(*page));
+    page->epoch = table->status.epoch;
     page->revision = table->status.revision;
     for (uint32_t i = 0; rc == 0 && i < table->status.capacity; ++i) {
         const struct dppd_connection_view *entry = &table->entries[i].view;
@@ -576,12 +731,32 @@ int dppd_conntrack_list(struct dppd_conntrack *table, uint64_t now_ms, uint64_t 
     return rc;
 }
 
-int dppd_conntrack_flush(struct dppd_conntrack *table, uint64_t expected_revision)
+int dppd_conntrack_list(struct dppd_conntrack *table, uint64_t now_ms, uint64_t after_id, uint64_t expected_revision,
+    struct dppd_connection_page *page)
+{
+    return list_connections(table, now_ms, after_id, 0, expected_revision, false, page);
+}
+
+int dppd_conntrack_list_guarded(struct dppd_conntrack *table, uint64_t now_ms, uint64_t after_id,
+    uint64_t expected_epoch, uint64_t expected_revision, struct dppd_connection_page *page)
+{
+    return list_connections(table, now_ms, after_id, expected_epoch, expected_revision, true, page);
+}
+
+static int flush_connections(struct dppd_conntrack *table, uint64_t expected_epoch, uint64_t expected_revision,
+    bool guarded)
 {
     if (table == NULL)
         return -ENODEV;
     pthread_mutex_lock(&table->lock);
-    int rc = expected_revision == 0 ? -EINVAL : expected_revision != table->status.revision ? -ESTALE : 0;
+    int rc = expected_revision == 0 || (guarded && expected_epoch == 0)
+        ? -EINVAL
+        : expected_revision != table->status.revision || (guarded && expected_epoch != table->status.epoch)
+        ? -ESTALE
+        : 0;
+    if (rc == 0 && (UINT64_MAX - table->status.revision < table->status.active ||
+                      UINT64_MAX - table->status.flushed < table->status.active))
+        rc = -EOVERFLOW;
     if (rc == 0)
         for (uint32_t i = 0; i < table->status.capacity; ++i)
             if (table->entries[i].view.id != 0) {
@@ -592,12 +767,23 @@ int dppd_conntrack_flush(struct dppd_conntrack *table, uint64_t expected_revisio
     return rc;
 }
 
+int dppd_conntrack_flush(struct dppd_conntrack *table, uint64_t expected_revision)
+{
+    return flush_connections(table, 0, expected_revision, false);
+}
+
+int dppd_conntrack_flush_guarded(struct dppd_conntrack *table, uint64_t expected_epoch, uint64_t expected_revision)
+{
+    return flush_connections(table, expected_epoch, expected_revision, true);
+}
+
 int dppd_conntrack_dnat_list(struct dppd_conntrack *table, uint64_t after_id, struct dppd_dnat_page *page)
 {
     if (table == NULL || page == NULL)
         return -ENODEV;
+    pthread_mutex_lock(&table->lock);
     memset(page, 0, sizeof(*page));
-    /** 启动后规则不可变，查询不需要占住逐包会话锁，游标超过末尾时返回空页 */
+    /** 在线替换可能改变整张 DNAT 表，单页复制必须与策略切换共用一把锁 */
     for (uint32_t i = 0; i < table->status.dnat_count; ++i) {
         if (i + 1 <= after_id)
             continue;
@@ -609,5 +795,6 @@ int dppd_conntrack_dnat_list(struct dppd_conntrack *table, uint64_t after_id, st
         page->entries[page->count++].rule = table->dnat[i];
         page->next_id = i + 1;
     }
+    pthread_mutex_unlock(&table->lock);
     return 0;
 }

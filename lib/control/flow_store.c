@@ -2,6 +2,7 @@
 #include "flow_state_io.h"
 #include "flow_request_io.h"
 #include "flow_routing_io.h"
+#include "flow_conntrack_io.h"
 #include "dppd/software_shared.h"
 
 #include <errno.h>
@@ -37,6 +38,7 @@ struct dppd_flow_store {
     struct dppd_flow_job_id request_jobs[DPPD_REQUEST_RECEIPTS];
     bool requests_dirty;
     struct dppd_ipv4_router *router;
+    struct dppd_conntrack *conntrack;
     uint64_t durable_routing_generation;
 };
 
@@ -231,6 +233,8 @@ static int teardown(struct dppd_flow_store *s)
     }
     s->status.ready = false;
     s->status.closing = true;
+    dppd_conntrack_destroy(s->conntrack);
+    s->conntrack = NULL;
     if (cleanup_configuration(s) != 0)
         return -EUCLEAN;
     if (s->service != NULL) {
@@ -514,6 +518,11 @@ int dppd_flow_store_open(const char *path, const struct dppd_flow_store_runtime 
         for (uint16_t i = 0; i < state->routing->binding_count; ++i)
             ports[i] = state->routing->bindings[i].port_id;
         rc = dppd_ipv4_router_create(&s->router, ports, state->routing->binding_count, &state->routing->configuration);
+        if (rc == 0) {
+            const struct dppd_conntrack_policy disabled = {0};
+            rc = dppd_conntrack_create_policy(&s->conntrack,
+                state->conntrack == NULL ? &disabled : &state->conntrack->policy);
+        }
     }
     if (rc == 0 && state->requests != NULL) {
         /** 文件中未完成的请求没有已提交策略结果，重启后明确中止，旧键不能重新执行 */
@@ -656,6 +665,10 @@ int dppd_flow_store_routing_bind(struct dppd_flow_store *s, const struct dppd_ro
         goto done;
     }
     rc = dppd_ipv4_router_create(&s->router, ports, count, &next->configuration);
+    if (rc == 0) {
+        const struct dppd_conntrack_policy disabled = {0};
+        rc = dppd_conntrack_create_policy(&s->conntrack, &disabled);
+    }
     if (rc == 0)
         rc = dppd_flow_service_config_revision(s->service, s->state->revision);
     if (rc != 0) {
@@ -663,6 +676,8 @@ int dppd_flow_store_routing_bind(struct dppd_flow_store *s, const struct dppd_ro
             (void)dppd_ipv4_router_destroy(s->router);
             s->router = NULL;
         }
+        dppd_conntrack_destroy(s->conntrack);
+        s->conntrack = NULL;
         goto done;
     }
     s->state->routing = next;
@@ -685,6 +700,81 @@ struct dppd_ipv4_router *dppd_flow_store_router(struct dppd_flow_store *s)
     struct dppd_ipv4_router *router = s->router;
     pthread_mutex_unlock(&s->lock);
     return router;
+}
+
+struct dppd_conntrack *dppd_flow_store_conntrack(struct dppd_flow_store *s)
+{
+    if (s == NULL)
+        return NULL;
+    pthread_mutex_lock(&s->lock);
+    struct dppd_conntrack *table = s->conntrack;
+    pthread_mutex_unlock(&s->lock);
+    return table;
+}
+
+int dppd_flow_store_conntrack_get(struct dppd_flow_store *s, struct dppd_flow_conntrack_view *view)
+{
+    if (s == NULL || view == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = s->conntrack == NULL ? -ENOTSUP : 0;
+    memset(view, 0, sizeof(*view));
+    if (rc == 0) {
+        struct dppd_conntrack_status status;
+        dppd_conntrack_status(s->conntrack, now_ns() / UINT64_C(1000000), &status);
+        if (s->state->conntrack != NULL) {
+            view->policy = s->state->conntrack->policy;
+            view->generation = s->state->conntrack->generation;
+        }
+        view->revision = s->state->revision;
+        view->durable_revision = s->status.durable_revision;
+        view->session_epoch = status.epoch;
+        view->session_revision = status.revision;
+    }
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_conntrack_status(struct dppd_flow_store *s, uint64_t now_ms, struct dppd_conntrack_status *status)
+{
+    if (s == NULL || status == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = s->conntrack == NULL ? -ENOTSUP : 0;
+    if (rc == 0)
+        dppd_conntrack_status(s->conntrack, now_ms, status);
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_conntrack_list(struct dppd_flow_store *s, uint64_t now_ms, uint64_t after_id,
+    uint64_t expected_epoch, uint64_t expected_revision, struct dppd_connection_page *page)
+{
+    if (s == NULL || page == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = s->conntrack == NULL ? -ENOTSUP : dppd_conntrack_list_guarded(s->conntrack, now_ms, after_id,
+        expected_epoch, expected_revision, page);
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_conntrack_flush(struct dppd_flow_store *s, uint64_t expected_epoch, uint64_t expected_revision)
+{
+    if (s == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = writable(s);
+    struct dppd_flow_service_status status;
+    if (rc == 0)
+        rc = dppd_flow_service_status(s->service, &status);
+    if (rc == 0 && status.isolated)
+        rc = -EUCLEAN;
+    if (rc == 0)
+        rc = s->conntrack == NULL ? -ENOTSUP : dppd_conntrack_flush_guarded(s->conntrack,
+            expected_epoch, expected_revision);
+    pthread_mutex_unlock(&s->lock);
+    return rc;
 }
 
 int dppd_flow_store_routing_get(struct dppd_flow_store *s, struct dppd_ipv4_configuration *configuration,
@@ -1272,6 +1362,54 @@ static void routing_replace_locked(struct dppd_flow_store *s, const struct dppd_
     (void)flush(s);
 }
 
+struct conntrack_publish_context {
+    struct dppd_flow_store *store;
+    struct dppd_flow_conntrack_state candidate;
+};
+
+/** 引擎已准备好新表并锁住旧会话，推进全局版本成功后只做不会失败的发布 */
+static int conntrack_publish(void *context)
+{
+    struct conntrack_publish_context *c = context;
+    struct dppd_flow_store *s = c->store;
+    int rc = dppd_flow_service_config_revision(s->service, s->state->revision);
+    if (rc == 0) {
+        *s->state->conntrack = c->candidate;
+        ++s->state->revision;
+    }
+    return rc;
+}
+
+static void conntrack_replace_locked(struct dppd_flow_store *s, const struct dppd_flow_request *request,
+    struct dppd_flow_request_record *record)
+{
+    struct dppd_flow_service_status status;
+    int rc = writable(s);
+    if (rc == 0)
+        rc = dppd_flow_service_status(s->service, &status);
+    if (rc == 0 && (status.jobs != 0 || status.isolated))
+        rc = -EBUSY;
+    if (rc == 0 && request->expected_revision != status.revision)
+        rc = -ESTALE;
+    if (rc == 0 && (status.revision >= UINT64_MAX - 1U || s->state->conntrack->generation >= UINT64_MAX - 1U))
+        rc = -EOVERFLOW;
+    struct conntrack_publish_context context = {.store = s,
+        .candidate = {.generation = s->state->conntrack->generation + 1U, .policy = request->payload.conntrack.policy}};
+    if (rc == 0)
+        rc = dppd_flow_conntrack_validate(&context.candidate, s->state->routing);
+    if (rc == 0)
+        rc = dppd_conntrack_replace(s->conntrack, &context.candidate.policy, request->payload.conntrack.reset_sessions,
+            request->payload.conntrack.expected_session_epoch, request->payload.conntrack.expected_session_revision,
+            conntrack_publish, &context);
+    record->result.phase = DPPD_FLOW_REQUEST_DONE;
+    record->result.status = rc;
+    record->result.applied = rc == 0;
+    record->result.revision = s->state->revision;
+    record->result.generations[0] = s->state->conntrack->generation;
+    s->requests_dirty = true;
+    (void)flush(s);
+}
+
 /** 持久受理在进入异步队列前完成，掉电后最多保留明确中止，不能重复执行原键 */
 int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_request *request, uint64_t now,
     struct dppd_flow_request_result *result)
@@ -1302,6 +1440,18 @@ int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_re
     if (request->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE && s->router == NULL) {
         rc = -ENOTSUP;
         goto done;
+    }
+    if (request->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE && s->conntrack == NULL) {
+        rc = -ENOTSUP;
+        goto done;
+    }
+    /** 首次 CT 请求升级为第四版文件，零代次仍表示尚未发布过策略，不能凭升级开启转发 */
+    if (request->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE && s->state->conntrack == NULL) {
+        s->state->conntrack = calloc(1, sizeof(*s->state->conntrack));
+        if (s->state->conntrack == NULL) {
+            rc = -ENOMEM;
+            goto done;
+        }
     }
     if (s->state->requests == NULL) {
         s->state->requests = calloc(1, sizeof(*s->state->requests));
@@ -1361,7 +1511,9 @@ int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_re
         rc = request_result(s, (uint32_t)slot, result);
         goto done;
     }
-    if (request->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE) {
+    if (request->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE) {
+        conntrack_replace_locked(s, request, record);
+    } else if (request->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE) {
         routing_replace_locked(s, request, record);
     } else if (request->operation == DPPD_FLOW_REQUEST_CONFIGURE) {
         for (uint32_t i = 0; i < request->count; ++i)

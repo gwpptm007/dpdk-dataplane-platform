@@ -66,7 +66,8 @@ M5 首项 [M4 配置持久化与进程重启恢复](docs/m5_flow_state.md) 已�
 
 新增 [统一管理的双栈路由与静态邻居](docs/managed_routing.md)：`--flow-state` 配合 `--managed-routing`
 使用同一持久文件恢复规则和路由，经 CLI 或 HTTP 管理完整双栈表，保留请求去重、精确版本和写盘失败停转发保护。
-连接跟踪/NAT 与动态邻居策略尚未接入该模式；本项独立验收记录不扩大历史 M5 报告范围。
+后续 [连接跟踪与 NAT 策略统一管理](docs/managed_conntrack_nat.md) 接入双栈 SNAT/DNAT 的持久替换、
+活跃会话保护、精确清理和重启恢复。动态邻居策略仍待接入；独立验收记录不扩大历史 M5 报告范围。
 
 M4 软件交付及当前环境整体验收已完成，包含模板、有界异步队列、资源配额、64 条增删改、
 AGE、共享 COUNT 和背压。三套各 82/82 单测、完整 TAP 与八项固定性能门禁通过，
@@ -140,7 +141,8 @@ sudo ./build/dppd -l 0-2 -n 4 -- --ports 0,1 --queues 2 --burst 64 --promisc
 三层模式可加 `--conntrack 8192 --ct-timeout 300` 启用 TCP/UDP 会话跟踪，再加
 `--snat 0,1,203.0.113.9,40000-60000` 启用内口 0 到外口 1 的出站转换。状态 ACL 可用
 `state:new,established`，管理命令有 `conntrack-status/list/flush` 与 `nat-status`。
-会话和映射重启后清空，NAT 启动策略需由部署参数保留，详见 [使用与重启语义](docs/conntrack_nat.md)。
+会话和映射重启后清空，旧独立模式的 NAT 策略由部署参数保留，详见 [使用与重启语义](docs/conntrack_nat.md)。
+统一管理模式通过持久文件恢复策略，在线更新和会话清理见 [managed CT/NAT](docs/managed_conntrack_nat.md)。
 
 静态服务可再加 `--dnat 1,0,tcp,203.0.113.9,443,10.10.0.9,8443`，将外口 1 的公网
 443 转给内口 0 的内网服务端口 8443；`dnat-list [AFTER_ID]` 分页查询，详见 [端口转发](docs/dnat.md)。

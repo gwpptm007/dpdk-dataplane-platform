@@ -300,6 +300,60 @@ def routing_lines(value):
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def conntrack_policy_lines(value):
+    """整个策略必须明确给出，null 和空数组表示关闭，省略字段不能偷偷沿用旧的 NAT 配置"""
+    fields(value, ("capacity", "timeout_s", "snat", "snat6", "dnat"))
+    capacity = integer(value["capacity"], 0, 65536)
+    timeout = integer(value["timeout_s"], 0 if capacity == "0" else 1, 0 if capacity == "0" else 86400)
+    if not isinstance(value["dnat"], list) or len(value["dnat"]) > 32:
+        raise Failure(400, "invalid_dnat_rules")
+    if capacity == "0" and (value["snat"] is not None or value["snat6"] is not None or value["dnat"]):
+        raise Failure(400, "nat_requires_conntrack")
+    lines = [f"conntrack {capacity} {timeout}"]
+
+    def nat_address(text, version):
+        address = routing_address(text, version)
+        if version == 6 and ipaddress.ip_address(address).is_link_local:
+            raise Failure(400, "nat_link_local_address")
+        return address
+
+    def devices(item):
+        inside = integer(item["inside_port"], 0, 65534)
+        outside = integer(item["outside_port"], 0, 65534)
+        if inside == outside:
+            raise Failure(400, "nat_ports_must_differ")
+        return inside, outside
+
+    for name, version in (("snat", 4), ("snat6", 6)):
+        item = value[name]
+        if item is None:
+            continue
+        fields(item, ("inside_port", "outside_port", "address", "first_port", "last_port"))
+        inside, outside = devices(item)
+        first, last = integer(item["first_port"], 1, 65535), integer(item["last_port"], 1, 65535)
+        if int(first) > int(last):
+            raise Failure(400, "invalid_nat_port_range")
+        lines.append(f"{name} {inside} {outside} {nat_address(item['address'], version)} {first} {last}")
+    for item in value["dnat"]:
+        fields(item, ("family", "protocol", "inside_port", "outside_port", "public_address", "public_first",
+                      "public_last", "private_address", "private_first"))
+        version = 4 if choice(item["family"], ("ipv4", "ipv6")) == "ipv4" else 6
+        protocol = choice(item["protocol"], ("tcp", "udp"))
+        inside, outside = devices(item)
+        public = nat_address(item["public_address"], version)
+        private = nat_address(item["private_address"], version)
+        first, last, translated = (int(integer(item[name], 0, 65535))
+                                   for name in ("public_first", "public_last", "private_first"))
+        if public == private or first > last or translated + last - first > 65535:
+            raise Failure(400, "invalid_dnat_translation")
+        if (first == 0 and (last != 65535 or translated != 0)) or (first != 0 and translated == 0):
+            raise Failure(400, "invalid_nat_port_range")
+        command = "dnat" if version == 4 else "dnat6"
+        # 顺序就是会话里显示的规则编号，不能为了排序而改变用户声明的身份
+        lines.append(f"{command} {protocol} {outside} {inside} {public} {first} {last} {private} {translated}")
+    return "\n".join(lines) + "\n"
+
+
 class Backend:
     def __init__(self, program, control_socket, timeout=10.0):
         self.program, self.control_socket, self.timeout = str(program), str(control_socket), timeout
@@ -383,13 +437,14 @@ class Application:
             raise Failure(400, "duplicate_query")
         query = {key: value[0] for key, value in query.items()}
         path = url.path
-        arguments, content, routing_revision = None, None, None
+        arguments, content, file_suffix = None, None, []
         if method == "GET":
             if body:
                 raise Failure(400, "unexpected_body")
             simple = {"/v1/health": "health", "/v1/ready": "health", "/v1/status": "flow-status",
                       "/v1/persistence": "persistence-status", "/v1/routing": "routing-show",
-                      "/v1/routing/status": "routing-status"}
+                      "/v1/routing/status": "routing-status", "/v1/conntrack/policy": "conntrack-policy-show",
+                      "/v1/conntrack/status": "conntrack-status"}
             if path in simple:
                 fields(query)
                 arguments = [simple[path]]
@@ -397,6 +452,14 @@ class Application:
                 fields(query, (), ("port", "queue"))
                 arguments = ["stats", *["all" if query.get(name, "all") == "all" else integer(query[name], 0, 65534)
                                         for name in ("port", "queue")]]
+            elif path == "/v1/conntrack/sessions":
+                fields(query, (), ("after", "epoch", "revision"))
+                after = integer(query.get("after", "0"), 0, U64)
+                if ("epoch" in query) != ("revision" in query) or (after != "0" and "epoch" not in query):
+                    raise Failure(400, "session_version_required")
+                arguments = ["conntrack-list", after]
+                if "epoch" in query:
+                    arguments += [integer(query["revision"], 1, U64), integer(query["epoch"], 1, U64)]
             elif path == "/v1/rules":
                 fields(query, (), ("after", "revision"))
                 arguments = ["list", integer(query.get("after", "0"))]
@@ -431,6 +494,10 @@ class Application:
                 require(principal, "admin")
                 fields(value)
                 arguments = ["persistence-flush" if path.endswith("flush") else "flow-retry"]
+            elif path == "/v1/conntrack/sessions/flush":
+                require(principal, "operator")
+                fields(value, ("epoch", "revision"))
+                arguments = ["conntrack-flush", integer(value["revision"], 1, U64), integer(value["epoch"], 1, U64)]
             elif path == "/v1/configuration":
                 require(principal, "admin")
                 fields(value, ("sequence", "revision", "changes"))
@@ -439,11 +506,25 @@ class Application:
                              integer(value["revision"])]
             elif path == "/v1/requests":
                 require(principal, "admin")
-                fields(value, ("operation", "sequence", "revision", "routes", "neighbors", "routes6", "neighbors6"))
-                choice(value["operation"], ("routing_replace",))
-                routing_revision = integer(value["revision"], 0, U64 - 2)
-                content = routing_lines(value)
-                arguments = ["request-submit", principal.client, integer(value["sequence"], 1), "routing-replace"]
+                if not isinstance(value, dict):
+                    raise Failure(400, "invalid_fields")
+                operation = choice(value.get("operation"), ("routing_replace", "conntrack_replace"))
+                if operation == "routing_replace":
+                    fields(value, ("operation", "sequence", "revision", "routes", "neighbors", "routes6", "neighbors6"))
+                    content = routing_lines(value)
+                    file_suffix = [integer(value["revision"], 0, U64 - 2)]
+                    command = "routing-replace"
+                else:
+                    fields(value, ("operation", "sequence", "revision", "reset_sessions", "expected_session_epoch",
+                                   "expected_session_revision", "policy"))
+                    if not isinstance(value["reset_sessions"], bool):
+                        raise Failure(400, "invalid_boolean")
+                    content = conntrack_policy_lines(value["policy"])
+                    file_suffix = [integer(value["revision"], 0, U64 - 2), str(value["reset_sessions"]).lower(),
+                                   integer(value["expected_session_epoch"], 1, U64),
+                                   integer(value["expected_session_revision"], 1, U64)]
+                    command = "conntrack-replace"
+                arguments = ["request-submit", principal.client, integer(value["sequence"], 1), command]
             elif path in ("/v1/rules/create", "/v1/rules/update"):
                 require(principal, "operator")
                 fields(value, ("sequence", "table", "queue", "rule"), ("generation",))
@@ -471,9 +552,8 @@ class Application:
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
                     stream.write(content)
-                # 路由命令沿用 FILE VERSION 顺序，模板配置命令沿用 VERSION FILE 顺序
-                suffix = [name, routing_revision] if routing_revision is not None else [name]
-                result = self.backend.execute([*arguments, *suffix])
+                # 整策略的版本和重置条件跟在文件后面，模板配置仍沿用 VERSION FILE 顺序
+                result = self.backend.execute([*arguments, name, *file_suffix])
             finally:
                 os.unlink(name)
         else:

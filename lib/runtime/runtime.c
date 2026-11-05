@@ -115,6 +115,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
             dppd_devices_stop(&runtime->devices);
             return rc;
         }
+        runtime->conntrack_owned = true;
     }
 
     if (cfg->enable_pdump) {
@@ -125,6 +126,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
             runtime->nd6 = NULL;
             dppd_conntrack_destroy(runtime->conntrack);
             runtime->conntrack = NULL;
+            runtime->conntrack_owned = false;
             dppd_devices_stop(&runtime->devices);
             return -EIO;
         }
@@ -144,6 +146,16 @@ void dppd_runtime_set_ipv4_router(struct dppd_runtime *runtime, struct dppd_ipv4
 {
     if (runtime != NULL && !runtime->workers_started)
         runtime->ipv4_router = router;
+}
+
+int dppd_runtime_set_conntrack(struct dppd_runtime *runtime, struct dppd_conntrack *conntrack)
+{
+    if (runtime == NULL)
+        return -EINVAL;
+    if (runtime->workers_started || runtime->conntrack_owned)
+        return -EBUSY;
+    runtime->conntrack = conntrack;
+    return 0;
 }
 
 /**
@@ -370,8 +382,10 @@ int dppd_runtime_destroy(struct dppd_runtime *runtime)
     }
     dppd_nd6_destroy(runtime->nd6);
     runtime->nd6 = NULL;
-    dppd_conntrack_destroy(runtime->conntrack);
+    if (runtime->conntrack_owned)
+        dppd_conntrack_destroy(runtime->conntrack);
     runtime->conntrack = NULL;
+    runtime->conntrack_owned = false;
     /** 将端口关闭或回调注销错误交给进程入口，避免清理失败却报告正常退出 */
     return dppd_devices_stop(&runtime->devices);
 }

@@ -46,6 +46,7 @@ dppd_sources = files(
   'lib/control/flow_shared_count.c',
   'lib/control/flow_state.c',
   'lib/control/flow_routing_codec.c',
+  'lib/control/flow_conntrack_codec.c',
   'lib/control/flow_request.c',
   'lib/control/flow_store.c',
   'lib/control/age.c',

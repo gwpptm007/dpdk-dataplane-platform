@@ -110,6 +110,29 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
         return 0;
     }
     switch (request->operation) {
+    case DPPD_MANAGEMENT_CONNTRACK_POLICY_GET:
+        rc = dppd_flow_store_conntrack_get(flows->store, &response->payload.conntrack_policy);
+        break;
+    case DPPD_MANAGEMENT_CONNTRACK_STATUS:
+    case DPPD_MANAGEMENT_NAT_STATUS:
+        rc = dppd_flow_store_conntrack_status(flows->store, dppd_monotonic_ms(), &response->payload.conntrack);
+        break;
+    case DPPD_MANAGEMENT_CONNTRACK_LIST:
+        rc = dppd_flow_store_conntrack_list(flows->store, dppd_monotonic_ms(), request->payload.conntrack.after_id,
+            request->payload.conntrack.expected_epoch, request->payload.conntrack.expected_revision,
+            &response->payload.connections);
+        break;
+    case DPPD_MANAGEMENT_CONNTRACK_FLUSH:
+        /** 清空只影响易失会话，必须同时确认本次启动和刚才读到的会话集合 */
+        rc = dppd_flow_store_conntrack_flush(flows->store, request->payload.conntrack.expected_epoch,
+            request->payload.conntrack.expected_revision);
+        if (rc == 0)
+            rc = dppd_flow_store_conntrack_status(flows->store, dppd_monotonic_ms(), &response->payload.conntrack);
+        break;
+    case DPPD_MANAGEMENT_DNAT_LIST:
+        rc = dppd_conntrack_dnat_list(dppd_flow_store_conntrack(flows->store), request->payload.conntrack.after_id,
+            &response->payload.dnat);
+        break;
     case DPPD_MANAGEMENT_ROUTING_GET:
         response->payload.flow_routing.managed = true;
         rc = dppd_flow_store_routing_get(flows->store, &response->payload.flow_routing.configuration,

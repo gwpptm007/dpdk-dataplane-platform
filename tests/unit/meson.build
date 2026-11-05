@@ -364,6 +364,11 @@ flow_routing_test = executable('test_flow_routing', 'test_flow_routing.c', depen
   link_args: ['-Wl,--wrap=fsync'])
 test('M5 managed dual-stack routing persistence requests and reader lifetime', flow_routing_test, timeout: 120)
 
+# 真实会话搭配持久配置，覆盖显式清空、重启身份、满额双栈策略及各阶段写盘失败
+flow_conntrack_test = executable('test_flow_conntrack', 'test_flow_conntrack.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=fsync'])
+test('M5 managed conntrack NAT policy persistence and session guards', flow_conntrack_test, timeout: 120)
+
 test('M5 northbound authentication parsing and resource limits', find_program('python3'),
   args: [files('test_northbound.py')], timeout: 60)
 

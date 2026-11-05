@@ -178,6 +178,101 @@ static void test_routing_arguments(void)
     assert(build_request(3, replace, &request) == -ENOENT);
 }
 
+/** 完整策略必须同时携带配置版本和会话身份，坏文件不能退化成关闭策略的有效请求 */
+static void test_conntrack_policy_arguments(void)
+{
+    struct dppd_management_request request;
+    char *query[] = {"conntrack-policy-show"};
+    assert(build_request(1, query, &request) == 0 && request.operation == DPPD_MANAGEMENT_CONNTRACK_POLICY_GET);
+    char *list[] = {"conntrack-list", "4", "6", "18446744073709551615"};
+    assert(build_request(4, list, &request) == 0 && request.payload.conntrack.expected_epoch == UINT64_MAX);
+    char *flush[] = {"conntrack-flush", "6", "5"};
+    assert(build_request(3, flush, &request) == 0 && request.payload.conntrack.expected_epoch == 5);
+    flush[2] = "0";
+    assert(build_request(3, flush, &request) == -EINVAL);
+    char path[] = "/tmp/dppctl-conntrack-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    const char text[] = "# dual stack\nconntrack 64 60\nsnat 0 1 192.0.2.9 20000 20063\n"
+                        "snat6 0 1 2001:db8::9 20000 20063\ndnat udp 1 0 192.0.2.9 8080 8081 10.0.0.2 80\n"
+                        "dnat6 tcp 1 0 2001:db8::9 0 65535 2001:db8:1::2 0\n";
+    assert(write(fd, text, sizeof(text) - 1) == sizeof(text) - 1);
+    char *replace[] = {"request-submit", "81", "9", "conntrack-replace", path, "0", "false",
+        "18446744073709551615", "9007199254740993"};
+    assert(build_request(9, replace, &request) == 0);
+    const struct dppd_flow_request *durable = &request.payload.durable_request;
+    assert(durable->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE && durable->expected_revision == 0);
+    assert(durable->key.client == 81 && durable->key.sequence == 9 && durable->count == 1);
+    assert(!durable->payload.conntrack.reset_sessions && durable->payload.conntrack.expected_session_epoch == UINT64_MAX);
+    assert(durable->payload.conntrack.expected_session_revision == UINT64_C(9007199254740993));
+    const struct dppd_conntrack_policy *policy = &durable->payload.conntrack.policy;
+    assert(policy->capacity == 64 && policy->timeout_s == 60 && policy->snat.enabled && policy->snat6.enabled);
+    assert(policy->dnat_count == 2 && policy->dnat[1].ipv6 && policy->dnat[1].public_last == UINT16_MAX);
+    assert(policy->dnat[0].private_first == 80 && policy->snat.address_be == htonl(0xc0000209));
+    replace[6] = "true";
+    assert(build_request(9, replace, &request) == 0 && durable->payload.conntrack.reset_sessions);
+    replace[6] = "yes";
+    assert(build_request(9, replace, &request) == -EINVAL);
+    replace[6] = "false";
+    assert(build_request(8, replace, &request) == -EINVAL);
+    replace[7] = "0";
+    assert(build_request(9, replace, &request) == -EINVAL);
+    replace[7] = "1";
+    const char *invalid[] = {"", "conntrack 0 60\n", "conntrack 1 0\n", "conntrack 65537 60\n",
+        "conntrack 64 60\nconntrack 64 60\n", "conntrack 64 60\nsnat 0 1 192.0.2.9 20000 20063 extra\n",
+        "conntrack 64 60\ndnat udp 1 0 192.0.2.9 8080 8081 10.0.0.2 65535\n",
+        "conntrack 0 0\nsnat 0 1 192.0.2.9 20000 20063\n",
+        "conntrack 64 60\nsnat6 0 1 192.0.2.9 20000 20063\n",
+        "conntrack 64 60\ndnat udp 1 0 192.0.2.9 0 80 10.0.0.2 0\n"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        assert(ftruncate(fd, 0) == 0 && lseek(fd, 0, SEEK_SET) == 0);
+        assert(write(fd, invalid[i], strlen(invalid[i])) == (ssize_t)strlen(invalid[i]));
+        assert(build_request(9, replace, &request) == -EINVAL);
+    }
+    assert(ftruncate(fd, 0) == 0 && lseek(fd, 0, SEEK_SET) == 0);
+    assert(write(fd, "conntrack 0 0\n", 14) == 14);
+    assert(build_request(9, replace, &request) == 0 && policy->capacity == 0 && policy->dnat_count == 0);
+    assert(write(fd, "\0", 1) == 1);
+    assert(build_request(9, replace, &request) == -EINVAL);
+    assert(ftruncate(fd, 16385) == 0);
+    assert(build_request(9, replace, &request) != 0);
+    close(fd);
+    assert(unlink(path) == 0);
+    assert(build_request(9, replace, &request) == -ENOENT);
+}
+
+/** JSON 查询保留超过 JavaScript 精确范围的身份，错误长度不能输出貌似完整的成功页 */
+static void test_conntrack_json(void)
+{
+    struct dppd_management_request request = {0};
+    struct dppd_management_response response = {.operation = DPPD_MANAGEMENT_CONNTRACK_POLICY_GET};
+    response.payload.conntrack_policy = (struct dppd_flow_conntrack_view){.revision = UINT64_C(9007199254740993),
+        .session_epoch = UINT64_MAX, .session_revision = 2, .generation = 3};
+    FILE *output = tmpfile();
+    assert(output != NULL && fflush(stdout) == 0);
+    int saved = dup(STDOUT_FILENO);
+    assert(saved >= 0 && dup2(fileno(output), STDOUT_FILENO) >= 0);
+    assert(dppctl_json_response(&request, &response) == 0);
+    assert(fflush(stdout) == 0 && fseek(output, 0, SEEK_SET) == 0);
+    char text[4096] = {0};
+    assert(fread(text, 1, sizeof(text) - 1, output) > 0);
+    assert(strstr(text, "\"revision\":\"9007199254740993\"") != NULL);
+    assert(strstr(text, "\"session_epoch\":\"18446744073709551615\"") != NULL);
+    assert(strstr(text, "\"snat\":null,\"snat6\":null,\"dnat\":[]") != NULL);
+    assert(dup2(saved, STDOUT_FILENO) >= 0);
+    close(saved);
+    fclose(output);
+    response.payload.conntrack_policy.policy.dnat_count = DPPD_MAX_DNAT_RULES + 1;
+    assert(dppctl_json_response(&request, &response) == -EPROTO);
+    response.operation = DPPD_MANAGEMENT_CONNTRACK_LIST;
+    response.payload.connections.count = DPPD_CT_PAGE_SIZE + 1;
+    assert(dppctl_json_response(&request, &response) == -EPROTO);
+    response.operation = DPPD_MANAGEMENT_REQUEST_GET;
+    response.payload.durable_result.operation = DPPD_FLOW_REQUEST_CONNTRACK_REPLACE;
+    response.payload.durable_result.count = 2;
+    assert(dppctl_json_response(&request, &response) == -EPROTO);
+}
+
 /** 状态查询默认读当前版本，也可携带精确非零版本，非法参数要在连接服务前被拒绝 */
 static void test_status_arguments(void)
 {
@@ -640,6 +735,8 @@ int main(void)
     test_status_arguments();
     test_acl_arguments();
     test_routing_arguments();
+    test_conntrack_policy_arguments();
+    test_conntrack_json();
     test_ipv6_arguments();
     test_probe_arguments();
     test_history_arguments();

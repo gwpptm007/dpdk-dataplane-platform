@@ -134,6 +134,11 @@ int dppd_managed_run(const struct dppd_config *config, struct dppd_recovery_scop
             goto destroy;
         }
         dppd_runtime_set_ipv4_router(&runtime, router);
+        /** store 始终提供稳定容器，当前关闭也保留地址，在线启用不需要替换 worker 引用 */
+        struct dppd_conntrack *conntrack = dppd_flow_store_conntrack(store);
+        rc = conntrack == NULL ? -EUCLEAN : dppd_runtime_set_conntrack(&runtime, conntrack);
+        if (rc != 0)
+            goto destroy;
     }
     rc = dppd_flow_management_init(flows, store);
     if (rc != 0)
@@ -182,6 +187,9 @@ int dppd_managed_run(const struct dppd_config *config, struct dppd_recovery_scop
             rc = dppd_runtime_start(&runtime);
             timeout_exit(rc, store);
         }
+        /** 即使没有新报文也逐步回收过期会话，固定预算避免管理循环被整表扫描拖住 */
+        if (rc == 0)
+            dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 256);
         if (rc == 0)
             rc = dppd_management_poll(&server);
         if (rc == 0)
@@ -209,6 +217,9 @@ destroy:
     dppd_runtime_request_stop(&runtime);
     if (wait_workers(&runtime, store) != 0)
         rc = -EIO;
+    /** store 即将释放借出的容器，先清掉已停止 runtime 中的引用，避免清理路径留下悬空指针 */
+    if (!runtime.conntrack_owned)
+        (void)dppd_runtime_set_conntrack(&runtime, NULL);
     if (store != NULL) {
         int closed = dppd_flow_store_close(&store);
         if (closed != 0)

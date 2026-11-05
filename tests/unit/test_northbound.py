@@ -35,6 +35,8 @@ class FakeBackend:
             self.configuration = Path(arguments[-1]).read_text(encoding="utf-8")
         elif "routing-replace" in arguments:
             self.configuration = Path(arguments[-2]).read_text(encoding="utf-8")
+        elif "conntrack-replace" in arguments:
+            self.configuration = Path(arguments[-5]).read_text(encoding="utf-8")
         return {"api_version": "v1", "status": 0, "data": {"ready": True}}
 
 
@@ -87,6 +89,103 @@ class NorthboundTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/v1/recovery/flush", {"command": "bad"}, role="admin")[0], 400)
         self.assertEqual(self.request("DELETE")[0], 405)
         self.assertEqual(self.backend.calls, [])
+
+    @staticmethod
+    def conntrack_request():
+        """双栈地址池和转发规则一起提交，三个版本字段不能被混成同一种身份"""
+        return {"operation": "conntrack_replace", "sequence": "9", "revision": "7", "reset_sessions": False,
+                "expected_session_epoch": "18446744073709551615", "expected_session_revision": "9007199254740993",
+                "policy": {"capacity": 64, "timeout_s": 60,
+                           "snat": {"inside_port": 0, "outside_port": 1, "address": "192.0.2.9",
+                                    "first_port": 20000, "last_port": 20063},
+                           "snat6": {"inside_port": 0, "outside_port": 1, "address": "2001:DB8::9",
+                                     "first_port": 20000, "last_port": 20063},
+                           "dnat": [{"family": "ipv4", "protocol": "udp", "outside_port": 1, "inside_port": 0,
+                                     "public_address": "192.0.2.9", "public_first": 8080, "public_last": 8081,
+                                     "private_address": "10.0.0.2", "private_first": 80},
+                                    {"family": "ipv6", "protocol": "tcp", "outside_port": 1, "inside_port": 0,
+                                     "public_address": "2001:db8::9", "public_first": 0, "public_last": 65535,
+                                     "private_address": "2001:db8:1::2", "private_first": 0}]}}
+
+    def test_conntrack_policy_permissions_and_complete_file(self):
+        body = self.conntrack_request()
+        for role in ("reader", "operator"):
+            self.assertEqual(self.request("POST", "/v1/requests", body, role=role)[0], 403)
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        call = self.backend.calls[-1]
+        self.assertEqual(call[:4], ["request-submit", "3", "9", "conntrack-replace"])
+        self.assertEqual(call[-4:], ["7", "false", "18446744073709551615", "9007199254740993"])
+        self.assertFalse(Path(call[4]).exists())
+        self.assertEqual(self.backend.configuration, "conntrack 64 60\nsnat 0 1 192.0.2.9 20000 20063\n"
+                         "snat6 0 1 2001:db8::9 20000 20063\ndnat udp 1 0 192.0.2.9 8080 8081 10.0.0.2 80\n"
+                         "dnat6 tcp 1 0 2001:db8::9 0 65535 2001:db8:1::2 0\n")
+        self.assertEqual(self.request(path="/v1/conntrack/policy")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["conntrack-policy-show"])
+        self.assertEqual(self.request(path="/v1/conntrack/status")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["conntrack-status"])
+
+    def test_conntrack_sessions_require_complete_version_for_continuation_and_flush(self):
+        self.assertEqual(self.request(path="/v1/conntrack/sessions")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["conntrack-list", "0"])
+        self.assertEqual(self.request(path="/v1/conntrack/sessions?after=4&epoch=5&revision=6")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["conntrack-list", "4", "6", "5"])
+        self.backend.calls.clear()
+        for query in ("after=4", "after=4&epoch=5", "revision=6", "epoch=0&revision=6", "epoch=5&revision=0"):
+            self.assertEqual(self.request(path="/v1/conntrack/sessions?" + query)[0], 400)
+        flush = {"epoch": "5", "revision": "6"}
+        self.assertEqual(self.request("POST", "/v1/conntrack/sessions/flush", flush)[0], 403)
+        self.assertEqual(self.request("POST", "/v1/conntrack/sessions/flush", {"revision": "6"}, role="operator")[0], 400)
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(self.request("POST", "/v1/conntrack/sessions/flush", flush, role="operator")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["conntrack-flush", "6", "5"])
+
+    def test_conntrack_policy_rejects_invalid_input_before_dispatch(self):
+        for key, value in (("reset_sessions", "true"), ("expected_session_epoch", "0"),
+                           ("expected_session_revision", True), ("expected_session_epoch", 1 << 63)):
+            body = self.conntrack_request()
+            body[key] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for key in ("policy", "reset_sessions", "expected_session_epoch", "expected_session_revision"):
+            body = self.conntrack_request()
+            del body[key]
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        changes = [("capacity", 65537), ("timeout_s", 0), ("dnat", {}), ("snat", {}), ("unknown", 1)]
+        for key, value in changes:
+            body = self.conntrack_request()
+            body["policy"][key] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for key, value in (("address", "192.0.2.9\nconntrack 0 0"), ("inside_port", 1), ("first_port", 0),
+                           ("last_port", 100), ("address", "::1")):
+            body = self.conntrack_request()
+            body["policy"]["snat"][key] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for key, value in (("address", "fe80::1"), ("address", "::ffff:192.0.2.9")):
+            body = self.conntrack_request()
+            body["policy"]["snat6"][key] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for key, value in (("private_first", 65535), ("public_first", 0), ("private_first", 0),
+                           ("public_address", "2001:db8::1"), ("private_address", "192.0.2.9"), ("protocol", "icmp")):
+            body = self.conntrack_request()
+            body["policy"]["dnat"][0][key] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        body = self.conntrack_request()
+        body["policy"]["dnat"] *= 17
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        self.assertEqual(self.backend.calls, [])
+
+    def test_conntrack_disable_is_explicit_and_dnat_order_is_preserved(self):
+        body = self.conntrack_request()
+        body["policy"]["dnat"].reverse()
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        self.assertTrue(self.backend.configuration.splitlines()[3].startswith("dnat6 tcp"))
+        body["policy"]["capacity"] = 0
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        body["policy"] = {"capacity": 0, "timeout_s": 0, "snat": None, "snat6": None, "dnat": []}
+        body["reset_sessions"] = True
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        self.assertEqual(self.backend.configuration, "conntrack 0 0\n")
+        self.assertEqual(self.backend.calls[-1][-3], "true")
 
     @staticmethod
     def routing_request():

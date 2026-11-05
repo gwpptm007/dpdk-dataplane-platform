@@ -715,11 +715,19 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         rc = dppd_conntrack_dnat_list(control->conntrack, request->payload.conntrack.after_id, &response->payload.dnat);
         break;
     case DPPD_MANAGEMENT_CONNTRACK_LIST:
-        rc = dppd_conntrack_list(control->conntrack, dppd_monotonic_ms(), request->payload.conntrack.after_id,
-            request->payload.conntrack.expected_revision, &response->payload.connections);
+        /** 旧命令可以只带修订号，新调用一旦给出启动标识就必须校验，不能悄悄降低保护 */
+        rc = request->payload.conntrack.expected_epoch == 0
+            ? dppd_conntrack_list(control->conntrack, dppd_monotonic_ms(), request->payload.conntrack.after_id,
+                  request->payload.conntrack.expected_revision, &response->payload.connections)
+            : dppd_conntrack_list_guarded(control->conntrack, dppd_monotonic_ms(), request->payload.conntrack.after_id,
+                  request->payload.conntrack.expected_epoch, request->payload.conntrack.expected_revision,
+                  &response->payload.connections);
         break;
     case DPPD_MANAGEMENT_CONNTRACK_FLUSH:
-        rc = dppd_conntrack_flush(control->conntrack, request->payload.conntrack.expected_revision);
+        rc = request->payload.conntrack.expected_epoch == 0
+            ? dppd_conntrack_flush(control->conntrack, request->payload.conntrack.expected_revision)
+            : dppd_conntrack_flush_guarded(control->conntrack, request->payload.conntrack.expected_epoch,
+                  request->payload.conntrack.expected_revision);
         dppd_conntrack_status(control->conntrack, dppd_monotonic_ms(), &response->payload.conntrack);
         break;
     case DPPD_MANAGEMENT_ROUTING_STATUS:

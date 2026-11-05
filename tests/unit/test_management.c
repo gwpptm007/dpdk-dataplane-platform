@@ -243,6 +243,18 @@ static void test_conntrack_management(void)
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
     assert(response.payload.connections.count == 1);
     uint64_t revision = response.payload.connections.revision;
+    uint64_t epoch = response.payload.connections.epoch;
+    assert(epoch != 0);
+    request.payload.conntrack.expected_revision = revision;
+    request.payload.conntrack.expected_epoch = epoch == 1 ? 2 : 1;
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -ESTALE);
+    request.payload.conntrack.expected_epoch = epoch;
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == 0);
+    initialize_request(&request, DPPD_MANAGEMENT_CONNTRACK_FLUSH);
+    request.payload.conntrack.expected_revision = revision;
+    request.payload.conntrack.expected_epoch = epoch == 1 ? 2 : 1;
+    assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -ESTALE);
+    /** 旧 CLI 仍可只传修订号，新入口给出的启动标识必须生效 */
     initialize_request(&request, DPPD_MANAGEMENT_CONNTRACK_FLUSH);
     request.payload.conntrack.expected_revision = revision - 1;
     assert(dppd_management_handle(&control, NULL, NULL, &request, &response) == 0 && response.status == -ESTALE);

@@ -535,6 +535,7 @@ static void stateful_queues(struct fixture *fixture)
         .public_last = 40000,
         .private_first = 8000};
     assert(dppd_conntrack_create(&fixture->runtime.conntrack, 32, 60, &nat, &dnat, 1) == 0);
+    fixture->runtime.conntrack_owned = true;
     fixture->control.conntrack = fixture->runtime.conntrack;
     assert(dppd_runtime_start(&fixture->runtime) == 0);
     uint16_t mapped = 0;
@@ -785,6 +786,7 @@ static void nat66_queues(struct fixture *fixture)
     memcpy(dnat.public_address6, nat.address6, 16);
     assert(inet_pton(AF_INET6, "2001:db8:1::8", dnat.private_address6) == 1);
     assert(dppd_conntrack_create_dual(&fixture->runtime.conntrack, 16, 60, NULL, &nat, &dnat, 1) == 0);
+    fixture->runtime.conntrack_owned = true;
     fixture->control.conntrack = fixture->runtime.conntrack;
     struct dppd_ipv4_configuration routes;
     assert(dppd_ipv4_router_get(fixture->router, &routes) == 0);

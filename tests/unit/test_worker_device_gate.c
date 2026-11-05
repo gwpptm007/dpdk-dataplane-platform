@@ -117,5 +117,21 @@ int main(void)
     process_ingress(worker, &runtime.devices.ports[0]);
     flush_egress(worker, &runtime.devices.ports[1], batch, lengths, 2, &ingress, &output);
     assert(rx_calls[0] == 0 && tx_calls == 0 && freed == 2);
+
+    /** 关闭的常驻容器必须在读取报文校验和之前旁路，NULL 报文可直接暴露误入校验路径 */
+    worker = setup();
+    struct dppd_conntrack_policy policy = {0};
+    assert(dppd_conntrack_create_policy(&runtime.conntrack, &policy) == 0);
+    struct dppd_packet packet = {.l3_type = DPPD_L3_IPV4, .l4_type = DPPD_L4_TCP, .ip_protocol = 6};
+    struct rte_mbuf *unread = NULL;
+    struct dppd_pipeline_decision decision;
+    struct dppd_software_count_batch counts = {0};
+    assert(!stateful_decide(worker, &runtime.devices.ports[0], &unread, DPPD_PARSE_OK, &packet, &decision, &counts));
+    packet.l3_type = DPPD_L3_IPV6;
+    packet.l4_type = DPPD_L4_UDP;
+    packet.ip_protocol = 17;
+    assert(!stateful_decide(worker, &runtime.devices.ports[0], &unread, DPPD_PARSE_OK, &packet, &decision, &counts));
+    dppd_conntrack_destroy(runtime.conntrack);
+    runtime.conntrack = NULL;
     return 0;
 }

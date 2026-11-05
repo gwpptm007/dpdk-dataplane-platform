@@ -60,8 +60,9 @@ struct dppd_runtime {
     struct dppd_software_backend *software_backend;
     /** 可选路由器由控制面持有，只在工作线程启动前绑定，退出并注销读者后才能释放 */
     struct dppd_ipv4_router *ipv4_router;
-    /** runtime 拥有易失会话，先停止全部线程再释放，控制面仅借用此指针 */
+    /** 普通模式拥有会话表，管理模式借用 store 的稳定容器，销毁时按所有权决定是否释放 */
     struct dppd_conntrack *conntrack;
+    bool conntrack_owned;
     /** 动态邻居与等待首包由 runtime 持有，静态路由快照仍由控制面独立管理 */
     struct dppd_nd6 *nd6;
     struct dppd_worker workers[DPPD_MAX_WORKERS];
@@ -77,6 +78,8 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
 /** 设置报文路径借用的软件 backend；不转移所有权，也不允许 worker 运行中热替换 */
 void dppd_runtime_set_software_backend(struct dppd_runtime *runtime, struct dppd_software_backend *software_backend);
 void dppd_runtime_set_ipv4_router(struct dppd_runtime *runtime, struct dppd_ipv4_router *router);
+/** 只在 worker 停止且 runtime 没有自有会话表时借用容器，不转移所有权 */
+int dppd_runtime_set_conntrack(struct dppd_runtime *runtime, struct dppd_conntrack *conntrack);
 int dppd_runtime_start(struct dppd_runtime *runtime);
 /** 检查已启动的线程是否异常结束；正常停止和设备移除由各自的退出流程处理 */
 int dppd_runtime_check_workers(const struct dppd_runtime *runtime);

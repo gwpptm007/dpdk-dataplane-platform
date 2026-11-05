@@ -31,7 +31,8 @@
 /** v29 增加在线模板与共享定义的整批配置事务和精确修订号分页 */
 /** v30 增加持久客户端请求键，回执与策略一起原子保存，重启后仍可查询 */
 /** v31 将双栈路由整表纳入持久请求，查询同时返回路由代次和统一配置修订号 */
-#define DPPD_MANAGEMENT_VERSION 31U
+/** v32 将连接跟踪与双栈 NAT 策略纳入持久请求，会话操作还要核对本次启动标识 */
+#define DPPD_MANAGEMENT_VERSION 32U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -128,6 +129,7 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_FLOW_CONFIG_APPLY,
     DPPD_MANAGEMENT_REQUEST_SUBMIT,
     DPPD_MANAGEMENT_REQUEST_GET,
+    DPPD_MANAGEMENT_CONNTRACK_POLICY_GET,
 };
 
 /** 随机启动标识阻止重启前的任务凭据误领本次进程的新任务 */
@@ -180,7 +182,7 @@ struct dppd_management_request {
             uint64_t after_id, expected_revision;
         } shared_count_list;
         struct {
-            uint64_t after_id, expected_revision;
+            uint64_t after_id, expected_revision, expected_epoch;
         } conntrack;
         struct {
             uint64_t expected_generation;
@@ -444,6 +446,7 @@ struct dppd_management_response {
         struct dppd_flow_job_result flow_result;
         struct dppd_flow_request_result durable_result;
         struct dppd_conntrack_status conntrack;
+        struct dppd_flow_conntrack_view conntrack_policy;
         struct dppd_nd6_status nd6;
         struct dppd_nd6_page dynamic_neighbors;
         struct dppd_connection_page connections;

@@ -263,6 +263,172 @@ static void test_snat(void)
     dppd_conntrack_destroy(table);
 }
 
+struct publication {
+    unsigned int calls;
+    int result;
+};
+
+static int publish_policy(void *context)
+{
+    struct publication *publication = context;
+    publication->calls++;
+    return publication->result;
+}
+
+/** 通过真实端口池检查替换结果，不能只看管理状态中的地址是否更新 */
+static struct dppd_conntrack_policy nat_policy(void)
+{
+    struct dppd_conntrack_policy policy = {.capacity = 8, .timeout_s = 60, .dnat_count = 1};
+    struct dppd_snat_config *nat = ipv6_case ? &policy.snat6 : &policy.snat;
+    *nat = (struct dppd_snat_config){.enabled = true, .inside_port = 0, .outside_port = 1,
+        .first_port = 40000, .last_port = 40001, .ipv6 = ipv6_case};
+    policy.dnat[0] = (struct dppd_dnat_rule){.outside_port = 1, .inside_port = 0, .public_first = 40000,
+        .public_last = 40000, .private_first = 80, .protocol = 17, .ipv6 = ipv6_case};
+    if (ipv6_case) {
+        assert(inet_pton(AF_INET6, "2001:db8:1::1", nat->address6) == 1);
+        memcpy(policy.dnat[0].public_address6, nat->address6, 16);
+        assert(inet_pton(AF_INET6, "fd00:1::9", policy.dnat[0].private_address6) == 1);
+    } else {
+        nat->address_be = htonl(0xcb007101);
+        policy.dnat[0].public_address_be = nat->address_be;
+        policy.dnat[0].private_address_be = htonl(0x0a000009);
+    }
+    return policy;
+}
+
+/** 预分配和发布失败都保留原会话，明确清空后才切换策略，关闭再启用也不能复用旧会话 ID */
+static void test_policy_replace(void)
+{
+    struct dppd_conntrack_policy disabled = {0}, policy = nat_policy();
+    struct dppd_conntrack *table = NULL;
+    assert(dppd_conntrack_policy_validate(&disabled) == 0);
+    disabled.timeout_s = 1;
+    assert(dppd_conntrack_policy_validate(&disabled) == -EINVAL);
+    disabled.timeout_s = 0;
+    disabled.snat.inside_port = 1;
+    assert(dppd_conntrack_policy_validate(&disabled) == -EINVAL);
+    disabled.snat.inside_port = 0;
+    disabled.dnat[31].protocol = 17;
+    assert(dppd_conntrack_policy_validate(&disabled) == -EINVAL);
+    disabled.dnat[31].protocol = 0;
+    assert(dppd_conntrack_create_policy(&table, &disabled) == 0);
+    struct dppd_conntrack *stable = table;
+    struct dppd_conntrack_status before, after;
+    dppd_conntrack_status(table, 0, &before);
+    assert(!before.enabled && before.capacity == 0 && before.revision == 1 && before.epoch != 0);
+    uint64_t other_epoch = before.epoch == UINT64_MAX ? 1 : before.epoch + 1;
+    struct publication publication = {0};
+    assert(dppd_conntrack_replace(table, &policy, false, 0, before.revision, publish_policy, &publication) == -EINVAL);
+    assert(dppd_conntrack_replace(table, &policy, false, other_epoch, before.revision, NULL, NULL) == -ESTALE);
+    assert(dppd_conntrack_replace(table, &policy, false, before.epoch, before.revision, publish_policy,
+               &publication) == 0 && publication.calls == 1 && table == stable);
+    struct dppd_packet value = packet(false, false);
+    struct dppd_connection_attempt attempt;
+    assert(dppd_conntrack_begin(table, 0, &value, 100, &attempt) == 0 && attempt.tracking && attempt.nat);
+    assert(ntohs(attempt.rewrite.source_port_be) == 40001);
+    assert(dppd_conntrack_finish(&attempt, 1, true) == 0);
+    dppd_conntrack_status(table, 100, &before);
+    assert(before.active == 1 && before.created == 1 && before.revision == 3);
+    struct dppd_connection_page page;
+    assert(dppd_conntrack_list_guarded(table, 100, 0, 0, 0, &page) == 0 && page.epoch == before.epoch &&
+        page.entries[0].id == 1);
+    assert(dppd_conntrack_list_guarded(table, 100, 1, 0, 0, &page) == -EINVAL);
+    assert(dppd_conntrack_list_guarded(table, 100, 0, other_epoch, before.revision, &page) == -ESTALE);
+    policy.capacity = 16;
+    policy.timeout_s = 2;
+    struct dppd_snat_config *nat = ipv6_case ? &policy.snat6 : &policy.snat;
+    nat->first_port = policy.dnat[0].public_first = policy.dnat[0].public_last = 50000;
+    nat->last_port = 50001;
+    if (ipv6_case) {
+        nat->address6[15] = 2;
+        memcpy(policy.dnat[0].public_address6, nat->address6, 16);
+    } else
+        policy.dnat[0].public_address_be = nat->address_be = htonl(0xcb007102);
+    for (unsigned int allocation = 1; allocation <= 4; ++allocation) {
+        fail_allocation = allocation;
+        assert(dppd_conntrack_replace(table, &policy, true, before.epoch, before.revision, publish_policy,
+                   &publication) == -ENOMEM);
+        fail_allocation = 0;
+        dppd_conntrack_status(table, 100, &after);
+        assert(after.revision == before.revision && after.active == 1 && after.capacity == 8);
+    }
+    assert(publication.calls == 1);
+    assert(dppd_conntrack_replace(table, &policy, false, before.epoch, before.revision, publish_policy,
+               &publication) == -EBUSY && publication.calls == 1);
+    assert(dppd_conntrack_replace(table, &policy, true, before.epoch, before.revision - 1, NULL, NULL) == -ESTALE);
+    assert(dppd_conntrack_flush_guarded(table, 0, before.revision) == -EINVAL);
+    assert(dppd_conntrack_flush_guarded(table, other_epoch, before.revision) == -ESTALE);
+    publication.result = -EIO;
+    assert(dppd_conntrack_replace(table, &policy, true, before.epoch, before.revision, publish_policy,
+               &publication) == -EIO && publication.calls == 2);
+    assert(dppd_conntrack_list(table, 100, 0, before.revision, &page) == 0 && page.count == 1 &&
+        ntohs(page.entries[0].translated.source_port_be) == 40001);
+    publication.result = 0;
+    assert(dppd_conntrack_replace(table, &policy, true, before.epoch, before.revision, publish_policy,
+               &publication) == 0 && publication.calls == 3);
+    dppd_conntrack_status(table, 100, &after);
+    assert(after.epoch == before.epoch && after.revision == before.revision + 1 && after.active == 0 &&
+        after.flushed == 1 && after.created == 1 && after.peak == 1 && after.capacity == 16 && after.timeout_s == 2);
+    assert(dppd_conntrack_list_guarded(table, 100, 0, before.epoch, before.revision, &page) == -ESTALE);
+    struct dppd_dnat_page rules;
+    assert(dppd_conntrack_dnat_list(table, 0, &rules) == 0 && rules.count == 1 &&
+        rules.entries[0].rule.public_first == 50000);
+    assert(dppd_conntrack_begin(table, 0, &value, 200, &attempt) == 0 && attempt.tracking);
+    assert(ntohs(attempt.rewrite.source_port_be) == 50001);
+    assert(ipv6_case ? memcmp(attempt.rewrite.source6, nat->address6, 16) == 0
+                    : attempt.rewrite.source_be == nat->address_be);
+    assert(dppd_conntrack_finish(&attempt, 1, true) == 0);
+    assert(dppd_conntrack_list(table, 200, 0, 0, &page) == 0 && page.entries[0].id == 2 &&
+        page.entries[0].expires_ms == 2200);
+    dppd_conntrack_gc(table, 2200, 16);
+    dppd_conntrack_status(table, 2200, &before);
+    assert(before.active == 0 && before.expired == 1);
+    assert(dppd_conntrack_replace(table, &disabled, false, before.epoch, before.revision, NULL, NULL) == 0);
+    dppd_conntrack_gc(table, 2201, UINT32_MAX);
+    dppd_conntrack_status(table, 2201, &after);
+    assert(!after.enabled && after.epoch == before.epoch && after.created == 2 && after.flushed == 1);
+    value.ip_protocol = 0;
+    assert(dppd_conntrack_begin(table, 0, &value, 2201, &attempt) == 0 && !attempt.tracking &&
+        attempt.owner == NULL && attempt.state == DPPD_CT_UNTRACKED);
+    assert(dppd_conntrack_list_guarded(table, 2201, 0, after.epoch, after.revision, &page) == 0 && page.count == 0);
+    assert(dppd_conntrack_replace(table, &policy, false, after.epoch, after.revision, NULL, NULL) == 0);
+    value = packet(false, false);
+    accept_packet(table, false, &value, 2202, DPPD_CT_NEW);
+    assert(dppd_conntrack_list(table, 2202, 0, 0, &page) == 0 && page.entries[0].id == 3);
+    assert(dppd_conntrack_flush_guarded(table, page.epoch, page.revision) == 0);
+    struct dppd_conntrack *restarted = NULL;
+    assert(dppd_conntrack_create_policy(&restarted, &policy) == 0);
+    dppd_conntrack_status(restarted, 0, &after);
+    assert(after.epoch != before.epoch && after.revision == 1 && after.active == 0);
+    assert(dppd_conntrack_replace(restarted, &disabled, true, before.epoch, 1, NULL, NULL) == -ESTALE);
+    dppd_conntrack_destroy(restarted);
+    dppd_conntrack_destroy(table);
+}
+
+/** 更新时 worker 可继续持有旧地址，表锁保证一次 begin/finish 不跨越两个策略版本 */
+static void test_replace_concurrent(void)
+{
+    struct dppd_conntrack_policy enabled = {.capacity = 8, .timeout_s = 60}, disabled = {0};
+    struct dppd_conntrack *table = NULL;
+    assert(dppd_conntrack_create_policy(&table, &enabled) == 0);
+    struct reader readers[2] = {{.table = table}, {.table = table}};
+    pthread_t threads[2];
+    for (unsigned int i = 0; i < 2; ++i)
+        assert(pthread_create(&threads[i], NULL, traffic, &readers[i]) == 0);
+    for (unsigned int i = 0; i < 100; ++i) {
+        struct dppd_conntrack_status status;
+        dppd_conntrack_status(table, 100, &status);
+        int rc = dppd_conntrack_replace(table, i % 2 ? &enabled : &disabled, true, status.epoch, status.revision,
+            NULL, NULL);
+        assert(rc == 0 || rc == -ESTALE);
+        struct dppd_dnat_page rules;
+        assert(dppd_conntrack_dnat_list(table, 0, &rules) == 0 && rules.count == 0);
+    }
+    for (unsigned int i = 0; i < 2; ++i)
+        assert(pthread_join(threads[i], NULL) == 0);
+    dppd_conntrack_destroy(table);
+}
+
 int main(void)
 {
     for (unsigned int i = 1; i <= 4; ++i) {
@@ -278,6 +444,8 @@ int main(void)
         test_tcp();
         test_capacity();
         test_concurrent();
+        test_policy_replace();
+        test_replace_concurrent();
     }
     ipv6_case = false;
     test_snat();

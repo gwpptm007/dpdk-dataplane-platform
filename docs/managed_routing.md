@@ -138,4 +138,5 @@ python3 tests/integration/m5_northbound.py --build-dir build-perf --report-dir b
 
 本轮没有重跑原八项性能门禁、发布包双目录复现、完整十二步 M2 TAP 或 134 主机验收，不据此扩大原阶段报告
 
-本项不接入连接跟踪/NAT 策略、动态邻居配置、会话持久化、硬件卸载或真实设备复位。相关旧独立模式继续保持原能力，不能据此宣称全部功能已统一管理
+本项验收范围不包括连接跟踪/NAT 策略、动态邻居配置、会话持久化、硬件卸载或真实设备复位
+后续 [managed CT/NAT](managed_conntrack_nat.md) 已单独接入连接策略管理，其他限制仍保留，不能据此宣称全部功能已统一管理

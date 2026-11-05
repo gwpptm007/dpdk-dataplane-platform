@@ -8,7 +8,8 @@ enum dppd_flow_request_operation {
     DPPD_FLOW_REQUEST_UPDATE,
     DPPD_FLOW_REQUEST_REMOVE,
     DPPD_FLOW_REQUEST_CONFIGURE,
-    DPPD_FLOW_REQUEST_ROUTING_REPLACE
+    DPPD_FLOW_REQUEST_ROUTING_REPLACE,
+    DPPD_FLOW_REQUEST_CONNTRACK_REPLACE
 };
 
 enum dppd_flow_request_phase { DPPD_FLOW_REQUEST_PENDING = 1, DPPD_FLOW_REQUEST_DONE };
@@ -32,6 +33,12 @@ struct dppd_flow_request {
         struct dppd_flow_config_change configuration[8];
         /** 一次请求替换完整双栈表，expected_revision 使用整个 managed 配置的版本 */
         struct dppd_ipv4_configuration routing;
+        /** 清空连接必须由调用方明确选择，旧启动或旧会话快照都不能触发清空 */
+        struct {
+            struct dppd_conntrack_policy policy;
+            bool reset_sessions;
+            uint64_t expected_session_epoch, expected_session_revision;
+        } conntrack;
     } payload;
 };
 

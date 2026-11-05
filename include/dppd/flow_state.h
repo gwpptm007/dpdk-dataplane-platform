@@ -3,6 +3,19 @@
 
 #include "dppd/flow_service.h"
 #include "dppd/routing.h"
+#include "dppd/conntrack.h"
+
+/** 只保存连接策略和策略代次，活跃会话与分配出的 NAT 端口在重启后重新建立 */
+struct dppd_flow_conntrack_state {
+    uint64_t generation;
+    struct dppd_conntrack_policy policy;
+};
+
+/** 配置版本用于并发修改保护，启动标识和会话版本用于防止误清理活跃连接 */
+struct dppd_flow_conntrack_view {
+    struct dppd_conntrack_policy policy;
+    uint64_t generation, revision, durable_revision, session_epoch, session_revision;
+};
 
 /** 路由表和实际端口身份一起保存，重启时不能把同一编号误认成原来的设备 */
 struct dppd_flow_routing_state {
@@ -45,6 +58,7 @@ struct dppd_flow_state {
     struct dppd_flow_request_ledger *requests;
     /** 空指针保持原端口对模式，非空表示路由和规则使用同一文件与写锁 */
     struct dppd_flow_routing_state *routing;
+    struct dppd_flow_conntrack_state *conntrack;
 };
 
 /** 独立版本的完整配置文件，规则使用既有 v5 编码，不保存任何实际句柄和运行时计数 */
@@ -83,6 +97,16 @@ struct dppd_ipv4_router *dppd_flow_store_router(struct dppd_flow_store *store);
 int dppd_flow_store_routing_get(struct dppd_flow_store *store, struct dppd_ipv4_configuration *configuration,
     uint64_t *revision, uint64_t *durable_revision);
 int dppd_flow_store_routing_status(struct dppd_flow_store *store, struct dppd_routing_status *status);
+
+/** 返回 store 持有的固定容器，调用者只借用，关闭 store 前必须停止报文线程 */
+struct dppd_conntrack *dppd_flow_store_conntrack(struct dppd_flow_store *store);
+int dppd_flow_store_conntrack_get(struct dppd_flow_store *store, struct dppd_flow_conntrack_view *view);
+int dppd_flow_store_conntrack_status(struct dppd_flow_store *store, uint64_t now_ms,
+    struct dppd_conntrack_status *status);
+int dppd_flow_store_conntrack_list(struct dppd_flow_store *store, uint64_t now_ms, uint64_t after_id,
+    uint64_t expected_epoch, uint64_t expected_revision, struct dppd_connection_page *page);
+/** 清会话只影响运行态，需要同时核对本次启动身份和会话版本，不改变持久策略 */
+int dppd_flow_store_conntrack_flush(struct dppd_flow_store *store, uint64_t expected_epoch, uint64_t expected_revision);
 
 #define DPPD_FLOW_CONFIG_OPERATIONS 8U
 enum dppd_flow_config_operation {

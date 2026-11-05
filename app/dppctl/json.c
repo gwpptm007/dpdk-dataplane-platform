@@ -157,6 +157,97 @@ static void routing(const struct dppd_ipv4_configuration *value)
     putchar(']');
 }
 
+/** 策略中的空地址池用 null 表示关闭，原样回传后可以作为下一次整策略替换的输入 */
+static void snat_json(const struct dppd_snat_config *value)
+{
+    if (!value->enabled) {
+        printf("null");
+        return;
+    }
+    printf("{\"inside_port\":%u,\"outside_port\":%u,\"first_port\":%u,\"last_port\":%u", value->inside_port,
+        value->outside_port, value->first_port, value->last_port);
+    address("address", value->ipv6 ? AF_INET6 : AF_INET,
+        value->ipv6 ? (const void *)value->address6 : (const void *)&value->address_be);
+    putchar('}');
+}
+
+static void dnat_json(const struct dppd_dnat_rule *value)
+{
+    printf("{\"family\":\"%s\",\"protocol\":\"%s\",\"inside_port\":%u,\"outside_port\":%u,"
+           "\"public_first\":%u,\"public_last\":%u,\"private_first\":%u",
+        value->ipv6 ? "ipv6" : "ipv4", value->protocol == 6 ? "tcp" : "udp", value->inside_port, value->outside_port,
+        value->public_first, value->public_last, value->private_first);
+    address("public_address", value->ipv6 ? AF_INET6 : AF_INET,
+        value->ipv6 ? (const void *)value->public_address6 : (const void *)&value->public_address_be);
+    address("private_address", value->ipv6 ? AF_INET6 : AF_INET,
+        value->ipv6 ? (const void *)value->private_address6 : (const void *)&value->private_address_be);
+    putchar('}');
+}
+
+static void conntrack_policy_json(const struct dppd_conntrack_policy *value)
+{
+    printf("{\"capacity\":%u,\"timeout_s\":%u,\"snat\":", value->capacity, value->timeout_s);
+    snat_json(&value->snat);
+    printf(",\"snat6\":");
+    snat_json(&value->snat6);
+    printf(",\"dnat\":[");
+    for (uint32_t i = 0; i < value->dnat_count; ++i) {
+        if (i != 0)
+            putchar(',');
+        dnat_json(&value->dnat[i]);
+    }
+    printf("]}");
+}
+
+static void conntrack_status_json(const struct dppd_conntrack_status *value)
+{
+    printf("\"enabled\":%s,\"epoch\":\"%" PRIu64 "\",\"revision\":\"%" PRIu64
+           "\",\"capacity\":%u,\"timeout_s\":%u,\"active\":%u,\"peak\":%u,\"created\":\"%" PRIu64
+           "\",\"expired\":\"%" PRIu64 "\",\"flushed\":\"%" PRIu64 "\",\"invalid\":\"%" PRIu64
+           "\",\"table_full\":\"%" PRIu64 "\",\"pool_full\":\"%" PRIu64 "\",\"sessions_persistent\":false,\"snat\":",
+        boolean(value->enabled), value->epoch, value->revision, value->capacity, value->timeout_s, value->active,
+        value->peak, value->created, value->expired, value->flushed, value->invalid, value->table_full, value->pool_full);
+    snat_json(&value->snat);
+    printf(",\"snat6\":");
+    snat_json(&value->snat6);
+    printf(",\"dnat_count\":%u", value->dnat_count);
+}
+
+static void tuple_json(const struct dppd_flow_tuple *value)
+{
+    printf("{\"family\":\"%s\",\"protocol\":%u,\"source_port\":%u,\"destination_port\":%u",
+        value->ipv6 ? "ipv6" : "ipv4", value->protocol, ntohs(value->source_port_be), ntohs(value->destination_port_be));
+    address("source", value->ipv6 ? AF_INET6 : AF_INET,
+        value->ipv6 ? (const void *)value->source6 : (const void *)&value->source_be);
+    address("destination", value->ipv6 ? AF_INET6 : AF_INET,
+        value->ipv6 ? (const void *)value->destination6 : (const void *)&value->destination_be);
+    putchar('}');
+}
+
+/** 成员集合由 epoch 和 revision 共同约束，流量计数仍是读取这一页时的即时值 */
+static void connections_json(const struct dppd_connection_page *page)
+{
+    printf("\"epoch\":\"%" PRIu64 "\",\"revision\":\"%" PRIu64 "\",\"next_id\":\"%" PRIu64
+           "\",\"count\":%u,\"more\":%s,\"entries\":[", page->epoch, page->revision, page->next_id, page->count,
+        boolean(page->more));
+    static const char *states[] = {"none", "syn", "syn-ack", "open", "fin", "closed"};
+    for (uint32_t i = 0; i < page->count; ++i) {
+        const struct dppd_connection_view *entry = &page->entries[i];
+        printf("%s{\"id\":\"%" PRIu64 "\",\"ingress\":%u,\"egress\":%u,\"nat\":%s,\"seen_reply\":%s,"
+               "\"dnat_rule_id\":%u,\"tcp_state\":\"%s\",\"last_seen_ms\":\"%" PRIu64
+               "\",\"expires_ms\":\"%" PRIu64 "\",\"packets\":[\"%" PRIu64 "\",\"%" PRIu64
+               "\"],\"bytes\":[\"%" PRIu64 "\",\"%" PRIu64 "\"],\"original\":",
+            i == 0 ? "" : ",", entry->id, entry->ingress, entry->egress, boolean(entry->nat), boolean(entry->seen_reply),
+            entry->dnat_rule_id, entry->tcp_state <= DPPD_TCP_CLOSED ? states[entry->tcp_state] : "unknown",
+            entry->last_seen_ms, entry->expires_ms, entry->packets[0], entry->packets[1], entry->bytes[0], entry->bytes[1]);
+        tuple_json(&entry->original);
+        printf(",\"translated\":");
+        tuple_json(&entry->translated);
+        putchar('}');
+    }
+    putchar(']');
+}
+
 bool dppctl_json_supported(enum dppd_management_operation operation)
 {
     switch (operation) {
@@ -178,6 +269,12 @@ bool dppctl_json_supported(enum dppd_management_operation operation)
     case DPPD_MANAGEMENT_FLOW_CONFIG_APPLY:
     case DPPD_MANAGEMENT_ROUTING_GET:
     case DPPD_MANAGEMENT_ROUTING_STATUS:
+    case DPPD_MANAGEMENT_CONNTRACK_POLICY_GET:
+    case DPPD_MANAGEMENT_CONNTRACK_STATUS:
+    case DPPD_MANAGEMENT_CONNTRACK_LIST:
+    case DPPD_MANAGEMENT_CONNTRACK_FLUSH:
+    case DPPD_MANAGEMENT_NAT_STATUS:
+    case DPPD_MANAGEMENT_DNAT_LIST:
         return true;
     default:
         return false;
@@ -194,8 +291,15 @@ static bool response_bounds(const struct dppd_management_response *value)
 {
     if (value->operation == DPPD_MANAGEMENT_REQUEST_SUBMIT || value->operation == DPPD_MANAGEMENT_REQUEST_GET) {
         const struct dppd_flow_request_result *result = &value->payload.durable_result;
-        return result->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE ? result->count == 1 : result->count <= 8;
+        return result->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE ||
+                result->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE ? result->count == 1 : result->count <= 8;
     }
+    if (value->operation == DPPD_MANAGEMENT_CONNTRACK_POLICY_GET)
+        return value->payload.conntrack_policy.policy.dnat_count <= DPPD_MAX_DNAT_RULES;
+    if (value->operation == DPPD_MANAGEMENT_CONNTRACK_LIST)
+        return value->payload.connections.count <= DPPD_CT_PAGE_SIZE;
+    if (value->operation == DPPD_MANAGEMENT_DNAT_LIST)
+        return value->payload.dnat.count <= DPPD_CT_PAGE_SIZE;
     if (value->operation == DPPD_MANAGEMENT_ROUTING_GET) {
         const struct dppd_ipv4_configuration *configuration = &value->payload.flow_routing.configuration;
         return configuration->route_count <= DPPD_IPV4_ROUTE_LIMIT &&
@@ -235,20 +339,51 @@ int dppctl_json_response(const struct dppd_management_request *request, const st
     case DPPD_MANAGEMENT_REQUEST_SUBMIT:
     case DPPD_MANAGEMENT_REQUEST_GET: {
         const struct dppd_flow_request_result *value = &response->payload.durable_result;
-        static const char *operations[] = {"unknown", "create", "update", "remove", "configure", "routing_replace"};
+        static const char *operations[] = {"unknown", "create", "update", "remove", "configure", "routing_replace",
+            "conntrack_replace"};
         printf("\"client\":\"%" PRIu64 "\",\"sequence\":\"%" PRIu64
                "\",\"operation\":\"%s\",\"state\":\"%s\",\"status\":%d,\"applied\":%s,\"durable\":%s,"
                "\"blocked\":%s,\"revision\":\"%" PRIu64 "\",\"rules\":[",
             value->key.client, value->key.sequence,
-            (unsigned int)value->operation <= 5 ? operations[value->operation] : "unknown",
+            (unsigned int)value->operation <= 6 ? operations[value->operation] : "unknown",
             value->phase == DPPD_FLOW_REQUEST_DONE ? "complete" : "pending", value->status, boolean(value->applied),
             boolean(value->durable), boolean(response->status == -EUCLEAN), value->revision);
-        for (uint32_t i = 0; value->operation != DPPD_FLOW_REQUEST_ROUTING_REPLACE && i < value->count && i < 8; ++i)
+        for (uint32_t i = 0; value->operation != DPPD_FLOW_REQUEST_ROUTING_REPLACE &&
+             value->operation != DPPD_FLOW_REQUEST_CONNTRACK_REPLACE && i < value->count && i < 8; ++i)
             printf("%s{\"id\":\"%" PRIu64 "\",\"generation\":\"%" PRIu64 "\"}", i == 0 ? "" : ",", value->ids[i],
                 value->generations[i]);
         putchar(']');
         if (value->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE)
             printf(",\"routing_generation\":\"%" PRIu64 "\"", value->generations[0]);
+        else if (value->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE)
+            printf(",\"conntrack_generation\":\"%" PRIu64 "\"", value->generations[0]);
+        break;
+    }
+    case DPPD_MANAGEMENT_CONNTRACK_POLICY_GET: {
+        const struct dppd_flow_conntrack_view *value = &response->payload.conntrack_policy;
+        printf("\"generation\":\"%" PRIu64 "\",\"revision\":\"%" PRIu64 "\",\"durable_revision\":\"%" PRIu64
+               "\",\"session_epoch\":\"%" PRIu64 "\",\"session_revision\":\"%" PRIu64 "\",\"policy\":",
+            value->generation, value->revision, value->durable_revision, value->session_epoch, value->session_revision);
+        conntrack_policy_json(&value->policy);
+        break;
+    }
+    case DPPD_MANAGEMENT_CONNTRACK_STATUS:
+    case DPPD_MANAGEMENT_CONNTRACK_FLUSH:
+    case DPPD_MANAGEMENT_NAT_STATUS:
+        conntrack_status_json(&response->payload.conntrack);
+        break;
+    case DPPD_MANAGEMENT_CONNTRACK_LIST:
+        connections_json(&response->payload.connections);
+        break;
+    case DPPD_MANAGEMENT_DNAT_LIST: {
+        const struct dppd_dnat_page *page = &response->payload.dnat;
+        printf("\"next_id\":%u,\"more\":%s,\"entries\":[", page->next_id, boolean(page->more));
+        for (uint32_t i = 0; i < page->count; ++i) {
+            printf("%s{\"id\":%u,\"rule\":", i == 0 ? "" : ",", page->entries[i].id);
+            dnat_json(&page->entries[i].rule);
+            putchar('}');
+        }
+        putchar(']');
         break;
     }
     case DPPD_MANAGEMENT_ROUTING_GET:
