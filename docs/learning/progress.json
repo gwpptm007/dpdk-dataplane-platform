@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-11-04",
+  "updated_at": "2026-11-05",
   "material_sync": {
-    "updated_at": "2026-11-04",
-    "description": "启动导读已补充并行运行与停止流程，启动总图和 mbuf 循环图采用分区 Mermaid 文档，保留两个停止标记、任务返回、资源释放顺序及报文归属说明",
+    "updated_at": "2026-11-05",
+    "description": "启动总图和 mbuf 循环图采用分区 Mermaid 文档；已补充网口准备、接口与 PCI 设备核对，以及 Netlink 查询请求、回复和属性提取流程",
     "topics": [
       {"title": "程序启动、运行、退出：先看全景", "href": "startup/index.html#overview"},
       {"title": "程序启动、运行与停止：分区 Mermaid 总图", "href": "startup/startup-stop.md"},
@@ -18,24 +18,24 @@
   "basis": "按实际源码走读与本次对话确认，已读过不等于已熟练掌握",
   "summary": "报文处理与规则管理已有走读记录；启动、运行和退出虽然讲过，但用户尚未建立整体理解。当前回到程序全貌，用固定例子重新梳理，连接跟踪与 NAT 暂缓展开",
   "current": {
-    "title": "3.1 链路状态查询与 worker 发送检查",
-    "description": "已读到 dppd_devices_poll_links，区分查询返回值与 UP/DOWN 状态，说明初次不支持查询的 UNSUPPORTED、查询失败，以及主线程更新状态供 worker 发送前读取；尚未确认掌握",
+    "title": "3.1 Netlink 接口查询",
+    "description": "已走读 read_netlink_identity 的请求构造、内核通信、回复校验、接口属性提取和 socket 清理；尚未确认掌握",
     "section": "3.1",
-    "file": "lib/device/device.c",
-    "fn": "dppd_devices_poll_links",
-    "review_href": "startup/startup-stop.md#链路状态",
-    "review_label": "回顾链路查询结果怎样影响发送资格"
+    "file": "lib/device/topology.c",
+    "fn": "read_netlink_identity",
+    "review_href": "startup/startup-stop.md#接口身份",
+    "review_label": "回顾 Netlink 怎样按编号查询接口信息"
   },
   "next": {
-    "title": "设备初始化的最后一步：收集网口身份与关联信息",
-    "description": "从 dppd_devices_init 的链路检查之后进入 dppd_topology_discover，了解拓扑保存哪些信息，以及后续规则配置怎样使用它",
+    "title": "返回身份补充流程，解析 mlx5 端口角色",
+    "description": "Netlink 查询返回 read_identity 完成核对，再回到 discover_identity，沿 dppd_topology_resolve_role 调用查看物理端口名与端口角色的对应关系",
     "href": "startup/index.html#stage-2",
     "link_label": "对照收发资源准备阶段",
     "file": "lib/device/topology.c",
-    "fn": "dppd_topology_discover",
-    "caller_fn": "dppd_topology_discover",
-    "caller_anchor": "return dppd_topology_discover_with_reader(cfg, topology, read_identity, NULL);",
-    "caller_label": "查看拓扑发现入口怎样交给具体读取流程",
+    "fn": "dppd_topology_resolve_role",
+    "caller_fn": "discover_identity",
+    "caller_anchor": "dppd_topology_resolve_role(endpoint, endpoint->driver_name, endpoint->kind == DPPD_ENDPOINT_REPRESENTOR,",
+    "caller_label": "查看身份核对成功后怎样进入角色解析",
     "note": "沿已学的启动主线补齐配置与实际收包的联系；连接跟踪与 NAT 仍暂缓，已讲解不作为掌握依据"
   },
   "recent_flow": "程序外：按模式准备大页、权限和设备驱动 → 执行 dppd\n程序内：EAL → 参数 → runtime 初始化收发资源 → control 与管理入口\n运行：主线程管理；worker 按自己的队列处理报文\n退出：关闭入口 → 请求停止 → 等待 worker → 清理控制面、设备和池 → EAL 清理",
@@ -49,7 +49,7 @@
     "2.2": {"status": "最近重点复习", "detail": "匹配表构建、原子发布、QSBR、安全点、回收链表与计数器引用"},
     "2.3": {"status": "单条主流程已有走读记录", "detail": "新建、版本检查、修改和删除已讲，原理集中保存为参考；不表示全部分支已经掌握"},
     "2.4": {"status": "回滚与保存已有走读记录", "detail": "事务清理、保存失败、补写与隔离已讲，后续按需查阅"},
-    "3.1": {"status": "启动至停止已重新走读，尚未确认理解", "detail": "已串联网口准备、按节点用池及链路查询与发送检查；下一步查看网口拓扑信息，尚未确认掌握"}
+    "3.1": {"status": "启动至停止已重新走读，尚未确认理解", "detail": "已串联网口准备、接口身份核对与 Netlink 查询；下一步返回身份补充流程解析 mlx5 端口角色，尚未确认掌握"}
   },
   "language_topics": ["函数指针与回调", "void *context 与对象地址", "结构体内容复制", "二级指针删除链表节点", "原子发布与读者安全点", "计数器引用管理"],
   "follow_up": [

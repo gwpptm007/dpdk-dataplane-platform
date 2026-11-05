@@ -287,11 +287,11 @@
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\sources\\lib__device__device.c.html",
+      "name": "Link exists: docs\\learning\\sources\\lib__device__topology.c.html",
       "passed": true
     },
     {
-      "name": "Anchor exists: #L896",
+      "name": "Anchor exists: #L162",
       "passed": true
     },
     {
@@ -307,7 +307,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L510",
+      "name": "Anchor exists: #L482",
       "passed": true
     },
     {
@@ -315,7 +315,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L508",
+      "name": "Anchor exists: #L55",
       "passed": true
     },
     {

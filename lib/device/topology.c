@@ -153,9 +153,18 @@ static int copy_attribute(char *output, size_t capacity, const struct rtattr *at
     return 0;
 }
 
-/** 在当前网络命名空间查询接口，避免 sysfs 挂载仍指向宿主命名空间时误认同名接口 */
+/**
+ * 按 if_index 查询当前网络命名空间中的接口，填写接口编号、接口名和可选物理端口名
+ * 组装 RTM_GETLINK 请求 → 发送给内核 → 校验回复并提取属性 → 关闭 socket
+ * 成功返回 0，失败返回负错误码，失败时输出可能已部分填写，由调用方丢弃
+ * sysfs 挂载可能仍指向宿主，先查询当前网络命名空间，再由 read_identity 交叉核对
+ */
 static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identity *identity)
 {
+    /**
+     * 请求布局：[Netlink 消息头 header][接口查询条件 link]
+     * RTM_GETLINK 表示查询，ifi_index 指定接口；seq 用于对应请求和回复
+     */
     struct {
         struct nlmsghdr header;
         struct ifinfomsg link;
@@ -166,6 +175,7 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
         .link = {.ifi_family = AF_UNSPEC, .ifi_index = (int)if_index}};
     struct sockaddr_nl kernel = {.nl_family = AF_NETLINK};
     struct timeval timeout = {.tv_sec = 0, .tv_usec = 200000};
+    /** 按消息头要求对齐接收缓冲；vector 指向缓冲，message 同时接收发送方地址 */
     _Alignas(struct nlmsghdr) char buffer[16384];
     struct iovec vector = {.iov_base = buffer, .iov_len = sizeof(buffer)};
     struct msghdr message = {.msg_name = &kernel, .msg_namelen = sizeof(kernel), .msg_iov = &vector, .msg_iovlen = 1};
@@ -176,6 +186,7 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
 
     if (if_index == 0 || if_index > INT_MAX)
         return -ENODEV;
+    /** NETLINK_ROUTE 查询内核网络信息，消息不经业务网卡发出；接收最多等待 200 ms */
     fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
     if (fd < 0)
         return -errno;
@@ -193,6 +204,7 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
         rc = -errno;
         goto done;
     }
+    /** 拒绝被截断的回复，并检查发送方为内核单播地址 */
     if ((message.msg_flags & MSG_TRUNC) != 0 || kernel.nl_pid != 0 || kernel.nl_groups != 0) {
         rc = -EOVERFLOW;
         goto done;
@@ -202,6 +214,7 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
         goto done;
     }
     remaining = (int)received;
+    /** 一次接收可包含多条消息，按各自长度和对齐位置遍历，只处理本次请求的回复 */
     for (header = (struct nlmsghdr *)buffer; NLMSG_OK(header, remaining); header = NLMSG_NEXT(header, remaining)) {
         struct ifinfomsg *link;
         struct rtattr *attribute;
@@ -218,6 +231,7 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
                 rc = -ENODATA;
             goto done;
         }
+        /** RTM_NEWLINK 在这里承载接口信息，收到它并不表示本函数创建了接口 */
         if (header->nlmsg_type != RTM_NEWLINK || header->nlmsg_len < NLMSG_LENGTH(sizeof(*link)))
             continue;
         link = NLMSG_DATA(header);
@@ -225,6 +239,7 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
             continue;
         identity->if_index = if_index;
         attributes = IFLA_PAYLOAD(header);
+        /** 属性按类型、长度和值组织，只提取接口名和物理端口名，其他属性跳过 */
         for (attribute = IFLA_RTA(link); RTA_OK(attribute, attributes); attribute = RTA_NEXT(attribute, attributes)) {
             if (attribute->rta_type == IFLA_IFNAME) {
                 if (has_interface) {
@@ -250,6 +265,7 @@ static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identit
         goto done;
     }
 
+    /** socket 创建成功后统一从这里关闭，查询失败也不会遗漏释放 */
 done:
     close(fd);
     return rc;
@@ -332,7 +348,11 @@ static int read_optional_phys_port(const char *path, char *output, size_t capaci
     return rc;
 }
 
-/** 先核对通用 PCI 与接口身份，全部成功后再交给上层按驱动解析角色 */
+/**
+ * 核对 if_index 对应的 Linux 接口是否属于 device_name 指定的 PCI 设备
+ * Netlink 查询接口 → sysfs 核对编号、设备和物理端口名 → 再查接口是否变化
+ * 全部通过后写入 identity 并返回 0，失败返回负错误码，不写入输出
+ */
 static int read_identity(uint32_t if_index, const char *device_name, struct dppd_topology_identity *identity,
     void *opaque)
 {
@@ -346,11 +366,13 @@ static int read_identity(uint32_t if_index, const char *device_name, struct dppd
     (void)opaque;
     if (!valid_pci_name(device_name))
         return -ENOTSUP;
+    /** Netlink 向当前网络命名空间的内核查询接口，observed 保存首次结果 */
     rc = read_netlink_identity(if_index, &observed);
     if (rc != 0)
         return rc;
     if (!valid_interface_name(observed.interface_name))
         return -EINVAL;
+    /** /sys/class/net/enp3s0/ifindex 例如编号 5 查到 enp3s0，还需确认 sysfs 中 enp3s0 的 ifindex 也是 5 */
     snprintf(path, sizeof(path), "/sys/class/net/%s/ifindex", observed.interface_name);
     rc = read_sysfs_text(path, text, sizeof(text));
     if (rc != 0)
@@ -358,19 +380,21 @@ static int read_identity(uint32_t if_index, const char *device_name, struct dppd
     cursor = text;
     if (parse_number(&cursor, &observed_index) != 0 || *cursor != '\0' || observed_index != if_index)
         return -EXDEV;
+    /** device 是设备链接，解析实际路径后取末段 PCI 名称，与 PMD 提供的设备名比较 */
     snprintf(path, sizeof(path), "/sys/class/net/%s/device", observed.interface_name);
     if (realpath(path, target) == NULL)
         return -errno;
     basename = strrchr(target, '/');
     if (basename == NULL || strcmp(basename + 1, device_name) != 0)
         return -EXDEV;
+    /** 物理端口名也要与 Netlink 一致；两边都没有名称时允许继续，具体角色由上层判断 */
     snprintf(path, sizeof(path), "/sys/class/net/%s/phys_port_name", observed.interface_name);
     rc = read_optional_phys_port(path, text, sizeof(text));
     if (rc != 0)
         return rc;
     if (strcmp(text, observed.phys_port_name) != 0)
         return -EXDEV;
-    /** 再查一次当前命名空间，避免读取期间接口改名或编号被另一个设备复用 */
+    /** 读取过程中接口可能改名或编号被复用，再查询并比较；发现变化返回 -EAGAIN */
     rc = read_netlink_identity(if_index, &current);
     if (rc != 0)
         return rc;
@@ -378,6 +402,7 @@ static int read_identity(uint32_t if_index, const char *device_name, struct dppd
         strcmp(current.phys_port_name, observed.phys_port_name) != 0 ||
         if_nametoindex(observed.interface_name) != if_index)
         return -EAGAIN;
+    /** 前面的步骤都只修改局部变量，成功后才一次性复制给调用方 */
     memcpy(observed.device_name, device_name, strlen(device_name) + 1U);
     *identity = observed;
     return 0;
@@ -394,6 +419,13 @@ static const char *get_device_name(const struct rte_eth_dev_info *info)
 #endif
 }
 
+/**
+ * 为当前网口补充设备名称、已核对的 Linux 接口名和可确认的端口角色，结果写入 endpoint
+ * 保存 PMD 观察 → 检查 PCI 名称和接口编号 → reader 核对接口身份
+ *   → 校验读取器结果并保存名称 → 对支持的 mlx5 网口继续解析角色
+ * 正式入口传入的 reader 是 read_identity，opaque 原样传给读取器
+ * 无法确认时保留 UNKNOWN 并填写 role_error，本函数返回不会中止外层的基础网口收集
+ */
 static void discover_identity(struct dppd_endpoint *endpoint, const struct rte_eth_dev_info *info,
     dppd_topology_identity_reader reader, void *opaque)
 {
@@ -402,6 +434,7 @@ static void discover_identity(struct dppd_endpoint *endpoint, const struct rte_e
     int rc;
 
     endpoint->if_index = info->if_index;
+    /** 先清掉旧角色及编号，后面只用本次核对通过的信息确认角色 */
     clear_role(endpoint, -ENOTSUP);
     /** 可信接口字段只从完整成功的读取器发布，错误时不保留容易被误认领的原始名称 */
     endpoint->interface_name[0] = endpoint->phys_port_name[0] = '\0';
@@ -412,6 +445,7 @@ static void discover_identity(struct dppd_endpoint *endpoint, const struct rte_e
         endpoint->role_error = mlx5 || info->if_index != 0 ? -ENODATA : -ENOTSUP;
         return;
     }
+    /** 当前正式读取器按 PCI 设备与内核接口核对身份，非 PCI 名称保持未识别状态 */
     if (!valid_pci_name(device_name))
         return;
     if (info->if_index == 0 || info->if_index > INT_MAX) {
@@ -422,6 +456,7 @@ static void discover_identity(struct dppd_endpoint *endpoint, const struct rte_e
         endpoint->role_error = -ENODATA;
         return;
     }
+    /** 正式入口中实际调用 read_identity，identity 接收核对后的接口信息 */
     rc = reader(info->if_index, device_name, &identity, opaque);
     if (rc != 0) {
         endpoint->role_error = rc < 0 ? rc : -EIO;
@@ -437,7 +472,7 @@ static void discover_identity(struct dppd_endpoint *endpoint, const struct rte_e
     }
     memcpy(endpoint->interface_name, identity.interface_name, sizeof(endpoint->interface_name));
     memcpy(endpoint->phys_port_name, identity.phys_port_name, sizeof(endpoint->phys_port_name));
-    /** 通用接口身份不能证明 PF/VF/SF，只有原有 mlx5 名称与 representor 契约可继续解析 */
+    /** 接口核对成功后保存名称；角色解析目前仅支持 mlx5，其他驱动仍保留 UNKNOWN */
     if (!mlx5)
         return;
     if (identity.phys_port_name[0] == '\0') {
@@ -460,9 +495,16 @@ static int copy_pmd_name(char *destination, size_t capacity, const char *value, 
     return 0;
 }
 
+/**
+ * 按 cfg 的网口列表读取 PMD 信息，生成网口身份与关联记录，reader 用于进一步核对接口身份
+ * 清空输出 → 逐口填入临时 discovered → 基础信息全部读取成功后整体写入 topology
+ * 身份或角色无法确认时保留 UNKNOWN 和 role_error；参数、PMD 查询或名称复制错误返回负错误码
+ * 成功返回 0；topology 非空时，失败不会输出只发现一半的网口列表
+ */
 int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dppd_topology *topology,
     dppd_topology_identity_reader reader, void *opaque)
 {
+    /** 临时结果与调用方的输出分开，发现中途失败时不发布部分结果 */
     struct dppd_topology discovered = {0};
 
     if (topology == NULL)
@@ -477,6 +519,7 @@ int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dpp
 
     for (uint16_t i = 0; i < cfg->nb_ports; ++i) {
         struct rte_eth_dev_info info = {0};
+        /** 本轮填写下一个空条目，完成当前网口后才增加 nb_endpoints */
         struct dppd_endpoint *endpoint = &discovered.endpoints[discovered.nb_endpoints];
         int rc = rte_eth_dev_info_get(cfg->ports[i], &info);
 
@@ -497,6 +540,7 @@ int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dpp
         const char *device_name = get_device_name(&info);
         if (device_name != NULL && strnlen(device_name, sizeof(endpoint->device_name)) == sizeof(endpoint->device_name))
             return -ENAMETOOLONG;
+        /** reader 核对接口身份，无法识别的角色及原因保存在当前条目中，不凭端口编号猜测 */
         discover_identity(endpoint, &info, reader, opaque);
         discovered.nb_endpoints++;
     }
@@ -505,8 +549,10 @@ int dppd_topology_discover_with_reader(const struct dppd_config *cfg, struct dpp
     return 0;
 }
 
+/** 使用正式身份读取函数 read_identity 发现 cfg 选定的网口，结果写入 topology，返回发现结果 */
 int dppd_topology_discover(const struct dppd_config *cfg, struct dppd_topology *topology)
 {
+    // read_identity 函数指针
     return dppd_topology_discover_with_reader(cfg, topology, read_identity, NULL);
 }
 
