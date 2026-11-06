@@ -313,7 +313,7 @@ UNSUPPORTED 表示缺少链路查询能力，不能据此认定链路已 UP；�
 
 ## 网口拓扑
 
-链路检查之后，`dppd_devices_init()` 调用 [dppd_topology_discover](../../../lib/device/topology.c#L553)，输出参数是 `&devices->topology`。这里保存的是配置网口的身份与设备关联：网口编号、驱动、设备名称、普通口或代理口种类，以及驱动提供的交换域等信息
+链路检查之后，`dppd_devices_init()` 调用 [dppd_topology_discover](../../../lib/device/topology.c#L565)，输出参数是 `&devices->topology`。这里保存的是配置网口的身份与设备关联：网口编号、驱动、设备名称、普通口或代理口种类，以及驱动提供的交换域等信息
 
 ### 先看结果放在哪里
 
@@ -347,7 +347,7 @@ devices->topology
 
 ### 从入口进入实际收集过程
 
-入口将正式身份读取函数传给 [dppd_topology_discover_with_reader](../../../lib/device/topology.c#L504)：
+入口将正式身份读取函数传给 [dppd_topology_discover_with_reader](../../../lib/device/topology.c#L516)：
 
 ```c
 return dppd_topology_discover_with_reader(cfg, topology, read_identity, NULL);
@@ -392,7 +392,7 @@ dppd_devices_init 填写 devices->topology
 
 ## 接口身份
 
-上一段已经为每个网口建立 `endpoint`，当前网口的 PMD 基础信息放在 `info` 中。现在沿拓扑遍历中的 [discover_identity](../../../lib/device/topology.c#L429) 调用，核对这个设备与 Linux 接口的对应关系，并补充能确认的角色
+上一段已经为每个网口建立 `endpoint`，当前网口的 PMD 基础信息放在 `info` 中。现在沿拓扑遍历中的 [discover_identity](../../../lib/device/topology.c#L441) 调用，核对这个设备与 Linux 接口的对应关系，并补充能确认的角色
 
 ### 分清同一网口的三种标识
 
@@ -451,7 +451,7 @@ PMD 提供设备名、接口编号
 
 ### 读取器怎样核对同一个网口
 
-沿 `discover_identity()` 的 `reader(...)` 调用进入 [read_identity](../../../lib/device/topology.c#L356)。它接收待核对的 Linux 接口编号和 PCI 设备名，成功才填写 `identity` 并返回 0；失败返回负错误码，输出保持原样
+沿 `discover_identity()` 的 `reader(...)` 调用进入 [read_identity](../../../lib/device/topology.c#L368)。它接收待核对的 Linux 接口编号和 PCI 设备名，成功才填写 `identity` 并返回 0；失败返回负错误码，输出保持原样
 
 这里用到两种读取方式：**Netlink** 是程序向内核查询网络接口的通信方式；**sysfs** 将内核中的设备信息呈现在 `/sys` 路径下，程序可以像读取文件一样获取这些属性。当前代码只查询和核对，不修改网口配置
 
@@ -487,7 +487,7 @@ PMD 提供设备名、接口编号
 
 ### Netlink 怎样查询接口信息
 
-从 `read_identity()` 的 `read_netlink_identity(if_index, &observed)` 进入 [read_netlink_identity](../../../lib/device/topology.c#L162)。这一层负责向当前网络命名空间的内核查询接口编号、接口名和可选物理端口名；PCI 设备仍由上一层读取 sysfs 核对
+从 `read_identity()` 的 `read_netlink_identity(if_index, &observed)` 进入 [read_netlink_identity](../../../lib/device/topology.c#L174)。这一层负责向当前网络命名空间的内核查询接口编号、接口名和可选物理端口名；PCI 设备仍由上一层读取 sysfs 核对
 
 查询过程与业务收发路径分开：这里使用 Netlink socket 与本机内核通信，不经过 worker、RX/TX 队列或业务网卡发送
 
@@ -528,6 +528,529 @@ socket 成功创建后，后续错误统一走 `done` 关闭它；`goto done` �
 
 接口查询这条支线到这里读完。下一步返回 `discover_identity()`，沿已有的 `dppd_topology_resolve_role(...)` 调用，看已核对的物理端口名怎样转换成 mlx5 端口角色；不用从 Netlink 跳到新的业务流程
 
+### 从已核对的名称解析端口角色
+
+接口查询返回后，调用关系回到原来的位置：
+
+```text
+dppd_devices_init
+  → dppd_topology_discover
+    → dppd_topology_discover_with_reader
+      → discover_identity
+        → read_identity → read_netlink_identity → 返回并完成身份核对
+        → dppd_topology_resolve_role  ← 现在继续这里
+```
+
+`discover_identity()` 只在 mlx5 驱动且物理端口名非空时进入 [dppd_topology_resolve_role](../../../lib/device/topology.c#L62)。这个函数解析名称和检查标志，填写已有的 `endpoint`，不会创建 PF/VF/SF，也不安装转发规则
+
+先分清当前网口与它所代表的端口：`kind = REPRESENTOR` 表示当前 DPDK 网口是代理口，`role = VF` 表示它代表 VF 侧的端口。代理口提供管理和收发入口，与所代表的功能分别记录，详见 [Linux representor 说明](https://www.kernel.org/doc/html/v6.4/networking/representors.html)
+
+| 本段出现的名称 | 含义 |
+| --- | --- |
+| UPLINK | 本项目中的物理上联端口角色，对应名称中的 `p` |
+| PF | Physical Function，物理功能；名称中的 `pf1` 给出 PF 编号，不是物理网线插口编号 |
+| VF | Virtual Function，虚拟功能；例如 `pf1vf2` 中 VF 编号为 2 |
+| SF | Subfunction，子功能；例如 `pf1sf2` 中 SF 编号为 2 |
+
+mlx5 支持 PF、VF、SF 及相应代理口，术语可对照 [DPDK mlx5 文档](https://doc.dpdk.org/guides-25.07/nics/mlx5.html)。下面的名称接受范围和标志要求以本项目实现为准
+
+调用中的四个参数依次是当前记录、驱动名、PMD 是否报告代理口、已经核对的物理端口名。以 `net_mlx5`、代理口和 `c0pf1vf2` 为例：
+
+```text
+c0pf1vf2
+│ │  └─ vf2：VF 编号 2，最终角色 VF
+│ └──── pf1：所属 PF 编号 1
+└────── c0：controller 编号 0，可省略
+```
+
+函数先把名称复制到局部 `name`，再清理旧角色。这样即使调用方直接传入 `endpoint->phys_port_name`，清理输出也不会破坏正在解析的输入。`parsed` 保存本次临时结果
+
+解析时 `cursor` 指向尚未处理的字符，`parse_number()` 读完连续十进制数字后会把它移到下一段：
+
+```text
+c0pf1vf2 → 读 c 和 0 → cursor 指向 pf1vf2
+pf1vf2   → 读 pf 和 1 → cursor 指向 vf2，暂定角色 PF
+vf2      → 读 vf 和 2 → cursor 指向字符串结尾，最终角色 VF
+```
+
+同一个 `function_id` 保存 VF 或 SF 的编号，具体含义由 `role` 决定；`has_*` 标志说明该编号是否实际出现，编号为 0 也可能有效
+
+| 名称示例 | 解析结果 | 本项目要求的 `is_representor` |
+| --- | --- | --- |
+| `p0` | UPLINK，物理上联端口编号 0 | `false` |
+| `pf1` | PF，PF 编号 1 | `true` |
+| `c0pf1vf2` | VF，controller 0、PF 1、VF 2 | `true` |
+| `pf0sf2` | SF，PF 0、SF 2 | `true` |
+
+名称必须全部读完。`pf1vf2tail` 即使前半段可解析，仍因尾部剩余字符而失败。缺少数字、负数、编号溢出等也会失败
+
+最后这条判断把名称解析结果与 PMD 报告相互核对：
+
+```c
+if ((parsed.role != DPPD_ENDPOINT_ROLE_UPLINK) != is_representor)
+```
+
+左边表示“名称解析成了 PF/VF/SF”，右边表示“驱动报告这是代理口”。两边不同则返回 `-EPROTO`，例如名称 `p0` 却带代理口标志，或名称 `pf1vf2` 却不带代理口标志。此要求属于当前项目对支持名称的检查，不推广成所有驱动的通用规则
+
+检查通过后，函数保存角色、判断来源、编号及其有效标志，并把 `role_error` 清为 0；失败则清理角色和编号，保留 UNKNOWN 与错误码
+
+返回 `discover_identity()` 后，外层继续收集其他配置网口，完成后写入 `devices->topology`。`dppd_devices_init()` 随后用 `dppd_topology_dump()` 打印这些记录，再返回 `dppd_runtime_init()`。下一段回到这条启动主线，看准备好的 MAC 地址怎样交给 IPv6 邻居发现
+
+## ND 初始化
+
+拓扑收集完成后，返回 [dppd_runtime_init](../../../lib/runtime/runtime.c#L28)。此时网口已经启动，MAC 已保存到 `runtime->devices.ports[]`，worker 还没有开始收包
+
+下一段调用 [dppd_nd6_create](../../../lib/dataplane/nd6.c#L216)，创建 IPv6 邻居发现管理表。表中保存本机 IPv6 地址、网口 MAC、动态邻居缓存及等待 MAC 解析的报文槽位；创建时邻居缓存和等待槽位都为空
+
+### MAC 数组怎样连接网口与 ND
+
+```c
+uint8_t macs[DPPD_MAX_PORTS][6] = {{0}};
+for (uint16_t i = 0; i < runtime->devices.nb_ports; ++i)
+    memcpy(macs[i], runtime->devices.ports[i].mac.addr_bytes, 6);
+```
+
+每行是一个 6 字节 MAC，行号遵循 `cfg->ports[]` 的配置顺序。行号与 DPDK 端口号分别使用，例如下面只是顺序示例：
+
+```text
+cfg->ports = [2, 5]
+  ├─ devices.ports[0]：网口 2 → macs[0]
+  └─ devices.ports[1]：网口 5 → macs[1]
+
+本机 ND 地址配置的 port_id = 5
+  → 在 cfg->ports[] 中找到 j = 1
+  → 复制 macs[1] 到该本机地址的 owner->mac
+```
+
+`cfg->nd6[]` 保存本机 IPv6 地址及所属网口、VLAN；不是已经学到的邻居地址。创建函数把配置和对应的 MAC 复制到自己的表中，因此返回后不再依赖局部数组 `macs` 的存活
+
+### 调用参数与输出
+
+```c
+rc = dppd_nd6_create(&runtime->nd6, cfg,
+    (const uint8_t(*)[6])macs, dppd_monotonic_ms());
+```
+
+| 参数 | 在本次调用中的含义 |
+| --- | --- |
+| `&runtime->nd6` | 把指针成员自身的地址交出去，函数通过 `*result = table` 让它指向新建管理表 |
+| `cfg` | 提供本机 IPv6 地址、所属端口、VLAN 和邻居可达期限等配置 |
+| `(const uint8_t(*)[6])macs` | 指向只读的 6 字节数组，即每次指向一行 MAC；不是 `uint8_t **` |
+| `dppd_monotonic_ms()` | 当前单调毫秒时间，供安排后续检测时间使用 |
+
+### 创建函数的完整过程
+
+```text
+检查输出指针、配置和 MAC 数组
+  ├─ 未配置本机 ND 地址 → 返回 0，runtime->nd6 保持 NULL
+  └─ 配置了本机 ND 地址
+       → 校验配置
+       → calloc 分配并清零管理表
+       → 准备随机种子、互斥锁和初始状态
+       → 逐个复制本机 IPv6 配置，按端口号找到并复制 MAC
+       → 检查 MAC 非零且为单播地址
+       → 首次检测时间安排在 now 到 now+1000 毫秒之间
+       → *result = table，返回 0
+```
+
+清零后本机地址的 `state` 为 0，对应 `DPPD_ND6_TENTATIVE`：待完成重复地址检测。动态邻居数和等待包数也为 0。`status.local_count` 保存本机 IPv6 地址配置数量，`reachable_ms` 保存邻居可达期限的基准值
+
+这些初始时间只安排后续工作。**本函数不发送报文，也不意味着本机 IPv6 地址已经可用**。后续由 worker 驱动 `dppd_nd6_tick()` 推进检测，检测通过后地址才转为 `PREFERRED`
+
+```text
+现在：runtime_init → 收集 MAC → 创建 ND 表，地址为 TENTATIVE
+之后：main 继续初始化控制与管理入口 → runtime_start 提交 worker
+运行：worker_main 的 queue_id == 0 → tick 推进重复地址检测
+```
+
+这样从初始化切换到 worker 时有明确的时间联系：创建管理表发生在启动准备阶段，检测报文的发送发生在 worker 运行阶段
+
+如果创建失败，新建表由创建函数清理；`runtime_init` 再停止前面已准备好的网口并返回错误。`rc == 0` 既可能表示成功创建了表，也可能表示未配置 ND 而跳过，是否启用还需看 `runtime->nd6` 是否为 NULL
+
+## worker 推进本机 IPv6 地址检测
+
+上一段只创建了 ND 表，还没有发送检测报文。现在连接启动与运行两个时刻：
+
+```text
+runtime_init：创建 ND 表，本机地址为 TENTATIVE
+  → 返回 main，继续控制与管理入口初始化
+  → main 调用 runtime_start
+  → remote_launch 将 worker_main 提交到选定 lcore
+  → worker 完成读者注册，发布 RUNNING
+  → 收包循环：队列 0 调用 ND tick，各队列继续处理等待包和网口 RX
+```
+
+入口见 [dppd_worker_main](../../../lib/dataplane/worker.c#L575)。只有 `queue_id == 0` 的 worker 推进 ND 定时任务，不额外创建定时线程；其他 worker 仍可接收 ND 报文并执行各自的收包任务
+
+```c
+if (runtime->nd6 != NULL) {
+    if (worker->queue_id == 0)
+        dppd_nd6_tick(runtime->nd6, dppd_monotonic_ms(), send_nd6, worker);
+    process_waiting(worker);
+}
+```
+
+本段进入 [dppd_nd6_tick](../../../lib/dataplane/nd6.c#L481)，重点读第一个循环：处理本机 IPv6 地址的重复地址检测，即 DAD。后面的动态邻居过期和探测属于另一个循环，本段不混在一起展开
+
+### 反复调用与到期处理
+
+`tick` 加锁并推进表内时钟，只在达到 `next_tick` 时扫描，然后将下一次扫描期限设为当前表内时间加 10 毫秒。这里不调用 sleep，也不要求每次恰好相隔 10 毫秒；worker 循环继续收包，后续调用满足期限才再次扫描
+
+每个本机地址还单独检查 `due`：必须为 `TENTATIVE` 且时间到期才处理。已经可用或已经冲突的地址都跳过
+
+### sent 表示请求是否已成功提交
+
+| 本机地址状态 | sent | 到期时做什么 |
+| --- | --- | --- |
+| TENTATIVE | false | 构造并发送检测 NS，成功则置为 true，失败保留 false |
+| TENTATIVE | true | 等待期已结束且未被标记冲突，改为 PREFERRED |
+| PREFERRED 或 DUPLICATE | 任意 | 跳过本机地址检测分支 |
+
+发送后，无论成功还是失败都把 `due` 设为当前时间加 1000 毫秒。成功时这段时间用于等待冲突证据；失败时等待到期后再重发，不能直接将地址设为可用
+
+### 检测 NS 问的是本机地址是否已被占用
+
+本次调用 `transmit()` 使用：
+
+```text
+类型：Neighbor Solicitation，简称 NS
+源 IPv6：::，代码中的 zero
+目的 IPv6：由待检测地址生成的 solicited-node 组播地址
+目标字段：本机待检测的 IPv6 地址
+```
+
+源地址仍未确认可用，因此检测报文使用未指定地址 `::`。协议背景见 [RFC 4862 的 DAD 发送过程](https://www.rfc-editor.org/rfc/rfc4862.html#section-5.4.2)。此处检查本机地址是否重复，与后续查询下一跳 MAC 分开
+
+本项目发送回调返回 0，表示报文成功交给驱动；`sent` 不表示对端已经收到，更不表示收到“允许使用地址”的确认
+
+发送连接仍采用函数指针：
+
+```text
+worker_main 传入 send_nd6 和 worker
+  → tick 把 send、context 继续传给 transmit
+  → transmit 调用 send(context, port, wire, length)
+  → 实际进入 send_nd6(worker, port, wire, length)
+```
+
+下一段沿这个调用继续看报文构造与交给驱动的过程
+
+### 未观察到冲突才转为可用
+
+这段代码不等待成功确认报文。例如某次检测 NS 在时间 600 毫秒成功提交，将 `due` 设为 1600；时间达到 1600 后的某次扫描中，如果地址仍为 TENTATIVE，才改为 PREFERRED
+
+如果等待期间 `dppd_nd6_input()` 收到并校验通过针对该待检测地址的冲突证据，就将其改为 DUPLICATE。定时器随后会跳过这个地址，不再把它转为可用。DAD 根据是否观察到冲突来判断，原理见 [RFC 4862](https://www.rfc-editor.org/rfc/rfc4862.html#section-5.4)
+
+```text
+TENTATIVE，sent=false
+  ├─ 提交失败 → 等待 1 秒 → 再尝试发送
+  └─ 提交成功 → sent=true，等待 1 秒
+       ├─ 接收路径发现冲突 → DUPLICATE，后续检测扫描跳过
+       └─ 到期仍未标记冲突 → PREFERRED
+```
+
+实际执行时刻取决于后续扫描，不保证刚好在期限那一刻完成。发送成功和没有观察到冲突，也不等于证明整个网络永远不存在重复地址
+
+[dppd_nd6_port_ready](../../../lib/dataplane/nd6.c#L273) 要求该网口配置的本机地址全部为 PREFERRED。未启用 ND 或该口没有本机地址配置时不额外限制。`process_batch` 先处理 ND 控制报文，再检查 IPv6 数据包的入口就绪状态，所以地址待检测时仍能接收检测相关报文
+
+## 检测 NS 的构造与发送
+
+继续沿本机地址检测分支的调用进入 [transmit](../../../lib/dataplane/nd6.c#L156)，随后通过回调进入 [send_nd6](../../../lib/dataplane/worker.c#L76)。本次是新建检测报文，收到的业务 mbuf 不参与这次构造
+
+```text
+worker_main：传入 send_nd6、worker
+  → dppd_nd6_tick：决定发送检测 NS
+  → transmit：在栈上 wire[] 中组装以太网、IPv6、ICMPv6
+  → send(context, port, wire, 实际帧长)
+  → send_nd6：分配 mbuf、预留数据区、复制报文字节
+  → rte_eth_tx_burst：提交到当前 worker 的出口 TX 队列
+  → 返回结果给 transmit，再返回 tick 设置 owner->sent
+```
+
+这里按一次无 VLAN 的 DAD NS 说明。待检测 IPv6 地址假设为 `2001:db8::1234`，它来自配置，不是本机运行观察
+
+### 先连接三个协议头
+
+```text
+整包偏移  0                 14                       54                    78
+          ├─ 以太网头 14 ────┼──── IPv6 头 40 ──────────┼── ICMPv6 NS 24 ─────┤
+wire      ↑                 ↑                        ↑
+                            ip                       body
+```
+
+`l2 = 14 + 4 * vlan_depth` 表示 IPv6 头从哪里开始；单层 VLAN 时为 18，双层为 22。`ip = wire + l2`、`body = ip + 40` 都指向同一个数组中的不同位置，未分配第二份报文
+
+无 VLAN 的本次检测报文实际长度为 `14 + 40 + 24 = 78` 字节。`wire[110]` 是临时缓冲容量，交给回调的长度按实际内容计算；这里不包含网卡补充的 FCS
+
+### 二层 MAC 从哪里来
+
+本次 DAD 调用没有传入单播目的 MAC，因此按 IPv6 组播映射填写：目的 MAC 为 `33:33` 加目的 IPv6 的最后 4 字节，源 MAC 来自 `owner->mac`。规则可对照 [RFC 2464 第 7 节](https://www.rfc-editor.org/rfc/rfc2464.html#section-7)
+
+```text
+待检测地址：2001:db8::1234
+  → solicited() 生成目的 IPv6：ff02::1:ff00:1234
+  → 目的 MAC：33:33:ff:00:12:34
+  → 源 MAC：创建 ND 表时从所属网口复制的 MAC
+```
+
+若其他 ND 调用明确传入目的 MAC，则直接使用；VLAN 标签按 owner 的配置写入，最后的 EtherType 填 `0x86dd` 表示 IPv6
+
+### IPv6 与 ICMPv6 填写哪些字段
+
+| 位置 | 本次检测 NS 填入的内容 |
+| --- | --- |
+| IPv6 版本 | 6，由 `ip[0] = 0x60` 设置，其余相关位初始为 0 |
+| IPv6 Payload Length | 24，即 ICMPv6 长度，不包含 IPv6 头 |
+| Next Header | 58，表示 ICMPv6 |
+| Hop Limit | 255，ND 的要求 |
+| IPv6 源地址 | `::`，本机地址还未确认可用 |
+| IPv6 目的地址 | 上面计算出的 solicited-node 组播地址 |
+| ICMPv6 Type | NS，项目常量值为 135 |
+| ICMPv6 Code、保留字段 | 初始清零，本次保持 0 |
+| ICMPv6 Target Address | 本机待检测地址 `2001:db8::1234` |
+
+NS 基础部分的 24 字节由类型 1、Code 1、校验和 2、保留字段 4、目标 IPv6 地址 16 组成。本次源 IPv6 为 `::`，不携带源 MAC 选项，这是 [RFC 4861 的 NS 要求](https://www.rfc-editor.org/rfc/rfc4861.html#section-4.3)；以太网头中的源 MAC 仍然存在
+
+其他使用非零源 IPv6 的 NS/NA 调用，在基础部分后追加一个 8 字节 MAC 选项，ICMPv6 总长为 32。选项的长度字段填 1，单位为 8 字节。`put16()` 按高字节在前的网络字节序写入长度、EtherType 和校验和等 16 位字段
+
+最后计算 ICMPv6 校验和，范围包含 IPv6 伪首部和 ICMPv6 内容，不包含以太网头。这是源码直接计算后写入，不依赖 TX 校验和卸载
+
+### 回调怎样把临时字节交给 mbuf
+
+`transmit()` 中的 `send` 对应 worker 传入的 `send_nd6`，`context` 对应 worker 地址。实际调用相当于：
+
+```c
+send_nd6(worker, owner->configuration.port_id, wire, 78);
+```
+
+这里的 78 只针对本段无 VLAN 的 DAD 示例。`send_nd6()` 先确认出口和 worker 当前允许收发，再从该网口 NUMA 节点的池中分配新 mbuf
+
+```c
+struct rte_mbuf *mbuf = rte_pktmbuf_alloc(pool);
+void *bytes = rte_pktmbuf_append(mbuf, length);
+memcpy(bytes, wire, length);
+```
+
+以上省略了源码中的错误检查。`append()` 扩展 mbuf 的有效数据区并返回新增区域的起始地址，本身不复制 `wire`，空间不足时返回 NULL；随后由 `memcpy` 复制内容。详见 [DPDK mbuf API](https://doc.dpdk.org/api/rte__mbuf_8h.html)
+
+```text
+transmit 的局部 wire[]
+  → memcpy 复制实际帧长
+  → 新 mbuf 的数据区
+  → 驱动使用这个 mbuf，不持有 wire 的地址
+```
+
+因此 `transmit()` 返回后，栈上 `wire` 的生命周期结束也不影响已交给驱动的 mbuf。发送前还会再检查一次设备状态，防止分配与复制期间发生移除或停止事件
+
+### TX 接收结果与释放责任
+
+```c
+rte_eth_tx_burst(port_id, worker->queue_id, &mbuf, 1)
+```
+
+本次只提交一个包，因此返回 1 表示驱动已接收；返回 0 时 `send_nd6` 释放 mbuf 并返回 `-EAGAIN`。驱动接收后，worker 不再自行释放该 mbuf
+
+| 结果 | mbuf 由谁负责 | 返回到 tick 后怎样处理 |
+| --- | --- | --- |
+| 分配或 append 失败 | 无已分配 mbuf，或由 worker 清理已分配 mbuf | 返回错误，sent 保持 false |
+| 提交前设备不可用 | worker 清理已分配 mbuf | 返回错误，sent 保持 false |
+| TX 未接收 | worker 释放 | 返回错误，等待后续重试 |
+| TX 接收 1 个包 | 驱动管理 | send_nd6 返回 0，tick 将 sent 设为 true |
+
+`send_nd6` 的返回值 0 与 `rte_eth_tx_burst` 的返回值 1 属于两种接口，分别表示回调成功与接收的包数。成功提交不表示对端已经收到
+
+本次检测从组包到提交的发送链已经接起来。下一段回到 `process_batch()` 的 ND 接收入口，看收到的 NS/NA 怎样校验，以及怎样把待检测地址标为冲突
+
+## ND 接收校验与本机地址冲突
+
+上一段读完检测 NS 的发送。这里回到正常收包循环：PMD 将接收的 mbuf 交给 worker，经过 [process_batch](../../../lib/dataplane/worker.c#L283) 的报文头解析，再调用 [dppd_nd6_input](../../../lib/dataplane/nd6.c#L301)。接收路径由实际收到这个包的 worker 执行，不限定为推进定时任务的队列 0
+
+```text
+RX → process_batch → 解析报文头
+  → dppd_nd6_input：是否由 ND 路径处理
+       ├─ false → 继续地址就绪检查、策略和转发流程
+       └─ true  → worker 统计 ND 接收、释放当前 mbuf，继续下一个包
+```
+
+**true 表示已处理，不表示校验成功**。无效 ND 也会返回 true，避免继续进入转发流程。本函数只借用 mbuf，不释放、不保存这个接收 mbuf；释放责任仍在 `process_batch`
+
+### 定位实际的 ICMPv6 字节
+
+函数先排除未启用 ND、非 IPv6 和非 ICMPv6 报文。普通非分片报文还会检查类型是否属于 ND；ICMPv6 分片进入后面的无效处理，不按完整 ND 使用
+
+```c
+offset = packet->l2_len + packet->l3_len;
+length = 40U + packet->ipv6_payload_len - packet->l3_len;
+```
+
+`l3_len` 包含已经解析的 IPv6 扩展头，而 IPv6 Payload Length 不包含固定的 40 字节头，因此 ICMPv6 长度需要扣掉扩展头。例如：
+
+```text
+无 VLAN、无扩展头：offset = 14 + 40 = 54
+IPv6 Payload Length = 24 → ICMPv6 长度 = 40 + 24 - 40 = 24
+
+若存在 8 字节扩展头，Payload Length = 32、l3_len = 48
+  → offset = 14 + 48 = 62
+  → ICMPv6 长度 = 40 + 32 - 48 = 24
+```
+
+`rte_pktmbuf_read()` 从原 mbuf 安全读取实际的以太网、Hop Limit 与 ICMPv6 内容；返回指针可能直接指向原报文，也可能指向跨段复制的局部缓冲。后续统一使用返回指针
+
+### 分组核对后才采用内容
+
+| 核对内容 | 当前代码的要求 |
+| --- | --- |
+| 入口与 VLAN | 网口有本机 ND 配置，标签层数、TPID 和 VLAN ID 与配置相符 |
+| 长度与协议 | 头部及 ICMPv6 完整可读，ICMPv6 不少于 24 字节且不超过当前 256 字节缓冲上限，不采用分片或已标记不支持的 IPv6 格式 |
+| 基础字段 | Hop Limit 为 255，仅处理 NS/NA，Code 为 0，目标地址为允许的单播地址，校验和正确 |
+| 二层与 IPv6 地址 | 源 MAC 有效，NS/NA 的源和目的地址符合代码要求，目的 MAC 与 IPv6 单播或组播目的对应 |
+| MAC 选项 | 长度以 8 字节为单位，不能越界或重复，选项类型须与 NS/NA 对应，选项 MAC 与以太网源 MAC 相同 |
+
+完成基础校验后，如果源 MAC 与本机相同，函数直接按已处理返回，避免本机发出的检测帧回环后误判为冲突。其余帧继续校验地址和选项。RS、RA、Redirect 虽属于 ND 类型范围，当前处理函数只接受 NS/NA，因此会作为无效 ND 消费
+
+源 IPv6 为 `::` 的检测 NS 不允许携带源 MAC 选项；NA 不允许以 `::` 为源地址。这里只按实际项目约束解释，源码中的 256 字节上限不代表所有 ND 报文的协议最大长度
+
+### owner 与 target 指向哪一条本机配置
+
+```text
+owner  = 按入口 port 查到的本机地址记录，用于该口 MAC、VLAN 核对
+target = 按入口 port + ICMPv6 Target Address 查到的本机地址记录
+```
+
+二者都查本机地址配置，不是动态邻居缓存。`target` 可能为 NULL，表示这个 NS/NA 的目标字段不是该网口配置的本机地址
+
+特别注意：这里用 `icmp + 8` 指向的 ICMPv6 目标字段查找，不用 IPv6 目的地址。DAD 报文的 IPv6 目的地址是组播地址，目标字段才是正在检测的本机地址
+
+### 哪些报文构成待检测地址的冲突证据
+
+假设本机 `2001:db8::1234` 仍为 TENTATIVE，且收到的报文已经通过前面的校验：
+
+| 目标字段为本机待检测地址的报文 | 当前处理 |
+| --- | --- |
+| NA | 有节点声明这个地址，标记 DUPLICATE |
+| 源 IPv6 为 `::` 的 NS | 有节点也在检测这个地址，标记 DUPLICATE |
+| 源 IPv6 为普通单播的 NS | 只是查询该地址的 MAC，不据此判断冲突；地址尚未可用，也不应答 |
+
+这些 DAD 规则可对照 [RFC 4862 的 NS 接收](https://www.rfc-editor.org/rfc/rfc4862.html#section-5.4.3)与 [NA 接收](https://www.rfc-editor.org/rfc/rfc4862.html#section-5.4.4)。源码采用源 MAC 相同即忽略的回环处理，本段不将其解释为对所有链路场景的唯一性保证
+
+发现冲突时：
+
+```c
+target->state = DPPD_ND6_DUPLICATE;
+table->status.revision++;
+```
+
+定时器只推进 TENTATIVE 地址，因此之后不会再将这条地址改为 PREFERRED。若该口任一本机地址仍待检测或已冲突，`dppd_nd6_port_ready()` 返回 false
+
+### 返回 worker 后的处理顺序
+
+```text
+有效 ND：更新状态或按后续分支处理 → true → worker 释放当前 mbuf
+无效 ND：invalid++              → true → worker 释放当前 mbuf
+非本次处理范围                 → false → 继续原处理流程
+```
+
+`process_batch()` 把 ND 接收放在 IPv6 地址就绪检查之前，所以本机地址还没可用时，冲突报文仍能被处理。对于继续走原流程的 IPv6 数据包，入口地址尚未就绪就由 worker 丢弃并释放
+
+本段到这里完成入口、校验和 DAD 冲突处理。下一段留在同一个函数，继续读非冲突的 NS/NA 分支：收到查询怎样回复 NA，收到通告又怎样更新已经存在的动态邻居
+
+## NS 应答与 NA 邻居更新
+
+继续留在 `dppd_nd6_input()`。前面的格式检查和本机地址冲突已经处理完，后面按 `ns` 分成两条路径。所有说明都以通过前面校验的报文为前提
+
+```text
+NS：对方在问一个 IPv6 地址的 MAC
+  → 确认问的是本机已可用地址
+  → 条件允许时学习请求者的地址与 MAC
+  → 用本机地址和 MAC 回复 NA
+
+NA：对方在通告一个邻居地址的 MAC
+  → 按网口与通告目标地址找已有动态邻居
+  → 检查是否允许更新 MAC
+  → 根据 Solicited 标志更新可达状态
+```
+
+### NS 查询本机，也可顺便学习请求者
+
+假设网口 0 的本机地址为 `2001:db8::1`，状态已为 PREFERRED。邻居 `2001:db8::2` 发来 NS，目标字段填 `2001:db8::1`，源 MAC 选项为 `02:11:22:33:44:55`
+
+```text
+收到的 NS
+  源 IPv6：2001:db8::2
+  Target：2001:db8::1
+  源 MAC 选项：02:11:22:33:44:55
+
+查本机地址：local(port, Target) → 本机 ::1，决定是否应答
+查动态邻居：find(port, 源 IPv6) → 邻居 ::2，决定是否学习请求者
+```
+
+只有查询本机已可用地址才回复。源地址非 `::`、存在有效 MAC 选项、源地址也不是本机配置时，函数查找请求者记录；没有则尝试分配空槽位。有记录且 MAC 改变或原状态为 FAILED 时，保存该 MAC 并标为 STALE
+
+这里的 STALE 表示保留 MAC、尚未确认当前双向可达，后续仍可沿用并触发探测，不表示立即不能发送。若缓存无空位导致学习失败，仍会继续执行下面的 NA 应答
+
+| 收到的 NS | 回复 NA 的 IPv6 目的地址 | 目的 MAC |
+| --- | --- | --- |
+| 普通源地址的查询 | 请求者的源 IPv6 | 收到的以太网源 MAC |
+| 源为 `::` 的 DAD 查询，且本机该地址已可用 | `ff02::1`，本链路所有节点 | 由组播 IPv6 映射的 MAC |
+
+应答的源 IPv6 是被查询的本机地址，目标字段沿用 NS 的目标地址；发送仍调用前面学过的 `transmit()`，再经 worker 的 `send_nd6()` 交给驱动
+
+### NA 标志与两个十六进制值
+
+NA 第 4 字节的高三位分别为 R、S、O，定义见 [RFC 4861 第 4.4 节](https://www.rfc-editor.org/rfc/rfc4861.html#section-4.4)
+
+```text
+位掩码：  0x80       0x40        0x20
+           R          S           O
+        Router     Solicited   Override
+        路由器     请求应答     允许覆盖缓存
+
+0xe0 = 1110 0000 → R=1、S=1、O=1，当前项目的普通单播应答
+0xa0 = 1010 0000 → R=1、S=0、O=1，当前项目的组播 DAD 应答
+```
+
+当前项目的这两种应答固定设置 R 与 O；组播应答清除 S。收到 NA 时，本段重点使用 S 和 O 处理邻居缓存，不据此重新选择业务路由
+
+### 收到 NA，只查已有邻居记录
+
+NA 的查找使用 `find(table, port, icmp + 8)`：按入口网口和 ICMPv6 Target Address 定位动态邻居。它查的是被通告的目标地址，不直接使用 NA 的 IPv6 源地址
+
+这一分支不调用 `insert()`。例如正在解析网口 0 上 `2001:db8::2`，已有 INCOMPLETE 记录时，通告才有可更新对象；未知地址的 NA 不会自行创建缓存记录。没有 MAC 选项且缓存里也没有有效 MAC 时，同样忽略本次通告
+
+### 先决定能否覆盖 MAC，再决定可达状态
+
+| 已有记录和通告情况 | 当前代码的处理 |
+| --- | --- |
+| 非 INCOMPLETE，MAC 改变，O=0 | 保留旧 MAC；原来为 REACHABLE 时降为 STALE，然后结束本次处理 |
+| INCOMPLETE，通告提供有效 MAC | 可以补齐 MAC，不要求 O=1 |
+| 其他允许更新的情况，带 MAC 选项 | 复制通告中的 MAC |
+| 通过上述处理，S=1 | 标为 REACHABLE，安排可达有效期 |
+| S=0 且 MAC 改变或原为 INCOMPLETE | 标为 STALE |
+| S=0、MAC 未改变且原非 INCOMPLETE | 保持原状态 |
+
+S 表明通告是查询应答，O 表明是否允许覆盖已有缓存；标志的协议含义见前面的 RFC 链接。本项目的状态更新顺序仍以代码为准
+
+可达期限由 `base = reachable_ms` 计算为当前时间加 `base/2 + random % (base+1)`。例如基准值 30000 ms 时，本次期限在约 15 到 45 秒之间，避免所有邻居同时到期
+
+`state()` 同时保存状态、变更时间、到期时间并递增查询版本。注意两种状态分别属于两张记录：
+
+```text
+本机地址：TENTATIVE → PREFERRED，表示本机地址完成检测
+动态邻居：INCOMPLETE → REACHABLE，表示对方 MAC 已解析并确认可达
+```
+
+### 更新邻居表之后，谁处理等待包
+
+本次收到的 NA 由 `process_batch()` 释放。`dppd_nd6_input()` 只更新邻居记录，不直接取出或发送之前等待 MAC 的业务 mbuf
+
+```text
+收到 NA → 更新动态邻居表 → 返回 true → worker 释放这个 NA
+  → 各 worker 后续循环调用 process_waiting
+  → 取回本队列的等待业务包
+  → 再次进入 process_batch，按最新状态重新决定去向
+```
+
+下一段沿这里的 `process_waiting()` 继续，把“邻居已解析”和“原来等待的业务包重新处理”接起来
+
 ## 怎么对应到代码
 
 | 看图中的哪一步 | 文件与函数 | 在这里完成什么 |
@@ -537,12 +1060,12 @@ socket 成功创建后，后续错误统一走 `done` 关闭它；`goto done` �
 | 准备资源 | [lib/runtime/runtime.c:28](../../../lib/runtime/runtime.c#L28) · `dppd_runtime_init` | 准备 worker 配置，创建 mbuf 池，配置队列并启动网口 |
 | 准备 RSS 配置 | [lib/device/device.c:394](../../../lib/device/device.c#L394) · `prepare_port_configuration` | 选择项目请求且设备支持的 RSS 类型，写入 `plan->conf`，留给下一步提交 |
 | 连接规则与管理入口 | [app/dppd/main.c:484](../../../app/dppd/main.c#L484) · `main` | 初始化 control，将软件规则对象交给 runtime，建立管理 socket |
-| 提交 worker 任务 | [lib/runtime/runtime.c:159](../../../lib/runtime/runtime.c#L159) · `dppd_runtime_start` | `rte_eal_remote_launch` 让指定 lcore 的 EAL 工作线程执行 `dppd_worker_main` |
+| 提交 worker 任务 | [lib/runtime/runtime.c:176](../../../lib/runtime/runtime.c#L176) · `dppd_runtime_start` | `rte_eal_remote_launch` 让指定 lcore 的 EAL 工作线程执行 `dppd_worker_main` |
 | 主线程的循环 | [app/dppd/main.c:622](../../../app/dppd/main.c#L622) · `main` | 周期检查运行状态，处理管理请求、统计和维护工作 |
-| worker 的循环 | [lib/dataplane/worker.c:560](../../../lib/dataplane/worker.c#L560) · `dppd_worker_main` | 按自己的队列编号扫描各网口，处理包后报告安全点与心跳 |
-| 逐包处理入口 | [lib/dataplane/worker.c:512](../../../lib/dataplane/worker.c#L512) · `process_ingress` | `rte_eth_rx_burst` 取得 mbuf 指针，再进入 `process_batch` |
+| worker 的循环 | [lib/dataplane/worker.c:575](../../../lib/dataplane/worker.c#L575) · `dppd_worker_main` | 按自己的队列编号扫描各网口，处理包后报告安全点与心跳 |
+| 逐包处理入口 | [lib/dataplane/worker.c:527](../../../lib/dataplane/worker.c#L527) · `process_ingress` | `rte_eth_rx_burst` 取得 mbuf 指针，再进入 `process_batch` |
 | 通知停止 | [app/dppd/main.c:726](../../../app/dppd/main.c#L726) · `main` | 关闭管理入口，调用 `dppd_runtime_request_stop`，再调用 wait |
-| 等待 worker 返回 | [lib/runtime/runtime.c:258](../../../lib/runtime/runtime.c#L258) · `dppd_runtime_wait` | 使用 `rte_eal_wait_lcore` 确认工作函数返回并取得结果 |
+| 等待 worker 返回 | [lib/runtime/runtime.c:275](../../../lib/runtime/runtime.c#L275) · `dppd_runtime_wait` | 使用 `rte_eal_wait_lcore` 确认工作函数返回并取得结果 |
 | 清理资源 | [app/dppd/main.c:748](../../../app/dppd/main.c#L748) · `main` | `control_fini` → `runtime_destroy` → `rte_eal_cleanup`；设备清理先关闭网口，再释放池 |
 
 ## 读图时抓住三个联系

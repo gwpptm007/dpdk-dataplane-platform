@@ -179,7 +179,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L188",
+      "name": "Anchor exists: #L205",
       "passed": true
     },
     {
@@ -195,7 +195,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L563",
+      "name": "Anchor exists: #L582",
       "passed": true
     },
     {
@@ -203,7 +203,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L518",
+      "name": "Anchor exists: #L537",
       "passed": true
     },
     {
@@ -227,7 +227,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L247",
+      "name": "Anchor exists: #L264",
       "passed": true
     },
     {
@@ -243,7 +243,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L621",
+      "name": "Anchor exists: #L641",
       "passed": true
     },
     {
@@ -251,7 +251,7 @@
       "passed": true
     },
     {
-      "name": "Anchor exists: #L280",
+      "name": "Anchor exists: #L297",
       "passed": true
     },
     {
@@ -287,11 +287,11 @@
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\sources\\lib__device__topology.c.html",
+      "name": "Link exists: docs\\learning\\sources\\lib__dataplane__nd6.c.html",
       "passed": true
     },
     {
-      "name": "Anchor exists: #L162",
+      "name": "Anchor exists: #L301",
       "passed": true
     },
     {
@@ -303,19 +303,19 @@
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\sources\\lib__device__topology.c.html",
+      "name": "Link exists: docs\\learning\\sources\\lib__dataplane__worker.c.html",
       "passed": true
     },
     {
-      "name": "Anchor exists: #L482",
+      "name": "Anchor exists: #L555",
       "passed": true
     },
     {
-      "name": "Link exists: docs\\learning\\sources\\lib__device__topology.c.html",
+      "name": "Link exists: docs\\learning\\sources\\lib__dataplane__worker.c.html",
       "passed": true
     },
     {
-      "name": "Anchor exists: #L55",
+      "name": "Anchor exists: #L551",
       "passed": true
     },
     {

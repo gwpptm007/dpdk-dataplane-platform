@@ -15,18 +15,18 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_ingress",
-      "line": 512,
-      "endLine": 520,
+      "line": 531,
+      "endLine": 539,
       "code": "static void process_ingress(struct dppd_worker *worker, const struct dppd_port *ingress)\n{\n    if (worker_io_quiesced(worker) || atomic_load_explicit(&ingress->removed, memory_order_acquire))\n        return;\n    struct rte_mbuf *packets[DPPD_MAX_BURST];\n    /** 最多接收 burst_size 个包，不等待凑满 */\n    uint16_t count = rte_eth_rx_burst(ingress->port_id, worker->queue_id, packets, worker->runtime->config.burst_size);\n    process_batch(worker, ingress, packets, count, false, 0);\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L512"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L531"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 272,
-      "endLine": 505,
-      "code": "static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,\n    uint16_t received, bool retry, uint64_t expires)\n{\n    struct dppd_runtime *runtime = worker->runtime;\n    /** 按出口暂存待发送的 mbuf 指针、长度和数量，逐包处理结束后统一批量发送 */\n    struct rte_mbuf *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint16_t counts[DPPD_MAX_PORTS] = {0};\n    struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};\n    struct dppd_software_count_batch rule_counts = {0};\n    if (worker_io_quiesced(worker)) {\n        /** RX 返回的报文已归线程所有，事件不能让这批 mbuf 因提前返回而泄漏 */\n        free_packets(rx, received);\n        return;\n    }\n    if (received == 0)\n        return;\n    delta.rx_packets = retry ? 0 : received;\n    const struct dppd_port *paired =\n        runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;\n    for (uint16_t i = 0; i < received; ++i) {\n        /** packet 保存解析字段，decision 保存处理决定，rx[i] 指向原始报文 */\n        struct dppd_pipeline_decision decision;\n        struct dppd_packet packet = {0};\n        uint32_t length = rte_pktmbuf_pkt_len(rx[i]);\n        if (!retry)\n            delta.rx_bytes += length;\n        /** 逐包进入 packet_mbuf.c 提取报文头字段，burst 只批量收发，不省略逐包解析 */\n        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);\n        packet.neighbor_retry = retry;\n        /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */\n        if (!retry) {\n            delta.tunnel_vxlan_packets += packet.tunnel.type == DPPD_TUNNEL_VXLAN;\n            delta.tunnel_geneve_packets += packet.tunnel.type == DPPD_TUNNEL_GENEVE;\n            delta.tunnel_gre_packets += packet.tunnel.type == DPPD_TUNNEL_GRE;\n            delta.tunnel_malformed += packet.tunnel.status == DPPD_PARSE_MALFORMED;\n            delta.tunnel_unsupported += packet.tunnel.status == DPPD_PARSE_UNSUPPORTED;\n        }\n        if (parsed == DPPD_PARSE_MALFORMED)\n            delta.rx_malformed++;\n        else if (parsed == DPPD_PARSE_UNSUPPORTED)\n            delta.rx_unsupported++;\n        if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&\n            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {\n            delta.nd6_rx_packets++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        if (packet.l3_type == DPPD_L3_IPV6 && !dppd_nd6_port_ready(runtime->nd6, ingress->port_id)) {\n            delta.nd6_not_ready_drops++;\n            delta.policy_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 未启用连接跟踪\n         *   → routed_decide → decision\n         *\n         * 启用连接跟踪\n         *   → stateful_decide\n         *       校验、准备候选会话\n         *         → routed_decide\n         *         → 检查出口、改写实际报文\n         *         → 成功提交会话，失败取消候选\n         */\n        if (runtime->conntrack != NULL)\n            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);\n        else\n            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);\n\n        /**\n         * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列\n         * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它\n         * 入队失败 → mbuf 仍归当前线程，继续下面的丢弃分支并释放\n         */\n        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {\n            struct dppd_nd6_pending pending = {.mbuf = rx[i],\n                .ingress = ingress->port_id,\n                .queue = worker->queue_id,\n                .expires_ms = expires};\n            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,\n                    dppd_monotonic_ms()) == 0) {\n                delta.nd6_queued++;\n                continue;\n            }\n            delta.nd6_queue_drops++;\n        }\n        /**\n         * 决定函数只填写结果，worker 在这里执行丢弃并按原因更新统计\n         * 释放当前报文后继续处理本批下一个包，不影响其他报文\n         */\n        if (decision.action != DPPD_PACKET_FORWARD) {\n            if (decision.drop_reason != DPPD_DROP_MALFORMED)\n                delta.policy_drops++;\n            if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)\n                delta.nd6_not_ready_drops++;\n            else if (decision.drop_reason == DPPD_DROP_POLICY)\n                delta.rule_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_ROUTE)\n                delta.no_route_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_NEIGHBOR)\n                delta.no_neighbor_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV4_UNSUPPORTED)\n                delta.ipv4_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV6_UNSUPPORTED)\n                delta.ipv6_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_INVALID)\n                delta.ct_invalid_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_FULL)\n                delta.ct_full_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_UNSUPPORTED)\n                delta.ct_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_ZONE)\n                delta.ct_zone_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_CHECKSUM)\n                delta.ct_checksum_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_POOL)\n                delta.nat_pool_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_MISS)\n                delta.nat_miss_drops++;\n            else if (decision.drop_reason == DPPD_DROP_TTL) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_hop_drops++;\n                else\n                    delta.ipv4_ttl_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_REWRITE) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_rewrite_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_EGRESS)\n                delta.egress_drops++;\n            /** 归还当前 mbuf，再进入逐包循环的下一轮 */\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 根据处理决定取得实际出口对象，三层模式按出口编号查找，端口配对模式复用 paired\n         * FORWARD 只表示策略允许，发送前仍须确认出口存在、编号一致且可发送\n         */\n        const struct dppd_port *egress =\n            runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;\n        if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {\n            delta.policy_drops++;\n            delta.egress_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 三层转发在这里改写报文头，启用连接跟踪时已由 stateful_decide 改写，不能再次递减跳数\n         * IPv6 普通转发：目的 MAC 改为下一跳 MAC，源 MAC 改为出口 MAC，Hop Limit 减 1\n         *\n         * &rx[i] 允许改写函数在需要复制报文时替换 mbuf 指针，后续发送使用替换后的指针\n         * &packet 提供已解析的头部信息，decision.ipv4 是 IPv4/IPv6 共用的转发结果\n         * 改写失败则释放当前包；成功后继续加入出口发送批次，此处尚未交给网卡\n         */\n        if (decision.routed && runtime->conntrack == NULL) {\n            bool ipv6 = packet.l3_type == DPPD_L3_IPV6;\n            int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)\n                          : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);\n            if (rc != 0) {\n                delta.policy_drops++;\n                if (ipv6) {\n                    if (rc == -ETIMEDOUT)\n                        delta.ipv6_hop_drops++;\n                    else if (rc == -EBADMSG)\n                        delta.ipv6_checksum_drops++;\n                    else if (rc == -ENOTSUP)\n                        delta.ipv6_unsupported_drops++;\n                    else\n                        delta.ipv6_rewrite_drops++;\n                } else if (rc == -ETIMEDOUT)\n                    delta.ipv4_ttl_drops++;\n                else if (rc == -EBADMSG)\n                    delta.ipv4_checksum_drops++;\n                else if (rc == -ENOTSUP)\n                    delta.ipv4_unsupported_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n                rte_pktmbuf_free(rx[i]);\n                continue;\n            }\n        }\n        /** 将规则 MARK 写入 mbuf 的附加信息并设置有效标志，不向报文字节中插入标记 */\n        if (decision.has_mark) {\n            rx[i]->hash.fdir.hi = decision.mark_id;\n            rx[i]->ol_flags |= RTE_MBUF_F_RX_FDIR_ID;\n        }\n        /**\n         * 以出口在 devices.ports 中的数组下标分组，指针相减得到元素间距\n         * 例：ports[0].port_id = 1、ports[1].port_id = 5，出口为网口 5 时 index 为 1\n         * tx[index]、tx_lengths[index]、counts[index] 和 outputs[index] 都属于这个出口\n         */\n        uint16_t index = (uint16_t)(egress - runtime->devices.ports);\n        /**\n         * 多段报文且出口未启用多段发送时，尝试将全部数据合并到第一段\n         * 第一段空间不足等原因导致合并失败时，统计并释放当前包，继续处理下一个\n         */\n        if (rx[i]->nb_segs > 1U && (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0 &&\n            rte_pktmbuf_linearize(rx[i]) != 0) {\n            outputs[index].tx_drops++;\n            outputs[index].tx_linearize_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 将当前包追加到对应出口的待发送批次，只保存指针，此处尚未交给驱动\n         * 提前保存长度供发送统计使用，成功提交后不再读取已转移所有权的 mbuf\n         * 例：counts[index] 为 2，长度和指针都写入下标 2，然后 counts[index] 增为 3\n         * counts 只统计本次 process_batch 收集的包，本批处理结束就发送，不等待凑满\n         */\n        tx_lengths[index][counts[index]] = length;\n        tx[index][counts[index]++] = rx[i];\n    }\n    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */\n    dppd_software_count_batch_flush(&rule_counts);\n    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)\n        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,\n            &outputs[index]);\n    /**\n     * 此时 delta 保存本批入口接收和处理中的丢弃统计，outputs 按出口保存发送及发送失败统计\n     * 先将 delta 记入入口网口，再将各 outputs 记入对应出口，并合并到 delta 供 worker 汇总\n     * 例：入口 0 收到 3 包，均送往出口 1，其中 2 包提交成功、1 包因发送队列未接收而丢弃\n     *   入口 0：RX 加 3；出口 1：TX 加 2、tx_queue_drops 加 1；worker 汇总包含这三项\n     */\n    dppd_stats_add(&worker->port_stats[ingress - runtime->devices.ports], &delta);\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index) {\n        dppd_stats_add(&worker->port_stats[index], &outputs[index]);\n        dppd_stats_accumulate(&delta, &outputs[index]);\n    }\n    /** 每批只更新一次工作线程汇总，避免入口丢弃已累计而出口字节还没累计的额外窗口 */\n    dppd_stats_add(&worker->stats, &delta);\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L272"
+      "line": 283,
+      "endLine": 524,
+      "code": "static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,\n    uint16_t received, bool retry, uint64_t expires)\n{\n    struct dppd_runtime *runtime = worker->runtime;\n    /** 按出口暂存待发送的 mbuf 指针、长度和数量，逐包处理结束后统一批量发送 */\n    struct rte_mbuf *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint16_t counts[DPPD_MAX_PORTS] = {0};\n    struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};\n    struct dppd_software_count_batch rule_counts = {0};\n    if (worker_io_quiesced(worker)) {\n        /** RX 返回的报文已归线程所有，事件不能让这批 mbuf 因提前返回而泄漏 */\n        free_packets(rx, received);\n        return;\n    }\n    if (received == 0)\n        return;\n    delta.rx_packets = retry ? 0 : received;\n    const struct dppd_port *paired =\n        runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;\n    for (uint16_t i = 0; i < received; ++i) {\n        /** packet 保存解析字段，decision 保存处理决定，rx[i] 指向原始报文 */\n        struct dppd_pipeline_decision decision;\n        struct dppd_packet packet = {0};\n        uint32_t length = rte_pktmbuf_pkt_len(rx[i]);\n        if (!retry)\n            delta.rx_bytes += length;\n        /** 逐包进入 packet_mbuf.c 提取报文头字段，burst 只批量收发，不省略逐包解析 */\n        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);\n        packet.neighbor_retry = retry;\n        /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */\n        if (!retry) {\n            delta.tunnel_vxlan_packets += packet.tunnel.type == DPPD_TUNNEL_VXLAN;\n            delta.tunnel_geneve_packets += packet.tunnel.type == DPPD_TUNNEL_GENEVE;\n            delta.tunnel_gre_packets += packet.tunnel.type == DPPD_TUNNEL_GRE;\n            delta.tunnel_malformed += packet.tunnel.status == DPPD_PARSE_MALFORMED;\n            delta.tunnel_unsupported += packet.tunnel.status == DPPD_PARSE_UNSUPPORTED;\n        }\n        if (parsed == DPPD_PARSE_MALFORMED)\n            delta.rx_malformed++;\n        else if (parsed == DPPD_PARSE_UNSUPPORTED)\n            delta.rx_unsupported++;\n        /**\n         * 先处理 ND 控制报文，再检查本机 IPv6 地址是否就绪，待检测期间仍能接收冲突证据\n         * input 返回 true 表示已处理，包含无效 ND；这里只释放当前 mbuf，再处理下一个包\n         *\n         * 收到 mbuf → 解析报文头 → ND 接收处理\n                                    ├─ 已处理 → worker 释放当前包，继续下一个\n                                    └─ 未处理 → 继续原来的检查和转发流程\n         */\n        if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&\n            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {\n            delta.nd6_rx_packets++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        if (packet.l3_type == DPPD_L3_IPV6 && !dppd_nd6_port_ready(runtime->nd6, ingress->port_id)) {\n            delta.nd6_not_ready_drops++;\n            delta.policy_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 未启用连接跟踪\n         *   → routed_decide → decision\n         *\n         * 启用连接跟踪\n         *   → stateful_decide\n         *       确认启用、准备候选并校验报文\n         *         → routed_decide\n         *         → 检查出口、改写实际报文\n         *         → 成功提交会话，失败取消候选\n         */\n        bool tracked = runtime->conntrack != NULL &&\n            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);\n        if (!tracked)\n            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);\n\n        /**\n         * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列\n         * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它\n         * 入队失败 → mbuf 仍归当前线程，继续下面的丢弃分支并释放\n         */\n        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {\n            struct dppd_nd6_pending pending = {.mbuf = rx[i],\n                .ingress = ingress->port_id,\n                .queue = worker->queue_id,\n                .expires_ms = expires};\n            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,\n                    dppd_monotonic_ms()) == 0) {\n                delta.nd6_queued++;\n                continue;\n            }\n            delta.nd6_queue_drops++;\n        }\n        /**\n         * 决定函数只填写结果，worker 在这里执行丢弃并按原因更新统计\n         * 释放当前报文后继续处理本批下一个包，不影响其他报文\n         */\n        if (decision.action != DPPD_PACKET_FORWARD) {\n            if (decision.drop_reason != DPPD_DROP_MALFORMED)\n                delta.policy_drops++;\n            if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)\n                delta.nd6_not_ready_drops++;\n            else if (decision.drop_reason == DPPD_DROP_POLICY)\n                delta.rule_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_ROUTE)\n                delta.no_route_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_NEIGHBOR)\n                delta.no_neighbor_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV4_UNSUPPORTED)\n                delta.ipv4_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV6_UNSUPPORTED)\n                delta.ipv6_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_INVALID)\n                delta.ct_invalid_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_FULL)\n                delta.ct_full_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_UNSUPPORTED)\n                delta.ct_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_ZONE)\n                delta.ct_zone_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_CHECKSUM)\n                delta.ct_checksum_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_POOL)\n                delta.nat_pool_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_MISS)\n                delta.nat_miss_drops++;\n            else if (decision.drop_reason == DPPD_DROP_TTL) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_hop_drops++;\n                else\n                    delta.ipv4_ttl_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_REWRITE) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_rewrite_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_EGRESS)\n                delta.egress_drops++;\n            /** 归还当前 mbuf，再进入逐包循环的下一轮 */\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 根据处理决定取得实际出口对象，三层模式按出口编号查找，端口配对模式复用 paired\n         * FORWARD 只表示策略允许，发送前仍须确认出口存在、编号一致且可发送\n         */\n        const struct dppd_port *egress =\n            runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;\n        if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {\n            delta.policy_drops++;\n            delta.egress_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 三层转发在这里改写报文头，启用连接跟踪时已由 stateful_decide 改写，不能再次递减跳数\n         * IPv6 普通转发：目的 MAC 改为下一跳 MAC，源 MAC 改为出口 MAC，Hop Limit 减 1\n         *\n         * &rx[i] 允许改写函数在需要复制报文时替换 mbuf 指针，后续发送使用替换后的指针\n         * &packet 提供已解析的头部信息，decision.ipv4 是 IPv4/IPv6 共用的转发结果\n         * 改写失败则释放当前包；成功后继续加入出口发送批次，此处尚未交给网卡\n         */\n        if (decision.routed && !tracked) {\n            bool ipv6 = packet.l3_type == DPPD_L3_IPV6;\n            int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)\n                          : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);\n            if (rc != 0) {\n                delta.policy_drops++;\n                if (ipv6) {\n                    if (rc == -ETIMEDOUT)\n                        delta.ipv6_hop_drops++;\n                    else if (rc == -EBADMSG)\n                        delta.ipv6_checksum_drops++;\n                    else if (rc == -ENOTSUP)\n                        delta.ipv6_unsupported_drops++;\n                    else\n                        delta.ipv6_rewrite_drops++;\n                } else if (rc == -ETIMEDOUT)\n                    delta.ipv4_ttl_drops++;\n                else if (rc == -EBADMSG)\n                    delta.ipv4_checksum_drops++;\n                else if (rc == -ENOTSUP)\n                    delta.ipv4_unsupported_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n                rte_pktmbuf_free(rx[i]);\n                continue;\n            }\n        }\n        /** 将规则 MARK 写入 mbuf 的附加信息并设置有效标志，不向报文字节中插入标记 */\n        if (decision.has_mark) {\n            rx[i]->hash.fdir.hi = decision.mark_id;\n            rx[i]->ol_flags |= RTE_MBUF_F_RX_FDIR_ID;\n        }\n        /**\n         * 以出口在 devices.ports 中的数组下标分组，指针相减得到元素间距\n         * 例：ports[0].port_id = 1、ports[1].port_id = 5，出口为网口 5 时 index 为 1\n         * tx[index]、tx_lengths[index]、counts[index] 和 outputs[index] 都属于这个出口\n         */\n        uint16_t index = (uint16_t)(egress - runtime->devices.ports);\n        /**\n         * 多段报文且出口未启用多段发送时，尝试将全部数据合并到第一段\n         * 第一段空间不足等原因导致合并失败时，统计并释放当前包，继续处理下一个\n         */\n        if (rx[i]->nb_segs > 1U && (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0 &&\n            rte_pktmbuf_linearize(rx[i]) != 0) {\n            outputs[index].tx_drops++;\n            outputs[index].tx_linearize_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 将当前包追加到对应出口的待发送批次，只保存指针，此处尚未交给驱动\n         * 提前保存长度供发送统计使用，成功提交后不再读取已转移所有权的 mbuf\n         * 例：counts[index] 为 2，长度和指针都写入下标 2，然后 counts[index] 增为 3\n         * counts 只统计本次 process_batch 收集的包，本批处理结束就发送，不等待凑满\n         */\n        tx_lengths[index][counts[index]] = length;\n        tx[index][counts[index]++] = rx[i];\n    }\n    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */\n    dppd_software_count_batch_flush(&rule_counts);\n    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)\n        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,\n            &outputs[index]);\n    /**\n     * 此时 delta 保存本批入口接收和处理中的丢弃统计，outputs 按出口保存发送及发送失败统计\n     * 先将 delta 记入入口网口，再将各 outputs 记入对应出口，并合并到 delta 供 worker 汇总\n     * 例：入口 0 收到 3 包，均送往出口 1，其中 2 包提交成功、1 包因发送队列未接收而丢弃\n     *   入口 0：RX 加 3；出口 1：TX 加 2、tx_queue_drops 加 1；worker 汇总包含这三项\n     */\n    dppd_stats_add(&worker->port_stats[ingress - runtime->devices.ports], &delta);\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index) {\n        dppd_stats_add(&worker->port_stats[index], &outputs[index]);\n        dppd_stats_accumulate(&delta, &outputs[index]);\n    }\n    /** 每批只更新一次工作线程汇总，避免入口丢弃已累计而出口字节还没累计的额外窗口 */\n    dppd_stats_add(&worker->stats, &delta);\n}",
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L283"
     },
     {
       "file": "lib/dataplane/packet_mbuf.c",
@@ -39,10 +39,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "routed_decide",
-      "line": 105,
-      "endLine": 145,
+      "line": 113,
+      "endLine": 153,
       "code": "static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int parsed, const struct dppd_packet *packet,\n    struct dppd_pipeline_decision *decision, struct dppd_software_count_batch *counts)\n{\n    dppd_pipeline_decide_counted(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,\n        packet, decision, counts);\n    if (runtime->nd6 == NULL || packet->l3_type != DPPD_L3_IPV6)\n        return;\n    /**\n     * 静态邻居未命中时，pipeline 返回 DROP / NO_NEIGHBOR，但已留下出口和下一跳\n     * 上方检查保证此处是 IPv6 且已启用 ND（IPv6 邻居发现）\n     *\n     * 沿用示例：\n     *   decision->ipv4.port_id = 1，next_hop6 = fe80::1，destination_mac 仍为全 0\n     *   用网口 1 和 fe80::1 查询 ND 动态邻居表\n     *   若找到可用 MAC，dppd_nd6_resolve 直接写入 decision->ipv4.destination_mac\n     * 静态表没有邻居，并不代表动态表也没有，因此这里还需再查一次\n     */\n    if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR) {\n        int rc = dppd_nd6_resolve(runtime->nd6, decision->ipv4.port_id, decision->ipv4.next_hop6, packet,\n            dppd_monotonic_ms(), decision->ipv4.destination_mac);\n\n        /**\n         * rc = 0       → MAC 已写入，改为 FORWARD，填写出口并设置 routed\n         * rc = -EAGAIN → MAC 尚未取得，改为 ND_PENDING，让 process_batch 尝试暂存报文\n         * 其他错误     → 保持 DROP / NO_NEIGHBOR，交回调用方处理失败\n         * ND_PENDING 时 action 仍是 DROP，但 process_batch 会先处理等待入队，再判断丢弃\n         */\n        if (rc == 0) {\n            decision->action = DPPD_PACKET_FORWARD;\n            decision->drop_reason = DPPD_DROP_NONE;\n            decision->egress_port = decision->ipv4.port_id;\n            decision->routed = true;\n        } else if (rc == -EAGAIN)\n            decision->drop_reason = DPPD_DROP_ND_PENDING;\n    }\n    /** 取得下一跳 MAC 后，仍须确认出口 IPv6 地址已就绪，否则改为 DROP / ND_NOT_READY */\n    if (decision->action == DPPD_PACKET_FORWARD && !dppd_nd6_port_ready(runtime->nd6, decision->egress_port)) {\n        decision->action = DPPD_PACKET_DROP;\n        decision->drop_reason = DPPD_DROP_ND_NOT_READY;\n    }\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L105"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L113"
     },
     {
       "file": "lib/dataplane/pipeline.c",
@@ -55,10 +55,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 272,
-      "endLine": 505,
-      "code": "static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,\n    uint16_t received, bool retry, uint64_t expires)\n{\n    struct dppd_runtime *runtime = worker->runtime;\n    /** 按出口暂存待发送的 mbuf 指针、长度和数量，逐包处理结束后统一批量发送 */\n    struct rte_mbuf *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint16_t counts[DPPD_MAX_PORTS] = {0};\n    struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};\n    struct dppd_software_count_batch rule_counts = {0};\n    if (worker_io_quiesced(worker)) {\n        /** RX 返回的报文已归线程所有，事件不能让这批 mbuf 因提前返回而泄漏 */\n        free_packets(rx, received);\n        return;\n    }\n    if (received == 0)\n        return;\n    delta.rx_packets = retry ? 0 : received;\n    const struct dppd_port *paired =\n        runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;\n    for (uint16_t i = 0; i < received; ++i) {\n        /** packet 保存解析字段，decision 保存处理决定，rx[i] 指向原始报文 */\n        struct dppd_pipeline_decision decision;\n        struct dppd_packet packet = {0};\n        uint32_t length = rte_pktmbuf_pkt_len(rx[i]);\n        if (!retry)\n            delta.rx_bytes += length;\n        /** 逐包进入 packet_mbuf.c 提取报文头字段，burst 只批量收发，不省略逐包解析 */\n        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);\n        packet.neighbor_retry = retry;\n        /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */\n        if (!retry) {\n            delta.tunnel_vxlan_packets += packet.tunnel.type == DPPD_TUNNEL_VXLAN;\n            delta.tunnel_geneve_packets += packet.tunnel.type == DPPD_TUNNEL_GENEVE;\n            delta.tunnel_gre_packets += packet.tunnel.type == DPPD_TUNNEL_GRE;\n            delta.tunnel_malformed += packet.tunnel.status == DPPD_PARSE_MALFORMED;\n            delta.tunnel_unsupported += packet.tunnel.status == DPPD_PARSE_UNSUPPORTED;\n        }\n        if (parsed == DPPD_PARSE_MALFORMED)\n            delta.rx_malformed++;\n        else if (parsed == DPPD_PARSE_UNSUPPORTED)\n            delta.rx_unsupported++;\n        if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&\n            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {\n            delta.nd6_rx_packets++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        if (packet.l3_type == DPPD_L3_IPV6 && !dppd_nd6_port_ready(runtime->nd6, ingress->port_id)) {\n            delta.nd6_not_ready_drops++;\n            delta.policy_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 未启用连接跟踪\n         *   → routed_decide → decision\n         *\n         * 启用连接跟踪\n         *   → stateful_decide\n         *       校验、准备候选会话\n         *         → routed_decide\n         *         → 检查出口、改写实际报文\n         *         → 成功提交会话，失败取消候选\n         */\n        if (runtime->conntrack != NULL)\n            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);\n        else\n            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);\n\n        /**\n         * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列\n         * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它\n         * 入队失败 → mbuf 仍归当前线程，继续下面的丢弃分支并释放\n         */\n        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {\n            struct dppd_nd6_pending pending = {.mbuf = rx[i],\n                .ingress = ingress->port_id,\n                .queue = worker->queue_id,\n                .expires_ms = expires};\n            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,\n                    dppd_monotonic_ms()) == 0) {\n                delta.nd6_queued++;\n                continue;\n            }\n            delta.nd6_queue_drops++;\n        }\n        /**\n         * 决定函数只填写结果，worker 在这里执行丢弃并按原因更新统计\n         * 释放当前报文后继续处理本批下一个包，不影响其他报文\n         */\n        if (decision.action != DPPD_PACKET_FORWARD) {\n            if (decision.drop_reason != DPPD_DROP_MALFORMED)\n                delta.policy_drops++;\n            if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)\n                delta.nd6_not_ready_drops++;\n            else if (decision.drop_reason == DPPD_DROP_POLICY)\n                delta.rule_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_ROUTE)\n                delta.no_route_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_NEIGHBOR)\n                delta.no_neighbor_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV4_UNSUPPORTED)\n                delta.ipv4_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV6_UNSUPPORTED)\n                delta.ipv6_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_INVALID)\n                delta.ct_invalid_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_FULL)\n                delta.ct_full_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_UNSUPPORTED)\n                delta.ct_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_ZONE)\n                delta.ct_zone_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_CHECKSUM)\n                delta.ct_checksum_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_POOL)\n                delta.nat_pool_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_MISS)\n                delta.nat_miss_drops++;\n            else if (decision.drop_reason == DPPD_DROP_TTL) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_hop_drops++;\n                else\n                    delta.ipv4_ttl_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_REWRITE) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_rewrite_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_EGRESS)\n                delta.egress_drops++;\n            /** 归还当前 mbuf，再进入逐包循环的下一轮 */\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 根据处理决定取得实际出口对象，三层模式按出口编号查找，端口配对模式复用 paired\n         * FORWARD 只表示策略允许，发送前仍须确认出口存在、编号一致且可发送\n         */\n        const struct dppd_port *egress =\n            runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;\n        if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {\n            delta.policy_drops++;\n            delta.egress_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 三层转发在这里改写报文头，启用连接跟踪时已由 stateful_decide 改写，不能再次递减跳数\n         * IPv6 普通转发：目的 MAC 改为下一跳 MAC，源 MAC 改为出口 MAC，Hop Limit 减 1\n         *\n         * &rx[i] 允许改写函数在需要复制报文时替换 mbuf 指针，后续发送使用替换后的指针\n         * &packet 提供已解析的头部信息，decision.ipv4 是 IPv4/IPv6 共用的转发结果\n         * 改写失败则释放当前包；成功后继续加入出口发送批次，此处尚未交给网卡\n         */\n        if (decision.routed && runtime->conntrack == NULL) {\n            bool ipv6 = packet.l3_type == DPPD_L3_IPV6;\n            int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)\n                          : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);\n            if (rc != 0) {\n                delta.policy_drops++;\n                if (ipv6) {\n                    if (rc == -ETIMEDOUT)\n                        delta.ipv6_hop_drops++;\n                    else if (rc == -EBADMSG)\n                        delta.ipv6_checksum_drops++;\n                    else if (rc == -ENOTSUP)\n                        delta.ipv6_unsupported_drops++;\n                    else\n                        delta.ipv6_rewrite_drops++;\n                } else if (rc == -ETIMEDOUT)\n                    delta.ipv4_ttl_drops++;\n                else if (rc == -EBADMSG)\n                    delta.ipv4_checksum_drops++;\n                else if (rc == -ENOTSUP)\n                    delta.ipv4_unsupported_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n                rte_pktmbuf_free(rx[i]);\n                continue;\n            }\n        }\n        /** 将规则 MARK 写入 mbuf 的附加信息并设置有效标志，不向报文字节中插入标记 */\n        if (decision.has_mark) {\n            rx[i]->hash.fdir.hi = decision.mark_id;\n            rx[i]->ol_flags |= RTE_MBUF_F_RX_FDIR_ID;\n        }\n        /**\n         * 以出口在 devices.ports 中的数组下标分组，指针相减得到元素间距\n         * 例：ports[0].port_id = 1、ports[1].port_id = 5，出口为网口 5 时 index 为 1\n         * tx[index]、tx_lengths[index]、counts[index] 和 outputs[index] 都属于这个出口\n         */\n        uint16_t index = (uint16_t)(egress - runtime->devices.ports);\n        /**\n         * 多段报文且出口未启用多段发送时，尝试将全部数据合并到第一段\n         * 第一段空间不足等原因导致合并失败时，统计并释放当前包，继续处理下一个\n         */\n        if (rx[i]->nb_segs > 1U && (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0 &&\n            rte_pktmbuf_linearize(rx[i]) != 0) {\n            outputs[index].tx_drops++;\n            outputs[index].tx_linearize_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 将当前包追加到对应出口的待发送批次，只保存指针，此处尚未交给驱动\n         * 提前保存长度供发送统计使用，成功提交后不再读取已转移所有权的 mbuf\n         * 例：counts[index] 为 2，长度和指针都写入下标 2，然后 counts[index] 增为 3\n         * counts 只统计本次 process_batch 收集的包，本批处理结束就发送，不等待凑满\n         */\n        tx_lengths[index][counts[index]] = length;\n        tx[index][counts[index]++] = rx[i];\n    }\n    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */\n    dppd_software_count_batch_flush(&rule_counts);\n    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)\n        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,\n            &outputs[index]);\n    /**\n     * 此时 delta 保存本批入口接收和处理中的丢弃统计，outputs 按出口保存发送及发送失败统计\n     * 先将 delta 记入入口网口，再将各 outputs 记入对应出口，并合并到 delta 供 worker 汇总\n     * 例：入口 0 收到 3 包，均送往出口 1，其中 2 包提交成功、1 包因发送队列未接收而丢弃\n     *   入口 0：RX 加 3；出口 1：TX 加 2、tx_queue_drops 加 1；worker 汇总包含这三项\n     */\n    dppd_stats_add(&worker->port_stats[ingress - runtime->devices.ports], &delta);\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index) {\n        dppd_stats_add(&worker->port_stats[index], &outputs[index]);\n        dppd_stats_accumulate(&delta, &outputs[index]);\n    }\n    /** 每批只更新一次工作线程汇总，避免入口丢弃已累计而出口字节还没累计的额外窗口 */\n    dppd_stats_add(&worker->stats, &delta);\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L272"
+      "line": 283,
+      "endLine": 524,
+      "code": "static void process_batch(struct dppd_worker *worker, const struct dppd_port *ingress, struct rte_mbuf **rx,\n    uint16_t received, bool retry, uint64_t expires)\n{\n    struct dppd_runtime *runtime = worker->runtime;\n    /** 按出口暂存待发送的 mbuf 指针、长度和数量，逐包处理结束后统一批量发送 */\n    struct rte_mbuf *tx[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint32_t tx_lengths[DPPD_MAX_PORTS][DPPD_MAX_BURST];\n    uint16_t counts[DPPD_MAX_PORTS] = {0};\n    struct dppd_stats_values delta = {0}, outputs[DPPD_MAX_PORTS] = {0};\n    struct dppd_software_count_batch rule_counts = {0};\n    if (worker_io_quiesced(worker)) {\n        /** RX 返回的报文已归线程所有，事件不能让这批 mbuf 因提前返回而泄漏 */\n        free_packets(rx, received);\n        return;\n    }\n    if (received == 0)\n        return;\n    delta.rx_packets = retry ? 0 : received;\n    const struct dppd_port *paired =\n        runtime->ipv4_router == NULL ? dppd_devices_find(&runtime->devices, ingress->peer_port_id) : NULL;\n    for (uint16_t i = 0; i < received; ++i) {\n        /** packet 保存解析字段，decision 保存处理决定，rx[i] 指向原始报文 */\n        struct dppd_pipeline_decision decision;\n        struct dppd_packet packet = {0};\n        uint32_t length = rte_pktmbuf_pkt_len(rx[i]);\n        if (!retry)\n            delta.rx_bytes += length;\n        /** 逐包进入 packet_mbuf.c 提取报文头字段，burst 只批量收发，不省略逐包解析 */\n        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);\n        packet.neighbor_retry = retry;\n        /** 隧道统计是外层中转观察，既不替换 ACL 字段，也不因内层错误改变已有放行结果 */\n        if (!retry) {\n            delta.tunnel_vxlan_packets += packet.tunnel.type == DPPD_TUNNEL_VXLAN;\n            delta.tunnel_geneve_packets += packet.tunnel.type == DPPD_TUNNEL_GENEVE;\n            delta.tunnel_gre_packets += packet.tunnel.type == DPPD_TUNNEL_GRE;\n            delta.tunnel_malformed += packet.tunnel.status == DPPD_PARSE_MALFORMED;\n            delta.tunnel_unsupported += packet.tunnel.status == DPPD_PARSE_UNSUPPORTED;\n        }\n        if (parsed == DPPD_PARSE_MALFORMED)\n            delta.rx_malformed++;\n        else if (parsed == DPPD_PARSE_UNSUPPORTED)\n            delta.rx_unsupported++;\n        /**\n         * 先处理 ND 控制报文，再检查本机 IPv6 地址是否就绪，待检测期间仍能接收冲突证据\n         * input 返回 true 表示已处理，包含无效 ND；这里只释放当前 mbuf，再处理下一个包\n         *\n         * 收到 mbuf → 解析报文头 → ND 接收处理\n                                    ├─ 已处理 → worker 释放当前包，继续下一个\n                                    └─ 未处理 → 继续原来的检查和转发流程\n         */\n        if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&\n            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {\n            delta.nd6_rx_packets++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        if (packet.l3_type == DPPD_L3_IPV6 && !dppd_nd6_port_ready(runtime->nd6, ingress->port_id)) {\n            delta.nd6_not_ready_drops++;\n            delta.policy_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 未启用连接跟踪\n         *   → routed_decide → decision\n         *\n         * 启用连接跟踪\n         *   → stateful_decide\n         *       确认启用、准备候选并校验报文\n         *         → routed_decide\n         *         → 检查出口、改写实际报文\n         *         → 成功提交会话，失败取消候选\n         */\n        bool tracked = runtime->conntrack != NULL &&\n            stateful_decide(worker, ingress, &rx[i], parsed, &packet, &decision, &rule_counts);\n        if (!tracked)\n            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);\n\n        /**\n         * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列\n         * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它\n         * 入队失败 → mbuf 仍归当前线程，继续下面的丢弃分支并释放\n         */\n        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {\n            struct dppd_nd6_pending pending = {.mbuf = rx[i],\n                .ingress = ingress->port_id,\n                .queue = worker->queue_id,\n                .expires_ms = expires};\n            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,\n                    dppd_monotonic_ms()) == 0) {\n                delta.nd6_queued++;\n                continue;\n            }\n            delta.nd6_queue_drops++;\n        }\n        /**\n         * 决定函数只填写结果，worker 在这里执行丢弃并按原因更新统计\n         * 释放当前报文后继续处理本批下一个包，不影响其他报文\n         */\n        if (decision.action != DPPD_PACKET_FORWARD) {\n            if (decision.drop_reason != DPPD_DROP_MALFORMED)\n                delta.policy_drops++;\n            if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)\n                delta.nd6_not_ready_drops++;\n            else if (decision.drop_reason == DPPD_DROP_POLICY)\n                delta.rule_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_ROUTE)\n                delta.no_route_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NO_NEIGHBOR)\n                delta.no_neighbor_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV4_UNSUPPORTED)\n                delta.ipv4_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_IPV6_UNSUPPORTED)\n                delta.ipv6_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_INVALID)\n                delta.ct_invalid_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_FULL)\n                delta.ct_full_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_UNSUPPORTED)\n                delta.ct_unsupported_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_ZONE)\n                delta.ct_zone_drops++;\n            else if (decision.drop_reason == DPPD_DROP_CT_CHECKSUM)\n                delta.ct_checksum_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_POOL)\n                delta.nat_pool_drops++;\n            else if (decision.drop_reason == DPPD_DROP_NAT_MISS)\n                delta.nat_miss_drops++;\n            else if (decision.drop_reason == DPPD_DROP_TTL) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_hop_drops++;\n                else\n                    delta.ipv4_ttl_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_REWRITE) {\n                if (packet.l3_type == DPPD_L3_IPV6)\n                    delta.ipv6_rewrite_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n            } else if (decision.drop_reason == DPPD_DROP_EGRESS)\n                delta.egress_drops++;\n            /** 归还当前 mbuf，再进入逐包循环的下一轮 */\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 根据处理决定取得实际出口对象，三层模式按出口编号查找，端口配对模式复用 paired\n         * FORWARD 只表示策略允许，发送前仍须确认出口存在、编号一致且可发送\n         */\n        const struct dppd_port *egress =\n            runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;\n        if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {\n            delta.policy_drops++;\n            delta.egress_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 三层转发在这里改写报文头，启用连接跟踪时已由 stateful_decide 改写，不能再次递减跳数\n         * IPv6 普通转发：目的 MAC 改为下一跳 MAC，源 MAC 改为出口 MAC，Hop Limit 减 1\n         *\n         * &rx[i] 允许改写函数在需要复制报文时替换 mbuf 指针，后续发送使用替换后的指针\n         * &packet 提供已解析的头部信息，decision.ipv4 是 IPv4/IPv6 共用的转发结果\n         * 改写失败则释放当前包；成功后继续加入出口发送批次，此处尚未交给网卡\n         */\n        if (decision.routed && !tracked) {\n            bool ipv6 = packet.l3_type == DPPD_L3_IPV6;\n            int rc = ipv6 ? dppd_ipv6_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes)\n                          : dppd_ipv4_rewrite(&rx[i], &packet, &decision.ipv4, egress->mac.addr_bytes);\n            if (rc != 0) {\n                delta.policy_drops++;\n                if (ipv6) {\n                    if (rc == -ETIMEDOUT)\n                        delta.ipv6_hop_drops++;\n                    else if (rc == -EBADMSG)\n                        delta.ipv6_checksum_drops++;\n                    else if (rc == -ENOTSUP)\n                        delta.ipv6_unsupported_drops++;\n                    else\n                        delta.ipv6_rewrite_drops++;\n                } else if (rc == -ETIMEDOUT)\n                    delta.ipv4_ttl_drops++;\n                else if (rc == -EBADMSG)\n                    delta.ipv4_checksum_drops++;\n                else if (rc == -ENOTSUP)\n                    delta.ipv4_unsupported_drops++;\n                else\n                    delta.ipv4_rewrite_drops++;\n                rte_pktmbuf_free(rx[i]);\n                continue;\n            }\n        }\n        /** 将规则 MARK 写入 mbuf 的附加信息并设置有效标志，不向报文字节中插入标记 */\n        if (decision.has_mark) {\n            rx[i]->hash.fdir.hi = decision.mark_id;\n            rx[i]->ol_flags |= RTE_MBUF_F_RX_FDIR_ID;\n        }\n        /**\n         * 以出口在 devices.ports 中的数组下标分组，指针相减得到元素间距\n         * 例：ports[0].port_id = 1、ports[1].port_id = 5，出口为网口 5 时 index 为 1\n         * tx[index]、tx_lengths[index]、counts[index] 和 outputs[index] 都属于这个出口\n         */\n        uint16_t index = (uint16_t)(egress - runtime->devices.ports);\n        /**\n         * 多段报文且出口未启用多段发送时，尝试将全部数据合并到第一段\n         * 第一段空间不足等原因导致合并失败时，统计并释放当前包，继续处理下一个\n         */\n        if (rx[i]->nb_segs > 1U && (egress->configured_tx_offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS) == 0 &&\n            rte_pktmbuf_linearize(rx[i]) != 0) {\n            outputs[index].tx_drops++;\n            outputs[index].tx_linearize_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }\n        /**\n         * 将当前包追加到对应出口的待发送批次，只保存指针，此处尚未交给驱动\n         * 提前保存长度供发送统计使用，成功提交后不再读取已转移所有权的 mbuf\n         * 例：counts[index] 为 2，长度和指针都写入下标 2，然后 counts[index] 增为 3\n         * counts 只统计本次 process_batch 收集的包，本批处理结束就发送，不等待凑满\n         */\n        tx_lengths[index][counts[index]] = length;\n        tx[index][counts[index]++] = rx[i];\n    }\n    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */\n    dppd_software_count_batch_flush(&rule_counts);\n    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)\n        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,\n            &outputs[index]);\n    /**\n     * 此时 delta 保存本批入口接收和处理中的丢弃统计，outputs 按出口保存发送及发送失败统计\n     * 先将 delta 记入入口网口，再将各 outputs 记入对应出口，并合并到 delta 供 worker 汇总\n     * 例：入口 0 收到 3 包，均送往出口 1，其中 2 包提交成功、1 包因发送队列未接收而丢弃\n     *   入口 0：RX 加 3；出口 1：TX 加 2、tx_queue_drops 加 1；worker 汇总包含这三项\n     */\n    dppd_stats_add(&worker->port_stats[ingress - runtime->devices.ports], &delta);\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index) {\n        dppd_stats_add(&worker->port_stats[index], &outputs[index]);\n        dppd_stats_accumulate(&delta, &outputs[index]);\n    }\n    /** 每批只更新一次工作线程汇总，避免入口丢弃已累计而出口字节还没累计的额外窗口 */\n    dppd_stats_add(&worker->stats, &delta);\n}",
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L283"
     },
     {
       "file": "lib/dataplane/worker.c",
@@ -79,10 +79,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 300,
-      "endLine": 300,
+      "line": 311,
+      "endLine": 311,
       "code": "        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L300"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L311"
     },
     {
       "file": "lib/dataplane/packet_mbuf.c",
@@ -159,34 +159,34 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 300,
-      "endLine": 300,
+      "line": 311,
+      "endLine": 311,
       "code": "        int parsed = dppd_packet_parse_mbuf(rx[i], &packet);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L300"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L311"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "routed_decide",
-      "line": 105,
-      "endLine": 145,
+      "line": 113,
+      "endLine": 153,
       "code": "static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int parsed, const struct dppd_packet *packet,\n    struct dppd_pipeline_decision *decision, struct dppd_software_count_batch *counts)\n{\n    dppd_pipeline_decide_counted(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,\n        packet, decision, counts);\n    if (runtime->nd6 == NULL || packet->l3_type != DPPD_L3_IPV6)\n        return;\n    /**\n     * 静态邻居未命中时，pipeline 返回 DROP / NO_NEIGHBOR，但已留下出口和下一跳\n     * 上方检查保证此处是 IPv6 且已启用 ND（IPv6 邻居发现）\n     *\n     * 沿用示例：\n     *   decision->ipv4.port_id = 1，next_hop6 = fe80::1，destination_mac 仍为全 0\n     *   用网口 1 和 fe80::1 查询 ND 动态邻居表\n     *   若找到可用 MAC，dppd_nd6_resolve 直接写入 decision->ipv4.destination_mac\n     * 静态表没有邻居，并不代表动态表也没有，因此这里还需再查一次\n     */\n    if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR) {\n        int rc = dppd_nd6_resolve(runtime->nd6, decision->ipv4.port_id, decision->ipv4.next_hop6, packet,\n            dppd_monotonic_ms(), decision->ipv4.destination_mac);\n\n        /**\n         * rc = 0       → MAC 已写入，改为 FORWARD，填写出口并设置 routed\n         * rc = -EAGAIN → MAC 尚未取得，改为 ND_PENDING，让 process_batch 尝试暂存报文\n         * 其他错误     → 保持 DROP / NO_NEIGHBOR，交回调用方处理失败\n         * ND_PENDING 时 action 仍是 DROP，但 process_batch 会先处理等待入队，再判断丢弃\n         */\n        if (rc == 0) {\n            decision->action = DPPD_PACKET_FORWARD;\n            decision->drop_reason = DPPD_DROP_NONE;\n            decision->egress_port = decision->ipv4.port_id;\n            decision->routed = true;\n        } else if (rc == -EAGAIN)\n            decision->drop_reason = DPPD_DROP_ND_PENDING;\n    }\n    /** 取得下一跳 MAC 后，仍须确认出口 IPv6 地址已就绪，否则改为 DROP / ND_NOT_READY */\n    if (decision->action == DPPD_PACKET_FORWARD && !dppd_nd6_port_ready(runtime->nd6, decision->egress_port)) {\n        decision->action = DPPD_PACKET_DROP;\n        decision->drop_reason = DPPD_DROP_ND_NOT_READY;\n    }\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L105"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L113"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 340,
-      "endLine": 340,
+      "line": 359,
+      "endLine": 359,
       "code": "            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L340"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L359"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "routed_decide",
-      "line": 105,
-      "endLine": 145,
+      "line": 113,
+      "endLine": 153,
       "code": "static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int parsed, const struct dppd_packet *packet,\n    struct dppd_pipeline_decision *decision, struct dppd_software_count_batch *counts)\n{\n    dppd_pipeline_decide_counted(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,\n        packet, decision, counts);\n    if (runtime->nd6 == NULL || packet->l3_type != DPPD_L3_IPV6)\n        return;\n    /**\n     * 静态邻居未命中时，pipeline 返回 DROP / NO_NEIGHBOR，但已留下出口和下一跳\n     * 上方检查保证此处是 IPv6 且已启用 ND（IPv6 邻居发现）\n     *\n     * 沿用示例：\n     *   decision->ipv4.port_id = 1，next_hop6 = fe80::1，destination_mac 仍为全 0\n     *   用网口 1 和 fe80::1 查询 ND 动态邻居表\n     *   若找到可用 MAC，dppd_nd6_resolve 直接写入 decision->ipv4.destination_mac\n     * 静态表没有邻居，并不代表动态表也没有，因此这里还需再查一次\n     */\n    if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR) {\n        int rc = dppd_nd6_resolve(runtime->nd6, decision->ipv4.port_id, decision->ipv4.next_hop6, packet,\n            dppd_monotonic_ms(), decision->ipv4.destination_mac);\n\n        /**\n         * rc = 0       → MAC 已写入，改为 FORWARD，填写出口并设置 routed\n         * rc = -EAGAIN → MAC 尚未取得，改为 ND_PENDING，让 process_batch 尝试暂存报文\n         * 其他错误     → 保持 DROP / NO_NEIGHBOR，交回调用方处理失败\n         * ND_PENDING 时 action 仍是 DROP，但 process_batch 会先处理等待入队，再判断丢弃\n         */\n        if (rc == 0) {\n            decision->action = DPPD_PACKET_FORWARD;\n            decision->drop_reason = DPPD_DROP_NONE;\n            decision->egress_port = decision->ipv4.port_id;\n            decision->routed = true;\n        } else if (rc == -EAGAIN)\n            decision->drop_reason = DPPD_DROP_ND_PENDING;\n    }\n    /** 取得下一跳 MAC 后，仍须确认出口 IPv6 地址已就绪，否则改为 DROP / ND_NOT_READY */\n    if (decision->action == DPPD_PACKET_FORWARD && !dppd_nd6_port_ready(runtime->nd6, decision->egress_port)) {\n        decision->action = DPPD_PACKET_DROP;\n        decision->drop_reason = DPPD_DROP_ND_NOT_READY;\n    }\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L105"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L113"
     },
     {
       "file": "lib/dataplane/pipeline.c",
@@ -263,10 +263,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 487,
-      "endLine": 487,
+      "line": 506,
+      "endLine": 506,
       "code": "    dppd_software_count_batch_flush(&rule_counts);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L487"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L506"
     },
     {
       "file": "lib/dataplane/pipeline.c",
@@ -279,10 +279,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 363,
-      "endLine": 363,
+      "line": 382,
+      "endLine": 382,
       "code": "        if (decision.action != DPPD_PACKET_FORWARD) {",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L363"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L382"
     },
     {
       "file": "lib/dataplane/pipeline.c",
@@ -319,66 +319,66 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "routed_decide",
-      "line": 122,
-      "endLine": 142,
+      "line": 130,
+      "endLine": 150,
       "code": "    if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR) {\n        int rc = dppd_nd6_resolve(runtime->nd6, decision->ipv4.port_id, decision->ipv4.next_hop6, packet,\n            dppd_monotonic_ms(), decision->ipv4.destination_mac);\n\n        /**\n         * rc = 0       → MAC 已写入，改为 FORWARD，填写出口并设置 routed\n         * rc = -EAGAIN → MAC 尚未取得，改为 ND_PENDING，让 process_batch 尝试暂存报文\n         * 其他错误     → 保持 DROP / NO_NEIGHBOR，交回调用方处理失败\n         * ND_PENDING 时 action 仍是 DROP，但 process_batch 会先处理等待入队，再判断丢弃\n         */\n        if (rc == 0) {\n            decision->action = DPPD_PACKET_FORWARD;\n            decision->drop_reason = DPPD_DROP_NONE;\n            decision->egress_port = decision->ipv4.port_id;\n            decision->routed = true;\n        } else if (rc == -EAGAIN)\n            decision->drop_reason = DPPD_DROP_ND_PENDING;\n    }\n    /** 取得下一跳 MAC 后，仍须确认出口 IPv6 地址已就绪，否则改为 DROP / ND_NOT_READY */\n    if (decision->action == DPPD_PACKET_FORWARD && !dppd_nd6_port_ready(runtime->nd6, decision->egress_port)) {\n        decision->action = DPPD_PACKET_DROP;",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L122"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L130"
     },
     {
       "file": "lib/dataplane/nd6.c",
       "fn": "dppd_nd6_resolve",
-      "line": 372,
-      "endLine": 408,
+      "line": 445,
+      "endLine": 481,
       "code": "int dppd_nd6_resolve(struct dppd_nd6 *table, uint16_t port, const uint8_t address[16], const struct dppd_packet *packet,\n    uint64_t now, uint8_t mac[6])\n{\n    if (table == NULL)\n        return -EHOSTUNREACH;\n    pthread_mutex_lock(&table->lock);\n    clock_advance(table, now);\n    int rc = -EHOSTUNREACH;\n    if (!domain(local(table, port, NULL), packet) || !dppd_ipv6_unicast(address, true) ||\n        local(table, port, address) != NULL)\n        goto done;\n    struct dppd_nd6_entry *entry = find(table, port, address);\n    if (entry == NULL)\n        entry = insert(table, port, address);\n    if (entry == NULL) {\n        rc = -ENOSPC;\n        goto done;\n    }\n    entry->used_ms = table->clock;\n    if (entry->state == DPPD_ND6_FAILED && entry->due_ms <= table->clock) {\n        entry->probes = 0;\n        state(table, entry, DPPD_ND6_INCOMPLETE, table->clock);\n    }\n    if (entry->state == DPPD_ND6_REACHABLE && entry->due_ms <= table->clock)\n        state(table, entry, DPPD_ND6_STALE, 0);\n    if (entry->state == DPPD_ND6_STALE)\n        state(table, entry, DPPD_ND6_DELAY, table->clock + 5000);\n    if (entry->state == DPPD_ND6_INCOMPLETE)\n        rc = -EAGAIN;\n    else if (entry->state != DPPD_ND6_FAILED) {\n        memcpy(mac, entry->mac, 6);\n        rc = 0;\n    }\ndone:\n    pthread_mutex_unlock(&table->lock);\n    return rc;\n}",
-      "sourceHref": "sources/lib__dataplane__nd6.c.html#L372"
+      "sourceHref": "sources/lib__dataplane__nd6.c.html#L445"
     },
     {
       "file": "lib/dataplane/nd6.c",
       "fn": "dppd_nd6_tick",
-      "line": 411,
-      "endLine": 474,
-      "code": "void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, void *context)\n{\n    if (table == NULL)\n        return;\n    pthread_mutex_lock(&table->lock);\n    clock_advance(table, now);\n    if (table->clock < table->next_tick)\n        goto done;\n    table->next_tick = table->clock + 10;\n    for (uint32_t i = 0; i < table->status.local_count; ++i) {\n        struct local_address *owner = &table->locals[i];\n        if (owner->state != DPPD_ND6_TENTATIVE || owner->due > table->clock)\n            continue;\n        if (owner->sent) {\n            owner->state = DPPD_ND6_PREFERRED;\n            table->status.revision++;\n        } else {\n            uint8_t group[16];\n            solicited(owner->configuration.address, group);\n            owner->sent =\n                transmit(table, owner, DPPD_ICMPV6_NEIGHBOR_SOLICITATION, zero, group,\n                    owner->configuration.address, NULL, 0, send, context) == 0;\n            owner->due = table->clock + 1000;\n        }\n    }\n    for (uint32_t i = 0; i < DPPD_ND6_LIMIT; ++i) {\n        struct dppd_nd6_entry *entry = &table->entries[i];\n        if (entry->id == 0)\n            continue;\n        if (entry->state == DPPD_ND6_REACHABLE && entry->due_ms <= table->clock)\n            state(table, entry, DPPD_ND6_STALE, 0);\n        if ((entry->state == DPPD_ND6_STALE || entry->state == DPPD_ND6_FAILED) &&\n            table->clock - entry->used_ms >= 60000) {\n            memset(entry, 0, sizeof(*entry));\n            table->status.active--;\n            table->status.revision++;\n            continue;\n        }\n        if (entry->state == DPPD_ND6_DELAY && entry->due_ms <= table->clock) {\n            entry->probes = 0;\n            state(table, entry, DPPD_ND6_PROBE, table->clock);\n        }\n        if ((entry->state != DPPD_ND6_INCOMPLETE && entry->state != DPPD_ND6_PROBE) || entry->due_ms > table->clock)\n            continue;\n        struct local_address *owner = local(table, entry->port_id, NULL);\n        if (owner == NULL || owner->state != DPPD_ND6_PREFERRED)\n            continue;\n        if (entry->probes == 3) {\n            state(table, entry, DPPD_ND6_FAILED, table->clock + 5000);\n            table->status.failed++;\n            continue;\n        }\n        uint8_t destination[16];\n        solicited(entry->address, destination);\n        bool unicast = entry->state == DPPD_ND6_PROBE;\n        transmit(table, owner, DPPD_ICMPV6_NEIGHBOR_SOLICITATION, owner->configuration.address,\n            unicast ? entry->address : destination,\n            entry->address, unicast ? entry->mac : NULL, 0, send, context);\n        entry->probes++;\n        entry->due_ms = table->clock + 1000;\n    }\ndone:\n    pthread_mutex_unlock(&table->lock);\n}",
-      "sourceHref": "sources/lib__dataplane__nd6.c.html#L411"
+      "line": 489,
+      "endLine": 558,
+      "code": "void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, void *context)\n{\n    if (table == NULL)\n        return;\n    pthread_mutex_lock(&table->lock);\n    clock_advance(table, now);\n    if (table->clock < table->next_tick)\n        goto done;\n    /** 这里只检查期限，不休眠；未到期直接返回，由 worker 后续循环再次调用 */\n    table->next_tick = table->clock + 10;\n    for (uint32_t i = 0; i < table->status.local_count; ++i) {\n        struct local_address *owner = &table->locals[i];\n        /** 只处理已经到期的待检测地址，PREFERRED 和 DUPLICATE 都跳过 */\n        if (owner->state != DPPD_ND6_TENTATIVE || owner->due > table->clock)\n            continue;\n        /** 已成功提交检测 NS，等待期限也已结束；仍未发现冲突，才允许使用该地址 */\n        if (owner->sent) {\n            owner->state = DPPD_ND6_PREFERRED;\n            table->status.revision++;\n        } else {\n            uint8_t group[16];\n            /** 检测本机地址是否被占用：源 IPv6 为 ::，目标字段为本机待检测地址，目的为其组播地址 */\n            solicited(owner->configuration.address, group);\n            owner->sent =\n                transmit(table, owner, DPPD_ICMPV6_NEIGHBOR_SOLICITATION, zero, group,\n                    owner->configuration.address, NULL, 0, send, context) == 0;\n            /** 成功后等待冲突报文，失败后等待重发，两种情况均至少间隔 1 秒再处理 */\n            owner->due = table->clock + 1000;\n        }\n    }\n    /** 以下维护邻居缓存，与上面的本机地址检测分别处理 */\n    for (uint32_t i = 0; i < DPPD_ND6_LIMIT; ++i) {\n        struct dppd_nd6_entry *entry = &table->entries[i];\n        if (entry->id == 0)\n            continue;\n        if (entry->state == DPPD_ND6_REACHABLE && entry->due_ms <= table->clock)\n            state(table, entry, DPPD_ND6_STALE, 0);\n        if ((entry->state == DPPD_ND6_STALE || entry->state == DPPD_ND6_FAILED) &&\n            table->clock - entry->used_ms >= 60000) {\n            memset(entry, 0, sizeof(*entry));\n            table->status.active--;\n            table->status.revision++;\n            continue;\n        }\n        if (entry->state == DPPD_ND6_DELAY && entry->due_ms <= table->clock) {\n            entry->probes = 0;\n            state(table, entry, DPPD_ND6_PROBE, table->clock);\n        }\n        if ((entry->state != DPPD_ND6_INCOMPLETE && entry->state != DPPD_ND6_PROBE) || entry->due_ms > table->clock)\n            continue;\n        struct local_address *owner = local(table, entry->port_id, NULL);\n        if (owner == NULL || owner->state != DPPD_ND6_PREFERRED)\n            continue;\n        if (entry->probes == 3) {\n            state(table, entry, DPPD_ND6_FAILED, table->clock + 5000);\n            table->status.failed++;\n            continue;\n        }\n        uint8_t destination[16];\n        solicited(entry->address, destination);\n        bool unicast = entry->state == DPPD_ND6_PROBE;\n        transmit(table, owner, DPPD_ICMPV6_NEIGHBOR_SOLICITATION, owner->configuration.address,\n            unicast ? entry->address : destination,\n            entry->address, unicast ? entry->mac : NULL, 0, send, context);\n        entry->probes++;\n        entry->due_ms = table->clock + 1000;\n    }\ndone:\n    pthread_mutex_unlock(&table->lock);\n}",
+      "sourceHref": "sources/lib__dataplane__nd6.c.html#L489"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 347,
-      "endLine": 358,
+      "line": 366,
+      "endLine": 377,
       "code": "        if (decision.drop_reason == DPPD_DROP_ND_PENDING) {\n            struct dppd_nd6_pending pending = {.mbuf = rx[i],\n                .ingress = ingress->port_id,\n                .queue = worker->queue_id,\n                .expires_ms = expires};\n            if (dppd_nd6_hold(runtime->nd6, decision.ipv4.port_id, decision.ipv4.next_hop6, pending,\n                    dppd_monotonic_ms()) == 0) {\n                delta.nd6_queued++;\n                continue;\n            }\n            delta.nd6_queue_drops++;\n        }",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L347"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L366"
     },
     {
       "file": "lib/dataplane/nd6.c",
       "fn": "dppd_nd6_hold",
-      "line": 486,
-      "endLine": 517,
+      "line": 570,
+      "endLine": 601,
       "code": "int dppd_nd6_hold(struct dppd_nd6 *table, uint16_t port, const uint8_t address[16], struct dppd_nd6_pending pending,\n    uint64_t now)\n{\n    if (table == NULL || pending.mbuf == NULL)\n        return -EINVAL;\n    pthread_mutex_lock(&table->lock);\n    clock_advance(table, now);\n    struct dppd_nd6_entry *entry = find(table, port, address);\n    /** 记录首个空槽位，并统计已有多少个包在等待同一邻居，避免单个邻居占满队列 */\n    uint32_t same = 0, available = DPPD_ND6_PENDING_LIMIT;\n    for (uint32_t i = 0; i < DPPD_ND6_PENDING_LIMIT; ++i) {\n        if (table->waiting[i].packet.mbuf == NULL) {\n            if (available == DPPD_ND6_PENDING_LIMIT)\n                available = i;\n        } else if (entry != NULL && table->waiting[i].neighbor_id == entry->id)\n            same++;\n    }\n    int rc = -ENOBUFS;\n    if (entry != NULL && same < 4 && available != DPPD_ND6_PENDING_LIMIT &&\n        (pending.expires_ms == 0 || pending.expires_ms > table->clock)) {\n        if (pending.expires_ms == 0)\n            pending.expires_ms = table->clock + 5000;\n        /** 保存记录和原始 mbuf 指针，不复制报文字节；仍未解析完成时，最早 100 毫秒后取出重试 */\n        table->waiting[available] =\n            (struct waiting_packet){.packet = pending, .neighbor_id = entry->id, .retry_ms = table->clock + 100};\n        table->status.pending++;\n        rc = 0;\n    } else\n        table->status.queue_drops++;\n    pthread_mutex_unlock(&table->lock);\n    return rc;\n}",
-      "sourceHref": "sources/lib__dataplane__nd6.c.html#L486"
+      "sourceHref": "sources/lib__dataplane__nd6.c.html#L570"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_waiting",
-      "line": 534,
-      "endLine": 549,
+      "line": 553,
+      "endLine": 568,
       "code": "    struct dppd_nd6_pending pending;\n    for (unsigned int i = 0;\n         i < DPPD_MAX_BURST && dppd_nd6_take(worker->runtime->nd6, worker->queue_id, dppd_monotonic_ms(), &pending);\n         ++i) {\n        const struct dppd_port *ingress = dppd_devices_find(&worker->runtime->devices, pending.ingress);\n        /** 取回不代表可以发送，失效包或已失去原入口的包在此归还 mbuf */\n        if (pending.expired || ingress == NULL) {\n            rte_pktmbuf_free(pending.mbuf);\n            struct dppd_stats_values dropped = {.policy_drops = 1, .nd6_queue_drops = 1};\n            dppd_stats_add(&worker->stats, &dropped);\n            if (ingress != NULL)\n                dppd_stats_add(&worker->port_stats[ingress - worker->runtime->devices.ports], &dropped);\n        } else\n            process_batch(worker, ingress, &pending.mbuf, 1, true, pending.expires_ms);\n    }\n}",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L534"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L553"
     },
     {
       "file": "lib/dataplane/nd6.c",
       "fn": "dppd_nd6_take",
-      "line": 528,
-      "endLine": 560,
+      "line": 612,
+      "endLine": 644,
       "code": "bool dppd_nd6_take(struct dppd_nd6 *table, uint16_t queue, uint64_t now, struct dppd_nd6_pending *pending)\n{\n    if (table == NULL)\n        return false;\n    pthread_mutex_lock(&table->lock);\n    clock_advance(table, now);\n    bool found = false;\n    for (uint32_t i = 0; i < DPPD_ND6_PENDING_LIMIT; ++i) {\n        struct waiting_packet *waiting = &table->waiting[i];\n        /** 只取本队列的有效记录，避免把同一 mbuf 同时交给不同处理队列 */\n        if (waiting->packet.mbuf == NULL || waiting->packet.queue != queue)\n            continue;\n        struct dppd_nd6_entry *entry = NULL;\n        for (uint32_t j = 0; j < DPPD_ND6_LIMIT; ++j)\n            if (table->entries[j].id == waiting->neighbor_id)\n                entry = &table->entries[j];\n        /** 超时、邻居记录消失或解析已失败的包也要取出，标记 expired 后交给调用方释放 */\n        bool expired = waiting->packet.expires_ms <= table->clock || entry == NULL || entry->state == DPPD_ND6_FAILED;\n        /** 仍在等待 MAC 且未到重试时间才继续留队；MAC 已可用或记录失效时可提前取出 */\n        if (!expired && entry->state == DPPD_ND6_INCOMPLETE && waiting->retry_ms > table->clock)\n            continue;\n        /** 复制记录后释放等待槽位，mbuf 本身未释放，现在由调用方继续处理 */\n        *pending = waiting->packet;\n        pending->expired = expired;\n        memset(waiting, 0, sizeof(*waiting));\n        table->status.pending--;\n        table->status.queue_drops += expired;\n        found = true;\n        break;\n    }\n    pthread_mutex_unlock(&table->lock);\n    return found;\n}",
-      "sourceHref": "sources/lib__dataplane__nd6.c.html#L528"
+      "sourceHref": "sources/lib__dataplane__nd6.c.html#L612"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 412,
-      "endLine": 419,
+      "line": 431,
+      "endLine": 438,
       "code": "        const struct dppd_port *egress =\n            runtime->ipv4_router != NULL ? dppd_devices_find(&runtime->devices, decision.egress_port) : paired;\n        if (egress == NULL || egress->port_id != decision.egress_port || !dppd_port_tx_available(egress)) {\n            delta.policy_drops++;\n            delta.egress_drops++;\n            rte_pktmbuf_free(rx[i]);\n            continue;\n        }",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L412"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L431"
     },
     {
       "file": "lib/dataplane/ipv6_rewrite.c",
@@ -423,10 +423,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 483,
-      "endLine": 491,
+      "line": 502,
+      "endLine": 510,
       "code": "        tx_lengths[index][counts[index]] = length;\n        tx[index][counts[index]++] = rx[i];\n    }\n    /** 接收批次内所有路径都会汇合到这里，先提交 COUNT 再发送或报告 QSBR 静默 */\n    dppd_software_count_batch_flush(&rule_counts);\n    /** 逐包处理已完成，进入本文件的 flush_egress，按出口提交各自的待发送批次 */\n    for (uint16_t index = 0; index < runtime->devices.nb_ports; ++index)\n        flush_egress(worker, &runtime->devices.ports[index], tx[index], tx_lengths[index], counts[index], &delta,\n            &outputs[index]);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L483"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L502"
     },
     {
       "file": "lib/dataplane/worker.c",
@@ -439,74 +439,74 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "dppd_worker_main",
-      "line": 611,
-      "endLine": 612,
+      "line": 631,
+      "endLine": 632,
       "code": "        dppd_software_backend_worker_quiescent(runtime->software_backend, worker->queue_id);\n        dppd_ipv4_router_reader_quiescent(runtime->ipv4_router, worker->queue_id);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L611"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L631"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "main",
-      "line": 2027,
-      "endLine": 2039,
+      "line": 2069,
+      "endLine": 2081,
       "code": "    rc = build_request(argc - argument, argv + argument, &request);\n    if (rc != 0) {\n        print_usage(argv[0]);\n        return EXIT_FAILURE;\n    }\n    if (json_output && !dppctl_json_supported(request.operation)) {\n        fprintf(stderr, \"dppctl: JSON output is not supported for this operation\\n\");\n        return EXIT_FAILURE;\n    }\n    /** 参数校验已通过，此时可以安全读取命令名，health 查询不会因 ready=no 自行失败 */\n    require_ready = request.operation == DPPD_MANAGEMENT_HEALTH_GET && strcmp(argv[argument], \"ready\") == 0;\n    rc = exchange(socket_path, &request, &response);\n    if (rc != 0) {",
-      "sourceHref": "sources/app__dppctl__main.c.html#L2027"
+      "sourceHref": "sources/app__dppctl__main.c.html#L2069"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "build_request",
-      "line": 948,
-      "endLine": 949,
+      "line": 985,
+      "endLine": 986,
       "code": "    if (argc >= 1 && (strcmp(argv[0], \"acl-set\") == 0 || strcmp(argv[0], \"acl6-set\") == 0))\n        return build_acl_request(argc, argv, request);",
-      "sourceHref": "sources/app__dppctl__main.c.html#L948"
+      "sourceHref": "sources/app__dppctl__main.c.html#L985"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "build_acl_request",
-      "line": 625,
-      "endLine": 645,
+      "line": 629,
+      "endLine": 649,
       "code": "    initialize_request(request, DPPD_MANAGEMENT_RULE_APPLY);\n    /**\n     * 本例的输出直接写进 request，rule 指针只是定位其中的完整规则，不另建副本\n     * request\n     * ├─ operation = RULE_APPLY，告诉服务端这是规则创建或更新请求\n     * └─ payload.apply\n     *    ├─ install_port_id       → 安装入口，本例为 0\n     *    ├─ expected_generation   → 预期旧版本，本例为 0，要求新建\n     *    └─ rule ← 下方 rule 指针 → ID、优先级、匹配条件和动作\n     * 请求头标识如何解释数据，payload 保存该操作的具体输入\n     */\n    struct dppd_rule *rule = &request->payload.apply.rule;\n    uint64_t port, priority, protocol;\n    if (parse_u64(argv[1], 1, UINT64_MAX, &rule->id) != 0 || parse_u64(argv[2], 0, UINT16_MAX - 1U, &port) != 0 ||\n        parse_u64(argv[3], 0, UINT64_MAX - 1U, &request->payload.apply.expected_generation) != 0 ||\n        parse_u64(argv[4], 0, UINT32_MAX, &priority) != 0)\n        return -EINVAL;\n    request->payload.apply.install_port_id = (uint16_t)port;\n    rule->domain = DPPD_RULE_DOMAIN_INGRESS;\n    rule->fallback = DPPD_FALLBACK_SOFTWARE_ONLY;\n    rule->priority = (uint32_t)priority;",
-      "sourceHref": "sources/app__dppctl__main.c.html#L625"
+      "sourceHref": "sources/app__dppctl__main.c.html#L629"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "initialize_request",
-      "line": 459,
-      "endLine": 474,
+      "line": 463,
+      "endLine": 478,
       "code": "static void initialize_request(struct dppd_management_request *request, enum dppd_management_operation operation)\n{\n    struct timespec now;\n\n    /* 清零整个结构也会清零 union padding/reserved，确保本地 ABI 报文可重复 */\n    memset(request, 0, sizeof(*request));\n    (void)clock_gettime(CLOCK_MONOTONIC, &now);\n    request->version = DPPD_MANAGEMENT_VERSION;\n    request->operation = operation;\n    request->size = sizeof(*request);\n    /*\n     * 当前客户端一次只保持一个在途请求，不需要全局唯一 ID；PID 与单调时钟\n     * 纳秒部分足以发现串线响应。服务端只回显，不把该值作为幂等键\n     */\n    request->request_id = ((uint64_t)(uint32_t)getpid() << 32) ^ (uint64_t)now.tv_nsec;\n}",
-      "sourceHref": "sources/app__dppctl__main.c.html#L459"
+      "sourceHref": "sources/app__dppctl__main.c.html#L463"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "build_acl_request",
-      "line": 674,
-      "endLine": 681,
+      "line": 678,
+      "endLine": 685,
       "code": "    if (strcmp(argv[5], \"udp\") == 0 || strcmp(argv[5], \"tcp\") == 0) {\n        transport->type = strcmp(argv[5], \"udp\") == 0 ? DPPD_MATCH_UDP_RANGE : DPPD_MATCH_TCP_RANGE;\n        if (parse_acl_range(argv[8], &transport->spec.range.src_first_be, &transport->spec.range.src_last_be) != 0 ||\n            parse_acl_range(argv[9], &transport->spec.range.dst_first_be, &transport->spec.range.dst_last_be) != 0)\n            return -EINVAL;\n        rule->nb_matches++;\n    } else {\n        if (strcmp(argv[8], \"any\") != 0 || strcmp(argv[9], \"any\") != 0)",
-      "sourceHref": "sources/app__dppctl__main.c.html#L674"
+      "sourceHref": "sources/app__dppctl__main.c.html#L678"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "build_acl_request",
-      "line": 691,
-      "endLine": 697,
+      "line": 695,
+      "endLine": 701,
       "code": "    if (strcmp(argv[10], \"allow\") != 0 && strcmp(argv[10], \"drop\") != 0)\n        return -EINVAL;\n    for (int i = 11; i < argc; ++i)\n        if (strcmp(argv[i], \"count\") != 0 && strncmp(argv[i], \"mark:\", 5) != 0 && strncmp(argv[i], \"state:\", 6) != 0)\n            return -EINVAL;\n    int rc = build_filter_actions(argc, argv, 10, rule);\n    return rc;",
-      "sourceHref": "sources/app__dppctl__main.c.html#L691"
+      "sourceHref": "sources/app__dppctl__main.c.html#L695"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "build_filter_actions",
-      "line": 442,
-      "endLine": 457,
+      "line": 446,
+      "endLine": 461,
       "code": "    rule->nb_actions = 0;\n    if (has_mark) {\n        rule->actions[rule->nb_actions].type = DPPD_ACTION_MARK;\n        rule->actions[rule->nb_actions].conf.mark_id = mark_id;\n        rule->nb_actions++;\n    }\n    if (has_count) {\n        rule->actions[rule->nb_actions].type = DPPD_ACTION_COUNT;\n        rule->nb_actions++;\n    }\n    rule->actions[rule->nb_actions].type = fate_type;\n    if (fate_type == DPPD_ACTION_QUEUE)\n        rule->actions[rule->nb_actions].conf.queue_id = queue_id;\n    rule->nb_actions++;\n    return 0;\n}",
-      "sourceHref": "sources/app__dppctl__main.c.html#L442"
+      "sourceHref": "sources/app__dppctl__main.c.html#L446"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "exchange",
-      "line": 504,
-      "endLine": 526,
+      "line": 508,
+      "endLine": 530,
       "code": "    fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);\n    if (fd < 0)\n        return -errno;\n    memset(&address, 0, sizeof(address));\n    address.sun_family = AF_UNIX;\n    memcpy(address.sun_path, socket_path, path_length + 1U);\n    if (connect(fd, (const struct sockaddr *)&address, sizeof(address)) != 0) {\n        error = -errno;\n        close(fd);\n        return error;\n    }\n\n    /* SOCK_SEQPACKET 保留消息边界；短发送或短响应都视为协议损坏 */\n    bytes = send(fd, request, sizeof(*request), MSG_NOSIGNAL);\n    if (bytes != (ssize_t)sizeof(*request)) {\n        error = bytes < 0 ? -errno : -EMSGSIZE;\n        close(fd);\n        return error;\n    }\n    bytes = recv(fd, response, sizeof(*response), 0);\n    if (bytes != (ssize_t)sizeof(*response)) {\n        error = bytes < 0 ? -errno : -EMSGSIZE;\n        close(fd);",
-      "sourceHref": "sources/app__dppctl__main.c.html#L504"
+      "sourceHref": "sources/app__dppctl__main.c.html#L508"
     },
     {
       "file": "app/dppd/main.c",
@@ -519,18 +519,18 @@
     {
       "file": "lib/management/server.c",
       "fn": "dppd_management_poll",
-      "line": 890,
-      "endLine": 897,
+      "line": 898,
+      "endLine": 905,
       "code": "        received = recv(client, &request, sizeof(request), MSG_TRUNC);\n        if (received == (ssize_t)sizeof(request)) {\n            if (server->flows != NULL)\n                (void)dppd_flow_management_handle(server->flows, server->runtime, &request, &response);\n            else\n                (void)dppd_management_handle(server->control, server->devices, server->runtime, &request, &response);\n        } else {\n            memset(&response, 0, sizeof(response));",
-      "sourceHref": "sources/lib__management__server.c.html#L890"
+      "sourceHref": "sources/lib__management__server.c.html#L898"
     },
     {
       "file": "lib/management/server.c",
       "fn": "dppd_management_poll",
-      "line": 858,
-      "endLine": 864,
+      "line": 866,
+      "endLine": 872,
       "code": "        client = accept4(server->socket_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);\n        if (client < 0) {\n            if (errno == EAGAIN || errno == EWOULDBLOCK)\n                return 0;\n            if (errno == EINTR)\n                continue;\n            return -errno;",
-      "sourceHref": "sources/lib__management__server.c.html#L858"
+      "sourceHref": "sources/lib__management__server.c.html#L866"
     },
     {
       "file": "lib/management/server.c",
@@ -791,34 +791,34 @@
     {
       "file": "lib/management/server.c",
       "fn": "dppd_management_handle",
-      "line": 757,
-      "endLine": 758,
+      "line": 765,
+      "endLine": 766,
       "code": "    response->status = rc;\n    return 0;",
-      "sourceHref": "sources/lib__management__server.c.html#L757"
+      "sourceHref": "sources/lib__management__server.c.html#L765"
     },
     {
       "file": "lib/management/server.c",
       "fn": "dppd_management_poll",
-      "line": 906,
-      "endLine": 911,
+      "line": 914,
+      "endLine": 919,
       "code": "        if (send(client, &response, sizeof(response), MSG_NOSIGNAL) < 0 && errno != EPIPE && errno != ECONNRESET) {\n            const int error = -errno;\n            close(client);\n            return error;\n        }\n        close(client);",
-      "sourceHref": "sources/lib__management__server.c.html#L906"
+      "sourceHref": "sources/lib__management__server.c.html#L914"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "exchange",
-      "line": 523,
-      "endLine": 537,
+      "line": 527,
+      "endLine": 541,
       "code": "    bytes = recv(fd, response, sizeof(*response), 0);\n    if (bytes != (ssize_t)sizeof(*response)) {\n        error = bytes < 0 ? -errno : -EMSGSIZE;\n        close(fd);\n        return error;\n    }\n    close(fd);\n    /*\n     * transport 成功并不代表响应属于本请求。四项头字段全部匹配后，调用方才能\n     * 按 operation 解释 union；否则返回 -EPROTO，绝不展示可能错位的 payload\n     */\n    if (response->version != DPPD_MANAGEMENT_VERSION || response->size != sizeof(*response) ||\n        response->operation != request->operation || response->request_id != request->request_id)\n        return -EPROTO;\n    return 0;",
-      "sourceHref": "sources/app__dppctl__main.c.html#L523"
+      "sourceHref": "sources/app__dppctl__main.c.html#L527"
     },
     {
       "file": "app/dppctl/main.c",
       "fn": "main",
-      "line": 2048,
-      "endLine": 2054,
+      "line": 2090,
+      "endLine": 2096,
       "code": "    if (response.status != 0) {\n        int status = response.status;\n\n        if ((response.operation == DPPD_MANAGEMENT_REQUEST_SUBMIT ||\n                response.operation == DPPD_MANAGEMENT_REQUEST_GET) &&\n            response.payload.durable_result.key.client != 0)\n            (void)print_response(&response);",
-      "sourceHref": "sources/app__dppctl__main.c.html#L2048"
+      "sourceHref": "sources/app__dppctl__main.c.html#L2090"
     },
     {
       "file": "lib/dataplane/software_backend.c",
@@ -831,10 +831,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_batch",
-      "line": 340,
-      "endLine": 340,
+      "line": 359,
+      "endLine": 359,
       "code": "            routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L340"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L359"
     },
     {
       "file": "lib/dataplane/software_backend.c",
@@ -895,10 +895,10 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "dppd_worker_main",
-      "line": 611,
-      "endLine": 612,
+      "line": 631,
+      "endLine": 632,
       "code": "        dppd_software_backend_worker_quiescent(runtime->software_backend, worker->queue_id);\n        dppd_ipv4_router_reader_quiescent(runtime->ipv4_router, worker->queue_id);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L611"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L631"
     },
     {
       "file": "lib/dataplane/software_backend.c",
@@ -1191,10 +1191,10 @@
     {
       "file": "lib/runtime/runtime.c",
       "fn": "dppd_runtime_start",
-      "line": 188,
-      "endLine": 188,
+      "line": 205,
+      "endLine": 205,
       "code": "        rc = rte_eal_remote_launch(dppd_worker_main, worker, worker->lcore_id);",
-      "sourceHref": "sources/lib__runtime__runtime.c.html#L188"
+      "sourceHref": "sources/lib__runtime__runtime.c.html#L205"
     },
     {
       "file": "app/dppd/main.c",
@@ -1207,18 +1207,18 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "dppd_worker_main",
-      "line": 563,
-      "endLine": 568,
+      "line": 582,
+      "endLine": 587,
       "code": "    struct dppd_worker *worker = arg;\n    struct dppd_runtime *runtime;\n\n    if (worker == NULL || worker->runtime == NULL)\n        return -1;\n    runtime = worker->runtime;",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L563"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L582"
     },
     {
       "file": "lib/dataplane/worker.c",
       "fn": "process_ingress",
-      "line": 518,
-      "endLine": 519,
+      "line": 537,
+      "endLine": 538,
       "code": "    uint16_t count = rte_eth_rx_burst(ingress->port_id, worker->queue_id, packets, worker->runtime->config.burst_size);\n    process_batch(worker, ingress, packets, count, false, 0);",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L518"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L537"
     },
     {
       "file": "app/dppd/main.c",
@@ -1231,10 +1231,10 @@
     {
       "file": "lib/runtime/runtime.c",
       "fn": "dppd_runtime_request_stop",
-      "line": 247,
-      "endLine": 251,
+      "line": 264,
+      "endLine": 268,
       "code": "void dppd_runtime_request_stop(struct dppd_runtime *runtime)\n{\n    if (runtime != NULL)\n        atomic_store_explicit(&runtime->stop_requested, true, memory_order_release);\n}",
-      "sourceHref": "sources/lib__runtime__runtime.c.html#L247"
+      "sourceHref": "sources/lib__runtime__runtime.c.html#L264"
     },
     {
       "file": "lib/dataplane/worker.c",
@@ -1247,42 +1247,42 @@
     {
       "file": "lib/dataplane/worker.c",
       "fn": "dppd_worker_main",
-      "line": 621,
-      "endLine": 625,
+      "line": 641,
+      "endLine": 645,
       "code": "    dppd_ipv4_router_reader_unregister(runtime->ipv4_router, worker->queue_id);\n    dppd_software_backend_worker_unregister(runtime->software_backend, worker->queue_id);\n    /** 注销读者后发布 STOPPED，下面才返回；主线程仍须 wait 确认工作函数已经返回 */\n    atomic_store_explicit(&worker->state, DPPD_WORKER_STOPPED, memory_order_release);\n    return 0;",
-      "sourceHref": "sources/lib__dataplane__worker.c.html#L621"
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L641"
     },
     {
       "file": "lib/runtime/runtime.c",
       "fn": "dppd_runtime_wait",
-      "line": 280,
-      "endLine": 281,
+      "line": 297,
+      "endLine": 298,
       "code": "        rc = rte_eal_wait_lcore(worker->lcore_id);\n        worker->launched = false;",
-      "sourceHref": "sources/lib__runtime__runtime.c.html#L280"
+      "sourceHref": "sources/lib__runtime__runtime.c.html#L297"
     },
     {
-      "file": "lib/device/topology.c",
-      "fn": "read_netlink_identity",
-      "line": 162,
-      "endLine": 272,
-      "code": "static int read_netlink_identity(uint32_t if_index, struct dppd_topology_identity *identity)\n{\n    /**\n     * 请求布局：[Netlink 消息头 header][接口查询条件 link]\n     * RTM_GETLINK 表示查询，ifi_index 指定接口；seq 用于对应请求和回复\n     */\n    struct {\n        struct nlmsghdr header;\n        struct ifinfomsg link;\n    } request = {.header = {.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg)),\n                     .nlmsg_type = RTM_GETLINK,\n                     .nlmsg_flags = NLM_F_REQUEST,\n                     .nlmsg_seq = 1},\n        .link = {.ifi_family = AF_UNSPEC, .ifi_index = (int)if_index}};\n    struct sockaddr_nl kernel = {.nl_family = AF_NETLINK};\n    struct timeval timeout = {.tv_sec = 0, .tv_usec = 200000};\n    /** 按消息头要求对齐接收缓冲；vector 指向缓冲，message 同时接收发送方地址 */\n    _Alignas(struct nlmsghdr) char buffer[16384];\n    struct iovec vector = {.iov_base = buffer, .iov_len = sizeof(buffer)};\n    struct msghdr message = {.msg_name = &kernel, .msg_namelen = sizeof(kernel), .msg_iov = &vector, .msg_iovlen = 1};\n    struct nlmsghdr *header;\n    ssize_t received;\n    int remaining, fd, rc = -ENODATA;\n    bool has_interface = false, has_phys_port = false;\n\n    if (if_index == 0 || if_index > INT_MAX)\n        return -ENODEV;\n    /** NETLINK_ROUTE 查询内核网络信息，消息不经业务网卡发出；接收最多等待 200 ms */\n    fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);\n    if (fd < 0)\n        return -errno;\n    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) {\n        rc = -errno;\n        goto done;\n    }\n    if (sendto(fd, &request, request.header.nlmsg_len, 0, (struct sockaddr *)&kernel, sizeof(kernel)) !=\n        (ssize_t)request.header.nlmsg_len) {\n        rc = errno == 0 ? -EIO : -errno;\n        goto done;\n    }\n    received = recvmsg(fd, &message, 0);\n    if (received < 0) {\n        rc = -errno;\n        goto done;\n    }\n    /** 拒绝被截断的回复，并检查发送方为内核单播地址 */\n    if ((message.msg_flags & MSG_TRUNC) != 0 || kernel.nl_pid != 0 || kernel.nl_groups != 0) {\n        rc = -EOVERFLOW;\n        goto done;\n    }\n    if (message.msg_namelen < sizeof(kernel) || kernel.nl_family != AF_NETLINK) {\n        rc = -EPROTO;\n        goto done;\n    }\n    remaining = (int)received;\n    /** 一次接收可包含多条消息，按各自长度和对齐位置遍历，只处理本次请求的回复 */\n    for (header = (struct nlmsghdr *)buffer; NLMSG_OK(header, remaining); header = NLMSG_NEXT(header, remaining)) {\n        struct ifinfomsg *link;\n        struct rtattr *attribute;\n        int attributes;\n\n        if (header->nlmsg_seq != request.header.nlmsg_seq)\n            continue;\n        if (header->nlmsg_type == NLMSG_ERROR) {\n            if (header->nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr)))\n                rc = -EPROTO;\n            else\n                rc = ((struct nlmsgerr *)NLMSG_DATA(header))->error;\n            if (rc >= 0)\n                rc = -ENODATA;\n            goto done;\n        }\n        /** RTM_NEWLINK 在这里承载接口信息，收到它并不表示本函数创建了接口 */\n        if (header->nlmsg_type != RTM_NEWLINK || header->nlmsg_len < NLMSG_LENGTH(sizeof(*link)))\n            continue;\n        link = NLMSG_DATA(header);\n        if (link->ifi_index != (int)if_index)\n            continue;\n        identity->if_index = if_index;\n        attributes = IFLA_PAYLOAD(header);\n        /** 属性按类型、长度和值组织，只提取接口名和物理端口名，其他属性跳过 */\n        for (attribute = IFLA_RTA(link); RTA_OK(attribute, attributes); attribute = RTA_NEXT(attribute, attributes)) {\n            if (attribute->rta_type == IFLA_IFNAME) {\n                if (has_interface) {\n                    rc = -EPROTO;\n                    goto done;\n                }\n                has_interface = true;\n                rc = copy_attribute(identity->interface_name, sizeof(identity->interface_name), attribute);\n            } else if (attribute->rta_type == IFLA_PHYS_PORT_NAME) {\n                if (has_phys_port) {\n                    rc = -EPROTO;\n                    goto done;\n                }\n                has_phys_port = true;\n                rc = copy_attribute(identity->phys_port_name, sizeof(identity->phys_port_name), attribute);\n            } else\n                continue;\n            if (rc != 0)\n                goto done;\n        }\n        /** 物理端口名是可选证据，通用 PCI 接口缺少它时仍须继续核对接口和设备 */\n        rc = attributes != 0 ? -EPROTO : identity->interface_name[0] == '\\0' ? -ENODATA : 0;\n        goto done;\n    }\n\n    /** socket 创建成功后统一从这里关闭，查询失败也不会遗漏释放 */\ndone:\n    close(fd);\n    return rc;\n}",
-      "sourceHref": "sources/lib__device__topology.c.html#L162"
+      "file": "lib/dataplane/nd6.c",
+      "fn": "dppd_nd6_input",
+      "line": 301,
+      "endLine": 435,
+      "code": "bool dppd_nd6_input(struct dppd_nd6 *table, uint16_t port, const struct rte_mbuf *mbuf,\n    const struct dppd_packet *packet, uint64_t now, dppd_nd6_send send, void *context)\n{\n    if (table == NULL || packet->l3_type != DPPD_L3_IPV6 || packet->ip_protocol != 58)\n        return false;\n    uint8_t first[1], ether[22], hop[1], body[256];\n    /** l3_len 包含已解析的 IPv6 扩展头；无 VLAN、无扩展头时 ICMPv6 从 14+40=54 开始 */\n    uint32_t offset = packet->l2_len + packet->l3_len;\n    const uint8_t *kind = rte_pktmbuf_read(mbuf, offset, 1, first);\n    /** 普通非 ND 报文交回原流程；ICMPv6 分片进入下面的无效处理，不按完整 ND 采用 */\n    if (packet->l4_type != DPPD_L4_FRAGMENT && (kind == NULL || !dppd_icmpv6_is_nd(*kind)))\n        return false;\n    pthread_mutex_lock(&table->lock);\n    clock_advance(table, now);\n    struct local_address *owner = local(table, port, NULL);\n    if (packet->l2_len < 14 || packet->l2_len > 22 || packet->l3_len < 40 ||\n        packet->ipv6_payload_len < packet->l3_len - 40)\n        goto invalid;\n    /** IPv6 Payload Length 包含扩展头，减去扩展头部分才是本次 ICMPv6 长度 */\n    uint32_t length = 40U + packet->ipv6_payload_len - packet->l3_len;\n    const uint8_t *link = rte_pktmbuf_read(mbuf, 0, packet->l2_len, ether);\n    const uint8_t *ttl = rte_pktmbuf_read(mbuf, packet->l2_len + 7, 1, hop);\n    const uint8_t *icmp = length <= sizeof(body) ? rte_pktmbuf_read(mbuf, offset, length, body) : NULL;\n    /** 先核对入口与 VLAN、实际可读长度、Hop Limit、NS/NA 类型、目标地址和校验和 */\n    if (!domain(owner, packet) || packet->l2_len > sizeof(ether) || link == NULL || ttl == NULL || *ttl != 255 ||\n        packet->ipv6_unsupported || packet->l4_type == DPPD_L4_FRAGMENT || icmp == NULL || length < 24 ||\n        (icmp[0] != DPPD_ICMPV6_NEIGHBOR_SOLICITATION && icmp[0] != DPPD_ICMPV6_NEIGHBOR_ADVERTISEMENT) ||\n        icmp[1] != 0 || !mac_valid(link + 6) ||\n        !dppd_ipv6_unicast(icmp + 8, true) || checksum(packet->ipv6_src, packet->ipv6_dst, icmp, length) != 0)\n        goto invalid;\n    /** 忽略源 MAC 与本机相同的帧，避免本机检测请求回环后被当成冲突 */\n    if (memcmp(link + 6, owner->mac, 6) == 0)\n        goto consumed;\n    bool ns = icmp[0] == DPPD_ICMPV6_NEIGHBOR_SOLICITATION, unspecified = equal(packet->ipv6_src, zero);\n    uint8_t group[16];\n    solicited(icmp + 8, group);\n    /** 用 ICMPv6 的目标字段查本机地址，不是用 IPv6 目的地址；后者在 DAD 中是组播地址 */\n    struct local_address *target = local(table, port, icmp + 8);\n    bool multicast = packet->ipv6_dst[0] == 255;\n    const uint8_t all_nodes[16] = {255, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};\n    /** 再核对 NS/NA 的源、目的地址，以及目的 IPv6 与二层目的 MAC 的对应关系 */\n    if ((!unspecified && !dppd_ipv6_unicast(packet->ipv6_src, true)) ||\n        (!ns && (unspecified || (multicast && (icmp[4] & 0x40U) != 0))) ||\n        (ns && (multicast ? !equal(packet->ipv6_dst, group) : !equal(packet->ipv6_dst, icmp + 8))) ||\n        (!ns && multicast && !equal(packet->ipv6_dst, all_nodes)) ||\n        (!multicast && local(table, port, packet->ipv6_dst) == NULL) ||\n        (multicast ? link[0] != 0x33 || link[1] != 0x33 || memcmp(link + 2, packet->ipv6_dst + 12, 4) != 0\n                   : memcmp(link, owner->mac, 6) != 0) ||\n        (ns && unspecified && !multicast))\n        goto invalid;\n    /** 选项从第 24 字节开始，长度单位为 8 字节；MAC 选项还需匹配以太网源地址 */\n    const uint8_t *option_mac = NULL;\n    for (uint32_t option = 24; option < length;) {\n        if (length - option < 2 || icmp[option + 1] == 0 || (uint32_t)icmp[option + 1] * 8 > length - option)\n            goto invalid;\n        if (icmp[option] == 1 || icmp[option] == 2) {\n            if (icmp[option] != (ns ? 1 : 2) || icmp[option + 1] != 1 || option_mac != NULL)\n                goto invalid;\n            option_mac = icmp + option + 2;\n            if (!mac_valid(option_mac) || memcmp(option_mac, link + 6, 6) != 0)\n                goto invalid;\n        }\n        option += (uint32_t)icmp[option + 1] * 8;\n    }\n    if (ns && unspecified && option_mac != NULL)\n        goto invalid;\n    /**\n     * 目标为本机待检测地址时：NA 表示地址已被声明，源为 :: 的 NS 表示也有人在检测该地址\n     * 两者都标记为 DUPLICATE；普通源地址的 NS 只是查询 MAC，不据此判断地址已被占用\n     */\n    if (target != NULL && ((!ns && !unspecified) || (ns && unspecified && target->state == DPPD_ND6_TENTATIVE))) {\n        if (target->state == DPPD_ND6_TENTATIVE) {\n            target->state = DPPD_ND6_DUPLICATE;\n            table->status.revision++;\n        } else\n            table->status.invalid++;\n        goto consumed;\n    }\n    if (ns) {\n        /** 只有查询本机且已经可用的地址才应答，其他目标或待检测地址直接消费 */\n        if (target == NULL || target->state != DPPD_ND6_PREFERRED)\n            goto consumed;\n        /** 有有效源地址和 MAC 选项时学习请求者，不能把源为 :: 的 DAD 请求当成邻居记录 */\n        if (!unspecified && option_mac != NULL && local(table, port, packet->ipv6_src) == NULL) {\n            struct dppd_nd6_entry *entry = find(table, port, packet->ipv6_src);\n            if (entry == NULL)\n                entry = insert(table, port, packet->ipv6_src);\n            if (entry != NULL && (memcmp(entry->mac, option_mac, 6) != 0 || entry->state == DPPD_ND6_FAILED)) {\n                memcpy(entry->mac, option_mac, 6);\n                /** 已知请求者 MAC，但收到查询不等于确认双向可达，先标记 STALE */\n                state(table, entry, DPPD_ND6_STALE, 0);\n            }\n        }\n        /**\n         * 普通 NS：单播回复请求者；源为 :: 的 DAD NS：发往 ff02::1，不能回复给 ::\n         * NA 标志：[R 0x80][S 0x40][O 0x20]，分别表示路由器、请求应答、允许覆盖缓存\n         * 当前固定 R=1、O=1；普通应答为 0xe0，组播 DAD 应答清 S 后为 0xa0\n         */\n        transmit(table, target, DPPD_ICMPV6_NEIGHBOR_ADVERTISEMENT, target->configuration.address,\n            unspecified ? all_nodes : packet->ipv6_src,\n            icmp + 8, unspecified ? NULL : link + 6, unspecified ? 0xa0 : 0xe0, send, context);\n    } else {\n        /** NA 的目标字段指出被通告的邻居地址；只查已有记录，不为未知通告分配槽位 */\n        struct dppd_nd6_entry *entry = find(table, port, icmp + 8);\n        if (entry == NULL || (option_mac == NULL && !mac_valid(entry->mac)))\n            goto consumed;\n        bool changed = option_mac != NULL && memcmp(entry->mac, option_mac, 6) != 0;\n        /** 非 INCOMPLETE 记录的 MAC 改变但 O=0 时保留旧值；原来可达的记录降为 STALE */\n        if (entry->state != DPPD_ND6_INCOMPLETE && changed && (icmp[4] & 0x20U) == 0) {\n            if (entry->state == DPPD_ND6_REACHABLE)\n                state(table, entry, DPPD_ND6_STALE, 0);\n            goto consumed;\n        }\n        if (option_mac != NULL)\n            memcpy(entry->mac, option_mac, 6);\n        /**\n         * S=1 时确认 REACHABLE，有效期在基准值约 0.5 到 1.5 倍间随机\n         * S=0 时仅将新学或变化的 MAC 记为 STALE，未变化的已有记录保持原状态\n         */\n        if ((icmp[4] & 0x40U) != 0) {\n            uint32_t base = table->status.reachable_ms;\n            state(table, entry, DPPD_ND6_REACHABLE, table->clock + base / 2 + random_value(table) % (base + 1));\n            table->status.resolved++;\n        } else if (changed || entry->state == DPPD_ND6_INCOMPLETE)\n            state(table, entry, DPPD_ND6_STALE, 0);\n    }\nconsumed:\n    pthread_mutex_unlock(&table->lock);\n    return true;\ninvalid:\n    /** 无效报文也返回已处理，mbuf 仍由 worker 释放，不能继续进入转发流程 */\n    table->status.invalid++;\n    pthread_mutex_unlock(&table->lock);\n    return true;\n}",
+      "sourceHref": "sources/lib__dataplane__nd6.c.html#L301"
     },
     {
-      "file": "lib/device/topology.c",
-      "fn": "dppd_topology_resolve_role",
-      "line": 55,
-      "endLine": 140,
-      "code": "int dppd_topology_resolve_role(struct dppd_endpoint *endpoint, const char *driver_name, bool is_representor,\n    const char *phys_port_name)\n{\n    struct dppd_endpoint parsed = {0};\n    char name[sizeof(endpoint->phys_port_name)];\n    const char *cursor = name;\n    size_t length = phys_port_name == NULL ? 0 : strnlen(phys_port_name, sizeof(name));\n    int rc = -EINVAL;\n\n    if (endpoint == NULL)\n        return -EINVAL;\n    /** 先保存输入，允许调用方直接传入 endpoint 自己保存的原始名称 */\n    if (phys_port_name != NULL && length < sizeof(name))\n        memcpy(name, phys_port_name, length + 1U);\n    clear_role(endpoint, -EINVAL);\n    endpoint->phys_port_name[0] = '\\0';\n    if (driver_name == NULL || phys_port_name == NULL)\n        return -EINVAL;\n    if (length >= sizeof(name)) {\n        endpoint->role_error = -ENAMETOOLONG;\n        return -ENAMETOOLONG;\n    }\n    memcpy(endpoint->phys_port_name, name, length + 1U);\n    if (strcmp(driver_name, \"mlx5_pci\") != 0 && strcmp(driver_name, \"net_mlx5\") != 0) {\n        endpoint->role_error = -ENOTSUP;\n        return -ENOTSUP;\n    }\n    if (*cursor == 'c') {\n        ++cursor;\n        rc = parse_number(&cursor, &parsed.controller_id);\n        if (rc != 0)\n            goto failed;\n        parsed.has_controller = true;\n    }\n    if (strncmp(cursor, \"pf\", 2) == 0) {\n        cursor += 2;\n        rc = parse_number(&cursor, &parsed.pf_id);\n        if (rc != 0)\n            goto failed;\n        parsed.has_pf = true;\n        parsed.role = DPPD_ENDPOINT_ROLE_PF;\n        if (strncmp(cursor, \"vf\", 2) == 0 || strncmp(cursor, \"sf\", 2) == 0) {\n            parsed.role = *cursor == 'v' ? DPPD_ENDPOINT_ROLE_VF : DPPD_ENDPOINT_ROLE_SF;\n            cursor += 2;\n            rc = parse_number(&cursor, &parsed.function_id);\n            if (rc != 0)\n                goto failed;\n            parsed.has_function = true;\n        }\n    } else if (*cursor == 'p') {\n        ++cursor;\n        rc = parse_number(&cursor, &parsed.physical_port_id);\n        if (rc != 0)\n            goto failed;\n        parsed.has_physical_port = true;\n        parsed.role = DPPD_ENDPOINT_ROLE_UPLINK;\n    } else {\n        rc = -EINVAL;\n        goto failed;\n    }\n    if (*cursor != '\\0') {\n        rc = -EINVAL;\n        goto failed;\n    }\n    /** mlx5 的物理上联口不带 representor 标志，PF、VF 和 SF 名称必须带该标志 */\n    if ((parsed.role != DPPD_ENDPOINT_ROLE_UPLINK) != is_representor) {\n        rc = -EPROTO;\n        goto failed;\n    }\n    endpoint->role = parsed.role;\n    endpoint->role_source = DPPD_ENDPOINT_ROLE_SOURCE_MLX5_PHYS_PORT_NAME;\n    endpoint->role_error = 0;\n    endpoint->has_controller = parsed.has_controller;\n    endpoint->has_pf = parsed.has_pf;\n    endpoint->has_function = parsed.has_function;\n    endpoint->has_physical_port = parsed.has_physical_port;\n    endpoint->controller_id = parsed.controller_id;\n    endpoint->pf_id = parsed.pf_id;\n    endpoint->function_id = parsed.function_id;\n    endpoint->physical_port_id = parsed.physical_port_id;\n    return 0;\n\nfailed:\n    clear_role(endpoint, rc);\n    return rc;\n}",
-      "sourceHref": "sources/lib__device__topology.c.html#L55"
+      "file": "lib/dataplane/worker.c",
+      "fn": "process_waiting",
+      "line": 551,
+      "endLine": 568,
+      "code": "static void process_waiting(struct dppd_worker *worker)\n{\n    struct dppd_nd6_pending pending;\n    for (unsigned int i = 0;\n         i < DPPD_MAX_BURST && dppd_nd6_take(worker->runtime->nd6, worker->queue_id, dppd_monotonic_ms(), &pending);\n         ++i) {\n        const struct dppd_port *ingress = dppd_devices_find(&worker->runtime->devices, pending.ingress);\n        /** 取回不代表可以发送，失效包或已失去原入口的包在此归还 mbuf */\n        if (pending.expired || ingress == NULL) {\n            rte_pktmbuf_free(pending.mbuf);\n            struct dppd_stats_values dropped = {.policy_drops = 1, .nd6_queue_drops = 1};\n            dppd_stats_add(&worker->stats, &dropped);\n            if (ingress != NULL)\n                dppd_stats_add(&worker->port_stats[ingress - worker->runtime->devices.ports], &dropped);\n        } else\n            process_batch(worker, ingress, &pending.mbuf, 1, true, pending.expires_ms);\n    }\n}",
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L551"
     },
     {
-      "file": "lib/device/topology.c",
-      "fn": "discover_identity",
-      "line": 482,
-      "endLine": 482,
-      "code": "    dppd_topology_resolve_role(endpoint, endpoint->driver_name, endpoint->kind == DPPD_ENDPOINT_REPRESENTOR,",
-      "sourceHref": "sources/lib__device__topology.c.html#L482"
+      "file": "lib/dataplane/worker.c",
+      "fn": "process_waiting",
+      "line": 555,
+      "endLine": 555,
+      "code": "         i < DPPD_MAX_BURST && dppd_nd6_take(worker->runtime->nd6, worker->queue_id, dppd_monotonic_ms(), &pending);",
+      "sourceHref": "sources/lib__dataplane__worker.c.html#L555"
     }
   ],
   "source_files": [
@@ -1304,7 +1304,6 @@
     "lib/dataplane/pipeline.c",
     "lib/dataplane/software_backend.c",
     "lib/dataplane/worker.c",
-    "lib/device/topology.c",
     "lib/management/server.c",
     "lib/runtime/runtime.c"
   ]

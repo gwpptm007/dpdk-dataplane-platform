@@ -93,9 +93,14 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
     if (rc != 0)
         return rc;
 
+    /**
+     * 网口准备完成后，按 cfg->ports 的顺序收集 MAC，每行保存一个网口的 6 字节地址
+     * ND 创建函数按端口号找到对应行并复制 MAC，返回后不保留这个局部数组的地址
+     */
     uint8_t macs[DPPD_MAX_PORTS][6] = {{0}};
     for (uint16_t i = 0; i < runtime->devices.nb_ports; ++i)
         memcpy(macs[i], runtime->devices.ports[i].mac.addr_bytes, 6);
+    /** 转为指向只读 6 字节数组的指针；&runtime->nd6 用于接收新建管理表的地址 */
     rc = dppd_nd6_create(&runtime->nd6, cfg, (const uint8_t(*)[6])macs, dppd_monotonic_ms());
     if (rc != 0) {
         dppd_devices_stop(&runtime->devices);

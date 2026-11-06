@@ -52,6 +52,13 @@ static int parse_number(const char **cursor, uint32_t *value)
     return 0;
 }
 
+/**
+ * 按 mlx5 的物理端口名解析端口角色和编号，结果写入 endpoint
+ * 保存名称 → 解析可选 controller 和端口编号 → 核对 representor 标志 → 保存结果
+ * 例如 c0pf1vf2 → controller 0、PF 1、VF 2；p0 → 物理上联端口 0
+ * driver_name 指定驱动，is_representor 来自 PMD 标志；PF/VF/SF 表示代理口所代表的角色
+ * 成功返回 0，失败返回负错误码，角色保持 UNKNOWN 并记录 role_error
+ */
 int dppd_topology_resolve_role(struct dppd_endpoint *endpoint, const char *driver_name, bool is_representor,
     const char *phys_port_name)
 {
@@ -79,6 +86,7 @@ int dppd_topology_resolve_role(struct dppd_endpoint *endpoint, const char *drive
         endpoint->role_error = -ENOTSUP;
         return -ENOTSUP;
     }
+    /** 可选前缀 c0 表示 controller 0，parse_number 同时把 cursor 移到后面的 pf 或 p */
     if (*cursor == 'c') {
         ++cursor;
         rc = parse_number(&cursor, &parsed.controller_id);
@@ -86,6 +94,7 @@ int dppd_topology_resolve_role(struct dppd_endpoint *endpoint, const char *drive
             goto failed;
         parsed.has_controller = true;
     }
+    /** pf1 先确定 PF 编号，后接 vf2 或 sf2 时再确定其所代表的 VF/SF 及编号 */
     if (strncmp(cursor, "pf", 2) == 0) {
         cursor += 2;
         rc = parse_number(&cursor, &parsed.pf_id);
@@ -102,6 +111,7 @@ int dppd_topology_resolve_role(struct dppd_endpoint *endpoint, const char *drive
             parsed.has_function = true;
         }
     } else if (*cursor == 'p') {
+        /** p0 是物理上联端口 0，和 pf0 所代表的 PF 0 分别记录 */
         ++cursor;
         rc = parse_number(&cursor, &parsed.physical_port_id);
         if (rc != 0)
@@ -112,15 +122,17 @@ int dppd_topology_resolve_role(struct dppd_endpoint *endpoint, const char *drive
         rc = -EINVAL;
         goto failed;
     }
+    /** 必须消耗整个名称，不能把 pf1vf2tail 仅按合法前缀 pf1vf2 接受 */
     if (*cursor != '\0') {
         rc = -EINVAL;
         goto failed;
     }
-    /** mlx5 的物理上联口不带 representor 标志，PF、VF 和 SF 名称必须带该标志 */
+    /** 本项目要求：UPLINK 对应非代理口，PF/VF/SF 对应代理口；名称与 PMD 标志冲突则拒绝 */
     if ((parsed.role != DPPD_ENDPOINT_ROLE_UPLINK) != is_representor) {
         rc = -EPROTO;
         goto failed;
     }
+    /** parsed 只保存本次解析结果，通过所有检查后才写入角色、有效标志和编号 */
     endpoint->role = parsed.role;
     endpoint->role_source = DPPD_ENDPOINT_ROLE_SOURCE_MLX5_PHYS_PORT_NAME;
     endpoint->role_error = 0;

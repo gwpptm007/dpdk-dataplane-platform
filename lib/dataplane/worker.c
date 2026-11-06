@@ -66,7 +66,13 @@ static void flush_egress(struct dppd_worker *worker, const struct dppd_port *egr
     }
 }
 
-/** 每个工作线程只写自己的 TX 队列，ND 不借主线程并发写同一个硬件队列 */
+/**
+ * 将 ND 回调传入的完整报文字节复制到新 mbuf，再提交给当前 worker 的 TX 队列
+ * context 是 worker，port_id 指定出口；wire 只在调用期间借用，不修改收到的业务报文
+ * 分配 mbuf → append 预留数据区 → 复制字节 → 再查网口状态 → TX burst
+ * 返回 0 表示驱动接管，不能据此确认对端收到；失败时释放已分配的 mbuf 并返回负错误码
+ * 每个 worker 只写自己的 TX 队列，ND 不另建发送线程
+ */
 static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16_t length)
 {
     struct dppd_worker *worker = context;
@@ -76,6 +82,7 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
     struct rte_mbuf *mbuf = rte_pktmbuf_alloc(worker->runtime->devices.pools[port->socket_id]);
     if (mbuf == NULL)
         return -ENOMEM;
+    /** append 在 mbuf 中增加 length 字节并返回可写地址，空间不足则失败，不会另分配报文 */
     void *bytes = rte_pktmbuf_append(mbuf, length);
     if (bytes == NULL) {
         rte_pktmbuf_free(mbuf);
@@ -87,6 +94,7 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
         rte_pktmbuf_free(mbuf);
         return -ENODEV;
     }
+    /** 本次只交一个包，未接收则本线程释放；接收后交给驱动管理，不再自行释放 */
     if (rte_eth_tx_burst(port_id, worker->queue_id, &mbuf, 1) != 1) {
         rte_pktmbuf_free(mbuf);
         return -EAGAIN;
@@ -314,6 +322,14 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             delta.rx_malformed++;
         else if (parsed == DPPD_PARSE_UNSUPPORTED)
             delta.rx_unsupported++;
+        /**
+         * 先处理 ND 控制报文，再检查本机 IPv6 地址是否就绪，待检测期间仍能接收冲突证据
+         * input 返回 true 表示已处理，包含无效 ND；这里只释放当前 mbuf，再处理下一个包
+         *
+         * 收到 mbuf → 解析报文头 → ND 接收处理
+                                    ├─ 已处理 → worker 释放当前包，继续下一个
+                                    └─ 未处理 → 继续原来的检查和转发流程
+         */
         if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&
             dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {
             delta.nd6_rx_packets++;
@@ -555,7 +571,7 @@ static void process_waiting(struct dppd_worker *worker)
  * EAL 在选定 lcore 上执行的工作函数，arg 是 runtime_start 传入的 worker 地址
  *
  * 取得 worker 和 runtime → 注册软件规则、路由读者 → 发布 RUNNING 状态
- *   → 循环：处理等待报文 → 扫描各网口的本 worker 队列 → 报告安全点和心跳
+     *   → 循环：队列 0 推进 ND 定时任务 → 各队列处理等待报文和收包 → 报告安全点和心跳
  *   → 停止或设备门禁生效：退出循环 → 注销读者 → 发布 STOPPED，返回 0
  *
  * 参数或读者注册失败返回 -1，尚未进入正常收包循环
@@ -598,6 +614,7 @@ int dppd_worker_main(void *arg)
         uint16_t i;
 
         if (runtime->nd6 != NULL) {
+            /** ND 表在 runtime_init 中创建；启动后由队列 0 推进检测和探测，其他队列仍正常收包 */
             if (worker->queue_id == 0)
                 dppd_nd6_tick(runtime->nd6, dppd_monotonic_ms(), send_nd6, worker);
             process_waiting(worker);

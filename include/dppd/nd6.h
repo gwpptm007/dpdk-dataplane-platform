@@ -110,6 +110,10 @@ struct dppd_nd6_pending {
 };
 /** 回调只借用当前小报文，成功表示已交给驱动，失败时由 ND 定时器按预算重试 */
 typedef int (*dppd_nd6_send)(void *context, uint16_t port, const uint8_t *wire, uint16_t length);
+/**
+ * 按本机 IPv6 配置创建 ND 管理表，macs 与 configuration->ports 顺序一致，地址复制后独立保存
+ * result 指向调用方的空指针；成功写入表地址，未启用时保持 NULL，失败返回负错误码
+ */
 int dppd_nd6_create(struct dppd_nd6 **result, const struct dppd_config *configuration,
     const uint8_t macs[DPPD_MAX_PORTS][6], uint64_t now_ms);
 /** 销毁前先停止全部工作线程，尚未发出的首包在这里归还内存池 */

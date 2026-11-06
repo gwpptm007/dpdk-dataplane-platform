@@ -103,13 +103,13 @@ dppctl ──Unix socket──→ management ──处理请求──→ control
   → 依次轮询各网口的同号队列 → process_batch
   → 报告安全点和心跳 → 下一轮
 
-两边并行，没有“等 worker 收完全部包再回 main”这一步</pre><div class="result"><strong>走到这里：</strong>worker 正在处理包，主线程维持管理和监控；主线程休眠不会让 worker 一起休眠</div><div class="boundary">remote_launch 提交成功与 worker 已完成准备是两件事。STARTING 表示启动中，worker 完成注册后才报告 RUNNING；RSS 选择队列，runtime 决定哪个 lcore 的 worker 轮询它</div><p class="handoff"><strong>怎么接下一步：</strong>收到退出信号或发生无法继续的错误时，主线程进入停止流程</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">remote_launch 的三个参数分别是函数地址、传入的 worker 地址、目标 lcore；rx_burst 用同一份 worker 中的 queue_id 收包</p><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L188">lib/runtime/runtime.c:188 · dppd_runtime_start</a></p><pre><code>        rc = rte_eal_remote_launch(dppd_worker_main, worker, worker-&gt;lcore_id);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L604">app/dppd/main.c:604 · main</a></p><pre><code>    if (dppd_runtime_start(&amp;runtime) != 0)
-        goto cleanup_telemetry;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L563">lib/dataplane/worker.c:563 · dppd_worker_main</a></p><pre><code>    struct dppd_worker *worker = arg;
+两边并行，没有“等 worker 收完全部包再回 main”这一步</pre><div class="result"><strong>走到这里：</strong>worker 正在处理包，主线程维持管理和监控；主线程休眠不会让 worker 一起休眠</div><div class="boundary">remote_launch 提交成功与 worker 已完成准备是两件事。STARTING 表示启动中，worker 完成注册后才报告 RUNNING；RSS 选择队列，runtime 决定哪个 lcore 的 worker 轮询它</div><p class="handoff"><strong>怎么接下一步：</strong>收到退出信号或发生无法继续的错误时，主线程进入停止流程</p><details class="source-detail"><summary>源码对照（可选展开）</summary><p class="source-note">remote_launch 的三个参数分别是函数地址、传入的 worker 地址、目标 lcore；rx_burst 用同一份 worker 中的 queue_id 收包</p><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L205">lib/runtime/runtime.c:205 · dppd_runtime_start</a></p><pre><code>        rc = rte_eal_remote_launch(dppd_worker_main, worker, worker-&gt;lcore_id);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/app__dppd__main.c.html#L604">app/dppd/main.c:604 · main</a></p><pre><code>    if (dppd_runtime_start(&amp;runtime) != 0)
+        goto cleanup_telemetry;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L582">lib/dataplane/worker.c:582 · dppd_worker_main</a></p><pre><code>    struct dppd_worker *worker = arg;
     struct dppd_runtime *runtime;
 
     if (worker == NULL || worker-&gt;runtime == NULL)
         return -1;
-    runtime = worker-&gt;runtime;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L518">lib/dataplane/worker.c:518 · process_ingress</a></p><pre><code>    uint16_t count = rte_eth_rx_burst(ingress-&gt;port_id, worker-&gt;queue_id, packets, worker-&gt;runtime-&gt;config.burst_size);
+    runtime = worker-&gt;runtime;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L537">lib/dataplane/worker.c:537 · process_ingress</a></p><pre><code>    uint16_t count = rte_eth_rx_burst(ingress-&gt;port_id, worker-&gt;queue_id, packets, worker-&gt;runtime-&gt;config.burst_size);
     process_batch(worker, ingress, packets, count, false, 0);</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article><article class="card step-card" id="stage-5"><div class="stage-label">阶段 5</div><h2>停止收包任务，再释放资源</h2><p class="question">为什么发出停止请求后，不能马上释放内存？</p><p>按 Ctrl+C 后，信号处理函数设置 stop_signal，让主线程结束管理循环。主线程随后调用 request_stop，设置 runtime.stop_requested，worker 才能看到停止请求。worker 退出循环、注销读者并返回后，主线程通过 wait 确认工作函数已经结束，再清理资源。</p><pre>正常退出示例：按 Ctrl+C
   → handle_signal：stop_signal = 1
   → 主线程结束管理循环，关闭管理 socket
@@ -125,7 +125,7 @@ dppctl ──Unix socket──→ management ──处理请求──→ control
     dppd_runtime_request_stop(&amp;runtime);
     if (dppd_runtime_wait(&amp;runtime) != 0)
         loop_error = -EIO;
-    dppd_runtime_stats_dump(&amp;runtime);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L247">lib/runtime/runtime.c:247 · dppd_runtime_request_stop</a></p><pre><code>void dppd_runtime_request_stop(struct dppd_runtime *runtime)
+    dppd_runtime_stats_dump(&amp;runtime);</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L264">lib/runtime/runtime.c:264 · dppd_runtime_request_stop</a></p><pre><code>void dppd_runtime_request_stop(struct dppd_runtime *runtime)
 {
     if (runtime != NULL)
         atomic_store_explicit(&amp;runtime-&gt;stop_requested, true, memory_order_release);
@@ -133,11 +133,11 @@ dppctl ──Unix socket──→ management ──处理请求──→ control
 {
     return atomic_load_explicit(&amp;worker-&gt;runtime-&gt;stop_requested, memory_order_acquire) ||
         dppd_devices_io_quiesced(&amp;worker-&gt;runtime-&gt;devices);
-}</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L621">lib/dataplane/worker.c:621 · dppd_worker_main</a></p><pre><code>    dppd_ipv4_router_reader_unregister(runtime-&gt;ipv4_router, worker-&gt;queue_id);
+}</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__dataplane__worker.c.html#L641">lib/dataplane/worker.c:641 · dppd_worker_main</a></p><pre><code>    dppd_ipv4_router_reader_unregister(runtime-&gt;ipv4_router, worker-&gt;queue_id);
     dppd_software_backend_worker_unregister(runtime-&gt;software_backend, worker-&gt;queue_id);
     /** 注销读者后发布 STOPPED，下面才返回；主线程仍须 wait 确认工作函数已经返回 */
     atomic_store_explicit(&amp;worker-&gt;state, DPPD_WORKER_STOPPED, memory_order_release);
-    return 0;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L280">lib/runtime/runtime.c:280 · dppd_runtime_wait</a></p><pre><code>        rc = rte_eal_wait_lcore(worker-&gt;lcore_id);
+    return 0;</code></pre></div><div class="code-block"><p class="source"><a href="../sources/lib__runtime__runtime.c.html#L297">lib/runtime/runtime.c:297 · dppd_runtime_wait</a></p><pre><code>        rc = rte_eal_wait_lcore(worker-&gt;lcore_id);
         worker-&gt;launched = false;</code></pre></div></details><a class="back-top" href="#overview">回到全景 ↑</a></article></section>
 <section class="card" id="boundaries"><h2>每走完一段，程序到底变成了什么状态？</h2><div class="table-wrap"><table><thead><tr><th>走到哪里</th><th>已经完成什么</th><th>后面还要做什么</th></tr></thead><tbody>
 <tr><td>EAL 返回</td><td>DPDK 基础环境和设备探测完成</td><td>建立项目的池、队列和业务对象</td></tr>
