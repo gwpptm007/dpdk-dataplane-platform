@@ -705,11 +705,21 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
         rc = 0;
         break;
     case DPPD_MANAGEMENT_ND6_LIST:
-        rc = dppd_nd6_list(runtime == NULL ? NULL : runtime->nd6, request->payload.conntrack.after_id,
-            request->payload.conntrack.expected_revision, &response->payload.dynamic_neighbors);
+        rc = request->payload.conntrack.expected_epoch == 0
+            ? dppd_nd6_list(runtime == NULL ? NULL : runtime->nd6, request->payload.conntrack.after_id,
+                  request->payload.conntrack.expected_revision, &response->payload.dynamic_neighbors)
+            : dppd_nd6_list_guarded(runtime == NULL ? NULL : runtime->nd6, request->payload.conntrack.after_id,
+                  request->payload.conntrack.expected_epoch, request->payload.conntrack.expected_revision,
+                  &response->payload.dynamic_neighbors);
         break;
     case DPPD_MANAGEMENT_ND6_FLUSH:
-        rc = dppd_nd6_flush(runtime == NULL ? NULL : runtime->nd6, request->payload.conntrack.expected_revision);
+        /** 旧命令保持延迟回收语义，显式启动身份的清理只释放锁内仍由 ND 持有的等待包 */
+        rc = request->payload.conntrack.expected_epoch == 0
+            ? dppd_nd6_flush(runtime == NULL ? NULL : runtime->nd6, request->payload.conntrack.expected_revision)
+            : dppd_nd6_flush_guarded(runtime == NULL ? NULL : runtime->nd6, request->payload.conntrack.expected_epoch,
+                  request->payload.conntrack.expected_revision);
+        if (rc == 0)
+            dppd_nd6_status(runtime == NULL ? NULL : runtime->nd6, &response->payload.nd6);
         break;
     case DPPD_MANAGEMENT_DNAT_LIST:
         rc = dppd_conntrack_dnat_list(control->conntrack, request->payload.conntrack.after_id, &response->payload.dnat);
@@ -861,6 +871,7 @@ int dppd_management_poll(struct dppd_management_server *server)
         struct pollfd ready;
         int client;
         int poll_rc;
+        int handled_rc = 0;
 
         /* 客户端 fd 同样保持非阻塞并禁止跨 exec 继承 */
         client = accept4(server->socket_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -898,9 +909,9 @@ int dppd_management_poll(struct dppd_management_server *server)
         received = recv(client, &request, sizeof(request), MSG_TRUNC);
         if (received == (ssize_t)sizeof(request)) {
             if (server->flows != NULL)
-                (void)dppd_flow_management_handle(server->flows, server->runtime, &request, &response);
+                handled_rc = dppd_flow_management_handle(server->flows, server->runtime, &request, &response);
             else
-                (void)dppd_management_handle(server->control, server->devices, server->runtime, &request, &response);
+                handled_rc = dppd_management_handle(server->control, server->devices, server->runtime, &request, &response);
         } else {
             memset(&response, 0, sizeof(response));
             response.version = DPPD_MANAGEMENT_VERSION;
@@ -914,9 +925,12 @@ int dppd_management_poll(struct dppd_management_server *server)
         if (send(client, &response, sizeof(response), MSG_NOSIGNAL) < 0 && errno != EPIPE && errno != ECONNRESET) {
             const int error = -errno;
             close(client);
-            return error;
+            return handled_rc != 0 ? handled_rc : error;
         }
         close(client);
+        /** 业务错误写在 response.status，负返回值表示线程停机等致命故障，必须交回主循环处理 */
+        if (handled_rc != 0)
+            return handled_rc;
         /**
          * 发现恢复状态后立即结束本轮请求处理，让主循环先停止软件工作线程
          * 如果继续处理已排队的清理请求，就可能在线程仍转发报文时提前删除残留对象

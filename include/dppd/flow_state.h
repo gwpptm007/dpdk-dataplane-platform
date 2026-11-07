@@ -4,6 +4,19 @@
 #include "dppd/flow_service.h"
 #include "dppd/routing.h"
 #include "dppd/conntrack.h"
+#include "dppd/nd6.h"
+
+/** 只保存本机地址和 ND 参数，动态邻居及等待报文在重启后重新建立 */
+struct dppd_flow_nd6_state {
+    uint64_t generation;
+    struct dppd_nd6_policy policy;
+};
+
+/** 全局版本保护配置，启动标识和邻居版本保护运行态缓存，二者不能互相代替 */
+struct dppd_flow_nd6_view {
+    struct dppd_nd6_policy policy;
+    uint64_t generation, revision, durable_revision, neighbor_epoch, neighbor_revision;
+};
 
 /** 只保存连接策略和策略代次，活跃会话与分配出的 NAT 端口在重启后重新建立 */
 struct dppd_flow_conntrack_state {
@@ -59,6 +72,7 @@ struct dppd_flow_state {
     /** 空指针保持原端口对模式，非空表示路由和规则使用同一文件与写锁 */
     struct dppd_flow_routing_state *routing;
     struct dppd_flow_conntrack_state *conntrack;
+    struct dppd_flow_nd6_state *nd6;
 };
 
 /** 独立版本的完整配置文件，规则使用既有 v5 编码，不保存任何实际句柄和运行时计数 */
@@ -107,6 +121,18 @@ int dppd_flow_store_conntrack_list(struct dppd_flow_store *store, uint64_t now_m
     uint64_t expected_epoch, uint64_t expected_revision, struct dppd_connection_page *page);
 /** 清会话只影响运行态，需要同时核对本次启动身份和会话版本，不改变持久策略 */
 int dppd_flow_store_conntrack_flush(struct dppd_flow_store *store, uint64_t expected_epoch, uint64_t expected_revision);
+
+/** 设备准备后绑定真实 MAC 并恢复 ND 配置，MAC 不落盘，重复绑定不能偷偷更换端口身份 */
+int dppd_flow_store_nd6_bind(struct dppd_flow_store *store, const struct dppd_nd6_port *ports,
+    uint16_t count, uint64_t now_ms);
+/** ND 容器由 store 持有，关闭 store 前必须停止全部借用它的报文线程 */
+struct dppd_nd6 *dppd_flow_store_nd6(struct dppd_flow_store *store);
+int dppd_flow_store_nd6_get(struct dppd_flow_store *store, struct dppd_flow_nd6_view *view);
+int dppd_flow_store_nd6_status(struct dppd_flow_store *store, struct dppd_nd6_status *status);
+int dppd_flow_store_nd6_list(struct dppd_flow_store *store, uint64_t after, uint64_t epoch, uint64_t revision,
+    struct dppd_nd6_page *page);
+/** 调用前必须停止报文线程，清除动态缓存并释放等待包，保留本机地址的 DAD 状态 */
+int dppd_flow_store_nd6_flush(struct dppd_flow_store *store, uint64_t epoch, uint64_t revision);
 
 #define DPPD_FLOW_CONFIG_OPERATIONS 8U
 enum dppd_flow_config_operation {

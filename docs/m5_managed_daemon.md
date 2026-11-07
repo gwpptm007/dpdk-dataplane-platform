@@ -2,6 +2,7 @@
 
 后续扩展：[统一管理的双栈路由与静态邻居](managed_routing.md) 已提供独立接入说明，显式 `--managed-routing` 使用同一 flow-state 文件
 该模式继续接入 [CT/NAT 策略管理](managed_conntrack_nat.md)，采用持久请求替换策略，保留活跃会话与重启身份保护
+后续 [动态 ND 统一管理](managed_nd6.md) 接入本机地址、VLAN、精确缓存清理和重启后的 DAD
 下面保留最初交付时的端口对范围和 v28 协议记录；当前持久请求、在线配置及路由扩展以各自后续文档为准
 
 本项将 [M4 完整配置持久化](m5_flow_state.md) 接入正式 `dppd`、本机 Unix 管理 socket

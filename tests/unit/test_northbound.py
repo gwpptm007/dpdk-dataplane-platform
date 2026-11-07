@@ -35,7 +35,7 @@ class FakeBackend:
             self.configuration = Path(arguments[-1]).read_text(encoding="utf-8")
         elif "routing-replace" in arguments:
             self.configuration = Path(arguments[-2]).read_text(encoding="utf-8")
-        elif "conntrack-replace" in arguments:
+        elif "conntrack-replace" in arguments or "nd6-replace" in arguments:
             self.configuration = Path(arguments[-5]).read_text(encoding="utf-8")
         return {"api_version": "v1", "status": 0, "data": {"ready": True}}
 
@@ -185,6 +185,90 @@ class NorthboundTests(unittest.TestCase):
         body["reset_sessions"] = True
         self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
         self.assertEqual(self.backend.configuration, "conntrack 0 0\n")
+        self.assertEqual(self.backend.calls[-1][-3], "true")
+
+    @staticmethod
+    def nd6_request():
+        """本机地址允许链路本地地址，启动身份与邻居版本独立于持久配置版本"""
+        return {"operation": "nd6_replace", "sequence": "10", "revision": "8", "reset_neighbors": False,
+                "expected_neighbor_epoch": "18446744073709551615", "expected_neighbor_revision": "9007199254740993",
+                "policy": {"reachable_ms": 30000, "locals": [
+                    {"port_id": 1, "address": "FE80::1", "vlans": [100, 200]},
+                    {"port_id": 1, "address": "2001:DB8::1", "vlans": [100, 200]},
+                    {"port_id": 0, "address": "2001:db8:1::1", "vlans": []}]}}
+
+    def test_nd6_policy_permissions_complete_file_and_order(self):
+        body = self.nd6_request()
+        for role in ("reader", "operator"):
+            self.assertEqual(self.request("POST", "/v1/requests", body, role=role)[0], 403)
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        call = self.backend.calls[-1]
+        self.assertEqual(call[:4], ["request-submit", "3", "10", "nd6-replace"])
+        self.assertEqual(call[-4:], ["8", "false", "18446744073709551615", "9007199254740993"])
+        self.assertFalse(Path(call[4]).exists())
+        self.assertEqual(self.backend.configuration, "nd6 30000\nlocal 1 fe80::1 100 200\n"
+                         "local 1 2001:db8::1 100 200\nlocal 0 2001:db8:1::1\n")
+        self.assertEqual(self.request(path="/v1/nd6/policy")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["nd6-policy-show"])
+        self.assertEqual(self.request(path="/v1/nd6/status")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["nd6-status"])
+
+    def test_nd6_neighbors_require_epoch_and_revision_for_pages_and_flush(self):
+        self.assertEqual(self.request(path="/v1/nd6/neighbors")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["nd6-list", "0"])
+        self.assertEqual(self.request(path="/v1/nd6/neighbors?after=8&epoch=5&revision=6")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["nd6-list", "8", "6", "5"])
+        self.backend.calls.clear()
+        for query in ("after=8", "after=8&epoch=5", "revision=6", "epoch=0&revision=6", "epoch=5&revision=0"):
+            self.assertEqual(self.request(path="/v1/nd6/neighbors?" + query)[0], 400)
+        body = {"epoch": "5", "revision": "6"}
+        self.assertEqual(self.request("POST", "/v1/nd6/neighbors/flush", body)[0], 403)
+        self.assertEqual(self.request("POST", "/v1/nd6/neighbors/flush", {"revision": "6"}, role="operator")[0], 400)
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(self.request("POST", "/v1/nd6/neighbors/flush", body, role="operator")[0], 200)
+        self.assertEqual(self.backend.calls[-1], ["nd6-flush", "6", "5"])
+
+    def test_nd6_policy_rejects_bad_addresses_domains_and_incomplete_guards(self):
+        for key, value in (("reset_neighbors", "true"), ("expected_neighbor_epoch", "0"),
+                           ("expected_neighbor_revision", True), ("expected_neighbor_epoch", 1 << 63)):
+            body = self.nd6_request()
+            body[key] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for key in ("policy", "reset_neighbors", "expected_neighbor_epoch", "expected_neighbor_revision"):
+            body = self.nd6_request()
+            del body[key]
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for key, value in (("reachable_ms", 999), ("reachable_ms", 3600001), ("locals", {}), ("unknown", 1)):
+            body = self.nd6_request()
+            body["policy"][key] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        for key, value in (("port_id", 65535), ("port_id", True), ("address", "fe80::1%eth0"),
+                           ("address", "::"), ("address", "::1"), ("address", "ff02::1"),
+                           ("address", "::ffff:192.0.2.1"), ("address", "fe80::1\nnd6 0"),
+                           ("vlans", [0]), ("vlans", [4095]), ("vlans", [1, 2, 3]), ("vlans", "1")):
+            body = self.nd6_request()
+            body["policy"]["locals"][0][key] = value
+            self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        body = self.nd6_request()
+        body["policy"]["locals"][1]["address"] = "fe80::1"
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        body = self.nd6_request()
+        body["policy"]["locals"][1]["vlans"] = []
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        body = self.nd6_request()
+        body["policy"]["locals"] *= 11
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        self.assertEqual(self.backend.calls, [])
+
+    def test_nd6_disable_must_clear_timer_and_locals_together(self):
+        body = self.nd6_request()
+        body["policy"]["locals"] = []
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 400)
+        body["policy"] = {"reachable_ms": 0, "locals": []}
+        body["reset_neighbors"] = True
+        self.assertEqual(self.request("POST", "/v1/requests", body, role="admin")[0], 200)
+        self.assertEqual(self.backend.configuration, "nd6 0\n")
         self.assertEqual(self.backend.calls[-1][-3], "true")
 
     @staticmethod

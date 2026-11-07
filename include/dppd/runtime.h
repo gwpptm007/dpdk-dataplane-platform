@@ -15,6 +15,12 @@
 struct dppd_runtime;
 struct dppd_software_backend;
 
+/** 只记录本次新开启的组播接收端口，失败时不会关闭原来就已开启的接收模式 */
+struct dppd_nd6_rx_preparation {
+    uint16_t count;
+    uint16_t ports[DPPD_MAX_PORTS];
+};
+
 /**
  * 记录工作线程实际走到的阶段，不能把主线程成功提交启动请求等同于线程已可转发
  * 主线程负责 IDLE/STARTING，工作线程完成读者注册后发布 RUNNING，退出时发布结束状态
@@ -63,8 +69,9 @@ struct dppd_runtime {
     /** 普通模式拥有会话表，管理模式借用 store 的稳定容器，销毁时按所有权决定是否释放 */
     struct dppd_conntrack *conntrack;
     bool conntrack_owned;
-    /** 动态邻居与等待首包由 runtime 持有，静态路由快照仍由控制面独立管理 */
+    /** 普通模式拥有 ND 表，统一管理模式借用 store 的稳定容器和等待队列 */
     struct dppd_nd6 *nd6;
+    bool nd6_owned;
     struct dppd_worker workers[DPPD_MAX_WORKERS];
     uint16_t nb_workers;
     /** 停止请求只通知线程结束循环，不表示线程已经退出；释放共享资源前仍需等待 */
@@ -80,6 +87,13 @@ void dppd_runtime_set_software_backend(struct dppd_runtime *runtime, struct dppd
 void dppd_runtime_set_ipv4_router(struct dppd_runtime *runtime, struct dppd_ipv4_router *router);
 /** 只在 worker 停止且 runtime 没有自有会话表时借用容器，不转移所有权 */
 int dppd_runtime_set_conntrack(struct dppd_runtime *runtime, struct dppd_conntrack *conntrack);
+/** 只在 worker 停止且没有自有 ND 表时绑定，不转移容器和等待包的所有权 */
+int dppd_runtime_set_nd6(struct dppd_runtime *runtime, struct dppd_nd6 *nd6);
+/** worker 停止后准备 ND 所需的组播接收，失败会补偿，补偿无法确认时返回 EUCLEAN */
+int dppd_runtime_prepare_nd6(struct dppd_runtime *runtime, const struct dppd_nd6_policy *policy,
+    struct dppd_nd6_rx_preparation *preparation);
+/** 策略尚未发布时撤销本次新增设置，策略已发布则保留接收模式直到设备关闭 */
+int dppd_runtime_rollback_nd6(struct dppd_runtime *runtime, struct dppd_nd6_rx_preparation *preparation);
 int dppd_runtime_start(struct dppd_runtime *runtime);
 /** 检查已启动的线程是否异常结束；正常停止和设备移除由各自的退出流程处理 */
 int dppd_runtime_check_workers(const struct dppd_runtime *runtime);

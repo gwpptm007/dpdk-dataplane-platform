@@ -911,6 +911,7 @@ static void nd6_queues(struct fixture *fixture)
     uint64_t now = dppd_monotonic_ms();
     assert(now > 3000 &&
         dppd_nd6_create(&fixture->runtime.nd6, &configuration, (const uint8_t(*)[6])macs, now - 3000) == 0);
+    fixture->runtime.nd6_owned = true;
     fixture->control.nd6 = fixture->runtime.nd6;
     dppd_nd6_tick(fixture->runtime.nd6, now - 1000, prime_dad, NULL);
     dppd_nd6_tick(fixture->runtime.nd6, now, prime_dad, NULL);

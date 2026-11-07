@@ -30,8 +30,9 @@ static int port_number(const char *text, uint16_t *value, bool device)
     return 0;
 }
 
-static int policy_line(char **words, unsigned int count, struct dppd_conntrack_policy *policy, bool *header)
+static int policy_line(char **words, unsigned int count, void *context, bool *header)
 {
+    struct dppd_conntrack_policy *policy = context;
     if (strcmp(words[0], "conntrack") == 0) {
         uint64_t capacity, timeout;
         if (*header || count != 3 || number(words[1], &capacity) != 0 || capacity > 65536 ||
@@ -79,11 +80,11 @@ static int policy_line(char **words, unsigned int count, struct dppd_conntrack_p
 }
 
 /** 整策略文件先完整读入再解析，普通文件、大小和行长度都有限制，出错不能发送半份策略 */
-int dppctl_conntrack_policy_read(const char *path, struct dppd_conntrack_policy *policy)
+static int policy_file_read(const char *path, void *policy,
+    int (*parse)(char **words, unsigned int count, void *context, bool *header))
 {
     if (path == NULL || policy == NULL)
         return -EINVAL;
-    memset(policy, 0, sizeof(*policy));
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
         return -errno;
@@ -132,13 +133,68 @@ int dppctl_conntrack_policy_read(const char *path, struct dppd_conntrack_policy 
         }
         if (count == 0)
             continue;
-        rc = word != NULL ? -EINVAL : policy_line(words, count, policy, &header);
+        rc = word != NULL ? -EINVAL : parse(words, count, policy, &header);
         if (rc != 0)
             break;
     }
     free(text);
-    if (rc == 0 && (!header || (policy->capacity == 0 &&
-                                  (policy->snat.enabled || policy->snat6.enabled || policy->dnat_count != 0))))
+    return rc == 0 && !header ? -EINVAL : rc;
+}
+
+int dppctl_conntrack_policy_read(const char *path, struct dppd_conntrack_policy *policy)
+{
+    if (policy == NULL)
+        return -EINVAL;
+    memset(policy, 0, sizeof(*policy));
+    int rc = policy_file_read(path, policy, policy_line);
+    if (rc == 0 && policy->capacity == 0 && (policy->snat.enabled || policy->snat6.enabled || policy->dnat_count != 0))
+        rc = -EINVAL;
+    return rc;
+}
+
+static int nd6_policy_line(char **words, unsigned int count, void *context, bool *header)
+{
+    struct dppd_nd6_policy *policy = context;
+    if (strcmp(words[0], "nd6") == 0) {
+        uint64_t reachable;
+        if (*header || count != 2 || number(words[1], &reachable) != 0 ||
+            (reachable != 0 && (reachable < 1000 || reachable > 3600000)))
+            return -EINVAL;
+        policy->reachable_ms = (uint32_t)reachable;
+        *header = true;
+        return 0;
+    }
+    if (strcmp(words[0], "local") != 0 || count < 3 || count > 5 || policy->local_count == DPPD_ND6_LOCAL_LIMIT)
+        return -EINVAL;
+    struct dppd_nd6_local *local = &policy->locals[policy->local_count];
+    struct in6_addr address;
+    if (port_number(words[1], &local->port_id, true) != 0 || inet_pton(AF_INET6, words[2], &address) != 1 ||
+        IN6_IS_ADDR_UNSPECIFIED(&address) || IN6_IS_ADDR_LOOPBACK(&address) || IN6_IS_ADDR_MULTICAST(&address) ||
+        IN6_IS_ADDR_V4MAPPED(&address))
+        return -EINVAL;
+    memcpy(local->address, &address, sizeof(local->address));
+    local->vlan_depth = (uint8_t)(count - 3U);
+    for (unsigned int i = 0; i < local->vlan_depth; ++i)
+        if (port_number(words[i + 3U], &local->vlan[i], false) != 0 || local->vlan[i] == 0 || local->vlan[i] > 4094)
+            return -EINVAL;
+    /** 同一网口共享一个 VLAN 域，地址重复或域不一致会让邻居选择含糊，文件阶段就拒绝 */
+    for (uint32_t i = 0; i < policy->local_count; ++i) {
+        const struct dppd_nd6_local *previous = &policy->locals[i];
+        if (previous->port_id == local->port_id && (memcmp(previous->address, local->address, 16) == 0 ||
+            previous->vlan_depth != local->vlan_depth || memcmp(previous->vlan, local->vlan, sizeof(local->vlan)) != 0))
+            return -EINVAL;
+    }
+    ++policy->local_count;
+    return 0;
+}
+
+int dppctl_nd6_policy_read(const char *path, struct dppd_nd6_policy *policy)
+{
+    if (policy == NULL)
+        return -EINVAL;
+    memset(policy, 0, sizeof(*policy));
+    int rc = policy_file_read(path, policy, nd6_policy_line);
+    if (rc == 0 && ((policy->local_count == 0) != (policy->reachable_ms == 0)))
         rc = -EINVAL;
     return rc;
 }
@@ -164,6 +220,8 @@ int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request
         operation = DPPD_MANAGEMENT_DNAT_LIST;
     else if (strcmp(argv[0], "nd6-status") == 0)
         operation = DPPD_MANAGEMENT_ND6_STATUS;
+    else if (strcmp(argv[0], "nd6-policy-show") == 0)
+        operation = DPPD_MANAGEMENT_ND6_POLICY_GET;
     else if (strcmp(argv[0], "nd6-list") == 0)
         operation = DPPD_MANAGEMENT_ND6_LIST;
     else if (strcmp(argv[0], "nd6-flush") == 0)
@@ -174,7 +232,7 @@ int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request
     if (operation == DPPD_MANAGEMENT_DNAT_LIST)
         return argc == 1 || (argc == 2 && number(argv[1], &request->payload.conntrack.after_id) == 0) ? 0 : -EINVAL;
     if (operation == DPPD_MANAGEMENT_CONNTRACK_FLUSH || operation == DPPD_MANAGEMENT_ND6_FLUSH) {
-        if (argc < 2 || argc > (operation == DPPD_MANAGEMENT_CONNTRACK_FLUSH ? 3 : 2) ||
+        if (argc < 2 || argc > 3 ||
             number(argv[1], &request->payload.conntrack.expected_revision) != 0 ||
             request->payload.conntrack.expected_revision == 0 ||
             (argc == 3 && (number(argv[2], &request->payload.conntrack.expected_epoch) != 0 ||
@@ -183,7 +241,7 @@ int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request
         return 0;
     }
     if (operation == DPPD_MANAGEMENT_CONNTRACK_LIST || operation == DPPD_MANAGEMENT_ND6_LIST) {
-        if (argc > (operation == DPPD_MANAGEMENT_CONNTRACK_LIST ? 4 : 3) ||
+        if (argc > 4 ||
             (argc >= 2 && number(argv[1], &request->payload.conntrack.after_id) != 0) ||
             (argc >= 3 &&
                 (number(argv[2], &request->payload.conntrack.expected_revision) != 0 ||
@@ -216,14 +274,31 @@ static void print_tuple(const char *label, const struct dppd_flow_tuple *tuple)
 /** 动态缓存单独查询，不混入持久静态邻居；修订号只属于本次进程的易失状态 */
 static bool nd6_print(const struct dppd_management_response *response)
 {
+    if (response->operation == DPPD_MANAGEMENT_ND6_POLICY_GET) {
+        const struct dppd_flow_nd6_view *view = &response->payload.nd6_policy;
+        printf("# generation=%" PRIu64 " revision=%" PRIu64 " durable-revision=%" PRIu64
+               " neighbor-epoch=%" PRIu64 " neighbor-revision=%" PRIu64 "\nnd6 %u\n",
+            view->generation, view->revision, view->durable_revision, view->neighbor_epoch,
+            view->neighbor_revision, view->policy.reachable_ms);
+        for (uint32_t i = 0; i < view->policy.local_count && i < DPPD_ND6_LOCAL_LIMIT; ++i) {
+            const struct dppd_nd6_local *local = &view->policy.locals[i];
+            char text[INET6_ADDRSTRLEN];
+            (void)inet_ntop(AF_INET6, local->address, text, sizeof(text));
+            printf("local %u %s", local->port_id, text);
+            for (uint8_t v = 0; v < local->vlan_depth && v < 2; ++v)
+                printf(" %u", local->vlan[v]);
+            putchar('\n');
+        }
+        return true;
+    }
     if (response->operation < DPPD_MANAGEMENT_ND6_STATUS || response->operation > DPPD_MANAGEMENT_ND6_FLUSH)
         return false;
     if (response->operation == DPPD_MANAGEMENT_ND6_STATUS) {
         const struct dppd_nd6_status *status = &response->payload.nd6;
-        printf("nd6 enabled=%s revision=%" PRIu64 " active=%u pending=%u local-count=%u reachable-ms=%u"
+        printf("nd6 enabled=%s epoch=%" PRIu64 " revision=%" PRIu64 " active=%u pending=%u local-count=%u reachable-ms=%u"
                " solicitations=%" PRIu64 " advertisements=%" PRIu64 " invalid=%" PRIu64 " tx-errors=%" PRIu64
                " queue-drops=%" PRIu64 " resolved=%" PRIu64 " failed=%" PRIu64 " persistent=no\n",
-            status->enabled ? "yes" : "no", status->revision, status->active, status->pending, status->local_count,
+            status->enabled ? "yes" : "no", status->epoch, status->revision, status->active, status->pending, status->local_count,
             status->reachable_ms, status->solicitations, status->advertisements, status->invalid, status->tx_errors,
             status->queue_drops, status->resolved, status->failed);
         for (uint32_t i = 0; i < status->local_count; ++i) {
@@ -239,7 +314,8 @@ static bool nd6_print(const struct dppd_management_response *response)
     } else if (response->operation == DPPD_MANAGEMENT_ND6_LIST) {
         const struct dppd_nd6_page *page = &response->payload.dynamic_neighbors;
         static const char *states[] = {"none", "incomplete", "reachable", "stale", "delay", "probe", "failed"};
-        printf("nd6 revision=%" PRIu64 " count=%u next-id=%" PRIu64 " more=%s\n", page->revision, page->count,
+        printf("nd6 epoch=%" PRIu64 " revision=%" PRIu64 " count=%u next-id=%" PRIu64 " more=%s\n",
+            page->epoch, page->revision, page->count,
             page->next_id, page->more ? "yes" : "no");
         for (uint32_t i = 0; i < page->count; ++i) {
             const struct dppd_nd6_entry *entry = &page->entries[i];

@@ -9,7 +9,8 @@ enum dppd_flow_request_operation {
     DPPD_FLOW_REQUEST_REMOVE,
     DPPD_FLOW_REQUEST_CONFIGURE,
     DPPD_FLOW_REQUEST_ROUTING_REPLACE,
-    DPPD_FLOW_REQUEST_CONNTRACK_REPLACE
+    DPPD_FLOW_REQUEST_CONNTRACK_REPLACE,
+    DPPD_FLOW_REQUEST_ND6_REPLACE
 };
 
 enum dppd_flow_request_phase { DPPD_FLOW_REQUEST_PENDING = 1, DPPD_FLOW_REQUEST_DONE };
@@ -39,6 +40,12 @@ struct dppd_flow_request {
             bool reset_sessions;
             uint64_t expected_session_epoch, expected_session_revision;
         } conntrack;
+        /** 调用 ND 替换前必须暂停报文线程，明确允许后才释放旧邻居和等待报文 */
+        struct {
+            struct dppd_nd6_policy policy;
+            bool reset_neighbors;
+            uint64_t expected_neighbor_epoch, expected_neighbor_revision;
+        } nd6;
     } payload;
 };
 

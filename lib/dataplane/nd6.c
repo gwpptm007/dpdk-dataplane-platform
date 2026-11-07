@@ -42,6 +42,9 @@ struct dppd_nd6 {
     struct dppd_nd6_entry entries[DPPD_ND6_LIMIT];
     /** 等待 MAC 的报文槽位，hold 成功后持有 mbuf，take 取出后交回原处理队列 */
     struct waiting_packet waiting[DPPD_ND6_PENDING_LIMIT];
+    /** 容器生命周期内固定的设备绑定，在线策略只能引用这些端口 */
+    struct dppd_nd6_port ports[DPPD_MAX_PORTS];
+    uint16_t port_count;
     /** 内部毫秒时钟，只接受更大的调用方时间，避免多队列传入时间使计时倒退 */
     uint64_t clock;
     /** 下次允许扫描定时任务的毫秒时间点，tick 每次扫描后推迟 10 毫秒 */
@@ -60,6 +63,12 @@ static bool equal(const uint8_t a[16], const uint8_t b[16])
 static bool mac_valid(const uint8_t mac[6])
 {
     return (mac[0] & 1U) == 0 && memcmp(mac, zero, 6) != 0;
+}
+/** 版本触顶后保持最大值，后续写入口拒绝推进，旧版本不能因整数回绕重新命中 */
+static void advance_revision(struct dppd_nd6 *table)
+{
+    if (table->status.revision != UINT64_MAX)
+        table->status.revision++;
 }
 static uint64_t clock_advance(struct dppd_nd6 *table, uint64_t now)
 {
@@ -104,11 +113,11 @@ static void state(struct dppd_nd6 *table, struct dppd_nd6_entry *entry, uint8_t 
     entry->state = value;
     entry->changed_ms = table->clock;
     entry->due_ms = due;
-    table->status.revision++;
+    advance_revision(table);
 }
 static struct dppd_nd6_entry *insert(struct dppd_nd6 *table, uint16_t port, const uint8_t address[16])
 {
-    if (table->next_id == UINT64_MAX)
+    if (table->next_id == UINT64_MAX || table->status.revision == UINT64_MAX)
         return NULL;
     for (uint32_t i = 0; i < DPPD_ND6_LIMIT; ++i)
         if (table->entries[i].id == 0) {
@@ -214,51 +223,101 @@ static int transmit(struct dppd_nd6 *table, const struct local_address *owner, u
     return rc;
 }
 
-/**
- * 创建 IPv6 邻居管理表，保存本机地址、所属网口 MAC 和首次重复地址检测时间
- * 未配置 ND 地址时返回 0，保持 *result 为 NULL；启用时分配表、初始化锁并逐项复制配置
- * macs 按 configuration->ports 的顺序排列，now 是当前单调毫秒时间
- * 新地址初始为 TENTATIVE，后续由 worker 调用 tick 推进检测，本函数不发送报文
- * 成功将表地址写入 *result 并返回 0，失败释放本次资源并返回负错误码
- */
-int dppd_nd6_create(struct dppd_nd6 **result, const struct dppd_config *configuration,
-    const uint8_t macs[DPPD_MAX_PORTS][6], uint64_t now)
+/** 这里只核对策略本身，实际端口存在性和 MAC 由创建容器时的设备绑定另行核对 */
+int dppd_nd6_policy_validate(const struct dppd_nd6_policy *policy)
 {
-    if (result == NULL || *result != NULL || configuration == NULL || macs == NULL)
+    if (policy == NULL || policy->local_count > DPPD_ND6_LOCAL_LIMIT)
         return -EINVAL;
-    /** 未启用时不分配空表，调用方用 NULL 区分是否需要执行 ND 处理 */
-    if (configuration->nd6_count == 0)
-        return 0;
-    char error[128];
-    if (dppd_config_validate(configuration, error, sizeof(error)) != 0)
+    if (policy->local_count == 0)
+        return policy->reachable_ms == 0 ? 0 : -EINVAL;
+    if (policy->reachable_ms < 1000 || policy->reachable_ms > 3600000)
         return -EINVAL;
+    for (uint32_t i = 0; i < policy->local_count; ++i) {
+        const struct dppd_nd6_local *local = &policy->locals[i];
+        if (local->port_id == UINT16_MAX || !dppd_ipv6_unicast(local->address, true) || local->vlan_depth > 2)
+            return -EINVAL;
+        for (uint8_t tag = 0; tag < local->vlan_depth; ++tag)
+            if (local->vlan[tag] == 0 || local->vlan[tag] > 4094)
+                return -EINVAL;
+        for (uint32_t j = 0; j < i; ++j) {
+            const struct dppd_nd6_local *other = &policy->locals[j];
+            if (local->port_id == other->port_id && (equal(local->address, other->address) ||
+                    local->vlan_depth != other->vlan_depth ||
+                    memcmp(local->vlan, other->vlan, local->vlan_depth * sizeof(local->vlan[0])) != 0))
+                return -EINVAL;
+        }
+    }
+    return 0;
+}
+
+/** 中断时继续读取随机字节，不用时钟或递增计数冒充跨进程启动身份 */
+static int random_bytes(void *value, size_t size)
+{
+    size_t offset = 0;
+    while (offset < size) {
+        ssize_t count = getrandom((uint8_t *)value + offset, size - offset, 0);
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            return -errno;
+        }
+        if (count == 0)
+            return -EIO;
+        offset += (size_t)count;
+    }
+    return 0;
+}
+
+int dppd_nd6_create_policy(struct dppd_nd6 **result, const struct dppd_nd6_policy *policy,
+    const struct dppd_nd6_port *ports, uint16_t count, uint64_t now)
+{
+    if (result == NULL || *result != NULL || ports == NULL || count == 0 || count > DPPD_MAX_PORTS)
+        return -EINVAL;
+    int rc = dppd_nd6_policy_validate(policy);
+    if (rc != 0)
+        return rc;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (ports[i].port_id == UINT16_MAX || !mac_valid(ports[i].mac))
+            return -EINVAL;
+        for (uint16_t j = 0; j < i; ++j)
+            if (ports[i].port_id == ports[j].port_id)
+                return -EINVAL;
+    }
     /** 清零后邻居和等待包槽位为空，本机地址 state 为枚举值 0，即 TENTATIVE */
     struct dppd_nd6 *table = calloc(1, sizeof(*table));
     if (table == NULL)
         return -ENOMEM;
-    /** 随机种子用于打散检测和可达期限，互斥锁保护后续多 worker 对共享表的访问 */
-    if (getrandom(&table->random, sizeof(table->random), 0) != sizeof(table->random) ||
-        pthread_mutex_init(&table->lock, NULL) != 0) {
+    rc = random_bytes(&table->random, sizeof(table->random));
+    while (rc == 0 && table->status.epoch == 0)
+        rc = random_bytes(&table->status.epoch, sizeof(table->status.epoch));
+    if (rc != 0) {
         free(table);
-        return -EIO;
+        return rc;
     }
+    rc = pthread_mutex_init(&table->lock, NULL);
+    if (rc != 0) {
+        free(table);
+        return -rc;
+    }
+    /** 随机种子用于打散检测和可达期限，端口 MAC 不随策略替换而改变 */
     if (table->random == 0)
         table->random = 1;
     table->clock = now;
-    table->status = (struct dppd_nd6_status){.enabled = true,
-        .revision = 1,
-        .local_count = configuration->nd6_count,
-        .reachable_ms = configuration->nd6_reachable_ms};
-    for (uint32_t i = 0; i < configuration->nd6_count; ++i) {
+    table->status.enabled = policy->local_count != 0;
+    table->status.revision = 1;
+    table->status.local_count = policy->local_count;
+    table->status.reachable_ms = policy->reachable_ms;
+    memcpy(table->ports, ports, count * sizeof(*ports));
+    table->port_count = count;
+    for (uint32_t i = 0; i < policy->local_count; ++i) {
         struct local_address *owner = &table->locals[i];
-        owner->configuration = configuration->nd6[i];
-        /** j 是配置顺序下标，不是端口号；例如 ports=[2,5]，端口 5 的 MAC 在 macs[1] */
-        for (uint16_t j = 0; j < configuration->nb_ports; ++j)
-            if (configuration->ports[j] == owner->configuration.port_id)
-                memcpy(owner->mac, macs[j], 6);
+        owner->configuration = policy->locals[i];
+        for (uint16_t j = 0; j < count; ++j)
+            if (ports[j].port_id == owner->configuration.port_id)
+                memcpy(owner->mac, ports[j].mac, 6);
         if (!mac_valid(owner->mac)) {
             dppd_nd6_destroy(table);
-            return -EINVAL;
+            return -ENODEV;
         }
         /** 首次检测安排在 now 到 now+1000 毫秒之间，实际发送要等 worker 驱动 tick */
         owner->due = now + random_value(table) % 1001;
@@ -266,6 +325,81 @@ int dppd_nd6_create(struct dppd_nd6 **result, const struct dppd_config *configur
     /** 全部本机地址和 MAC 准备成功，才将表交给 runtime 持有 */
     *result = table;
     return 0;
+}
+
+/**
+ * 兼容旧启动配置，MAC 数组仍按 configuration->ports 顺序排列
+ * 只绑定实际启用 ND 的端口，其他端口缺少 MAC 不影响原本可用的 ND 配置
+ * 本函数不发送报文，所有本机地址仍由 worker 的 tick 推进重复地址检测
+ */
+int dppd_nd6_create(struct dppd_nd6 **result, const struct dppd_config *configuration,
+    const uint8_t macs[DPPD_MAX_PORTS][6], uint64_t now)
+{
+    if (result == NULL || *result != NULL || configuration == NULL || macs == NULL)
+        return -EINVAL;
+    /** 旧独立模式仍用 NULL 表示未启用，不能因为统一管理引入容器就改变旧入口行为 */
+    if (configuration->nd6_count == 0)
+        return 0;
+    char error[128];
+    if (dppd_config_validate(configuration, error, sizeof(error)) != 0)
+        return -EINVAL;
+    struct dppd_nd6_policy policy = {.local_count = configuration->nd6_count,
+        .reachable_ms = configuration->nd6_reachable_ms};
+    memcpy(policy.locals, configuration->nd6, policy.local_count * sizeof(policy.locals[0]));
+    struct dppd_nd6_port ports[DPPD_MAX_PORTS] = {0};
+    uint16_t count = 0;
+    for (uint16_t i = 0; i < configuration->nb_ports; ++i) {
+        bool used = false;
+        for (uint32_t j = 0; j < policy.local_count; ++j)
+            used |= policy.locals[j].port_id == configuration->ports[i];
+        if (used) {
+            ports[count].port_id = configuration->ports[i];
+            memcpy(ports[count++].mac, macs[i], 6);
+        }
+    }
+    return dppd_nd6_create_policy(result, &policy, ports, count, now);
+}
+
+int dppd_nd6_replace(struct dppd_nd6 *table, const struct dppd_nd6_policy *policy, bool reset_neighbors,
+    uint64_t expected_epoch, uint64_t expected_revision, uint64_t now, int (*publish)(void *), void *context)
+{
+    if (table == NULL)
+        return -ENODEV;
+    if (expected_epoch == 0 || expected_revision == 0)
+        return -EINVAL;
+    struct dppd_nd6 *candidate = NULL;
+    int rc = dppd_nd6_create_policy(&candidate, policy, table->ports, table->port_count, now);
+    if (rc != 0)
+        return rc;
+    pthread_mutex_lock(&table->lock);
+    if (expected_epoch != table->status.epoch || expected_revision != table->status.revision)
+        rc = -ESTALE;
+    else if (!reset_neighbors && (table->status.active != 0 || table->status.pending != 0))
+        rc = -EBUSY;
+    else if (table->status.revision == UINT64_MAX || UINT64_MAX - table->status.queue_drops < table->status.pending)
+        rc = -EOVERFLOW;
+    else if (publish != NULL)
+        rc = publish(context);
+    if (rc == 0) {
+        /** 回调成功前不动旧对象，成功后把旧等待包交给候选析构，地址和 mutex 始终保持不变 */
+        memcpy(candidate->waiting, table->waiting, sizeof(table->waiting));
+        memset(table->waiting, 0, sizeof(table->waiting));
+        memset(table->entries, 0, sizeof(table->entries));
+        memcpy(table->locals, candidate->locals, sizeof(table->locals));
+        clock_advance(table, now);
+        for (uint32_t i = 0; i < candidate->status.local_count; ++i)
+            table->locals[i].due = table->clock + random_value(table) % 1001;
+        table->status.queue_drops += table->status.pending;
+        table->status.pending = table->status.active = 0;
+        table->status.enabled = candidate->status.enabled;
+        table->status.local_count = candidate->status.local_count;
+        table->status.reachable_ms = candidate->status.reachable_ms;
+        table->next_tick = 0;
+        advance_revision(table);
+    }
+    pthread_mutex_unlock(&table->lock);
+    dppd_nd6_destroy(candidate);
+    return rc;
 }
 void dppd_nd6_destroy(struct dppd_nd6 *table)
 {
@@ -277,13 +411,37 @@ void dppd_nd6_destroy(struct dppd_nd6 *table)
     pthread_mutex_destroy(&table->lock);
     free(table);
 }
+
+void dppd_nd6_discard_pending(struct dppd_nd6 *table)
+{
+    if (table == NULL)
+        return;
+    struct rte_mbuf *retired[DPPD_ND6_PENDING_LIMIT] = {0};
+    pthread_mutex_lock(&table->lock);
+    for (uint32_t i = 0; i < DPPD_ND6_PENDING_LIMIT; ++i)
+        retired[i] = table->waiting[i].packet.mbuf;
+    memset(table->waiting, 0, sizeof(table->waiting));
+    if (table->status.pending != 0) {
+        /** 结束清理不能因统计或版本触顶而留下借用内存，达到上限就保留最大值 */
+        table->status.queue_drops = UINT64_MAX - table->status.queue_drops < table->status.pending ? UINT64_MAX :
+            table->status.queue_drops + table->status.pending;
+        advance_revision(table);
+    }
+    table->status.pending = 0;
+    pthread_mutex_unlock(&table->lock);
+    /** 锁内先摘掉指针，锁外归还引用，之后销毁容器或再次结束清理都不会重复释放 */
+    for (uint32_t i = 0; i < DPPD_ND6_PENDING_LIMIT; ++i)
+        if (retired[i] != NULL)
+            rte_pktmbuf_free(retired[i]);
+}
+
 /** 该网口配置的本机 IPv6 地址全部为 PREFERRED 才就绪；未启用 ND 或该口无配置时不限制 */
 bool dppd_nd6_port_ready(struct dppd_nd6 *table, uint16_t port)
 {
     if (table == NULL)
         return true;
     pthread_mutex_lock(&table->lock);
-    bool ready = true;
+    bool ready = !table->status.enabled || table->status.revision != UINT64_MAX;
     for (uint32_t i = 0; i < table->status.local_count; ++i)
         if (table->locals[i].configuration.port_id == port && table->locals[i].state != DPPD_ND6_PREFERRED)
             ready = false;
@@ -303,14 +461,23 @@ bool dppd_nd6_input(struct dppd_nd6 *table, uint16_t port, const struct rte_mbuf
 {
     if (table == NULL || packet->l3_type != DPPD_L3_IPV6 || packet->ip_protocol != 58)
         return false;
+    pthread_mutex_lock(&table->lock);
+    /** 常驻但关闭的容器与 NULL 语义相同，不读取或消费普通转发路径中的 ND 报文 */
+    if (!table->status.enabled) {
+        pthread_mutex_unlock(&table->lock);
+        return false;
+    }
     uint8_t first[1], ether[22], hop[1], body[256];
     /** l3_len 包含已解析的 IPv6 扩展头；无 VLAN、无扩展头时 ICMPv6 从 14+40=54 开始 */
     uint32_t offset = packet->l2_len + packet->l3_len;
     const uint8_t *kind = rte_pktmbuf_read(mbuf, offset, 1, first);
     /** 普通非 ND 报文交回原流程；ICMPv6 分片进入下面的无效处理，不按完整 ND 采用 */
-    if (packet->l4_type != DPPD_L4_FRAGMENT && (kind == NULL || !dppd_icmpv6_is_nd(*kind)))
+    if (packet->l4_type != DPPD_L4_FRAGMENT && (kind == NULL || !dppd_icmpv6_is_nd(*kind))) {
+        pthread_mutex_unlock(&table->lock);
         return false;
-    pthread_mutex_lock(&table->lock);
+    }
+    if (table->status.revision == UINT64_MAX)
+        goto invalid;
     clock_advance(table, now);
     struct local_address *owner = local(table, port, NULL);
     if (packet->l2_len < 14 || packet->l2_len > 22 || packet->l3_len < 40 ||
@@ -371,7 +538,7 @@ bool dppd_nd6_input(struct dppd_nd6 *table, uint16_t port, const struct rte_mbuf
     if (target != NULL && ((!ns && !unspecified) || (ns && unspecified && target->state == DPPD_ND6_TENTATIVE))) {
         if (target->state == DPPD_ND6_TENTATIVE) {
             target->state = DPPD_ND6_DUPLICATE;
-            table->status.revision++;
+            advance_revision(table);
         } else
             table->status.invalid++;
         goto consumed;
@@ -450,6 +617,10 @@ int dppd_nd6_resolve(struct dppd_nd6 *table, uint16_t port, const uint8_t addres
     pthread_mutex_lock(&table->lock);
     clock_advance(table, now);
     int rc = -EHOSTUNREACH;
+    if (table->status.revision == UINT64_MAX) {
+        rc = -EOVERFLOW;
+        goto done;
+    }
     if (!domain(local(table, port, NULL), packet) || !dppd_ipv6_unicast(address, true) ||
         local(table, port, address) != NULL)
         goto done;
@@ -492,11 +663,11 @@ void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, voi
         return;
     pthread_mutex_lock(&table->lock);
     clock_advance(table, now);
-    if (table->clock < table->next_tick)
+    if (!table->status.enabled || table->status.revision == UINT64_MAX || table->clock < table->next_tick)
         goto done;
     /** 这里只检查期限，不休眠；未到期直接返回，由 worker 后续循环再次调用 */
     table->next_tick = table->clock + 10;
-    for (uint32_t i = 0; i < table->status.local_count; ++i) {
+    for (uint32_t i = 0; i < table->status.local_count && table->status.revision != UINT64_MAX; ++i) {
         struct local_address *owner = &table->locals[i];
         /** 只处理已经到期的待检测地址，PREFERRED 和 DUPLICATE 都跳过 */
         if (owner->state != DPPD_ND6_TENTATIVE || owner->due > table->clock)
@@ -504,7 +675,7 @@ void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, voi
         /** 已成功提交检测 NS，等待期限也已结束；仍未发现冲突，才允许使用该地址 */
         if (owner->sent) {
             owner->state = DPPD_ND6_PREFERRED;
-            table->status.revision++;
+            advance_revision(table);
         } else {
             uint8_t group[16];
             /** 检测本机地址是否被占用：源 IPv6 为 ::，目标字段为本机待检测地址，目的为其组播地址 */
@@ -517,7 +688,7 @@ void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, voi
         }
     }
     /** 以下维护邻居缓存，与上面的本机地址检测分别处理 */
-    for (uint32_t i = 0; i < DPPD_ND6_LIMIT; ++i) {
+    for (uint32_t i = 0; i < DPPD_ND6_LIMIT && table->status.revision != UINT64_MAX; ++i) {
         struct dppd_nd6_entry *entry = &table->entries[i];
         if (entry->id == 0)
             continue;
@@ -527,7 +698,7 @@ void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, voi
             table->clock - entry->used_ms >= 60000) {
             memset(entry, 0, sizeof(*entry));
             table->status.active--;
-            table->status.revision++;
+            advance_revision(table);
             continue;
         }
         if (entry->state == DPPD_ND6_DELAY && entry->due_ms <= table->clock) {
@@ -563,7 +734,7 @@ done:
  * port 和 address 定位动态邻居，pending 保存原始 mbuf、入口、队列和截止时间
  *
  * 返回 0：已保存到 waiting，调用方继续处理下一个包，不再发送或释放此 mbuf
- * 返回 -EINVAL 或 -ENOBUFS：没有接管 mbuf，调用方负责后续释放
+ * 返回 -EINVAL、-ENOBUFS 或 -EOVERFLOW：没有接管 mbuf，调用方负责后续释放
  *
  * 入队条件：邻居记录存在、同邻居等待包少于 4、总计 128 个槽位尚有空位、报文未超时
  */
@@ -574,6 +745,10 @@ int dppd_nd6_hold(struct dppd_nd6 *table, uint16_t port, const uint8_t address[1
         return -EINVAL;
     pthread_mutex_lock(&table->lock);
     clock_advance(table, now);
+    if (table->status.revision == UINT64_MAX) {
+        pthread_mutex_unlock(&table->lock);
+        return -EOVERFLOW;
+    }
     struct dppd_nd6_entry *entry = find(table, port, address);
     /** 记录首个空槽位，并统计已有多少个包在等待同一邻居，避免单个邻居占满队列 */
     uint32_t same = 0, available = DPPD_ND6_PENDING_LIMIT;
@@ -593,6 +768,7 @@ int dppd_nd6_hold(struct dppd_nd6 *table, uint16_t port, const uint8_t address[1
         table->waiting[available] =
             (struct waiting_packet){.packet = pending, .neighbor_id = entry->id, .retry_ms = table->clock + 100};
         table->status.pending++;
+        advance_revision(table);
         rc = 0;
     } else
         table->status.queue_drops++;
@@ -616,7 +792,7 @@ bool dppd_nd6_take(struct dppd_nd6 *table, uint16_t queue, uint64_t now, struct 
     pthread_mutex_lock(&table->lock);
     clock_advance(table, now);
     bool found = false;
-    for (uint32_t i = 0; i < DPPD_ND6_PENDING_LIMIT; ++i) {
+    for (uint32_t i = 0; i < DPPD_ND6_PENDING_LIMIT && table->status.revision != UINT64_MAX; ++i) {
         struct waiting_packet *waiting = &table->waiting[i];
         /** 只取本队列的有效记录，避免把同一 mbuf 同时交给不同处理队列 */
         if (waiting->packet.mbuf == NULL || waiting->packet.queue != queue)
@@ -636,6 +812,7 @@ bool dppd_nd6_take(struct dppd_nd6 *table, uint16_t queue, uint64_t now, struct 
         memset(waiting, 0, sizeof(*waiting));
         table->status.pending--;
         table->status.queue_drops += expired;
+        advance_revision(table);
         found = true;
         break;
     }
@@ -655,14 +832,19 @@ void dppd_nd6_status(struct dppd_nd6 *table, struct dppd_nd6_status *status)
     }
     pthread_mutex_unlock(&table->lock);
 }
-int dppd_nd6_list(struct dppd_nd6 *table, uint64_t after, uint64_t revision, struct dppd_nd6_page *page)
+static int list_neighbors(struct dppd_nd6 *table, uint64_t after, uint64_t epoch, uint64_t revision,
+    bool guarded, struct dppd_nd6_page *page)
 {
-    if (table == NULL)
+    if (table == NULL || page == NULL)
         return -ENODEV;
+    if (guarded && ((epoch == 0) != (revision == 0) || (after != 0 && epoch == 0)))
+        return -EINVAL;
     memset(page, 0, sizeof(*page));
     pthread_mutex_lock(&table->lock);
+    page->epoch = table->status.epoch;
     page->revision = table->status.revision;
-    int rc = revision != 0 && revision != page->revision ? -ESTALE : 0;
+    int rc = (revision != 0 && revision != page->revision) || (guarded && epoch != 0 && epoch != page->epoch)
+        ? -ESTALE : 0;
     for (uint32_t i = 0; rc == 0 && i < DPPD_ND6_LIMIT; ++i) {
         const struct dppd_nd6_entry *entry = &table->entries[i];
         if (entry->id <= after)
@@ -684,17 +866,54 @@ int dppd_nd6_list(struct dppd_nd6 *table, uint64_t after, uint64_t revision, str
     pthread_mutex_unlock(&table->lock);
     return rc;
 }
-int dppd_nd6_flush(struct dppd_nd6 *table, uint64_t revision)
+int dppd_nd6_list(struct dppd_nd6 *table, uint64_t after, uint64_t revision, struct dppd_nd6_page *page)
+{
+    return list_neighbors(table, after, 0, revision, false, page);
+}
+
+int dppd_nd6_list_guarded(struct dppd_nd6 *table, uint64_t after, uint64_t epoch, uint64_t revision,
+    struct dppd_nd6_page *page)
+{
+    return list_neighbors(table, after, epoch, revision, true, page);
+}
+
+static int flush_neighbors(struct dppd_nd6 *table, uint64_t epoch, uint64_t revision, bool guarded)
 {
     if (table == NULL)
         return -ENODEV;
+    struct rte_mbuf *retired[DPPD_ND6_PENDING_LIMIT] = {0};
     pthread_mutex_lock(&table->lock);
-    int rc = revision == 0 ? -EINVAL : revision != table->status.revision ? -ESTALE : 0;
+    int rc = revision == 0 || (guarded && epoch == 0) ? -EINVAL :
+        revision != table->status.revision || (guarded && epoch != table->status.epoch) ? -ESTALE : 0;
+    if (rc == 0 && (table->status.revision == UINT64_MAX ||
+            (guarded && UINT64_MAX - table->status.queue_drops < table->status.pending)))
+        rc = -EOVERFLOW;
     if (rc == 0) {
         memset(table->entries, 0, sizeof(table->entries));
         table->status.active = 0;
-        table->status.revision++;
+        if (guarded) {
+            /** 只释放仍属于队列的包，已经由 take 交还给 worker 的包不会出现在这里 */
+            for (uint32_t i = 0; i < DPPD_ND6_PENDING_LIMIT; ++i)
+                retired[i] = table->waiting[i].packet.mbuf;
+            memset(table->waiting, 0, sizeof(table->waiting));
+            table->status.queue_drops += table->status.pending;
+            table->status.pending = 0;
+        }
+        advance_revision(table);
     }
     pthread_mutex_unlock(&table->lock);
+    for (uint32_t i = 0; i < DPPD_ND6_PENDING_LIMIT; ++i)
+        if (retired[i] != NULL)
+            rte_pktmbuf_free(retired[i]);
     return rc;
+}
+
+int dppd_nd6_flush(struct dppd_nd6 *table, uint64_t revision)
+{
+    return flush_neighbors(table, 0, revision, false);
+}
+
+int dppd_nd6_flush_guarded(struct dppd_nd6 *table, uint64_t epoch, uint64_t revision)
+{
+    return flush_neighbors(table, epoch, revision, true);
 }

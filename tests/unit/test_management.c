@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include "dppd/device.h"
 #include "dppd/management.h"
+#include "dppd/runtime.h"
 
 static int fake_validate(uint16_t port_id, const struct dppd_rule *rule, struct dppd_flow_error *error)
 {
@@ -304,9 +305,48 @@ static void test_conntrack_management(void)
     dppd_conntrack_destroy(table);
 }
 
+/** 旧接口保留只传版本的用法，新客户端一旦提供启动身份就必须严格核对 */
+static void test_nd6_management(void)
+{
+    struct dppd_topology topology = {.nb_endpoints = 1};
+    struct dppd_control_service control;
+    assert(dppd_control_init(&control, &topology, 8, NULL) == 0);
+    struct dppd_runtime *runtime = calloc(1, sizeof(*runtime));
+    assert(runtime != NULL);
+    const struct dppd_nd6_port port = {.port_id = 7, .mac = {2, 0, 0, 0, 0, 7}};
+    struct dppd_nd6_policy policy = {.local_count = 1, .reachable_ms = 30000};
+    policy.locals[0].port_id = 7;
+    assert(inet_pton(AF_INET6, "fe80::7", policy.locals[0].address) == 1);
+    assert(dppd_nd6_create_policy(&runtime->nd6, &policy, &port, 1, dppd_monotonic_ms()) == 0);
+    struct dppd_management_request request;
+    struct dppd_management_response response;
+    initialize_request(&request, DPPD_MANAGEMENT_ND6_STATUS);
+    assert(dppd_management_handle(&control, NULL, runtime, &request, &response) == 0 && response.status == 0);
+    assert(response.payload.nd6.enabled && response.payload.nd6.epoch != 0);
+    uint64_t epoch = response.payload.nd6.epoch, revision = response.payload.nd6.revision;
+    initialize_request(&request, DPPD_MANAGEMENT_ND6_LIST);
+    assert(dppd_management_handle(&control, NULL, runtime, &request, &response) == 0 && response.status == 0);
+    assert(response.payload.dynamic_neighbors.epoch == epoch && response.payload.dynamic_neighbors.count == 0);
+    request.payload.conntrack.expected_epoch = epoch == 1 ? 2 : 1;
+    request.payload.conntrack.expected_revision = revision;
+    assert(dppd_management_handle(&control, NULL, runtime, &request, &response) == 0 && response.status == -ESTALE);
+    request.operation = DPPD_MANAGEMENT_ND6_FLUSH;
+    assert(dppd_management_handle(&control, NULL, runtime, &request, &response) == 0 && response.status == -ESTALE);
+    request.payload.conntrack.expected_epoch = epoch;
+    assert(dppd_management_handle(&control, NULL, runtime, &request, &response) == 0 && response.status == 0);
+    assert(response.payload.nd6.revision > revision && response.payload.nd6.locals[0].state == DPPD_ND6_TENTATIVE);
+    request.payload.conntrack.expected_epoch = 0;
+    request.payload.conntrack.expected_revision = response.payload.nd6.revision;
+    assert(dppd_management_handle(&control, NULL, runtime, &request, &response) == 0 && response.status == 0);
+    dppd_nd6_destroy(runtime->nd6);
+    free(runtime);
+    assert(dppd_control_fini(&control) == 0);
+}
+
 int main(void)
 {
     test_conntrack_management();
+    test_nd6_management();
     const struct dppd_flow_api api = {
         .validate = fake_validate,
         .create = fake_create,

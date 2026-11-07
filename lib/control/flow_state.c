@@ -3,6 +3,7 @@
 #include "flow_request_io.h"
 #include "flow_routing_io.h"
 #include "flow_conntrack_io.h"
+#include "flow_nd6_io.h"
 #include "persistence_codec.h"
 
 #include <errno.h>
@@ -155,13 +156,18 @@ int dppd_flow_state_validate(const struct dppd_flow_state *state)
     rc = dppd_flow_conntrack_validate(state->conntrack, state->routing);
     if (rc != 0 || (state->conntrack != NULL && state->conntrack->generation > state->revision))
         return rc != 0 ? rc : -EINVAL;
+    rc = dppd_flow_nd6_validate(state->nd6, state->routing);
+    if (rc != 0 || (state->nd6 != NULL && state->nd6->generation > state->revision))
+        return rc != 0 ? rc : -EINVAL;
     if (state->requests != NULL)
         for (uint32_t i = 0; i < DPPD_REQUEST_RECEIPTS; ++i)
             if (state->requests->receipts[i].result.key.client != 0 &&
                 ((state->routing == NULL &&
                     state->requests->receipts[i].result.operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE) ||
                     (state->conntrack == NULL &&
-                        state->requests->receipts[i].result.operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE)))
+                        state->requests->receipts[i].result.operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE) ||
+                    (state->nd6 == NULL &&
+                        state->requests->receipts[i].result.operation == DPPD_FLOW_REQUEST_ND6_REPLACE)))
                 return -EINVAL;
     return dppd_flow_request_ledger_validate(state->requests, state->revision);
 }
@@ -362,6 +368,32 @@ static int wire_conntrack(struct codec *c, struct dppd_flow_conntrack_state *sta
     return c->error;
 }
 
+/** 第五版保存本机 IPv6 配置，DAD 状态、动态邻居、等待包和真实 MAC 都在启动后重新取得 */
+static int wire_nd6(struct codec *c, struct dppd_flow_nd6_state *state, bool writing)
+{
+    if (writing) {
+        put(c, state->generation);
+        if (c->error != 0 || c->offset > c->size || c->size - c->offset < 8)
+            return -EBADMSG;
+        size_t length;
+        int rc = dppd_flow_nd6_encode(&state->policy, c->data + c->offset + 8, c->size - c->offset - 8, &length);
+        if (rc != 0)
+            return rc;
+        put(c, length);
+        c->offset += length;
+    } else {
+        state->generation = get(c);
+        uint64_t length = get(c);
+        if (c->error != 0 || c->offset > c->size || length > c->size - c->offset)
+            return -EBADMSG;
+        int rc = dppd_flow_nd6_decode(c->data + c->offset, length, &state->policy);
+        if (rc != 0)
+            return rc;
+        c->offset += length;
+    }
+    return c->error;
+}
+
 static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *size)
 {
     size_t capacity = 4096U + DPPD_MAX_PORTS * 80U + s->shared_count * 32U +
@@ -372,6 +404,8 @@ static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *siz
         capacity += 32U + DPPD_MAX_PORTS * DPPD_FLOW_BINDING_BYTES + DPPD_FLOW_ROUTING_BYTES;
     if (s->conntrack != NULL)
         capacity += 16U + DPPD_FLOW_CONNTRACK_BYTES;
+    if (s->nd6 != NULL)
+        capacity += 24U + DPPD_FLOW_ND6_BYTES;
     struct codec w = {.data = calloc(1, capacity), .size = capacity, .offset = 32};
     if (w.data == NULL)
         return -ENOMEM;
@@ -434,8 +468,12 @@ static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *siz
     }
     if (s->routing != NULL) {
         w.error = wire_routing(&w, s->routing, true);
+        if (s->nd6 != NULL)
+            put(&w, s->conntrack != NULL);
         if (s->conntrack != NULL && w.error == 0)
             w.error = wire_conntrack(&w, s->conntrack, true);
+        if (s->nd6 != NULL && w.error == 0)
+            w.error = wire_nd6(&w, s->nd6, true);
         put(&w, s->requests != NULL);
     }
     if (s->requests != NULL && w.error == 0)
@@ -447,7 +485,7 @@ static int encode(const struct dppd_flow_state *s, uint8_t **output, size_t *siz
     *size = w.offset;
     memcpy(w.data, "DPPM4CFG", 8);
     w.offset = 8;
-    put(&w, s->conntrack != NULL ? 4 : s->routing != NULL ? 3 : s->requests == NULL ? 1 : 2);
+    put(&w, s->nd6 != NULL ? 5 : s->conntrack != NULL ? 4 : s->routing != NULL ? 3 : s->requests == NULL ? 1 : 2);
     put(&w, *size);
     put(&w, checksum(w.data, *size));
     *output = w.data;
@@ -460,7 +498,7 @@ static int decode(uint8_t *data, size_t size, struct dppd_flow_state **output)
     if (size < 32 || memcmp(data, "DPPM4CFG", 8) != 0)
         return -EBADMSG;
     uint64_t version = get(&r);
-    if (version < 1 || version > 4)
+    if (version < 1 || version > 5)
         return -EPROTONOSUPPORT;
     if (get(&r) != size || get(&r) != checksum(data, size))
         return -EBADMSG;
@@ -546,13 +584,29 @@ static int decode(uint8_t *data, size_t size, struct dppd_flow_state **output)
         }
         if (wire_routing(&r, s->routing, false) != 0)
             goto fail;
-        if (version == 4) {
+        bool has_conntrack = version == 4;
+        if (version == 5) {
+            uint64_t present = get(&r);
+            if (present > 1)
+                goto fail;
+            has_conntrack = present != 0;
+        }
+        if (has_conntrack) {
             s->conntrack = calloc(1, sizeof(*s->conntrack));
             if (s->conntrack == NULL) {
                 rc = -ENOMEM;
                 goto fail;
             }
             if (wire_conntrack(&r, s->conntrack, false) != 0)
+                goto fail;
+        }
+        if (version == 5) {
+            s->nd6 = calloc(1, sizeof(*s->nd6));
+            if (s->nd6 == NULL) {
+                rc = -ENOMEM;
+                goto fail;
+            }
+            if (wire_nd6(&r, s->nd6, false) != 0)
                 goto fail;
         }
         uint64_t present = get(&r);
@@ -603,6 +657,7 @@ void dppd_flow_state_free(struct dppd_flow_state **state)
         free((*state)->requests);
         free((*state)->routing);
         free((*state)->conntrack);
+        free((*state)->nd6);
         free(*state);
         *state = NULL;
     }

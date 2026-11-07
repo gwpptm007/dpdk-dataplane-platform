@@ -1,9 +1,22 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 #include <rte_mbuf.h>
 #include "dppd/nd6.h"
+
+static unsigned int fail_allocation;
+void *__real_calloc(size_t count, size_t size);
+void *__wrap_calloc(size_t count, size_t size);
+
+void *__wrap_calloc(size_t count, size_t size)
+{
+    if (fail_allocation != 0 && --fail_allocation == 0)
+        return NULL;
+    return __real_calloc(count, size);
+}
 
 static const uint8_t macs[DPPD_MAX_PORTS][6] = {{2, 0, 0, 0, 0, 10}, {2, 0, 0, 0, 0, 20}};
 static const uint8_t peer[6] = {2, 0, 0, 0, 1, 1};
@@ -303,11 +316,280 @@ static void overrides_and_bounds(void)
     struct rte_mbuf queued;
     memset(&queued, 0, sizeof(queued));
     assert(dppd_nd6_hold(table, 0, target, (struct dppd_nd6_pending){.mbuf = &queued, .queue = 1}, 3060) == 0);
-    assert(dppd_nd6_flush(table, revision) == 0);
+    /** 等待包集合发生变化也推进版本，清理前必须重新查询，而不是沿用分页开始时的旧版本 */
+    assert(dppd_nd6_flush(table, revision) == -ESTALE);
+    struct dppd_nd6_status status;
+    dppd_nd6_status(table, &status);
+    assert(dppd_nd6_flush(table, status.revision) == 0);
     struct dppd_nd6_pending pending;
     assert(dppd_nd6_take(table, 1, 3060, &pending) && pending.expired && pending.mbuf == &queued);
     dppd_nd6_destroy(table);
 }
+
+static struct dppd_nd6_policy policy(void)
+{
+    struct dppd_nd6_policy result = {.local_count = 2, .reachable_ms = 1000};
+    for (uint16_t i = 0; i < 2; ++i) {
+        result.locals[i].port_id = i;
+        address(result.locals[i].address, i == 0 ? "fe80::10" : "fe80::20");
+    }
+    return result;
+}
+
+static struct dppd_nd6 *create_policy(const struct dppd_nd6_policy *value)
+{
+    struct dppd_nd6_port ports[2] = {{.port_id = 0}, {.port_id = 1}};
+    memcpy(ports[0].mac, macs[0], 6);
+    memcpy(ports[1].mac, macs[1], 6);
+    struct dppd_nd6 *table = NULL;
+    assert(dppd_nd6_create_policy(&table, value, ports, 2, 1000) == 0);
+    return table;
+}
+
+struct publication {
+    unsigned int calls;
+    int result;
+};
+
+static int publish_policy(void *context)
+{
+    struct publication *p = context;
+    p->calls++;
+    return p->result;
+}
+
+/** 保留一份外部引用，可在不使用真实 mempool 的单测中精确观察队列是否归还自己的引用 */
+static struct rte_mbuf referenced_packet(void)
+{
+    struct rte_mbuf packet = {.nb_segs = 1};
+    rte_mbuf_refcnt_set(&packet, 2);
+    return packet;
+}
+
+/** 退出时归还所有仍在等待队列的引用，已取走的包和已保存的策略仍由原所有者处理 */
+static void discard_pending(void)
+{
+    struct dppd_nd6_policy enabled = policy();
+    struct dppd_nd6 *table = create_policy(&enabled);
+    struct capture output = {0};
+    dppd_nd6_tick(table, 2001, capture, &output);
+    dppd_nd6_tick(table, 3001, capture, &output);
+    struct dppd_packet packet = {0};
+    uint8_t target[16], mac[6];
+    address(target, "fe80::1");
+    assert(dppd_nd6_resolve(table, 1, target, &packet, 3010, mac) == -EAGAIN);
+    struct rte_mbuf taken = referenced_packet(), first = referenced_packet(), second = referenced_packet();
+    assert(dppd_nd6_hold(table, 1, target, (struct dppd_nd6_pending){.mbuf = &taken}, 3010) == 0);
+    struct dppd_nd6_pending returned;
+    assert(dppd_nd6_take(table, 0, 3110, &returned) && returned.mbuf == &taken && !returned.expired);
+    assert(dppd_nd6_hold(table, 1, target, (struct dppd_nd6_pending){.mbuf = &first, .queue = 1}, 3110) == 0);
+    assert(dppd_nd6_hold(table, 1, target, (struct dppd_nd6_pending){.mbuf = &second, .queue = 2}, 3110) == 0);
+    struct dppd_nd6_status before, after;
+    dppd_nd6_status(table, &before);
+    assert(before.pending == 2 && before.active == 1);
+    dppd_nd6_discard_pending(table);
+    dppd_nd6_status(table, &after);
+    assert(after.pending == 0 && after.active == 1 && after.queue_drops == before.queue_drops + 2);
+    assert(after.epoch == before.epoch && after.revision == before.revision + 1);
+    assert(after.enabled && after.locals[1].state == DPPD_ND6_PREFERRED);
+    assert(rte_mbuf_refcnt_read(&first) == 1 && rte_mbuf_refcnt_read(&second) == 1 && rte_mbuf_refcnt_read(&taken) == 2);
+    assert(!dppd_nd6_take(table, 1, 4000, &returned) && !dppd_nd6_take(table, 2, 4000, &returned));
+    dppd_nd6_discard_pending(table);
+    dppd_nd6_destroy(table);
+    assert(rte_mbuf_refcnt_read(&first) == 1 && rte_mbuf_refcnt_read(&second) == 1 && rte_mbuf_refcnt_read(&taken) == 2);
+    rte_pktmbuf_free(&taken);
+    assert(rte_mbuf_refcnt_read(&taken) == 1);
+    dppd_nd6_discard_pending(NULL);
+}
+
+/** 更换策略的失败路径不得释放旧等待包，成功才重做 DAD，邻居 ID 和容器地址始终不复用 */
+static void policy_replacement(void)
+{
+    struct dppd_nd6_policy enabled = policy(), disabled = {0};
+    struct dppd_nd6 *table = create_policy(&disabled), *stable = table;
+    struct dppd_nd6_status before, after;
+    struct capture output = {0};
+    dppd_nd6_status(table, &before);
+    assert(!before.enabled && before.epoch != 0 && before.revision == 1 && before.local_count == 0);
+    struct dppd_packet control = {.l3_type = DPPD_L3_IPV6, .ip_protocol = 58};
+    assert(!dppd_nd6_input(table, 0, NULL, &control, 1000, capture, &output));
+    assert(dppd_nd6_port_ready(table, 0));
+    uint64_t other_epoch = before.epoch == UINT64_MAX ? 1 : before.epoch + 1;
+    assert(dppd_nd6_replace(table, &enabled, false, 0, before.revision, 1000, NULL, NULL) == -EINVAL);
+    assert(dppd_nd6_replace(table, &enabled, false, other_epoch, before.revision, 1000, NULL, NULL) == -ESTALE);
+    struct publication publication = {0};
+    assert(dppd_nd6_replace(table, &enabled, false, before.epoch, before.revision, 1000,
+               publish_policy, &publication) == 0 && publication.calls == 1 && table == stable);
+    assert(!dppd_nd6_port_ready(table, 0));
+    dppd_nd6_tick(table, 2001, capture, &output);
+    dppd_nd6_tick(table, 3001, capture, &output);
+    assert(dppd_nd6_port_ready(table, 0) && dppd_nd6_port_ready(table, 1));
+    uint8_t target[16], mac[6];
+    address(target, "fe80::1");
+    struct dppd_packet packet = {0};
+    assert(dppd_nd6_resolve(table, 1, target, &packet, 3010, mac) == -EAGAIN);
+    uint64_t old_id = entry(table).id;
+    struct rte_mbuf queued = referenced_packet();
+    dppd_nd6_status(table, &before);
+    assert(dppd_nd6_hold(table, 1, target, (struct dppd_nd6_pending){.mbuf = &queued, .queue = 1}, 3010) == 0);
+    assert(dppd_nd6_flush_guarded(table, before.epoch, before.revision) == -ESTALE);
+    dppd_nd6_status(table, &before);
+    struct dppd_nd6_page page;
+    assert(dppd_nd6_list_guarded(table, 0, 0, 0, &page) == 0 && page.epoch == before.epoch && page.count == 1);
+    assert(dppd_nd6_list_guarded(table, page.next_id, 0, 0, &page) == -EINVAL);
+    assert(dppd_nd6_list_guarded(table, 0, other_epoch, before.revision, &page) == -ESTALE);
+    assert(dppd_nd6_replace(table, &disabled, false, before.epoch, before.revision, 3020,
+               publish_policy, &publication) == -EBUSY && publication.calls == 1);
+    enabled.reachable_ms = 2000;
+    enabled.locals[1].address[15] = 0x21;
+    fail_allocation = 1;
+    assert(dppd_nd6_replace(table, &enabled, true, before.epoch, before.revision, 3020,
+               publish_policy, &publication) == -ENOMEM && publication.calls == 1);
+    publication.result = -EIO;
+    assert(dppd_nd6_replace(table, &enabled, true, before.epoch, before.revision, 3020,
+               publish_policy, &publication) == -EIO && publication.calls == 2);
+    dppd_nd6_status(table, &after);
+    assert(after.revision == before.revision && after.pending == 1 && after.active == 1 &&
+        after.locals[1].configuration.address[15] == 0x20 && rte_mbuf_refcnt_read(&queued) == 2);
+    publication.result = 0;
+    assert(dppd_nd6_replace(table, &enabled, true, before.epoch, before.revision, 3020,
+               publish_policy, &publication) == 0 && publication.calls == 3);
+    dppd_nd6_status(table, &after);
+    assert(after.epoch == before.epoch && after.revision == before.revision + 1 && after.pending == 0 &&
+        after.active == 0 && after.queue_drops == 1 && after.solicitations == before.solicitations &&
+        after.reachable_ms == 2000 && after.locals[1].state == DPPD_ND6_TENTATIVE &&
+        after.locals[1].configuration.address[15] == 0x21 && rte_mbuf_refcnt_read(&queued) == 1);
+    struct dppd_nd6_pending returned;
+    assert(!dppd_nd6_take(table, 1, 3030, &returned));
+    assert(dppd_nd6_list_guarded(table, 0, before.epoch, before.revision, &page) == -ESTALE);
+    dppd_nd6_tick(table, 4021, capture, &output);
+    dppd_nd6_tick(table, 5021, capture, &output);
+    assert(dppd_nd6_resolve(table, 1, target, &packet, 5030, mac) == -EAGAIN && entry(table).id > old_id);
+    struct rte_mbuf taken = referenced_packet();
+    assert(dppd_nd6_hold(table, 1, target, (struct dppd_nd6_pending){.mbuf = &taken}, 5030) == 0);
+    assert(dppd_nd6_take(table, 0, 5130, &returned) && returned.mbuf == &taken && !returned.expired);
+    dppd_nd6_status(table, &before);
+    assert(dppd_nd6_flush_guarded(table, before.epoch, before.revision) == 0);
+    assert(rte_mbuf_refcnt_read(&taken) == 2);
+    rte_pktmbuf_free(&taken);
+    assert(rte_mbuf_refcnt_read(&taken) == 1);
+    dppd_nd6_status(table, &before);
+    assert(dppd_nd6_replace(table, &disabled, false, before.epoch, before.revision, 5200, NULL, NULL) == 0);
+    dppd_nd6_status(table, &after);
+    assert(!after.enabled && after.local_count == 0 && after.queue_drops == 1 && dppd_nd6_port_ready(table, 1));
+    assert(!dppd_nd6_input(table, 0, NULL, &control, 5200, capture, &output));
+    struct dppd_nd6 *restarted = create_policy(&enabled);
+    dppd_nd6_status(restarted, &after);
+    assert(after.epoch != before.epoch && after.revision == 1);
+    assert(dppd_nd6_flush_guarded(restarted, before.epoch, after.revision) == -ESTALE);
+    dppd_nd6_destroy(restarted);
+    dppd_nd6_destroy(table);
+}
+
+/** 精确清缓存立即归还等待包，但本机地址冲突必须通过新策略重新执行 DAD 才能解除 */
+static void guarded_flush(void)
+{
+    struct capture output = {0};
+    struct dppd_nd6 *table = create(0, &output);
+    struct dppd_packet packet = {0};
+    uint8_t target[16], mac[6];
+    address(target, "fe80::1");
+    assert(dppd_nd6_resolve(table, 1, target, &packet, 3010, mac) == -EAGAIN);
+    struct rte_mbuf queued = referenced_packet();
+    assert(dppd_nd6_hold(table, 1, target, (struct dppd_nd6_pending){.mbuf = &queued}, 3010) == 0);
+    struct dppd_nd6_status status;
+    dppd_nd6_status(table, &status);
+    assert(dppd_nd6_flush_guarded(table, 0, status.revision) == -EINVAL);
+    assert(dppd_nd6_flush_guarded(table, status.epoch, status.revision) == 0);
+    assert(rte_mbuf_refcnt_read(&queued) == 1 && dppd_nd6_port_ready(table, 1));
+    dppd_nd6_status(table, &status);
+    assert(status.pending == 0 && status.active == 0 && status.queue_drops == 1);
+    struct dppd_nd6_policy p = policy();
+    assert(dppd_nd6_replace(table, &p, false, status.epoch, status.revision, 4000, NULL, NULL) == 0);
+    uint8_t bytes[256];
+    uint16_t length = frame(bytes, 0, 136, "fe80::1", "fe80::20", "fe80::20", 0x20, true);
+    assert(input(table, 0, 1, bytes, length, 4001, &output));
+    dppd_nd6_status(table, &status);
+    assert(status.locals[1].state == DPPD_ND6_DUPLICATE);
+    assert(dppd_nd6_flush_guarded(table, status.epoch, status.revision) == 0 && !dppd_nd6_port_ready(table, 1));
+    dppd_nd6_status(table, &status);
+    assert(status.locals[1].state == DPPD_ND6_DUPLICATE);
+    dppd_nd6_destroy(table);
+}
+
+static void policy_validation(void)
+{
+    struct dppd_nd6_policy p = policy();
+    assert(dppd_nd6_policy_validate(&p) == 0);
+    p.locals[0].vlan[1] = 65535;
+    p.locals[31].port_id = UINT16_MAX;
+    assert(dppd_nd6_policy_validate(&p) == 0);
+    p.reachable_ms = 999;
+    assert(dppd_nd6_policy_validate(&p) == -EINVAL);
+    p = policy();
+    p.locals[1] = p.locals[0];
+    assert(dppd_nd6_policy_validate(&p) == -EINVAL);
+    p.locals[1].address[15]++;
+    p.locals[1].vlan_depth = 1;
+    p.locals[1].vlan[0] = 37;
+    assert(dppd_nd6_policy_validate(&p) == -EINVAL);
+    p = policy();
+    p.locals[0].address[0] = 255;
+    assert(dppd_nd6_policy_validate(&p) == -EINVAL);
+    p = (struct dppd_nd6_policy){.reachable_ms = 1000};
+    assert(dppd_nd6_policy_validate(&p) == -EINVAL);
+    p.reachable_ms = 0;
+    assert(dppd_nd6_policy_validate(&p) == 0);
+    struct dppd_nd6 *table = NULL;
+    struct dppd_nd6_port port = {.port_id = 0, .mac = {2, 0, 0, 0, 0, 10}};
+    p = policy();
+    assert(dppd_nd6_create_policy(&table, &p, &port, 1, 1000) == -ENODEV && table == NULL);
+    port.mac[0] = 1;
+    assert(dppd_nd6_create_policy(&table, &p, &port, 1, 1000) == -EINVAL && table == NULL);
+    /** 旧入口没有给端口 1 启用 ND，不应因该口 MAC 为零而拒绝端口 0 的合法配置 */
+    struct dppd_config configuration;
+    dppd_config_defaults(&configuration);
+    strcpy(configuration.routing_path, "/private/routes");
+    configuration.nd6_count = 1;
+    configuration.nd6[0] = policy().locals[0];
+    uint8_t partial_macs[DPPD_MAX_PORTS][6] = {{0}};
+    memcpy(partial_macs[0], macs[0], 6);
+    assert(dppd_nd6_create(&table, &configuration, (const uint8_t(*)[6])partial_macs, 1000) == 0 && table != NULL);
+    dppd_nd6_destroy(table);
+}
+
+static void *observe_policy(void *context)
+{
+    struct dppd_nd6 *table = context;
+    for (unsigned int i = 0; i < 1000; ++i) {
+        struct dppd_nd6_status status;
+        dppd_nd6_status(table, &status);
+        assert((status.enabled && status.local_count == 2 && status.reachable_ms == 1000) ||
+            (!status.enabled && status.local_count == 0 && status.reachable_ms == 0));
+        struct dppd_nd6_page page;
+        int rc = dppd_nd6_list_guarded(table, 0, status.epoch, status.revision, &page);
+        assert(rc == 0 || rc == -ESTALE);
+    }
+    return NULL;
+}
+
+/** 运行态查询必须得到完整旧策略或完整新策略，不能混读 locals 数量和计时参数 */
+static void concurrent_observers(void)
+{
+    struct dppd_nd6_policy enabled = policy(), disabled = {0};
+    struct dppd_nd6 *table = create_policy(&disabled);
+    pthread_t reader;
+    assert(pthread_create(&reader, NULL, observe_policy, table) == 0);
+    for (unsigned int i = 0; i < 100; ++i) {
+        struct dppd_nd6_status status;
+        dppd_nd6_status(table, &status);
+        assert(dppd_nd6_replace(table, i % 2 ? &disabled : &enabled, false, status.epoch, status.revision,
+                   1000 + i, NULL, NULL) == 0);
+    }
+    assert(pthread_join(reader, NULL) == 0);
+    dppd_nd6_destroy(table);
+}
+
 int main(void)
 {
     for (unsigned int vlan = 0; vlan <= 2; ++vlan)
@@ -315,5 +597,10 @@ int main(void)
     invalid_packets();
     local_neighbors();
     overrides_and_bounds();
+    policy_validation();
+    policy_replacement();
+    guarded_flush();
+    discard_pending();
+    concurrent_observers();
     return 0;
 }

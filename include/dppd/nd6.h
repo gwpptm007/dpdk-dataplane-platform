@@ -9,6 +9,18 @@
 #define DPPD_ND6_PAGE_SIZE 8U
 
 struct dppd_nd6;
+
+/** 只保存本机地址和可达计时配置，动态邻居、DAD 进度和等待报文都属于易失状态 */
+struct dppd_nd6_policy {
+    uint32_t local_count, reachable_ms;
+    struct dppd_nd6_local locals[DPPD_ND6_LOCAL_LIMIT];
+};
+
+/** 设备准备完成后提供真实 MAC，端口绑定由容器保存，不从策略文件恢复旧 MAC */
+struct dppd_nd6_port {
+    uint16_t port_id;
+    uint8_t mac[6];
+};
 enum dppd_nd6_state {
     /** 尚无下一跳 MAC，等待邻居响应 */
     DPPD_ND6_INCOMPLETE = 1,
@@ -48,7 +60,7 @@ struct dppd_nd6_entry {
 };
 /** ND 管理状态快照，数量反映当前占用，事件计数从创建管理表起累计 */
 struct dppd_nd6_status {
-    /** 是否创建了 ND 管理表，未启用时状态查询返回全零结果 */
+    /** 是否启用 ND，未创建表时返回全零，统一管理的关闭容器仍保留启动身份和版本 */
     bool enabled;
     /** 当前有效邻居记录数，包含尚在解析和解析失败的记录 */
     uint32_t active;
@@ -58,8 +70,8 @@ struct dppd_nd6_status {
     uint32_t local_count;
     /** 可达有效期的基准毫秒数，实际期限在约 0.5 到 1.5 倍之间随机选择 */
     uint32_t reachable_ms;
-    /** 邻居或本机地址状态等变化时递增，分页和清空接口据此检查查询版本是否过期 */
-    uint64_t revision;
+    /** epoch 标识本次容器，重启会改变；revision 覆盖邻居、本机状态及等待队列变化 */
+    uint64_t epoch, revision;
     /** 成功提交发送的 NS 请求数，包含本机重复地址检测和邻居探测 */
     uint64_t solicitations;
     /** 成功提交发送的 NA 通告数 */
@@ -84,6 +96,8 @@ struct dppd_nd6_status {
 };
 /** 动态邻居分页查询结果，按记录 ID 升序返回，每页最多 8 条 */
 struct dppd_nd6_page {
+    /** 与本次启动绑定，不能把旧进程的游标用于新进程 */
+    uint64_t epoch;
     /** 本页查询版本，继续查询时传回，用于检测分页过程中状态是否变化 */
     uint64_t revision;
     /** 本页最后一条记录的 ID，下次作为 after 传入；空页为 0 */
@@ -110,6 +124,17 @@ struct dppd_nd6_pending {
 };
 /** 回调只借用当前小报文，成功表示已交给驱动，失败时由 ND 定时器按预算重试 */
 typedef int (*dppd_nd6_send)(void *context, uint16_t port, const uint8_t *wire, uint16_t length);
+int dppd_nd6_policy_validate(const struct dppd_nd6_policy *policy);
+/** 统一管理模式始终返回稳定容器，local_count 和 reachable_ms 同时为零表示关闭 */
+int dppd_nd6_create_policy(struct dppd_nd6 **result, const struct dppd_nd6_policy *policy,
+    const struct dppd_nd6_port *ports, uint16_t count, uint64_t now_ms);
+/**
+ * 先准备候选再锁表核对版本，只有明确允许重置才清理已有邻居和等待包
+ * 正式在线更新先暂停包线程，避免 resolve 到 hold、take 到重试跨越两份策略
+ * publish 在表锁内执行，不能重入 ND 接口，失败保留全部旧状态
+ */
+int dppd_nd6_replace(struct dppd_nd6 *table, const struct dppd_nd6_policy *policy, bool reset_neighbors,
+    uint64_t expected_epoch, uint64_t expected_revision, uint64_t now_ms, int (*publish)(void *), void *context);
 /**
  * 按本机 IPv6 配置创建 ND 管理表，macs 与 configuration->ports 顺序一致，地址复制后独立保存
  * result 指向调用方的空指针；成功写入表地址，未启用时保持 NULL，失败返回负错误码
@@ -118,6 +143,8 @@ int dppd_nd6_create(struct dppd_nd6 **result, const struct dppd_config *configur
     const uint8_t macs[DPPD_MAX_PORTS][6], uint64_t now_ms);
 /** 销毁前先停止全部工作线程，尚未发出的首包在这里归还内存池 */
 void dppd_nd6_destroy(struct dppd_nd6 *table);
+/** 仅用于全部 worker 已停止后的结束清理，归还等待包，不受持久化失败或版本触顶限制 */
+void dppd_nd6_discard_pending(struct dppd_nd6 *table);
 bool dppd_nd6_port_ready(struct dppd_nd6 *table, uint16_t port);
 /** 只消费本机 ND 控制报文，不能把收到的 NA 当成跨接口可转发的数据 */
 bool dppd_nd6_input(struct dppd_nd6 *table, uint16_t port, const struct rte_mbuf *mbuf,
@@ -132,6 +159,10 @@ int dppd_nd6_hold(struct dppd_nd6 *table, uint16_t port, const uint8_t address[1
 bool dppd_nd6_take(struct dppd_nd6 *table, uint16_t queue, uint64_t now_ms, struct dppd_nd6_pending *pending);
 void dppd_nd6_status(struct dppd_nd6 *table, struct dppd_nd6_status *status);
 int dppd_nd6_list(struct dppd_nd6 *table, uint64_t after, uint64_t revision, struct dppd_nd6_page *page);
+int dppd_nd6_list_guarded(struct dppd_nd6 *table, uint64_t after, uint64_t epoch, uint64_t revision,
+    struct dppd_nd6_page *page);
 int dppd_nd6_flush(struct dppd_nd6 *table, uint64_t revision);
+/** 精确核对启动身份与版本，清缓存和仍由队列持有的包，不改变本机地址的检测结果 */
+int dppd_nd6_flush_guarded(struct dppd_nd6 *table, uint64_t epoch, uint64_t revision);
 
 #endif

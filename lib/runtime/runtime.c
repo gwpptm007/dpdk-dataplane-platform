@@ -106,6 +106,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         dppd_devices_stop(&runtime->devices);
         return rc;
     }
+    runtime->nd6_owned = runtime->nd6 != NULL;
     /**
      * 启用连接跟踪时创建一张会话表，由 runtime 持有，所有 worker 共用
      * 启动只创建空表，报文通过 stateful_decide 处理后才可能产生会话
@@ -117,6 +118,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         if (rc != 0) {
             dppd_nd6_destroy(runtime->nd6);
             runtime->nd6 = NULL;
+            runtime->nd6_owned = false;
             dppd_devices_stop(&runtime->devices);
             return rc;
         }
@@ -129,6 +131,7 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
             fprintf(stderr, "[dppd] cannot initialize pdump service\n");
             dppd_nd6_destroy(runtime->nd6);
             runtime->nd6 = NULL;
+            runtime->nd6_owned = false;
             dppd_conntrack_destroy(runtime->conntrack);
             runtime->conntrack = NULL;
             runtime->conntrack_owned = false;
@@ -160,6 +163,98 @@ int dppd_runtime_set_conntrack(struct dppd_runtime *runtime, struct dppd_conntra
     if (runtime->workers_started || runtime->conntrack_owned)
         return -EBUSY;
     runtime->conntrack = conntrack;
+    return 0;
+}
+
+int dppd_runtime_set_nd6(struct dppd_runtime *runtime, struct dppd_nd6 *nd6)
+{
+    if (runtime == NULL)
+        return -EINVAL;
+    if (runtime->workers_started || runtime->nd6_owned)
+        return -EBUSY;
+    runtime->nd6 = nd6;
+    return 0;
+}
+
+int dppd_runtime_rollback_nd6(struct dppd_runtime *runtime, struct dppd_nd6_rx_preparation *preparation)
+{
+    uint16_t failed = 0;
+
+    if (runtime == NULL || preparation == NULL || preparation->count > DPPD_MAX_PORTS)
+        return -EINVAL;
+    if (runtime->workers_started)
+        return -EBUSY;
+    /** 即使一个端口补偿失败，也继续关闭其余本次新增设置，并保留无法确认的端口 */
+    for (uint16_t i = 0; i < preparation->count; ++i) {
+        uint16_t port_id = preparation->ports[i];
+        const struct dppd_port *port = dppd_devices_find(&runtime->devices, port_id);
+        int rc = port == NULL || !port->started || atomic_load_explicit(&port->removed, memory_order_acquire) ?
+            -ENODEV : rte_eth_allmulticast_disable(port_id);
+        if (rc != 0 || rte_eth_allmulticast_get(port_id) != 0)
+            preparation->ports[failed++] = port_id;
+    }
+    preparation->count = failed;
+    return failed == 0 ? 0 : -EUCLEAN;
+}
+
+int dppd_runtime_prepare_nd6(struct dppd_runtime *runtime, const struct dppd_nd6_policy *policy,
+    struct dppd_nd6_rx_preparation *preparation)
+{
+    uint16_t ports[DPPD_MAX_PORTS], count = 0;
+    bool enabled[DPPD_MAX_PORTS];
+    int rc;
+
+    if (runtime == NULL || preparation == NULL)
+        return -EINVAL;
+    memset(preparation, 0, sizeof(*preparation));
+    rc = dppd_nd6_policy_validate(policy);
+    if (rc != 0)
+        return rc;
+    if (runtime->workers_started)
+        return -EBUSY;
+    /** 关闭 ND 的普通管理转发不需要驱动支持组播开关，也不额外访问网卡 */
+    if (policy->local_count == 0)
+        return 0;
+    if (dppd_devices_io_quiesced(&runtime->devices))
+        return -ENODEV;
+    /** 先检查全部引用端口并读取原状态，避免后面的端口无效时已经改变前面的端口 */
+    for (uint32_t i = 0; i < policy->local_count; ++i) {
+        uint16_t port_id = policy->locals[i].port_id, index = 0;
+        while (index < count && ports[index] != port_id)
+            ++index;
+        if (index < count)
+            continue;
+        const struct dppd_port *port = dppd_devices_find(&runtime->devices, port_id);
+        if (port == NULL || !port->started || atomic_load_explicit(&port->removed, memory_order_acquire))
+            return -ENODEV;
+        if (count == DPPD_MAX_PORTS)
+            return -E2BIG;
+        ports[count++] = port_id;
+    }
+    for (uint16_t i = 0; i < count; ++i) {
+        rc = rte_eth_allmulticast_get(ports[i]);
+        if (rc < 0)
+            return rc;
+        if (rc > 1)
+            return -EIO;
+        enabled[i] = rc != 0;
+    }
+    for (uint16_t i = 0; i < count; ++i) {
+        if (enabled[i])
+            continue;
+        rc = rte_eth_allmulticast_enable(ports[i]);
+        int state = rte_eth_allmulticast_get(ports[i]);
+        /** 成功开启或状态不明时都登记补偿，明确拒绝且仍关闭则不调用不支持的 disable */
+        if (rc == 0 || state != 0)
+            preparation->ports[preparation->count++] = ports[i];
+        if (rc == 0 && state == 1)
+            continue;
+        if (rc == 0)
+            rc = state < 0 ? state : -EIO;
+        if (dppd_runtime_rollback_nd6(runtime, preparation) != 0)
+            return -EUCLEAN;
+        return rc;
+    }
     return 0;
 }
 
@@ -385,8 +480,10 @@ int dppd_runtime_destroy(struct dppd_runtime *runtime)
         (void)rte_pdump_uninit();
         runtime->pdump_initialized = false;
     }
-    dppd_nd6_destroy(runtime->nd6);
+    if (runtime->nd6_owned)
+        dppd_nd6_destroy(runtime->nd6);
     runtime->nd6 = NULL;
+    runtime->nd6_owned = false;
     if (runtime->conntrack_owned)
         dppd_conntrack_destroy(runtime->conntrack);
     runtime->conntrack = NULL;

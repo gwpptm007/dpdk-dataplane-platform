@@ -25,7 +25,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  global options: --socket PATH --json (versioned management output)\n");
     fprintf(stderr,
         "  %s [--socket PATH] request-submit CLIENT SEQUENCE "
-        "flow-create|flow-update|flow-remove|flow-config-apply|routing-replace|conntrack-replace ...\n",
+        "flow-create|flow-update|flow-remove|flow-config-apply|routing-replace|conntrack-replace|nd6-replace ...\n",
         program);
     fprintf(stderr, "  %s [--socket PATH] request-get CLIENT SEQUENCE\n", program);
     fprintf(stderr, "  managed routing: request-submit CLIENT SEQUENCE routing-replace FILE EXACT_REVISION\n");
@@ -49,7 +49,10 @@ static void print_usage(const char *program)
     fprintf(stderr, "  %s [--socket PATH] conntrack-list [AFTER_ID [REVISION [EPOCH]]]\n", program);
     fprintf(stderr, "  %s [--socket PATH] conntrack-flush REVISION [EPOCH]\n", program);
     fprintf(stderr, "  %s [--socket PATH] dnat-list [AFTER_ID]\n", program);
-    fprintf(stderr, "  %s [--socket PATH] nd6-status|nd6-list [AFTER_ID [REVISION]]|nd6-flush REVISION\n", program);
+    fprintf(stderr, "  %s [--socket PATH] nd6-policy-show|nd6-status|nd6-list [AFTER_ID [REVISION [EPOCH]]]\n", program);
+    fprintf(stderr, "  %s [--socket PATH] nd6-flush REVISION [EPOCH]\n", program);
+    fprintf(stderr, "  managed ND: request-submit CLIENT SEQUENCE nd6-replace FILE EXACT_REVISION "
+                    "RESET_NEIGHBORS EPOCH NEIGHBOR_REVISION\n");
     fprintf(stderr, "  ACL modifiers also accept state:new,established,invalid,untracked\n");
     dppctl_routing_usage(program);
     dppctl_transfer_usage(program);
@@ -846,25 +849,33 @@ static int build_request(int argc, char **argv, struct dppd_management_request *
             parse_u64(argv[2], 1, UINT64_MAX, &key.sequence) != 0 ||
             (strcmp(argv[3], "flow-create") != 0 && strcmp(argv[3], "flow-update") != 0 &&
                 strcmp(argv[3], "flow-remove") != 0 && strcmp(argv[3], "flow-config-apply") != 0 &&
-                strcmp(argv[3], "routing-replace") != 0 && strcmp(argv[3], "conntrack-replace") != 0))
+                strcmp(argv[3], "routing-replace") != 0 && strcmp(argv[3], "conntrack-replace") != 0 &&
+                strcmp(argv[3], "nd6-replace") != 0))
             return -EINVAL;
-        /** 策略和会话有不同的版本，显式重置开关避免一次普通配置修改悄悄中断现有连接 */
-        if (strcmp(argv[3], "conntrack-replace") == 0) {
-            uint64_t revision, epoch, session_revision;
+        /** 配置和运行态分别核对版本，显式重置开关避免普通修改悄悄丢弃会话或等待包 */
+        if (strcmp(argv[3], "conntrack-replace") == 0 || strcmp(argv[3], "nd6-replace") == 0) {
+            uint64_t revision, epoch, runtime_revision;
             if (argc != 9 || parse_u64(argv[5], 0, UINT64_MAX - 1U, &revision) != 0 ||
                 (strcmp(argv[6], "true") != 0 && strcmp(argv[6], "false") != 0) ||
                 parse_u64(argv[7], 1, UINT64_MAX, &epoch) != 0 ||
-                parse_u64(argv[8], 1, UINT64_MAX, &session_revision) != 0)
+                parse_u64(argv[8], 1, UINT64_MAX, &runtime_revision) != 0)
                 return -EINVAL;
             initialize_request(request, DPPD_MANAGEMENT_REQUEST_SUBMIT);
             struct dppd_flow_request *replacement = &request->payload.durable_request;
             replacement->key = key;
-            replacement->operation = DPPD_FLOW_REQUEST_CONNTRACK_REPLACE;
             replacement->expected_revision = revision;
             replacement->count = 1;
+            if (strcmp(argv[3], "nd6-replace") == 0) {
+                replacement->operation = DPPD_FLOW_REQUEST_ND6_REPLACE;
+                replacement->payload.nd6.reset_neighbors = strcmp(argv[6], "true") == 0;
+                replacement->payload.nd6.expected_neighbor_epoch = epoch;
+                replacement->payload.nd6.expected_neighbor_revision = runtime_revision;
+                return dppctl_nd6_policy_read(argv[4], &replacement->payload.nd6.policy);
+            }
+            replacement->operation = DPPD_FLOW_REQUEST_CONNTRACK_REPLACE;
             replacement->payload.conntrack.reset_sessions = strcmp(argv[6], "true") == 0;
             replacement->payload.conntrack.expected_session_epoch = epoch;
-            replacement->payload.conntrack.expected_session_revision = session_revision;
+            replacement->payload.conntrack.expected_session_revision = runtime_revision;
             return dppctl_conntrack_policy_read(argv[4], &replacement->payload.conntrack.policy);
         }
         /** 路由请求检查统一配置版本，初始版本可以为零，不能套用独立路由的代次规则 */
@@ -1617,6 +1628,8 @@ static int print_response(const struct dppd_management_response *response)
             printf("routing-generation=%" PRIu64 "\n", r->generations[0]);
         else if (r->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE)
             printf("conntrack-generation=%" PRIu64 "\n", r->generations[0]);
+        else if (r->operation == DPPD_FLOW_REQUEST_ND6_REPLACE)
+            printf("nd6-generation=%" PRIu64 "\n", r->generations[0]);
         else
             for (uint32_t i = 0; i < r->count; ++i)
                 printf("id=%" PRIu64 " generation=%" PRIu64 "\n", r->ids[i], r->generations[i]);

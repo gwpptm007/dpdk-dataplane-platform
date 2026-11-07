@@ -248,6 +248,67 @@ static void connections_json(const struct dppd_connection_page *page)
     putchar(']');
 }
 
+static void nd6_local_json(const struct dppd_nd6_local *local)
+{
+    printf("{\"port_id\":%u", local->port_id);
+    address("address", AF_INET6, local->address);
+    printf(",\"vlans\":[");
+    for (uint8_t i = 0; i < local->vlan_depth; ++i)
+        printf("%s%u", i == 0 ? "" : ",", local->vlan[i]);
+    printf("]}");
+}
+
+/** 本机地址配置可直接回传给整策略接口，动态缓存和 DAD 结果单独查询 */
+static void nd6_policy_json(const struct dppd_nd6_policy *value)
+{
+    printf("{\"reachable_ms\":%u,\"locals\":[", value->reachable_ms);
+    for (uint32_t i = 0; i < value->local_count; ++i) {
+        if (i != 0)
+            putchar(',');
+        nd6_local_json(&value->locals[i]);
+    }
+    printf("]}");
+}
+
+static void nd6_status_json(const struct dppd_nd6_status *value)
+{
+    printf("\"enabled\":%s,\"epoch\":\"%" PRIu64 "\",\"revision\":\"%" PRIu64
+           "\",\"active\":%u,\"pending\":%u,\"local_count\":%u,\"reachable_ms\":%u,\"solicitations\":\"%" PRIu64
+           "\",\"advertisements\":\"%" PRIu64 "\",\"invalid\":\"%" PRIu64 "\",\"tx_errors\":\"%" PRIu64
+           "\",\"queue_drops\":\"%" PRIu64 "\",\"resolved\":\"%" PRIu64 "\",\"failed\":\"%" PRIu64
+           "\",\"neighbors_persistent\":false,\"locals\":[",
+        boolean(value->enabled), value->epoch, value->revision, value->active, value->pending, value->local_count,
+        value->reachable_ms, value->solicitations, value->advertisements, value->invalid, value->tx_errors,
+        value->queue_drops, value->resolved, value->failed);
+    static const char *states[] = {"tentative", "preferred", "duplicate"};
+    for (uint32_t i = 0; i < value->local_count; ++i) {
+        printf("%s{\"state\":\"%s\",\"configuration\":", i == 0 ? "" : ",",
+            value->locals[i].state <= DPPD_ND6_DUPLICATE ? states[value->locals[i].state] : "unknown");
+        nd6_local_json(&value->locals[i].configuration);
+        putchar('}');
+    }
+    putchar(']');
+}
+
+static void nd6_neighbors_json(const struct dppd_nd6_page *page)
+{
+    printf("\"epoch\":\"%" PRIu64 "\",\"revision\":\"%" PRIu64 "\",\"next_id\":\"%" PRIu64
+           "\",\"count\":%u,\"more\":%s,\"entries\":[", page->epoch, page->revision, page->next_id, page->count,
+        boolean(page->more));
+    static const char *states[] = {"none", "incomplete", "reachable", "stale", "delay", "probe", "failed"};
+    for (uint32_t i = 0; i < page->count; ++i) {
+        const struct dppd_nd6_entry *entry = &page->entries[i];
+        printf("%s{\"id\":\"%" PRIu64 "\",\"port_id\":%u", i == 0 ? "" : ",", entry->id, entry->port_id);
+        address("address", AF_INET6, entry->address);
+        printf(",\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"state\":\"%s\",\"probes\":%u,"
+               "\"changed_ms\":\"%" PRIu64 "\",\"due_ms\":\"%" PRIu64 "\",\"used_ms\":\"%" PRIu64 "\"}",
+            entry->mac[0], entry->mac[1], entry->mac[2], entry->mac[3], entry->mac[4], entry->mac[5],
+            entry->state <= DPPD_ND6_FAILED ? states[entry->state] : "unknown", entry->probes,
+            entry->changed_ms, entry->due_ms, entry->used_ms);
+    }
+    putchar(']');
+}
+
 bool dppctl_json_supported(enum dppd_management_operation operation)
 {
     switch (operation) {
@@ -275,6 +336,10 @@ bool dppctl_json_supported(enum dppd_management_operation operation)
     case DPPD_MANAGEMENT_CONNTRACK_FLUSH:
     case DPPD_MANAGEMENT_NAT_STATUS:
     case DPPD_MANAGEMENT_DNAT_LIST:
+    case DPPD_MANAGEMENT_ND6_POLICY_GET:
+    case DPPD_MANAGEMENT_ND6_STATUS:
+    case DPPD_MANAGEMENT_ND6_LIST:
+    case DPPD_MANAGEMENT_ND6_FLUSH:
         return true;
     default:
         return false;
@@ -292,8 +357,27 @@ static bool response_bounds(const struct dppd_management_response *value)
     if (value->operation == DPPD_MANAGEMENT_REQUEST_SUBMIT || value->operation == DPPD_MANAGEMENT_REQUEST_GET) {
         const struct dppd_flow_request_result *result = &value->payload.durable_result;
         return result->operation == DPPD_FLOW_REQUEST_ROUTING_REPLACE ||
-                result->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE ? result->count == 1 : result->count <= 8;
+                result->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE || result->operation == DPPD_FLOW_REQUEST_ND6_REPLACE
+            ? result->count == 1 : result->count <= 8;
     }
+    if (value->operation == DPPD_MANAGEMENT_ND6_POLICY_GET) {
+        const struct dppd_nd6_policy *policy = &value->payload.nd6_policy.policy;
+        if (policy->local_count > DPPD_ND6_LOCAL_LIMIT)
+            return false;
+        for (uint32_t i = 0; i < policy->local_count; ++i)
+            if (policy->locals[i].vlan_depth > 2)
+                return false;
+    }
+    if (value->operation == DPPD_MANAGEMENT_ND6_STATUS || value->operation == DPPD_MANAGEMENT_ND6_FLUSH) {
+        const struct dppd_nd6_status *status = &value->payload.nd6;
+        if (status->local_count > DPPD_ND6_LOCAL_LIMIT)
+            return false;
+        for (uint32_t i = 0; i < status->local_count; ++i)
+            if (status->locals[i].configuration.vlan_depth > 2)
+                return false;
+    }
+    if (value->operation == DPPD_MANAGEMENT_ND6_LIST)
+        return value->payload.dynamic_neighbors.count <= DPPD_ND6_PAGE_SIZE;
     if (value->operation == DPPD_MANAGEMENT_CONNTRACK_POLICY_GET)
         return value->payload.conntrack_policy.policy.dnat_count <= DPPD_MAX_DNAT_RULES;
     if (value->operation == DPPD_MANAGEMENT_CONNTRACK_LIST)
@@ -340,16 +424,17 @@ int dppctl_json_response(const struct dppd_management_request *request, const st
     case DPPD_MANAGEMENT_REQUEST_GET: {
         const struct dppd_flow_request_result *value = &response->payload.durable_result;
         static const char *operations[] = {"unknown", "create", "update", "remove", "configure", "routing_replace",
-            "conntrack_replace"};
+            "conntrack_replace", "nd6_replace"};
         printf("\"client\":\"%" PRIu64 "\",\"sequence\":\"%" PRIu64
                "\",\"operation\":\"%s\",\"state\":\"%s\",\"status\":%d,\"applied\":%s,\"durable\":%s,"
                "\"blocked\":%s,\"revision\":\"%" PRIu64 "\",\"rules\":[",
             value->key.client, value->key.sequence,
-            (unsigned int)value->operation <= 6 ? operations[value->operation] : "unknown",
+            (unsigned int)value->operation <= 7 ? operations[value->operation] : "unknown",
             value->phase == DPPD_FLOW_REQUEST_DONE ? "complete" : "pending", value->status, boolean(value->applied),
             boolean(value->durable), boolean(response->status == -EUCLEAN), value->revision);
         for (uint32_t i = 0; value->operation != DPPD_FLOW_REQUEST_ROUTING_REPLACE &&
-             value->operation != DPPD_FLOW_REQUEST_CONNTRACK_REPLACE && i < value->count && i < 8; ++i)
+             value->operation != DPPD_FLOW_REQUEST_CONNTRACK_REPLACE && value->operation != DPPD_FLOW_REQUEST_ND6_REPLACE &&
+             i < value->count && i < 8; ++i)
             printf("%s{\"id\":\"%" PRIu64 "\",\"generation\":\"%" PRIu64 "\"}", i == 0 ? "" : ",", value->ids[i],
                 value->generations[i]);
         putchar(']');
@@ -357,8 +442,25 @@ int dppctl_json_response(const struct dppd_management_request *request, const st
             printf(",\"routing_generation\":\"%" PRIu64 "\"", value->generations[0]);
         else if (value->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE)
             printf(",\"conntrack_generation\":\"%" PRIu64 "\"", value->generations[0]);
+        else if (value->operation == DPPD_FLOW_REQUEST_ND6_REPLACE)
+            printf(",\"nd6_generation\":\"%" PRIu64 "\"", value->generations[0]);
         break;
     }
+    case DPPD_MANAGEMENT_ND6_POLICY_GET: {
+        const struct dppd_flow_nd6_view *value = &response->payload.nd6_policy;
+        printf("\"generation\":\"%" PRIu64 "\",\"revision\":\"%" PRIu64 "\",\"durable_revision\":\"%" PRIu64
+               "\",\"neighbor_epoch\":\"%" PRIu64 "\",\"neighbor_revision\":\"%" PRIu64 "\",\"policy\":",
+            value->generation, value->revision, value->durable_revision, value->neighbor_epoch, value->neighbor_revision);
+        nd6_policy_json(&value->policy);
+        break;
+    }
+    case DPPD_MANAGEMENT_ND6_STATUS:
+    case DPPD_MANAGEMENT_ND6_FLUSH:
+        nd6_status_json(&response->payload.nd6);
+        break;
+    case DPPD_MANAGEMENT_ND6_LIST:
+        nd6_neighbors_json(&response->payload.dynamic_neighbors);
+        break;
     case DPPD_MANAGEMENT_CONNTRACK_POLICY_GET: {
         const struct dppd_flow_conntrack_view *value = &response->payload.conntrack_policy;
         printf("\"generation\":\"%" PRIu64 "\",\"revision\":\"%" PRIu64 "\",\"durable_revision\":\"%" PRIu64

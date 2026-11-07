@@ -67,13 +67,15 @@ M5 首项 [M4 配置持久化与进程重启恢复](docs/m5_flow_state.md) 已�
 新增 [统一管理的双栈路由与静态邻居](docs/managed_routing.md)：`--flow-state` 配合 `--managed-routing`
 使用同一持久文件恢复规则和路由，经 CLI 或 HTTP 管理完整双栈表，保留请求去重、精确版本和写盘失败停转发保护。
 后续 [连接跟踪与 NAT 策略统一管理](docs/managed_conntrack_nat.md) 接入双栈 SNAT/DNAT 的持久替换、
-活跃会话保护、精确清理和重启恢复。动态邻居策略仍待接入；独立验收记录不扩大历史 M5 报告范围。
+活跃会话保护、精确清理和重启恢复。[动态 ND 统一管理](docs/managed_nd6.md) 继续接入本机 IPv6/VLAN 配置、
+版本保护、缓存清理和重启 DAD；独立验收记录不扩大历史 M5 报告范围。
 
 M4 软件交付及当前环境整体验收已完成，包含模板、有界异步队列、资源配额、64 条增删改、
 AGE、共享 COUNT 和背压。三套各 82/82 单测、完整 TAP 与八项固定性能门禁通过，
 新能力通过独立 C API 提供，物理卸载与真实复位仍待实机；详见 [M4 最终验收及重复入口](docs/m4_final_acceptance.md)。
 
-管理协议 v26 增加 `shared-count-create/get/query/delete/list` 和 transfer 的
+当前管理协议为 v33，包含受管理的 ND 策略与版本保护；daemon 和 dppctl 需要一起升级。
+协议继续支持 v26 引入的 `shared-count-create/get/query/delete/list` 和 transfer 的
 `shared-count:ID:GEN`，保留 `age-status`、`rule-age` 和 `age:N`，保留端口角色与身份线索、`transfer-plan/transfer-apply`，保留隧道识别与错误统计、动态 ND 状态、分页、精确清空和 DAD 就绪检查，保留 IPv6 会话和 NAT66 地址/策略查询，保留 IPv6 ACL、双栈路由/邻居及 IPv6 丢弃原因，保留静态 DNAT 查询和会话映射信息，保留会话管理、NAT 状态、状态 ACL 和跟踪丢弃原因，保留 ACL、路由/邻居、规则历史、耗时、指标、能力画像和探测，
 保留 `rule-status` 的实际规则执行位置与提交耗时、`health/ready` 的线程状态和 `port-show` 的链路状态。
 daemon 持续检测链路，出口断开时释放
@@ -155,6 +157,7 @@ sudo ./build/dppd -l 0-2 -n 4 -- --ports 0,1 --queues 2 --burst 64 --promisc
 
 `--nd6 PORT,IP6[,VID[,VID]]` 启用本机地址 DAD 与动态邻居发现，包含首包等待、NS/NA、
 NUD 和静态优先；管理命令为 `nd6-status/list/flush`，见 [ND 闭环](docs/nd6.md)。
+统一管理模式通过持久请求配置地址和 VLAN，使用 `nd6-policy-show` 查询，见 [managed ND](docs/managed_nd6.md)。
 
 完整环境准备、运行、telemetry 与抓包方式见 [构建与运行](docs/build_and_run.md)。架构语义和扩展边界见 [V3 架构](docs/architecture_v3.md)。
 代码排版、中文注释和格式检查命令见 [代码风格约定](docs/code_style.md)。

@@ -32,7 +32,8 @@
 /** v30 增加持久客户端请求键，回执与策略一起原子保存，重启后仍可查询 */
 /** v31 将双栈路由整表纳入持久请求，查询同时返回路由代次和统一配置修订号 */
 /** v32 将连接跟踪与双栈 NAT 策略纳入持久请求，会话操作还要核对本次启动标识 */
-#define DPPD_MANAGEMENT_VERSION 32U
+/** v33 将动态 ND 配置纳入持久请求，缓存操作核对启动身份，在线替换重新执行地址检测 */
+#define DPPD_MANAGEMENT_VERSION 33U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -130,6 +131,7 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_REQUEST_SUBMIT,
     DPPD_MANAGEMENT_REQUEST_GET,
     DPPD_MANAGEMENT_CONNTRACK_POLICY_GET,
+    DPPD_MANAGEMENT_ND6_POLICY_GET,
 };
 
 /** 随机启动标识阻止重启前的任务凭据误领本次进程的新任务 */
@@ -447,6 +449,7 @@ struct dppd_management_response {
         struct dppd_flow_request_result durable_result;
         struct dppd_conntrack_status conntrack;
         struct dppd_flow_conntrack_view conntrack_policy;
+        struct dppd_flow_nd6_view nd6_policy;
         struct dppd_nd6_status nd6;
         struct dppd_nd6_page dynamic_neighbors;
         struct dppd_connection_page connections;

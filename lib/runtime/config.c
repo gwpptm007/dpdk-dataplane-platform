@@ -502,7 +502,8 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
     /** 本轮只接入静态三层配置，不能顺带启用尚未纳入统一持久化的会话、NAT 或动态邻居策略 */
     if (cfg->managed_routing && (cfg->flow_state_path[0] == '\0' || cfg->conntrack_capacity != 0 ||
             cfg->snat.enabled || cfg->snat6.enabled || cfg->dnat_count != 0 || cfg->nd6_count != 0)) {
-        snprintf(error, error_len, "managed-routing requires flow-state and does not support conntrack, NAT or ND");
+        /** 统一模式只接受持久请求中的策略，不能再从旧启动参数读第二份配置 */
+        snprintf(error, error_len, "managed-routing requires flow-state; configure CT, NAT and ND through managed requests");
         return -1;
     }
     if (cfg->nd6_count > DPPD_ND6_LOCAL_LIMIT ||

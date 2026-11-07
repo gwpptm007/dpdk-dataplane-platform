@@ -202,8 +202,15 @@ nat66_test = executable('test_nat66', 'test_nat66.c', dependencies: dppd_core_de
 test('NAT66 mappings and address family isolation', nat66_test)
 
 # 使用独立线缆校验和和可控时钟，验证 ND、DAD、VLAN、等待首包和可达性探测
-nd6_test = executable('test_nd6', 'test_nd6.c', dependencies: dppd_core_dep)
+nd6_test = executable('test_nd6', 'test_nd6.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=calloc'])
 test('IPv6 neighbor discovery lifecycle and validation', nd6_test)
+
+# 仅为动态 ND 使用的端口打开组播接收，驱动失败或配置未生效时恢复原有模式
+runtime_nd6_test = executable('test_runtime_nd6', 'test_runtime_nd6.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=rte_eth_allmulticast_get', '-Wl,--wrap=rte_eth_allmulticast_enable',
+              '-Wl,--wrap=rte_eth_allmulticast_disable'])
+test('managed ND multicast preparation and rollback', runtime_nd6_test)
 
 config_test = executable(
   'test_config',
@@ -352,7 +359,9 @@ test('rule failure classification and outcomes', rule_observation_test)
 
 # 正式管理分发搭配真实配置实例，验证落盘失败不能领取成功回执
 flow_management_test = executable('test_flow_management', 'test_flow_management.c',
-  dependencies: dppd_core_dep, link_args: ['-Wl,--wrap=fsync'])
+  dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=fsync', '-Wl,--wrap=dppd_runtime_wait', '-Wl,--wrap=dppd_runtime_prepare_nd6',
+              '-Wl,--wrap=dppd_runtime_rollback_nd6'])
 test('M5 managed protocol durable receipts and session boundaries', flow_management_test)
 
 flow_request_test = executable('test_flow_request', 'test_flow_request.c', dependencies: dppd_core_dep,
@@ -368,6 +377,11 @@ test('M5 managed dual-stack routing persistence requests and reader lifetime', f
 flow_conntrack_test = executable('test_flow_conntrack', 'test_flow_conntrack.c', dependencies: dppd_core_dep,
   link_args: ['-Wl,--wrap=fsync'])
 test('M5 managed conntrack NAT policy persistence and session guards', flow_conntrack_test, timeout: 120)
+
+# 本机地址配置与易失邻居分开恢复，核对精确清理、CT 共存和各阶段写盘失败
+flow_nd6_test = executable('test_flow_nd6', 'test_flow_nd6.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=fsync'])
+test('M5 managed ND configuration persistence and neighbor guards', flow_nd6_test, timeout: 120)
 
 test('M5 northbound authentication parsing and resource limits', find_program('python3'),
   args: [files('test_northbound.py')], timeout: 60)

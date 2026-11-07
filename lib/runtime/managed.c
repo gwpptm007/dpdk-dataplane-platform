@@ -139,6 +139,24 @@ int dppd_managed_run(const struct dppd_config *config, struct dppd_recovery_scop
         rc = conntrack == NULL ? -EUCLEAN : dppd_runtime_set_conntrack(&runtime, conntrack);
         if (rc != 0)
             goto destroy;
+        /** MAC 只能在设备准备后取得，重启恢复本机配置而不是保存上次的设备 MAC */
+        struct dppd_nd6_port nd_ports[DPPD_MAX_PORTS] = {0};
+        for (uint16_t i = 0; i < runtime.devices.nb_ports; ++i) {
+            nd_ports[i].port_id = runtime.devices.ports[i].port_id;
+            memcpy(nd_ports[i].mac, runtime.devices.ports[i].mac.addr_bytes, 6);
+        }
+        rc = dppd_flow_store_nd6_bind(store, nd_ports, runtime.devices.nb_ports, dppd_monotonic_ms());
+        /** 恢复的 ND 地址也需要真实网卡接收组播，准备失败时不能启动 DAD 和报文转发 */
+        struct dppd_flow_nd6_view nd_view;
+        struct dppd_nd6_rx_preparation nd_preparation;
+        if (rc == 0)
+            rc = dppd_flow_store_nd6_get(store, &nd_view);
+        if (rc == 0)
+            rc = dppd_runtime_prepare_nd6(&runtime, &nd_view.policy, &nd_preparation);
+        if (rc == 0)
+            rc = dppd_runtime_set_nd6(&runtime, dppd_flow_store_nd6(store));
+        if (rc != 0)
+            goto destroy;
     }
     rc = dppd_flow_management_init(flows, store);
     if (rc != 0)
@@ -190,8 +208,11 @@ int dppd_managed_run(const struct dppd_config *config, struct dppd_recovery_scop
         /** 即使没有新报文也逐步回收过期会话，固定预算避免管理循环被整表扫描拖住 */
         if (rc == 0)
             dppd_conntrack_gc(runtime.conntrack, dppd_monotonic_ms(), 256);
-        if (rc == 0)
+        if (rc == 0) {
             rc = dppd_management_poll(&server);
+            /** 在线 ND 更新需要等待 worker 退出，超时线程仍借用共享表，不能继续常规清理 */
+            timeout_exit(rc, store);
+        }
         if (rc == 0)
             rc = dppd_production_poll(production, dppd_monotonic_ms());
         if (status.ready && config->duration_s != 0 &&
@@ -217,9 +238,13 @@ destroy:
     dppd_runtime_request_stop(&runtime);
     if (wait_workers(&runtime, store) != 0)
         rc = -EIO;
+    /** dirty 时 store 会拒绝关闭，先归还其等待包，不能让这些包留到 runtime 释放缓冲池之后 */
+    dppd_nd6_discard_pending(runtime.nd6);
     /** store 即将释放借出的容器，先清掉已停止 runtime 中的引用，避免清理路径留下悬空指针 */
     if (!runtime.conntrack_owned)
         (void)dppd_runtime_set_conntrack(&runtime, NULL);
+    if (!runtime.nd6_owned)
+        (void)dppd_runtime_set_nd6(&runtime, NULL);
     if (store != NULL) {
         int closed = dppd_flow_store_close(&store);
         if (closed != 0)

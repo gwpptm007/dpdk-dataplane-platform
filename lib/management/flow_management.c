@@ -86,7 +86,23 @@ static void health(struct dppd_runtime *runtime, const struct dppd_flow_store_st
     }
     if (output->ports_started != output->ports_expected)
         output->blockers |= DPPD_HEALTH_PORTS_NOT_STARTED;
+    /** DAD 尚未通过时健康检查不就绪，但 worker 必须继续运行才能收发检测报文 */
+    struct dppd_nd6_status neighbors;
+    dppd_nd6_status(runtime->nd6, &neighbors);
+    for (uint32_t i = 0; neighbors.enabled && i < neighbors.local_count; ++i)
+        if (neighbors.locals[i].state != DPPD_ND6_PREFERRED)
+            output->blockers |= DPPD_HEALTH_ND6_NOT_READY;
     output->ready = output->blockers == 0;
+}
+
+/** 等所有包交回后再清理等待队列，停机失败属于进程级故障，不能继续执行配置或释放借用对象 */
+static int quiesce_neighbors(struct dppd_runtime *runtime)
+{
+    if (runtime == NULL || !runtime->workers_started)
+        return 0;
+    dppd_runtime_request_stop(runtime);
+    int rc = dppd_runtime_wait(runtime);
+    return rc != 0 ? rc : runtime->workers_started ? -EBUSY : 0;
 }
 
 int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_runtime *runtime,
@@ -110,6 +126,31 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
         return 0;
     }
     switch (request->operation) {
+    case DPPD_MANAGEMENT_ND6_POLICY_GET:
+        rc = dppd_flow_store_nd6_get(flows->store, &response->payload.nd6_policy);
+        break;
+    case DPPD_MANAGEMENT_ND6_STATUS:
+        rc = dppd_flow_store_nd6_status(flows->store, &response->payload.nd6);
+        break;
+    case DPPD_MANAGEMENT_ND6_LIST:
+        rc = dppd_flow_store_nd6_list(flows->store, request->payload.conntrack.after_id,
+            request->payload.conntrack.expected_epoch, request->payload.conntrack.expected_revision,
+            &response->payload.dynamic_neighbors);
+        break;
+    case DPPD_MANAGEMENT_ND6_FLUSH:
+        if (status.ready && request->payload.conntrack.expected_epoch != 0 &&
+            request->payload.conntrack.expected_revision != 0) {
+            rc = quiesce_neighbors(runtime);
+            if (rc != 0) {
+                response->status = rc;
+                return rc;
+            }
+        }
+        rc = dppd_flow_store_nd6_flush(flows->store, request->payload.conntrack.expected_epoch,
+            request->payload.conntrack.expected_revision);
+        if (rc == 0)
+            rc = dppd_flow_store_nd6_status(flows->store, &response->payload.nd6);
+        break;
     case DPPD_MANAGEMENT_CONNTRACK_POLICY_GET:
         rc = dppd_flow_store_conntrack_get(flows->store, &response->payload.conntrack_policy);
         break;
@@ -141,10 +182,47 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
     case DPPD_MANAGEMENT_ROUTING_STATUS:
         rc = dppd_flow_store_routing_status(flows->store, &response->payload.routing_status);
         break;
-    case DPPD_MANAGEMENT_REQUEST_SUBMIT:
+    case DPPD_MANAGEMENT_REQUEST_SUBMIT: {
+        struct dppd_nd6_rx_preparation prepared = {0};
+        bool receive_prepared = false;
+        if (request->payload.durable_request.operation == DPPD_FLOW_REQUEST_ND6_REPLACE && status.ready) {
+            struct dppd_flow_request_result previous;
+            int found = dppd_flow_store_request_get(flows->store, request->payload.durable_request.key, &previous);
+            /** 已存在的键只查询或比较内容，不再暂停线程，也不会再次触发 DAD */
+            if (found == -ENOENT && request->payload.durable_request.count == 1 &&
+                request->payload.durable_request.queue == 0 &&
+                request->payload.durable_request.payload.nd6.expected_neighbor_epoch != 0 &&
+                request->payload.durable_request.payload.nd6.expected_neighbor_revision != 0 &&
+                dppd_nd6_policy_validate(&request->payload.durable_request.payload.nd6.policy) == 0) {
+                rc = quiesce_neighbors(runtime);
+                if (rc != 0) {
+                    response->status = rc;
+                    return rc;
+                }
+                /** 新端口先打开 IPv6 组播接收，驱动不能接收 NS 时不能发布表面成功的策略 */
+                if (runtime != NULL) {
+                    rc = dppd_runtime_prepare_nd6(runtime, &request->payload.durable_request.payload.nd6.policy, &prepared);
+                    if (rc != 0) {
+                        if (rc == -EUCLEAN) {
+                            response->status = rc;
+                            return rc;
+                        }
+                        break;
+                    }
+                    receive_prepared = true;
+                }
+            }
+        }
         rc = dppd_flow_store_request(flows->store, &request->payload.durable_request,
             dppd_monotonic_ms() * UINT64_C(1000000), &response->payload.durable_result);
+        /** 配置未发布就撤回临时接收设置，发布后即使落盘失败也保留当前运行策略所需的接收能力 */
+        if (receive_prepared && !response->payload.durable_result.applied &&
+            dppd_runtime_rollback_nd6(runtime, &prepared) != 0) {
+            response->status = -EUCLEAN;
+            return -EUCLEAN;
+        }
         break;
+    }
     case DPPD_MANAGEMENT_REQUEST_GET:
         rc = dppd_flow_store_request_get(flows->store, request->payload.request_key, &response->payload.durable_result);
         break;

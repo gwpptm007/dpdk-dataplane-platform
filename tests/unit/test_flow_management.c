@@ -4,11 +4,45 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include "flow_state_fixture.h"
 #include "dppd/flow_management.h"
+#include "dppd/runtime.h"
 
 static bool fail_sync;
+static int wait_error;
+static unsigned int wait_calls;
+static int prepare_error, rollback_error;
+static unsigned int prepare_calls, rollback_calls;
+int __real_dppd_runtime_wait(struct dppd_runtime *runtime);
+int __wrap_dppd_runtime_wait(struct dppd_runtime *runtime);
+int __wrap_dppd_runtime_prepare_nd6(struct dppd_runtime *runtime, const struct dppd_nd6_policy *policy,
+    struct dppd_nd6_rx_preparation *prepared);
+int __wrap_dppd_runtime_rollback_nd6(struct dppd_runtime *runtime, struct dppd_nd6_rx_preparation *prepared);
+/** 模拟包线程不能按时交回控制权，验证这种故障不能被当成普通配置失败继续运行 */
+int __wrap_dppd_runtime_wait(struct dppd_runtime *runtime)
+{
+    ++wait_calls;
+    return wait_error != 0 ? wait_error : __real_dppd_runtime_wait(runtime);
+}
+
+/** 这里关注管理事务边界，驱动组播开关的具体行为由 runtime 单测覆盖 */
+int __wrap_dppd_runtime_prepare_nd6(struct dppd_runtime *runtime, const struct dppd_nd6_policy *policy,
+    struct dppd_nd6_rx_preparation *prepared)
+{
+    assert(runtime != NULL && !runtime->workers_started && policy != NULL && prepared != NULL);
+    ++prepare_calls;
+    return prepare_error;
+}
+
+int __wrap_dppd_runtime_rollback_nd6(struct dppd_runtime *runtime, struct dppd_nd6_rx_preparation *prepared)
+{
+    assert(runtime != NULL && !runtime->workers_started && prepared != NULL);
+    ++rollback_calls;
+    return rollback_error;
+}
 int __real_fsync(int fd);
 int __wrap_fsync(int fd);
 int __wrap_fsync(int fd)
@@ -149,6 +183,144 @@ static void test_managed_conntrack(struct dppd_flow_management *flows)
     response = exchange(flows, &query);
     assert(response.status == 0 && response.payload.conntrack_policy.revision == initial.revision + 1);
     assert(response.payload.conntrack_policy.generation == initial.generation + 1);
+}
+
+static int discard_nd_probe(void *context, uint16_t port, const uint8_t *wire, uint16_t length)
+{
+    (void)context;
+    (void)port;
+    (void)wire;
+    (void)length;
+    return 0;
+}
+
+/** 致命故障先告知客户端，再交给 daemon 主循环，不能发送完响应就把错误吞掉 */
+static void test_nd6_fatal_socket(struct dppd_flow_management *flows, struct dppd_runtime *runtime,
+    const struct dppd_management_request *request, struct dppd_management_response *response)
+{
+    char directory[] = "/tmp/dppd-nd6-socket-XXXXXX", path[128];
+    assert(mkdtemp(directory) != NULL);
+    snprintf(path, sizeof(path), "%s/control.sock", directory);
+    struct dppd_management_server server = {0};
+    assert(dppd_management_start_flow(&server, flows, runtime, path) == 0);
+    int client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    assert(client >= 0);
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    assert(strlen(path) < sizeof(address.sun_path));
+    memcpy(address.sun_path, path, strlen(path) + 1U);
+    assert(connect(client, (const struct sockaddr *)&address, sizeof(address)) == 0);
+    assert(send(client, request, sizeof(*request), 0) == (ssize_t)sizeof(*request));
+    assert(dppd_management_poll(&server) == -ETIMEDOUT);
+    assert(recv(client, response, sizeof(*response), 0) == (ssize_t)sizeof(*response));
+    assert(response->status == -ETIMEDOUT && response->request_id == request->request_id);
+    close(client);
+    dppd_management_stop(&server);
+    assert(rmdir(directory) == 0);
+}
+
+/** 先交回包线程再改 ND，重复提交不重跑检测，检测未完成也不能阻止 worker 继续收发 */
+static void test_managed_nd6(struct dppd_flow_management *flows)
+{
+    const struct dppd_nd6_port port = {.port_id = 7, .mac = {2, 0, 0, 0, 0, 7}};
+    assert(dppd_flow_store_nd6_bind(flows->store, &port, 1, dppd_monotonic_ms()) == 0);
+    struct dppd_management_request query = {.version = DPPD_MANAGEMENT_VERSION,
+        .size = sizeof(query), .operation = DPPD_MANAGEMENT_ND6_POLICY_GET, .request_id = 105};
+    struct dppd_management_response response = exchange(flows, &query);
+    assert(response.status == 0 && response.payload.nd6_policy.policy.local_count == 0);
+    const struct dppd_flow_nd6_view initial = response.payload.nd6_policy;
+    assert(initial.neighbor_epoch != 0 && initial.neighbor_revision != 0);
+    struct dppd_management_request request = {.version = DPPD_MANAGEMENT_VERSION,
+        .size = sizeof(request), .operation = DPPD_MANAGEMENT_REQUEST_SUBMIT, .request_id = 106};
+    struct dppd_flow_request *replacement = &request.payload.durable_request;
+    *replacement = (struct dppd_flow_request){.key = {84, 1}, .operation = DPPD_FLOW_REQUEST_ND6_REPLACE,
+        .count = 1, .expected_revision = initial.revision};
+    replacement->payload.nd6.expected_neighbor_epoch = initial.neighbor_epoch;
+    replacement->payload.nd6.expected_neighbor_revision = initial.neighbor_revision;
+    replacement->payload.nd6.policy = (struct dppd_nd6_policy){.local_count = 1, .reachable_ms = 30000};
+    replacement->payload.nd6.policy.locals[0].port_id = 7;
+    assert(inet_pton(AF_INET6, "fe80::7", replacement->payload.nd6.policy.locals[0].address) == 1);
+    struct dppd_runtime *runtime = calloc(1, sizeof(*runtime));
+    assert(runtime != NULL);
+    runtime->nd6 = dppd_flow_store_nd6(flows->store);
+    runtime->workers_started = true;
+    atomic_init(&runtime->stop_requested, false);
+    wait_calls = 0;
+    wait_error = -ETIMEDOUT;
+    test_nd6_fatal_socket(flows, runtime, &request, &response);
+    assert(response.status == -ETIMEDOUT && wait_calls == 1 && runtime->workers_started);
+    assert(exchange(flows, &query).payload.nd6_policy.generation == initial.generation);
+    struct dppd_flow_request_result receipt;
+    assert(dppd_flow_store_request_get(flows->store, replacement->key, &receipt) == -ENOENT);
+    wait_error = 0;
+    prepare_error = -ENOTSUP;
+    assert(dppd_flow_management_handle(flows, runtime, &request, &response) == 0 && response.status == -ENOTSUP);
+    assert(wait_calls == 2 && !runtime->workers_started && prepare_calls == 1);
+    assert(dppd_flow_store_request_get(flows->store, replacement->key, &receipt) == -ENOENT);
+    prepare_error = -EUCLEAN;
+    assert(dppd_flow_management_handle(flows, runtime, &request, &response) == -EUCLEAN && response.status == -EUCLEAN);
+    assert(prepare_calls == 2 && dppd_flow_store_request_get(flows->store, replacement->key, &receipt) == -ENOENT);
+    prepare_error = 0;
+    assert(dppd_flow_management_handle(flows, runtime, &request, &response) == 0 && response.status == 0);
+    assert(response.payload.durable_result.applied && response.payload.durable_result.durable);
+    assert(response.payload.durable_result.generations[0] == initial.generation + 1);
+    assert(wait_calls == 2 && !runtime->workers_started);
+    assert(prepare_calls == 3 && rollback_calls == 0);
+    runtime->workers_started = true;
+    atomic_store(&runtime->stop_requested, false);
+    assert(dppd_flow_management_handle(flows, runtime, &request, &response) == 0 && response.status == 0);
+    assert(wait_calls == 2 && runtime->workers_started);
+    assert(prepare_calls == 3);
+    replacement->payload.nd6.policy.reachable_ms = 40000;
+    assert(dppd_flow_management_handle(flows, runtime, &request, &response) == 0 && response.status == -EEXIST);
+    assert(wait_calls == 2 && runtime->workers_started);
+    assert(prepare_calls == 3);
+    query.operation = DPPD_MANAGEMENT_HEALTH_GET;
+    assert(dppd_flow_management_handle(flows, runtime, &query, &response) == 0 && response.status == 0);
+    assert(!response.payload.health.ready && (response.payload.health.blockers & DPPD_HEALTH_ND6_NOT_READY));
+    struct dppd_flow_store_status store_status;
+    assert(dppd_flow_store_status(flows->store, &store_status) == 0 && store_status.ready);
+    uint64_t now = dppd_monotonic_ms();
+    dppd_nd6_tick(runtime->nd6, now + 2000, discard_nd_probe, NULL);
+    dppd_nd6_tick(runtime->nd6, now + 4000, discard_nd_probe, NULL);
+    assert(dppd_flow_management_handle(flows, runtime, &query, &response) == 0 && response.status == 0);
+    assert(!(response.payload.health.blockers & DPPD_HEALTH_ND6_NOT_READY));
+    query.operation = DPPD_MANAGEMENT_ND6_LIST;
+    response = exchange(flows, &query);
+    assert(response.status == 0 && response.payload.dynamic_neighbors.count == 0);
+    uint64_t epoch = response.payload.dynamic_neighbors.epoch, revision = response.payload.dynamic_neighbors.revision;
+    query.payload.conntrack.expected_revision = revision;
+    assert(exchange(flows, &query).status == -EINVAL);
+    query.payload.conntrack.expected_epoch = epoch == 1 ? 2 : 1;
+    assert(exchange(flows, &query).status == -ESTALE);
+    query.payload.conntrack.expected_epoch = epoch;
+    assert(exchange(flows, &query).status == 0);
+    query.operation = DPPD_MANAGEMENT_ND6_FLUSH;
+    wait_error = -ETIMEDOUT;
+    assert(dppd_flow_management_handle(flows, runtime, &query, &response) == -ETIMEDOUT);
+    assert(response.status == -ETIMEDOUT && wait_calls == 3);
+    wait_error = 0;
+    assert(dppd_flow_management_handle(flows, runtime, &query, &response) == 0 && response.status == 0);
+    assert(wait_calls == 4 && !runtime->workers_started);
+    assert(response.payload.nd6.epoch == epoch && response.payload.nd6.revision > revision);
+    assert(response.payload.nd6.locals[0].state == DPPD_ND6_PREFERRED);
+    assert(exchange(flows, &query).status == -ESTALE);
+    query.operation = DPPD_MANAGEMENT_ND6_POLICY_GET;
+    response = exchange(flows, &query);
+    assert(response.payload.nd6_policy.generation == initial.generation + 1);
+    assert(response.payload.nd6_policy.revision == initial.revision + 1);
+    query.operation = DPPD_MANAGEMENT_CONNTRACK_POLICY_GET;
+    assert(exchange(flows, &query).payload.conntrack_policy.policy.capacity == 8);
+    /** 版本冲突没有发布策略，撤销组播准备；撤销也失败时必须交给主循环退出 */
+    replacement->key.sequence = 2;
+    rollback_error = -EIO;
+    assert(dppd_flow_management_handle(flows, runtime, &request, &response) == -EUCLEAN && response.status == -EUCLEAN);
+    assert(prepare_calls == 4 && rollback_calls == 1);
+    rollback_error = 0;
+    replacement->key.sequence = 3;
+    assert(dppd_flow_management_handle(flows, runtime, &request, &response) == 0);
+    assert(response.status == 0 && response.payload.durable_result.status == -ESTALE);
+    assert(!response.payload.durable_result.applied && prepare_calls == 5 && rollback_calls == 2);
+    free(runtime);
 }
 
 int main(void)
@@ -295,6 +467,7 @@ int main(void)
     assert(exchange(flows, &request).status == 0);
     test_managed_routing(flows);
     test_managed_conntrack(flows);
+    test_managed_nd6(flows);
     assert(dppd_flow_store_close(&store) == 0);
     free(flows);
     dppd_flow_state_free(&state);

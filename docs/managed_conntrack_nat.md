@@ -150,7 +150,8 @@ daemon 按既有 managed 机制停止 worker，返回 `applied=true`、`durable=
 
 本项把配置和请求管理统一起来，路由、规则、CT/NAT 仍是独立请求，不提供三者一次跨对象原子提交
 不迁移活跃连接，不保存会话，不提供 HA 同步、hairpin NAT、NPTv6、RELATED/ICMP 转换或硬件有状态卸载
-动态 ND 策略尚未接入 managed 配置，原独立模式仍保留已有 ND 能力
+后续 [动态 ND 统一管理](managed_nd6.md) 已接入 managed 配置，原独立模式仍保留已有 ND 能力
+ND 策略替换保留 CT/NAT 表，但重新检测地址和学习邻居期间可能暂时无法通信
 
 ## 验收入口
 
