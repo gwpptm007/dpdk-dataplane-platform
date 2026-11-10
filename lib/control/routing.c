@@ -17,15 +17,28 @@
 #define ROUTE6_OFFSET DPPD_ROUTING_FILE_SIZE
 #define NEIGHBOR6_OFFSET (ROUTE6_OFFSET + 40U * DPPD_IPV4_ROUTE_LIMIT)
 
+/** 路由配置的管理对象，持有供 worker 查询的 router，以及路由文件和独立锁 */
 struct dppd_routing_service {
+    /** 内存中的路由与静态邻居表，runtime 借用此地址 */
     struct dppd_ipv4_router *router;
+    /**
+     * lock_fd 持有独立 .lock 文件，snapshot_fd 保留当前已核对的路由文件
+     * directory_fd 用于保存文件后的目录同步，last_error 记录最近一次保存结果
+     */
     int lock_fd, snapshot_fd, directory_fd, last_error;
+    /** 保存未完整成功时置位，普通配置替换暂停，等待显式同步修复 */
     bool dirty;
+    /** 本次启动的网口与设备对应记录数量 */
     uint16_t count;
+    /** 最近一次确认保存成功的配置版本 */
     uint64_t persisted_generation;
+    /** 路由文件、独立锁文件及父目录路径，例如 /tmp/routes.bin、同名 .lock 和 /tmp */
     char path[DPPD_STATE_PATH_CAPACITY], lock_path[DPPD_STATE_PATH_CAPACITY], parent[DPPD_STATE_PATH_CAPACITY];
+    /** 已复制并按端口编号排序的网口对应记录，不依赖调用方局部数组 */
     struct dppd_routing_binding bindings[DPPD_MAX_PORTS];
+    /** 当前文件的有效长度，区分原 IPv4 格式与双栈格式 */
     uint32_t expected_size;
+    /** 上次确认的完整文件内容，后续保存前用它检测文件是否被改动 */
     uint8_t expected[DPPD_ROUTING_DUAL_FILE_SIZE];
 };
 
@@ -336,6 +349,11 @@ int dppd_routing_check_paths(const char *path, const char *const *others, size_t
     return 0;
 }
 
+/**
+ * 规范化路由文件路径，生成同名 .lock 路径，并打开父目录供后续同步
+ * 例如 /tmp/routes.bin → /tmp/routes.bin.lock；文件可以不存在，父目录必须存在
+ * 路径和目录句柄写入 service，成功返回 0，失败返回负错误码
+ */
 static int prepare_paths(struct dppd_routing_service *service, const char *path)
 {
     int rc = canonical_target(path, service->path);
@@ -351,6 +369,13 @@ static int prepare_paths(struct dppd_routing_service *service, const char *path)
     return service->directory_fd >= 0 ? 0 : -errno;
 }
 
+/**
+ * 打开项目路由配置，创建供 runtime 借用的路由器，并持有该配置的独立文件锁
+ * 复制本次网口对应记录 → 取得 .lock 排他锁
+ *   文件已存在 → 核对格式、设备对应关系和路由内容，恢复配置
+ *   文件不存在 → 创建版本 1 的空路由和静态邻居表，并保存
+ * 全部准备并复查成功后，将服务写入 *result 并返回 0；失败调用清理并返回负错误码
+ */
 int dppd_routing_open(struct dppd_routing_service **result, const char *path,
     const struct dppd_routing_binding *bindings, uint16_t count)
 {
@@ -359,6 +384,7 @@ int dppd_routing_open(struct dppd_routing_service **result, const char *path,
     struct dppd_routing_service *service = calloc(1, sizeof(*service));
     if (service == NULL)
         return -ENOMEM;
+    /** 避免失败清理时误关标准输入（fd 0） */
     service->lock_fd = service->snapshot_fd = service->directory_fd = -1;
     int rc = -EINVAL;
     service->count = count;
@@ -375,6 +401,7 @@ int dppd_routing_open(struct dppd_routing_service **result, const char *path,
         strcpy(service->bindings[i].driver, binding->driver);
         strcpy(service->bindings[i].ifname, binding->ifname);
     }
+    /** 固定网口记录的存储顺序，便于恢复时核对 */
     qsort(service->bindings, count, sizeof(service->bindings[0]), compare_binding);
     for (uint16_t i = 0; i < count; ++i) {
         if (i != 0 && service->bindings[i].port_id == service->bindings[i - 1].port_id)
@@ -392,10 +419,12 @@ int dppd_routing_open(struct dppd_routing_service **result, const char *path,
     rc = file_identity(service->lock_fd, service->lock_path, 0);
     if (rc != 0)
         goto fail;
+    /** 路由文件会被替换，用独立 .lock 文件保持互斥 */
     if (flock(service->lock_fd, LOCK_EX | LOCK_NB) != 0) {
         rc = errno == EWOULDBLOCK ? -EBUSY : -errno;
         goto fail;
     }
+    /** 仅文件不存在时创建空表，旧文件损坏必须报错 */
     struct dppd_ipv4_configuration initial = {.generation = 1};
     service->snapshot_fd = open(service->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (service->snapshot_fd >= 0) {
@@ -420,7 +449,7 @@ int dppd_routing_open(struct dppd_routing_service **result, const char *path,
         rc = dppd_ipv4_router_create(&service->router, ports, count, &initial);
     if (rc != 0)
         goto fail;
-    /* 恢复后再次编码规范顺序，连原来顺序不规范但 CRC 正确的文件也拒绝 */
+    /** 用路由器整理后的配置复核原文件的内容和顺序 */
     struct dppd_ipv4_configuration canonical;
     rc = dppd_ipv4_router_get(service->router, &canonical);
     if (rc == 0 && service->snapshot_fd >= 0) {
@@ -444,6 +473,7 @@ fail:
     return rc;
 }
 
+/** 销毁路由器并关闭数据文件、独立锁和目录句柄；路由器销毁失败则返回错误并保留服务 */
 int dppd_routing_close(struct dppd_routing_service *service)
 {
     if (service == NULL)
@@ -461,6 +491,7 @@ int dppd_routing_close(struct dppd_routing_service *service)
     return 0;
 }
 
+/** 返回服务持有的路由器，供 runtime 借用；服务为空时返回 NULL，不创建或复制对象 */
 struct dppd_ipv4_router *dppd_routing_router(struct dppd_routing_service *service)
 {
     return service != NULL ? service->router : NULL;

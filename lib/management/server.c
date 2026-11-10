@@ -776,6 +776,11 @@ int dppd_management_handle(struct dppd_control_service *control, const struct dp
     return 0;
 }
 
+/**
+ * 创建本机 Unix 管理入口，保存服务对象供主线程后续处理请求
+ * 创建 socket → 绑定路径 → 设置访问权限 → 开始监听
+ * 成功保存监听句柄和对象引用并返回 0，失败清理本次 socket 并返回负错误码
+ */
 static int start_server(struct dppd_management_server *server, struct dppd_control_service *control,
     struct dppd_flow_management *flows, const struct dppd_device_set *devices, struct dppd_runtime *runtime,
     const char *socket_path)
@@ -789,38 +794,30 @@ static int start_server(struct dppd_management_server *server, struct dppd_contr
     path_length = strlen(socket_path);
     if (path_length == 0 || path_length > DPPD_MANAGEMENT_SOCKET_PATH_MAX)
         return -ENAMETOOLONG;
-    /* 先建立明确的未启动状态，保证后续任一步失败都不会留下可误关闭的 fd */
     memset(server, 0, sizeof(*server));
     server->socket_fd = -1;
     server->runtime = runtime;
 
-    /*
-     * SOCK_SEQPACKET 让一次 send 对应一次 recv，避免自行设计流式 framing；
-     * NONBLOCK 防止管理客户端卡住主循环；CLOEXEC 防止未来启动子进程时泄漏 fd
-     */
+    /** 保留请求边界，监听 socket 不阻塞主循环 */
     fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0)
         return -errno;
     memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
     memcpy(address.sun_path, socket_path, path_length + 1U);
-    /*
-     * 不在 bind 前无条件 unlink：配置错误或另一个存活 daemon 使用同一路径时
-     * 擅自删除会绕过单实例保护。异常退出留下的路径需由部署层确认后清理
-     */
+    /** 不删除已有路径，避免抢占其他进程的管理入口 */
     if (bind(fd, (const struct sockaddr *)&address, sizeof(address)) != 0) {
         const int error = -errno;
         close(fd);
         return error;
     }
-    /* socket 默认仅允许启动 dppd 的用户访问，避免未授权规则变更 */
+    /** 管理入口仅允许启动用户读写 */
     if (chmod(socket_path, S_IRUSR | S_IWUSR) != 0 || listen(fd, 16) != 0) {
         const int error = -errno;
         close(fd);
         unlink(socket_path);
         return error;
     }
-    /* 只有 bind/chmod/listen 全部成功后才发布 started 状态 */
     server->socket_fd = fd;
     server->control = control;
     server->flows = flows;
@@ -831,6 +828,10 @@ static int start_server(struct dppd_management_server *server, struct dppd_contr
     return 0;
 }
 
+/**
+ * 为 control 启动管理入口，成功返回 0，失败返回负错误码
+ * 只借用 control、devices 和 runtime，请求仍由主线程调用 poll 处理
+ */
 int dppd_management_start(struct dppd_management_server *server, struct dppd_control_service *control,
     const struct dppd_device_set *devices, struct dppd_runtime *runtime, const char *socket_path)
 {

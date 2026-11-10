@@ -251,9 +251,9 @@ static void finish_recovery_remove(void *context, uint64_t attempt, int remove_e
         recovery_record_error(recovery, rc);
 }
 
+/** 通知主线程退出，由主线程统一停止 worker 并回收资源 */
 static void handle_signal(int signal_number)
 {
-    /** 信号处理器只设置退出标记，主线程跳出循环后再停止 worker 和回收资源 */
     (void)signal_number;
     stop_signal = 1;
 }
@@ -295,20 +295,29 @@ static int bind_monitor(const struct dppd_config *config, struct dppd_recovery_g
     return dppd_monitor_client_open(client, config->recovery_monitor, guard, &ports);
 }
 
-/** 启动时绑定稳定端口映射，恢复配置不能按可复用的 DPDK 编号猜测设备或 TAP */
+/**
+ * 按独立路由文件准备路由服务，让 worker 能查询路由和静态邻居
+ * 收集网口编号与设备对应关系 → 创建或恢复路由服务 → 将服务中的路由器交给 runtime
+ * control 持有路由服务，runtime 只借用路由器；未配置路径时跳过并返回 0
+ * 准备成功返回 0，网口身份、文件恢复或路由创建失败返回负错误码
+ */
 static int setup_ipv4_routing(struct dppd_runtime *runtime, struct dppd_control_service *control)
 {
     if (runtime->config.routing_path[0] == '\0')
         return 0;
+    /** 每项对应一个已配置网口，用于恢复文件时核对设备，不是路由或邻居条目 */
     struct dppd_routing_binding bindings[DPPD_MAX_PORTS] = {0};
     for (uint16_t i = 0; i < runtime->devices.nb_ports; ++i) {
         const struct dppd_port *port = &runtime->devices.ports[i];
         const struct dppd_endpoint *endpoint = dppd_topology_find(&runtime->devices.topology, port->port_id);
+        /** 要恢复路由必须知道出口对应哪个设备，三层转发也需要有效的单播源 MAC */
         if (endpoint == NULL || !port->identity.device_name_known || !rte_is_valid_assigned_ether_addr(&port->mac))
             return -ENODEV;
+        /** 例如端口 0 对应 0000:03:00.0；恢复时同时核对编号、设备和驱动，防止编号复用 */
         bindings[i].port_id = port->port_id;
         strcpy(bindings[i].device, port->identity.device_name);
         strcpy(bindings[i].driver, endpoint->driver_name);
+        /** TAP 再记录内核接口名：DPDK 提供 if_index，if_indextoname 将其转换为名称 */
         if (strcmp(endpoint->driver_name, "net_tap") == 0) {
             struct rte_eth_dev_info information;
             int rc = rte_eth_dev_info_get(port->port_id, &information);
@@ -318,8 +327,10 @@ static int setup_ipv4_routing(struct dppd_runtime *runtime, struct dppd_control_
                 return -errno;
         }
     }
+    /** 服务会复制 bindings；已有文件核对后恢复，新路径创建空表，本地数组无需在返回后保留 */
     int rc = dppd_routing_open(&control->routing, runtime->config.routing_path, bindings, runtime->devices.nb_ports);
     if (rc == 0) {
+        /** control.routing 持有服务，runtime.ipv4_router 指向服务中的同一个 router，供 worker 查询 */
         dppd_runtime_set_ipv4_router(runtime, dppd_routing_router(control->routing));
         printf("[dppd] IPv4 routing ready: path=%s\n", runtime->config.routing_path);
     }
@@ -485,7 +496,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "[dppd] control service initialization failed\n");
         goto cleanup_runtime;
     }
-    /** 快照重放前就启用事件门禁，不能等到 worker 启动后才开始保护驱动句柄 */
+    /**
+     * 设备移除或复位 → runtime 记录事件 → control 检查状态，再决定是否继续调用 PMD
+     * 后面的规则重放也会操作网卡，因此先登记事件并绑定检查函数
+     */
     int device_binding = dppd_runtime_device_bind(&runtime, &control);
     if (device_binding != 0) {
         fprintf(stderr, "[dppd] device event tracking refused: %d\n", device_binding);
@@ -498,6 +512,12 @@ int main(int argc, char **argv)
      * 启动 worker 前完成绑定；退出时先等待 worker 返回，再释放规则表和计数器
      */
     dppd_runtime_set_software_backend(&runtime, &control.software);
+    /**
+     * control 规划规则时要考虑 ND 和连接跟踪，避免网卡直接转发绕过这些 CPU 处理
+     * runtime.nd6 ─┐
+     * control.nd6 ─┴→ 同一张 ND 表，由 runtime 创建和销毁
+     * 会话表的共享方式相同，control 只借用这些表
+     */
     control.conntrack = runtime.conntrack;
     control.nd6 = runtime.nd6;
     int routing_error = setup_ipv4_routing(&runtime, &control);
@@ -516,19 +536,23 @@ int main(int argc, char **argv)
         control.rte_flow.after_shared_create = finish_shared_recovery_create;
         control.rte_flow.after_shared_remove = finish_recovery_remove;
     }
+    /** 在 worker 收包前恢复规则，避免先按空规则表处理业务 */
     if (config.state_path[0] != '\0') {
         int restore_rc = dppd_control_persistence_restore(&control, config.state_path);
 
+        /**
+         * 普通恢复错误
+         *   → 清理并退出
+         * -EUCLEAN，且恢复状态为 RECONCILIATION_REQUIRED
+         *   → 标记 recovery_isolation
+         *   → 保留残留对象，供后续清理重试
+         */
         if (restore_rc != 0) {
             if (restore_rc != -EUCLEAN || control.recovery_state != DPPD_CONTROL_RECOVERY_RECONCILIATION_REQUIRED) {
                 fprintf(stderr, "[dppd] rule snapshot restore failed: path=%s error=%s (%d)\n", config.state_path,
                     restore_rc < 0 && restore_rc >= -4095 ? strerror(-restore_rc) : "unknown", restore_rc);
                 goto cleanup_control;
             }
-            /*
-             * transaction 回滚未完成：绝不能启动 worker 或开放普通规则接口，但保留
-             * 当前进程的 backend handle，供受限的 reconcile-retry 再次删除
-             */
             recovery_isolation = true;
             fprintf(stderr,
                 "[dppd] snapshot rollback incomplete; entering recovery isolation "
@@ -540,8 +564,8 @@ int main(int argc, char **argv)
                 dppd_rule_repository_generation(&control.rules), dppd_rule_repository_count(&control.rules));
     }
     /**
-     * 创建并监听管理 socket，默认 /tmp/dppd-control.sock，同时保存 control、devices 和 runtime 的引用
-     * 后续主线程循环调用 management_poll：接收 dppctl 请求 → 使用这些对象处理 → 返回响应
+     * 管理请求由后面的主线程循环处理，不另建管理线程
+     * 隔离启动也保留此入口，供查询和清理重试
      */
     if (dppd_management_start(&management, &control, &runtime.devices, &runtime, config.control_socket) != 0) {
         fprintf(stderr, "[dppd] management socket initialization failed: %s\n", config.control_socket);
@@ -549,18 +573,24 @@ int main(int argc, char **argv)
     }
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
-    /** 先发布本次重放或隔离的完成态，诊断线程只读取副本，不访问规则或驱动 */
+    /** 规则查询读取已发布副本，避免与主线程的规则修改并发访问 */
     if (dppd_telemetry_register(&runtime, &control) != 0) {
         fprintf(stderr, "[dppd] telemetry command registration failed\n");
         goto cleanup_management;
     }
+    /**
+     * 设备检查出错 → 清理退出
+     * 检查完成，再看隔离标志与 control 的恢复状态
+     *   需要隔离 → 受限管理循环
+     *   状态正常 → 核对外部监控 → runtime_start 提交 worker
+     */
     if (dppd_runtime_device_poll(&runtime) != 0)
         goto cleanup_telemetry;
     recovery_isolation |= control.recovery_state != DPPD_CONTROL_RECOVERY_READY;
     if (recovery_isolation) {
         /**
-         * 隔离保留只读诊断，不启动 ethdev worker，也不输出正常转发统计
-         * 清理重试结束后更新诊断副本，成功进入 RESTART_REQUIRED 后仍必须退出重启
+         * 隔离期间只处理查询和受限恢复请求，不启动 worker
+         * 清理完成后退出重启，重新执行完整规则恢复
          */
         while (!stop_signal) {
             loop_error = dppd_runtime_device_poll(&runtime);

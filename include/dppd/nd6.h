@@ -22,17 +22,17 @@ struct dppd_nd6_port {
     uint8_t mac[6];
 };
 enum dppd_nd6_state {
-    /** 尚无下一跳 MAC，等待邻居响应 */
+    /** 下一跳 MAC 尚未解析完成，等待邻居响应；此状态不提供缓存 MAC */
     DPPD_ND6_INCOMPLETE = 1,
     /** 已确认可达，可在有效期内使用缓存 MAC */
     DPPD_ND6_REACHABLE,
-    /** 可达确认已过期，MAC 仍保留，使用时转入 DELAY */
+    /** 已有 MAC，但当前可达性未确认，使用时转入 DELAY */
     DPPD_ND6_STALE,
     /** 暂时沿用 MAC，等待 5 秒后进入主动探测 */
     DPPD_ND6_DELAY,
     /** 沿用缓存 MAC 发送数据，同时通过单播 NS 探测邻居 */
     DPPD_ND6_PROBE,
-    /** 探测次数耗尽，停止提供 MAC，冷却期后可重新解析 */
+    /** 探测次数耗尽，停止提供 MAC；5 秒冷却后再次 resolve 查询才重启解析 */
     DPPD_ND6_FAILED
 };
 enum dppd_nd6_local_state { DPPD_ND6_TENTATIVE, DPPD_ND6_PREFERRED, DPPD_ND6_DUPLICATE };

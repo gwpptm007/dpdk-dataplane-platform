@@ -8,9 +8,15 @@
 
 struct dppd_routing_service;
 
-/** 保存稳定端口映射，不把可复用的编号单独当作设备身份，也不证明内核规则所有权 */
+/** 一条网口与设备的对应记录，随路由文件保存；恢复时核对整条记录，防止端口编号复用 */
 struct dppd_routing_binding {
+    /** 当前 DPDK 网口编号，例如 0，与下方设备信息一起核对 */
     uint16_t port_id;
+    /**
+     * device：DPDK 设备名，例如 PCI 的 0000:03:00.0 或 TAP 的 net_tap0
+     * driver：PMD 驱动名，例如 net_mlx5、net_tap
+     * ifname：TAP 对应的 Linux 接口名，例如 dppd0；其他驱动在本路径中保持为空
+     */
     char device[128], driver[64], ifname[16];
 };
 

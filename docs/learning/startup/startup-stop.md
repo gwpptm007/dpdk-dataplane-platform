@@ -267,7 +267,7 @@ devices->pools[0]
 
 ## 链路状态
 
-两个网口启动后，`dppd_devices_init()` 调用 [dppd_devices_poll_links](../../../lib/device/device.c#L896)。它逐个检查已启动网口，先确认设备仍有效，再查询链路并把结果存到 `port->link_state`
+两个网口启动后，`dppd_devices_init()` 调用 [dppd_devices_poll_links](../../../lib/device/device.c#L895)。它逐个检查已启动网口，先确认设备仍有效，再查询链路并把结果存到 `port->link_state`
 
 普通初始化时尚未开启事件跟踪，因此先沿不进入复位事件核对的路径阅读；设备移除检查仍然执行。已经移除或无效的设备会触发移除处理并返回 `-ENODEV`，不会继续按正常网口查询
 
@@ -600,7 +600,7 @@ if ((parsed.role != DPPD_ENDPOINT_ROLE_UPLINK) != is_representor)
 
 拓扑收集完成后，返回 [dppd_runtime_init](../../../lib/runtime/runtime.c#L28)。此时网口已经启动，MAC 已保存到 `runtime->devices.ports[]`，worker 还没有开始收包
 
-下一段调用 [dppd_nd6_create](../../../lib/dataplane/nd6.c#L216)，创建 IPv6 邻居发现管理表。表中保存本机 IPv6 地址、网口 MAC、动态邻居缓存及等待 MAC 解析的报文槽位；创建时邻居缓存和等待槽位都为空
+下一段调用 [dppd_nd6_create](../../../lib/dataplane/nd6.c#L335)，创建 IPv6 邻居发现管理表。表中保存本机 IPv6 地址、网口 MAC、动态邻居缓存及等待 MAC 解析的报文槽位；创建时邻居缓存和等待槽位都为空
 
 ### MAC 数组怎样连接网口与 ND
 
@@ -640,11 +640,15 @@ rc = dppd_nd6_create(&runtime->nd6, cfg,
 
 ### 创建函数的完整过程
 
+同步远端 ND 管理更新后，独立启动仍从 `dppd_nd6_create()` 进入；它先把旧配置整理成策略和端口 MAC，再调用 `dppd_nd6_create_policy()` 完成分配与初始化。下面沿这条调用链阅读，未配置地址时仍返回 NULL；统一管理模式使用可保持关闭状态的常驻容器，尚未展开学习
+
 ```text
 检查输出指针、配置和 MAC 数组
   ├─ 未配置本机 ND 地址 → 返回 0，runtime->nd6 保持 NULL
   └─ 配置了本机 ND 地址
        → 校验配置
+       → 整理本机地址策略和相关端口 MAC
+       → 调用 dppd_nd6_create_policy
        → calloc 分配并清零管理表
        → 准备随机种子、互斥锁和初始状态
        → 逐个复制本机 IPv6 配置，按端口号找到并复制 MAC
@@ -680,7 +684,7 @@ runtime_init：创建 ND 表，本机地址为 TENTATIVE
   → 收包循环：队列 0 调用 ND tick，各队列继续处理等待包和网口 RX
 ```
 
-入口见 [dppd_worker_main](../../../lib/dataplane/worker.c#L575)。只有 `queue_id == 0` 的 worker 推进 ND 定时任务，不额外创建定时线程；其他 worker 仍可接收 ND 报文并执行各自的收包任务
+入口见 [dppd_worker_main](../../../lib/dataplane/worker.c#L577)。只有 `queue_id == 0` 的 worker 推进 ND 定时任务，不额外创建定时线程；其他 worker 仍可接收 ND 报文并执行各自的收包任务
 
 ```c
 if (runtime->nd6 != NULL) {
@@ -690,7 +694,7 @@ if (runtime->nd6 != NULL) {
 }
 ```
 
-本段进入 [dppd_nd6_tick](../../../lib/dataplane/nd6.c#L481)，重点读第一个循环：处理本机 IPv6 地址的重复地址检测，即 DAD。后面的动态邻居过期和探测属于另一个循环，本段不混在一起展开
+本段进入 [dppd_nd6_tick](../../../lib/dataplane/nd6.c#L664)，重点读第一个循环：处理本机 IPv6 地址的重复地址检测，即 DAD。后面的动态邻居过期和探测属于另一个循环，本段不混在一起展开
 
 ### 反复调用与到期处理
 
@@ -750,11 +754,11 @@ TENTATIVE，sent=false
 
 实际执行时刻取决于后续扫描，不保证刚好在期限那一刻完成。发送成功和没有观察到冲突，也不等于证明整个网络永远不存在重复地址
 
-[dppd_nd6_port_ready](../../../lib/dataplane/nd6.c#L273) 要求该网口配置的本机地址全部为 PREFERRED。未启用 ND 或该口没有本机地址配置时不额外限制。`process_batch` 先处理 ND 控制报文，再检查 IPv6 数据包的入口就绪状态，所以地址待检测时仍能接收检测相关报文
+[dppd_nd6_port_ready](../../../lib/dataplane/nd6.c#L439) 要求该网口配置的本机地址全部为 PREFERRED。未启用 ND 或该口没有本机地址配置时不额外限制。`process_batch` 先处理 ND 控制报文，再检查 IPv6 数据包的入口就绪状态，所以地址待检测时仍能接收检测相关报文
 
 ## 检测 NS 的构造与发送
 
-继续沿本机地址检测分支的调用进入 [transmit](../../../lib/dataplane/nd6.c#L156)，随后通过回调进入 [send_nd6](../../../lib/dataplane/worker.c#L76)。本次是新建检测报文，收到的业务 mbuf 不参与这次构造
+继续沿本机地址检测分支的调用进入 [transmit](../../../lib/dataplane/nd6.c#L165)，随后通过回调进入 [send_nd6](../../../lib/dataplane/worker.c#L76)。本次是新建检测报文，收到的业务 mbuf 不参与这次构造
 
 ```text
 worker_main：传入 send_nd6、worker
@@ -862,7 +866,7 @@ rte_eth_tx_burst(port_id, worker->queue_id, &mbuf, 1)
 
 ## ND 接收校验与本机地址冲突
 
-上一段读完检测 NS 的发送。这里回到正常收包循环：PMD 将接收的 mbuf 交给 worker，经过 [process_batch](../../../lib/dataplane/worker.c#L283) 的报文头解析，再调用 [dppd_nd6_input](../../../lib/dataplane/nd6.c#L301)。接收路径由实际收到这个包的 worker 执行，不限定为推进定时任务的队列 0
+上一段读完检测 NS 的发送。这里回到正常收包循环：PMD 将接收的 mbuf 交给 worker，经过 [process_batch](../../../lib/dataplane/worker.c#L283) 的报文头解析，再调用 [dppd_nd6_input](../../../lib/dataplane/nd6.c#L459)。接收路径由实际收到这个包的 worker 执行，不限定为推进定时任务的队列 0
 
 ```text
 RX → process_batch → 解析报文头
@@ -1051,22 +1055,671 @@ S 表明通告是查询应答，O 表明是否允许覆盖已有缓存；标志�
 
 下一段沿这里的 `process_waiting()` 继续，把“邻居已解析”和“原来等待的业务包重新处理”接起来
 
+## 等待业务包的取回与重处理
+
+上次 NA 只更新了邻居表，并未直接发送此前暂存的业务包。现在从 worker 循环中的 [process_waiting](../../../lib/dataplane/worker.c#L547) 接着读，每个 worker 轮询取回自己的队列记录，再决定释放还是重新处理
+
+```text
+process_batch：缺下一跳 MAC → hold 成功，ND 等待数组持有业务 mbuf
+  → 收到 NA，更新邻居缓存；worker 释放这次收到的 NA
+  → 后续 worker 循环调用 process_waiting
+  → take 按原 queue 取回业务 mbuf，清空等待槽位
+       ├─ 包已失效或原入口不存在 → worker 释放
+       └─ 仍可重试 → process_batch 重新解析和决定去向
+```
+
+这里没有专门的唤醒通知或另建发送线程。各 worker 每轮先处理等待包，再扫描各网口自己的 RX 队列。每次最多处理 `DPPD_MAX_BURST`，当前为 256 个；没有可取记录就结束本次轮询，不阻塞等待
+
+### take 返回 true 不保证 MAC 已解析
+
+调用 [dppd_nd6_take](../../../lib/dataplane/nd6.c#L795) 时传入当前 worker 的 `queue_id`、单调毫秒时间，以及用于接收结果的 `pending`
+
+| 记录情况 | 当前处理 |
+| --- | --- |
+| 槽位为空或属于其他 queue | 跳过 |
+| 邻居仍为 INCOMPLETE，包未失效且 100 ms 重试时间未到 | 继续留在等待数组 |
+| 邻居仍为 INCOMPLETE，但重试时间已到 | 取回重试，expired=false |
+| 邻居处于可沿用 MAC 的状态，如 REACHABLE 或 STALE | 可提前取回，expired=false |
+| 业务包超时、原邻居记录消失或邻居 FAILED | 取回，expired=true，交给 worker 释放 |
+
+所以 true 表示“已交回一个等待包”，而不是“可以直接发包”。false 表示当前没有可取出的记录，此时不能使用 pending 里的内容。100 ms 是等待业务包的重试时间，与邻居 NS 的发送间隔分别使用
+
+### 按邻居 ID 找记录，避免槽位复用串包
+
+等待项保存的是 `neighbor_id`，不是邻居数组下标。`take()` 按该 ID 查找：如果旧记录 ID=17 被删除，即使同一个数组槽位装入新记录 ID=18，原来等 ID=17 的包也会被判为失效，不会借用新邻居的 MAC
+
+查找和取出都在互斥锁保护下完成。找到可取项后：
+
+```c
+*pending = waiting->packet;
+pending->expired = expired;
+memset(waiting, 0, sizeof(*waiting));
+```
+
+这是结构体和 mbuf 指针的复制，没有复制报文字节，也没有释放 mbuf。清空槽位并减少等待计数后，等待数组不再持有该包，调用方重新负责它的后续处理
+
+```text
+入队成功：worker → ND 等待数组
+取回成功：ND 等待数组 → 对应队列的 worker
+```
+
+### worker 为什么还要检查原入口
+
+`pending.ingress` 保存这个业务包最初进入的网口。取回后，worker 用它查找入口记录，以便重新提供 process_batch 所需的上下文。如果原入口不存在，或 pending.expired 为 true，就释放 mbuf 并更新丢弃统计，不进入重新处理
+
+`queue` 指原处理队列，`ingress` 指原入口网口，均不是等待包准备使用的出口编号。等待项借邻居 ID 关联原出口及下一跳；重处理会再按当前规则和路由选择出口
+
+### 单个包怎样重新进入 process_batch
+
+```c
+process_batch(worker, ingress, &pending.mbuf, 1, true, pending.expires_ms);
+```
+
+| 参数 | 此处含义 |
+| --- | --- |
+| `ingress` | 恢复原入口上下文 |
+| `&pending.mbuf` | 把这个 mbuf 指针的地址当作只有一个元素的指针数组传入 |
+| `1` | 这次只处理取回的一个包 |
+| `true` | retry 标志，避免再次累计 RX、隧道观察和规则 COUNT |
+| `pending.expires_ms` | 沿用第一次等待时确定的截止时间 |
+
+重新处理仍会解析报文、匹配当前软件规则、查询当前路由和邻居、检查出口，再决定转发、丢弃或重新等待。取回期间规则和路由可能已经改变，因此不直接采用入队前的旧决定
+
+### 未取得 MAC 时可以再次入队，但不能续期
+
+例如第一次在 1000 ms 入队，截止时间为 6000 ms；1100 ms 时重试仍缺 MAC，再次 hold 时继续传 6000，不会改为 6100。每次重新入队会重新安排 100 ms 重试时间，整个包的 5 秒等待期限保持不变
+
+```text
+重新进入 process_batch
+  ├─ 已有可用 MAC、检查通过 → 改写并提交 TX
+  ├─ 仍缺 MAC、未超时且 hold 成功 → 再次交给等待数组
+  └─ 命中丢弃、出口不可用或入队失败 → worker 释放
+```
+
+从邻居更新到等待业务包重处理的联系到这里已接上。下一段回到 tick 的第二个循环，看动态邻居怎样从可达到过期、主动探测，再到 FAILED；这也解释本段 take 中“邻居失败则取回释放”的状态来源
+
+## 动态邻居的过期与探测
+
+上次 `take()` 将 FAILED 邻居的等待包标为失效。现在进入 [dppd_nd6_tick](../../../lib/dataplane/nd6.c#L664) 的第二个循环，查看这个状态怎样产生。第一个循环检测本机 IPv6 地址，第二个循环维护对方的动态邻居缓存，二者分别处理
+
+### 先看有 MAC 的邻居怎样变化
+
+```text
+收到有效查询应答 → REACHABLE
+  → 可达期限结束 → STALE，保留 MAC
+  → 业务再次查询使用该邻居 → DELAY，继续提供 MAC，等待 5 秒
+  → 5 秒到期仍未确认可达 → PROBE，用缓存 MAC 发单播 NS
+       ├─ 收到有效的可达确认 → REACHABLE
+       └─ 3 次尝试后再等满一次期限，仍未确认 → FAILED
+```
+
+STALE 也可能来自前面 NS/NA 中新学到但尚未确认可达的 MAC。状态的协议背景见 [RFC 4861 邻居缓存状态](https://www.rfc-editor.org/rfc/rfc4861.html#section-7.3.2)；下面的时间、次数和失败保留方式以本项目代码为准
+
+| 状态 | 当前 resolve 能否提供缓存 MAC | 后续处理 |
+| --- | --- | --- |
+| REACHABLE | 可以 | 可达期限结束转 STALE |
+| STALE | 可以 | 本次使用时转 DELAY，安排 5 秒期限 |
+| DELAY | 可以 | 到期后由 tick 转 PROBE |
+| PROBE | 可以 | 用单播 NS 重新确认可达性 |
+| FAILED | 不提供 | 冷却期后再次 resolve 才重启解析 |
+| INCOMPLETE | 不提供，返回 -EAGAIN | tick 用组播 NS 解析 MAC，业务包可尝试等待入队 |
+
+### STALE 到 DELAY 发生在实际查询时
+
+定时器只把到期的 REACHABLE 改为 STALE，不清除 MAC，也不立刻探测。[dppd_nd6_resolve](../../../lib/dataplane/nd6.c#L612) 在业务使用这个邻居时，才把 STALE 改为 DELAY 并设置 5 秒期限
+
+```text
+没有业务使用 → 保持 STALE，暂不主动探测
+有业务使用   → STALE 转 DELAY，本次仍返回缓存 MAC
+```
+
+tick 发现 DELAY 到期后，将 probes 清零并转为 PROBE。后续判断在同一次扫描中继续执行，因此满足条件时可以立即尝试第一次单播探测
+
+### 两种 NS 的目的不同
+
+| 状态 | 已有可用 MAC | 探测目的 IPv6 | 探测目的 MAC |
+| --- | --- | --- | --- |
+| INCOMPLETE | 尚未解析完成 | 下一跳地址对应的 solicited-node 组播 | 从组播 IPv6 映射得到 |
+| PROBE | 已缓存 MAC，仍需确认可达 | 下一跳 IPv6 本身 | 已缓存的 MAC |
+
+这里发送 NS 的源 IPv6 是本机已可用地址，与前面 DAD 使用 `::` 分别使用。若用于发送的本机地址不存在或不是 PREFERRED，代码暂时跳过发送，也不会增加 probes
+
+### 三次尝试之后，还要等一次期限
+
+代码先检查 probes 是否已经为 3，再尝试发送；发送后 probes 加 1，并把下一次期限设为当前时间加 1000 毫秒。计数针对尝试，发送回调失败也会消耗预算
+
+假设用于发送的本机地址可用、按期扫描，期间没有有效应答：
+
+```text
+t=0 秒：尝试 1，probes=1，下一次期限 t=1
+  t=1：尝试 2，probes=2，下一次期限 t=2
+  t=2：尝试 3，probes=3，下一次期限 t=3
+  t=3：预算已经耗尽 → FAILED，冷却期限设为 t=8
+```
+
+第三次尝试后仍留出等待应答的时间，不在尝试结束时立即判失败。扫描可能晚于期限，因此示例时间是条件成立时的说明，不是精确调度保证
+
+### FAILED 冷却到期后，谁重新发起解析
+
+FAILED 不提供缓存 MAC，等待该邻居的业务包由 `take()` 取回并标记失效。5 秒冷却到期后，tick 不自动重启；后续业务再次调用 resolve 时，才清零尝试次数并转回 INCOMPLETE
+
+```text
+FAILED，冷却未到期 → resolve 返回不可达
+FAILED，冷却已到期且业务再次查询
+  → INCOMPLETE → resolve 返回 -EAGAIN
+  → 业务包尝试 hold → tick 开始新一轮组播解析
+```
+
+原来的 MAC 字节可能仍保留在记录中，但 FAILED 与 INCOMPLETE 都不会直接把它作为可用结果返回
+
+注意三个 5 秒分别属于不同对象：DELAY 的首次探测等待、FAILED 的重新解析冷却，以及单个业务包首次入队后的总等待期限，不能相互续期
+
+### 长期未用记录的清理
+
+只有 STALE 或 FAILED 且自创建或最近一次 resolve 查询以来已闲置至少 60 秒的记录，才由本段清空槽位、减少 active 并更新查询版本。依据是 used_ms，不是进入 STALE/FAILED 的时刻；因此刚到期转为 STALE 的长期闲置记录也可能在同次扫描中被清理
+
+清理的是邻居记录，未在这里释放等待业务 mbuf。等待项之后按旧 neighbor_id 找不到记录，便由 take 标记失效并交给原 worker 释放
+
+运行时 tick 处理完返回 worker 循环。学习上，ND 从初始化、检测收发到邻居维护与业务包重处理已形成一条走读记录；下一段回看 runtime_init 中 ND 创建之后的初始化流程，连接跟踪与 NAT 按原安排暂缓，继续看可选抓包服务与初始化返回
+
+## 可选抓包与初始化返回
+
+ND 运行路径已经展开过，现在按学习顺序回看 `dppd_runtime_init()` 中 ND 表创建之后的准备工作。运行中的 tick 仍返回 worker 循环；这里阅读的是启动阶段尚未提交 worker 的位置
+
+```text
+runtime_init
+  → 准备 worker 配置、端口配对、设备和拓扑
+  → 收集 MAC，创建可选 ND 表
+  → 按配置创建会话表，本段仍暂缓其内部实现
+  → 按 enable_pdump 初始化抓包支持
+  → 返回 0，main 继续创建规则与管理入口
+  → 后续 runtime_start 才提交 worker
+```
+
+### enable_pdump 从哪里来
+
+命令行参数 `--enable-pdump` 使 `cfg->enable_pdump` 为 true，默认关闭。当前分支只执行 `rte_pdump_init()`，初始化抓包 IPC 请求处理，让独立抓包程序能够请求在指定端口、队列捕获报文
+
+初始化与具体捕获分别对应 DPDK 的 init 和 enable 接口，详见 [DPDK pdump API](https://doc.dpdk.org/api/rte__pdump_8h.html)。这段初始化没有选择输出文件，也不会自动开始捕获或写入 pcapng
+
+```text
+dppd：--enable-pdump → 初始化抓包请求处理
+独立抓包程序：请求启用指定端口和队列的捕获 → 接收捕获副本并写文件
+```
+
+实际启用捕获时，DPDK 注册 RX/TX 回调并将报文副本交给抓包程序使用，机制见 [DPDK Packet Capture Library](https://doc.dpdk.org/guides/prog_guide/pdump_lib.html)
+
+本项目的 [capture_pdump.sh](../../../scripts/capture_pdump.sh) 调用 `dpdk-dumpcap`。已有运行说明见 [build_and_run.md 的抓包段落](../../build_and_run.md#抓包)；本段只阅读源码和脚本，没有启动抓包进程
+
+### 两个布尔字段分别记录什么
+
+| 字段 | 保存的信息 |
+| --- | --- |
+| `cfg->enable_pdump` | 配置是否要求本次启动初始化抓包支持 |
+| `runtime->pdump_initialized` | 本次初始化是否成功，退出时是否需要调用 uninit |
+
+因此 `pdump_initialized=true` 不能用来判断当前是否正在捕获报文。成功后，`dppd_runtime_destroy()` 会在 worker 退出后，根据这个标志调用 `rte_pdump_uninit()` 并清零标志
+
+### 初始化失败怎样结束启动
+
+```text
+rte_pdump_init 返回非 0
+  → 打印错误
+  → 销毁已建 ND 表，指针置 NULL
+  → 销毁已建会话表，清空指针和自有标志
+  → 调用 dppd_devices_stop 尝试清理设备资源
+  → runtime_init 返回 -EIO
+  → main 跳到 cleanup_eal，停止后续启动
+```
+
+此时 worker 业务循环尚未提交，因此不会一边收包一边销毁这些表。设备清理的实际结果受设备停止、关闭及回调注销影响，这里按源码说明调用顺序，不把调用清理函数解释为保证全部资源已释放
+
+### 成功返回 0 后接到哪里
+
+未启用抓包时跳过该分支；启用并初始化成功则记录标志。两种正常情况最后都返回 0
+
+返回 [main 的 runtime 初始化调用](../../../app/dppd/main.c#L487) 后，继续执行 [dppd_control_init 调用](../../../app/dppd/main.c#L495)。此时 runtime 已准备设备、拓扑和可选 ND 等资源，worker 尚未开始业务收包
+
+下一段只串联启动时的对象引用与顺序：control 怎样准备规则管理对象，main 怎样把软件规则和路由对象连接到 runtime，以及设备事件保护怎样在启动前绑定；此前已读过的规则安装细节不在这里重新逐层展开
+
+## main 中的对象连接
+
+`runtime_init()` 返回成功后，继续 [main 的 control 初始化调用](../../../app/dppd/main.c#L495)。此时网口已准备，worker 还未提交；本段只串联对象与依赖，不重新展开此前已学过的规则安装事务
+
+```text
+main
+  → runtime_init：准备设备、拓扑和可选 ND 等资源
+  → control_init：准备规则记录、软件规则表和网卡规则管理对象
+  → runtime_device_bind：接上设备事件检查
+  → runtime_set_software_backend：把软件规则对象的地址交给 runtime
+  → 保存 ND、会话表的共享指针
+  → setup_ipv4_routing：下一段继续准备路由
+```
+
+### control 为什么接收 runtime 的拓扑
+
+`dppd_control_init(&control, &runtime.devices.topology, config.rule_capacity, NULL)` 用设备拓扑初始化规则管理能力。`control.topology` 保存传入地址，之后规则规划可查询安装口、代理口及交换域关系
+
+对象的职责分别是：
+
+| 对象 | 本段准备的内容 | 后面谁使用 |
+| --- | --- | --- |
+| `control.rules` | 规则及版本等管理记录 | 管理请求、规则安装与查询 |
+| `control.software` | 软件匹配表、快照和计数器 | worker 查表并执行规则动作 |
+| `control.rte_flow` | PMD 规则接口、驱动句柄及安装记录 | 控制流程调用网卡规则 API |
+| `control.topology` | 借用 runtime 已收集的设备拓扑 | 规则规划与设备身份核对 |
+
+创建这些对象是准备管理能力，此处尚未按某条用户规则执行安装。拓扑仍由 runtime 持有，退出时 control 的清理必须早于 runtime 的销毁
+
+### 设备事件保护怎样接到规则操作
+
+随后 [dppd_runtime_device_bind](../../../lib/runtime/device_recovery.c#L52) 建立两边的联系：
+
+```c
+recovery->control = control;
+control->rte_flow.driver_ready = driver_ready;
+control->rte_flow.driver_context = runtime;
+```
+
+第一项让 runtime 的异常处理能够访问 control；后两项是回调与上下文的配对：规则操作需要检查设备时，调用 `driver_ready(runtime)`，从 runtime 读取事件状态
+
+```text
+规则操作前的检查
+  → control.rte_flow.driver_ready(control.rte_flow.driver_context)
+  → 实际调用 device_recovery.c 的 driver_ready(runtime)
+  → 检查事件序号、移除/销毁标志、正在执行的事件回调等
+       ├─ 符合已确认状态 → 允许继续
+       └─ 出现异常 → 隔离普通规则操作，请求 worker 停止，返回错误
+```
+
+“隔离”在这里是停止继续按正常状态操作网卡规则，留待恢复核对，不是在这个检查函数中直接执行设备复位
+
+绑定函数还会启用事件跟踪：复用已经注册的回调，补齐设备移除、复位和销毁事件的登记，并检查登记期间是否已经有事件到达。绑定发生在启动规则重放之前，因为重放也可能向网卡安装规则，不能只等 worker 启动后才开始检查
+
+### worker 怎样找到 control 的软件规则表
+
+[main 的软件规则指针绑定](../../../app/dppd/main.c#L514) 调用：
+
+```c
+dppd_runtime_set_software_backend(&runtime, &control.software);
+```
+
+函数只将地址写入 runtime，关联关系为：
+
+```text
+worker->runtime
+  → runtime.software_backend
+  → control.software
+  → 当前已发布的软件规则快照
+```
+
+这里没有复制软件规则对象。后续管理请求修改同一个对象并发布新快照，worker 沿原来的指针查表；退出时先等待 worker 返回，再释放 control 持有的规则表和计数器
+
+### ND 与会话表为什么反过来交给 control
+
+```c
+control.conntrack = runtime.conntrack;
+control.nd6 = runtime.nd6;
+```
+
+这两项也是指针赋值，不另建表，不转移销毁责任。control 根据功能是否启用约束规则规划，例如避免网卡直接处理绕过 CPU 需要执行的 ND 或连接跟踪逻辑；连接跟踪内部流程仍按此前安排暂缓
+
+```text
+control.topology → runtime.devices.topology
+worker → runtime.software_backend → control.software
+runtime.nd6 与 control.nd6 → 同一张 ND 表，由 runtime 持有
+runtime.conntrack 与 control.conntrack → 同一张会话表，由 runtime 持有
+```
+
+其中控制服务持有的软件规则对象交给 runtime 使用，runtime 持有的 ND 等对象则交给 control 判断规划条件。共享的是对象地址，各自原来的销毁责任保持不变
+
+如果 control 初始化失败，main 转去清理 runtime；如果设备事件绑定失败，则先走 control 清理，再清理 runtime。worker 在这些步骤成功前尚未提交
+
+本段读到 `setup_ipv4_routing(&runtime, &control)` 之前。下一段继续同一条启动路径，查看路由配置怎样根据实际设备建立绑定，以及路由器怎样交给 runtime 供 worker 查询
+
+## 启动路由与实际网口对应
+
+从 main 的对象连接继续进入 [setup_ipv4_routing](../../../app/dppd/main.c#L304)。它处理 `routing_path` 指定的独立路由文件：未配置该路径时直接返回 0；配置了路径时，先收集实际网口信息，再创建或恢复路由服务，并把路由器交给 runtime
+
+```text
+main 调用 setup_ipv4_routing
+  → 当前网口 → 编号、设备名、驱动、TAP 接口名
+  → dppd_routing_open → 创建或恢复 control.routing
+  → dppd_routing_router → 取出服务中的 router
+  → runtime_set_ipv4_router → 保存地址，供 worker 查询
+```
+
+名字中保留 ipv4，但当前路由对象与存储实现也支持 IPv6 路由和静态邻居。这里沿独立路由文件路径学习；`--managed-routing` 的统一配置路径另有入口，详见 [统一管理的双栈路由](../../managed_routing.md)
+
+### bindings 是网口对应记录，不是路由条目
+
+`bindings[DPPD_MAX_PORTS]` 是局部数组，每个已配置网口填一项。字段定义在 [dppd_routing_binding](../../../include/dppd/routing.h#L12)：
+
+| 字段 | 保存内容 | 例子 |
+| --- | --- | --- |
+| port_id | 当前 DPDK 网口编号 | 0 |
+| device | DPDK 设备名称 | PCI 的 `0000:03:00.0`，或 TAP 的 `net_tap0` |
+| driver | PMD 驱动名称 | `net_mlx5` 或 `net_tap` |
+| ifname | TAP 对应的 Linux 接口名，其他驱动在本路径中留空 | `dppd0` |
+
+例如下面是假设的 PCI 网口记录，不是本机运行输出：
+
+```text
+bindings[0]
+  port_id = 0
+  device  = "0000:03:00.0"
+  driver  = "net_mlx5"
+  ifname  = ""
+```
+
+端口编号可能被复用。旧文件即使也写端口 0，本次如果对应另一个设备，就不能按原文件继续恢复；因此打开路由服务时会核对整条对应记录，而不只看编号
+
+### 先用实际设备和拓扑填写记录
+
+循环中 `port` 来自已初始化的设备数组，提供当前编号、设备身份和 MAC；`endpoint` 从拓扑按该编号查找，提供驱动信息
+
+如果找不到拓扑记录、设备名未确认，或者 MAC 不是有效单播地址，就返回 `-ENODEV`。路由转发会使用出口源 MAC，因此不能仅有路由条目却缺少有效网口 MAC
+
+TAP 还要额外查询：
+
+```text
+DPDK 网口 → rte_eth_dev_info_get → Linux if_index
+  → if_indextoname → bindings[i].ifname
+```
+
+这里的接口编号与 DPDK port_id 分别使用。接口名转换失败会返回负错误码，不把空名称当作成功结果保存
+
+### 打开服务，复制对应记录并恢复路由
+
+```c
+rc = dppd_routing_open(&control->routing, runtime->config.routing_path,
+                      bindings, runtime->devices.nb_ports);
+```
+
+[这个函数](../../../lib/control/routing.c#L379)接收本次启动的网口对应记录，并复制到服务内部，因此 setup 返回后不再依赖局部 bindings 数组
+
+```text
+文件已存在 → 核对格式、设备对应关系及路由内容 → 恢复配置
+文件不存在 → 创建版本 1 的空路由与静态邻居表并保存
+```
+
+打开的是项目自己的路由存储文件，不是读取系统内核的路由表。空表也不代表有默认出口；实际查询结果仍取决于后续配置的路由和邻居。独立文件锁和恢复过程下一段再展开
+
+### control 持有服务，runtime 借用同一个路由器
+
+打开成功后执行：
+
+```c
+dppd_runtime_set_ipv4_router(runtime, dppd_routing_router(control->routing));
+```
+
+`dppd_routing_router()` 只返回服务中已有的 router 指针；setter 在 worker 启动前保存它，没有复制第二份路由表
+
+```text
+control.routing → 路由服务 → 服务持有的 router
+runtime.ipv4_router ───────→ 同一个 router
+worker->runtime ──────────→ 通过 runtime 查询这个 router
+```
+
+服务负责路由配置的管理与保存，worker 使用已发布的路由结果处理报文。后续修改路由仍作用于这个路由器，runtime 不需要再换一个地址。销毁服务前必须停止 worker，避免它继续使用已释放的对象
+
+setup 成功返回 0；任何网口身份或路由打开错误都会交回 main，进入 control 和 runtime 的清理路径。此时 worker 尚未提交运行
+
+下一段进入 dppd_routing_open，重点看独立锁的作用，以及新文件初始化和已有文件恢复两条分支
+
+## 路由服务的独立锁与新旧文件
+
+从 `setup_ipv4_routing()` 的调用进入 [dppd_routing_open](../../../lib/control/routing.c#L379)。前者已经收集当前网口与设备的对应记录，后者复制这些记录、取得独立锁，并从项目自己的二进制路由文件恢复配置或创建空表
+
+```text
+setup_ipv4_routing
+  → dppd_routing_open(&control.routing, path, bindings, count)
+       → 复制网口对应记录，排序并拒绝重复端口
+       → 规范化路径，打开父目录
+       → 打开独立 .lock 文件，取得排他锁
+       → 已有文件：校验并恢复；文件不存在：准备版本 1 空表
+       → 创建内存 router，复查旧文件或保存新文件
+       → 全部成功后写入 control.routing
+  → runtime 借用 service->router，供后续 worker 查路由和静态邻居
+```
+
+### 服务内部持有什么
+
+`dppd_routing_service` 持有内存 router、文件句柄、网口对应记录以及上次确认的文件内容。对象字段已在源码中按用途补充说明
+
+| 内容 | 用途 |
+| --- | --- |
+| router | 路由与静态邻居的内存对象，runtime 借用 |
+| lock_fd | 独立锁文件，服务存续期间保留打开并持锁 |
+| snapshot_fd | 当前已核对的数据文件，供后续保存前复查 |
+| directory_fd | 数据文件所在目录，供保存后的目录同步 |
+| bindings | 服务自己的网口对应记录副本，不再依赖 setup 的局部数组 |
+| expected 与 expected_size | 上次确认的文件字节及有效长度，用于检测外部改动 |
+
+分配服务后先把三个文件描述符设为 -1，失败清理时只关闭实际打开的文件；不能把 calloc 产生的初始值 0 误作已打开的资源
+
+### 路径准备不是读取路由
+
+[prepare_paths](../../../lib/control/routing.c#L357) 先处理路径。例如以下只是路径含义示例：
+
+```text
+数据文件：/tmp/routes.bin
+锁文件：  /tmp/routes.bin.lock
+父目录：  /tmp
+```
+
+数据文件可以不存在，但父目录必须存在。函数保存规范化路径并打开父目录，此时还没有开始恢复路由条目
+
+### 为什么锁单独放在 .lock 文件
+
+```c
+flock(service->lock_fd, LOCK_EX | LOCK_NB)
+```
+
+`LOCK_EX` 要求排他锁，`LOCK_NB` 表示被占用时立即失败。当前代码把锁冲突转为 `-EBUSY`，不会在启动过程中一直等待，含义见 [Linux flock 手册](https://man7.org/linux/man-pages/man2/flock.2.html)
+
+保存路由时，数据文件会由临时新文件替换。打开的旧文件描述符仍对应旧文件，不能用“锁住旧数据文件”代表新文件也受同一把锁约束，因此项目把锁放在独立文件上；相关文件替换语义见 [rename 手册](https://man7.org/linux/man-pages/man2/rename.2.html)
+
+```text
+一直保留：routes.bin.lock 的锁
+会被替换：routes.bin 的数据文件
+```
+
+锁文件存在不表示正被占用，是否占用由 flock 判断。成功关闭服务时关闭锁句柄并释放锁，代码不要求删除 .lock 文件。这里是遵守同一锁协议的进程之间互斥，后续文件复查仍用于发现其他改动
+
+### 新文件与旧文件怎样分支
+
+| 文件情况 | 本次处理 |
+| --- | --- |
+| 已存在 | 核对文件身份、支持的长度和格式、校验和、当前网口对应及配置内容，恢复到 initial |
+| 不存在，错误为 ENOENT | 使用预先准备的 generation=1 空配置 |
+| 权限等其他打开错误，或旧文件校验失败 | 失败清理并返回错误，不用空表继续启动 |
+
+空配置不包含默认路由和静态邻居，不能据此推断报文已有出口。解码接受的文件长度区分旧 IPv4 格式与双栈格式，格式和设备对应必须与本次启动相符
+
+两条路径随后都创建内存 router，再读取它整理后的配置：旧文件重新编码后必须与原内容一致，并复查文件与目录状态；新文件则调用 save，将空表完整保存成功后才返回服务
+
+“校验和正确”只说明字节满足校验值，仍要检查配置内容与规范顺序。因此代码在创建路由器之后还有一次编码比较
+
+### 何时把对象交给 control
+
+```c
+service->persisted_generation = canonical.generation;
+*result = service;
+return 0;
+```
+
+所有步骤成功后才写入输出指针，router、锁句柄和配置记录随服务保留；失败则调用 `dppd_routing_close()` 清理。路由器若无法销毁，close 返回错误并保留服务，不把仍在使用的对象强行释放
+
+路由服务打开成功后，setup 将服务中的 router 地址保存到 runtime，再返回 main。本段先掌握打开与恢复的整体流程，不逐字节展开文件编码。下一段回到 main，串联保存规则的启动重放和管理请求入口，具体规则增删改继续沿用已有学习记录
+
+## 规则恢复与管理请求入口
+
+路由准备返回 main 后，继续 [保存规则的启动恢复调用](../../../app/dppd/main.c#L541)。这里要区分两个配置文件：
+
+| 配置路径 | 恢复的内容 |
+| --- | --- |
+| routing_path | 路由与静态邻居，由路由服务管理 |
+| state_path | 规则快照，恢复到软件规则表或网卡规则对象 |
+
+本段按 main 的启动顺序阅读，不重新展开之前已走读的规则事务
+
+```text
+路由准备成功
+  → 配置了规则快照路径：加载并重新安装规则
+       ├─ 成功 → 继续
+       ├─ 普通错误 → 清理并退出
+       └─ 回滚未完成 → 标记恢复隔离，保留待清理对象
+  → 创建管理 socket，供后续主线程处理请求
+  → 注册信号与诊断入口，检查设备与恢复状态
+       ├─ 正常路径 → runtime_start 提交 worker
+       └─ 隔离路径 → 保留受限管理处理，main 不走正常 worker 启动分支
+```
+
+### 为什么恢复规则发生在启动 worker 之前
+
+runtime 和 control 的资源已经创建，但用户规则尚未从保存文件重放。恢复会重新执行软件规则或网卡规则安装，因此必须先完成设备事件检查的绑定，再开始恢复，并在正常恢复后才开始业务收包
+
+`config.state_path` 为空时跳过本次恢复；配置了路径时调用 `dppd_control_persistence_restore()`。文件不存在会建立空规则快照，其他读取、校验或安装错误按恢复结果处理
+
+### 特殊错误为什么仍保留进程
+
+main 检查返回码与恢复状态的组合：
+
+```text
+restore_rc == -EUCLEAN
+  且 control.recovery_state == RECONCILIATION_REQUIRED
+    → recovery_isolation = true
+
+其他非零恢复结果
+    → goto cleanup_control
+```
+
+这个特殊组合表示恢复失败后的回滚仍有待清理对象。进程保留对象与驱动句柄，供恢复查询和清理重试使用，不能按正常状态继续转发。仅看到一个 -EUCLEAN 返回值，并不足以判断应进入此分支
+
+### management_start 创建入口，不创建管理线程
+
+[dppd_management_start](../../../lib/management/server.c#L835) 将 control、devices、runtime 交给公共的 start_server，后者完成：
+
+```text
+socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC)
+  → bind 到 config.control_socket
+  → 设置仅启动用户可读写的权限
+  → listen
+  → 保存监听句柄和服务对象引用，started=true
+```
+
+默认路径为 `/tmp/dppd-control.sock`。入口供本机 dppctl 连接，消息边界由 SEQPACKET 保留。已有路径不会在 bind 前被无条件删除，避免抢占其他进程的管理入口
+
+成功后只代表入口已监听。请求要等后面的主线程循环调用 `dppd_management_poll()` 才处理；普通转发 worker 仍由 runtime_start 单独提交
+
+### 隔离路径允许做什么
+
+隔离启动同样建立管理入口，保留状态查询、清理重试及受限设备恢复操作，普通规则修改不放行。main 在这个分支轮询管理请求和设备状态，不执行下面的正常 worker 启动调用
+
+管理请求分发会检查 `control.recovery_state`，所以“socket 还在”不表示“所有命令都允许”。当残留清理完成、恢复状态变为 RESTART_REQUIRED 时，main 退出，下一次启动重新执行规则恢复
+
+### 两个状态不要混在一起
+
+```text
+management.started=true → 管理入口已经监听
+worker.state=RUNNING     → 对应 worker 已进入可运行状态
+```
+
+启动顺序先准备管理入口，再决定进入正常运行还是恢复隔离。恢复期间保留管理入口，是为了能够诊断和重试清理，不是把规则恢复失败当作正常启动
+
+下一段继续 main 中管理入口之后的步骤，串联信号、telemetry、设备检查和 worker 提交，说明正常运行与恢复隔离怎样分开进入
+
+## 启动前检查与 worker 提交
+
+管理入口已监听后，main 还要注册退出信号、准备诊断查询，再检查设备与恢复状态。这些步骤完成前，正常的 worker 任务尚未提交
+
+```text
+管理 socket 已监听
+  → 注册 SIGINT、SIGTERM 的处理函数
+  → 注册 telemetry 诊断命令，准备初始规则副本
+  → 检查设备事件
+       ├─ 检查出错 → 清理退出
+       └─ 检查完成 → 再看隔离标志和 control 的恢复状态
+            ├─ 需要隔离 → 受限管理循环
+            └─ 正常 → 核对外部监控 → runtime_start 提交 worker
+```
+
+这段图已放在对应的设备检查判断前，源码与这里采用同一条分支说明
+
+### 退出信号交给谁处理
+
+main 为 SIGINT 和 SIGTERM 注册 [handle_signal](../../../app/dppd/main.c#L255)。这个函数只执行 `stop_signal = 1`，不在信号处理函数里直接销毁资源
+
+```text
+运行中收到退出信号
+  → stop_signal=1
+  → 主线程结束管理循环
+  → 统一退出路径请求 worker 停止并等待返回
+  → 清理共享规则、协议和设备资源
+```
+
+stop_signal 供主线程检查，worker 读取的是 runtime.stop_requested。主线程负责把退出请求传到 worker，不能把设置信号标志理解为 worker 已经退出
+
+### telemetry 在这里提供什么
+
+[dppd_telemetry_register](../../../lib/observability/telemetry.c#L596) 注册项目的只读诊断命令，例如：
+
+| 命令 | 查询内容 |
+| --- | --- |
+| /dppd/stats | worker 收发统计 |
+| /dppd/rules | 已发布规则副本的概览 |
+| /dppd/rule | 指定规则的已发布记录 |
+| /dppd/rule_failures | 规则操作结果与失败信息 |
+
+DPDK 通过命令名与回调配对提供查询，机制见 [Telemetry Library](https://fast.dpdk.org/doc/guides/prog_guide/telemetry_lib.html#registering-commands)。这里注册项目命令，不负责提交业务收包任务
+
+本函数先根据 control 建立规则副本，再注册命令，全部成功后绑定 runtime。规则查询回调读取已发布副本，避免与主线程修改规则并发访问；统计查询则从 runtime 汇总 worker 统计。初始化失败会交回 main 进入清理
+
+### 设备检查返回 0，为什么还要看恢复状态
+
+[dppd_runtime_device_poll](../../../lib/runtime/device_recovery.c#L83) 在设备事件发生变化时，会隔离普通规则操作，并请求、等待 worker 停止。它返回的 0 可能表示检查正常，也可能表示停止处理已经完成
+
+因此 main 紧接着执行：
+
+```c
+recovery_isolation |= control.recovery_state != DPPD_CONTROL_RECOVERY_READY;
+```
+
+这个判断把“恢复期间已经要求隔离”和“设备检查后 control 不再 READY”合并起来。只看函数返回值，不能判断现在是否允许继续正常转发
+
+```text
+poll 返回非 0 → 清理退出
+poll 返回 0
+  ├─ 原来已经隔离 → 保持隔离
+  ├─ control 非 READY → 进入隔离
+  └─ 都正常 → 继续正常启动路径
+```
+
+### 何时才提交 worker
+
+隔离路径停留在受限管理循环。正常路径先核对外部恢复监控状态，通过后才执行 [runtime_start 调用](../../../app/dppd/main.c#L634)
+
+runtime_start 把各 worker 的工作函数提交到选定 lcore。它返回 0 表示提交成功；各 worker 完成自身准备后才发布 RUNNING，主线程随后进入正常管理循环
+
+下一段从运行计时与统计期限继续，看主线程怎样与 worker 并行工作，以及运行时长、信号和设备异常怎样结束运行
+
 ## 怎么对应到代码
 
 | 看图中的哪一步 | 文件与函数 | 在这里完成什么 |
 | --- | --- | --- |
 | 主机准备 | [scripts/bind_nic.sh](../../../scripts/bind_nic.sh) | 提供 VFIO 驱动加载与网卡绑定，大页需在启动前另行准备；具体操作取决于驱动和部署环境 |
-| 初始化环境和参数 | [app/dppd/main.c:395](../../../app/dppd/main.c#L395) · `main` | 先调用 `rte_eal_init`，再由 `dppd_config_parse` 读取项目参数 |
+| 初始化环境和参数 | [app/dppd/main.c:406](../../../app/dppd/main.c#L406) · `main` | 先调用 `rte_eal_init`，再由 `dppd_config_parse` 读取项目参数 |
 | 准备资源 | [lib/runtime/runtime.c:28](../../../lib/runtime/runtime.c#L28) · `dppd_runtime_init` | 准备 worker 配置，创建 mbuf 池，配置队列并启动网口 |
 | 准备 RSS 配置 | [lib/device/device.c:394](../../../lib/device/device.c#L394) · `prepare_port_configuration` | 选择项目请求且设备支持的 RSS 类型，写入 `plan->conf`，留给下一步提交 |
-| 连接规则与管理入口 | [app/dppd/main.c:484](../../../app/dppd/main.c#L484) · `main` | 初始化 control，将软件规则对象交给 runtime，建立管理 socket |
-| 提交 worker 任务 | [lib/runtime/runtime.c:176](../../../lib/runtime/runtime.c#L176) · `dppd_runtime_start` | `rte_eal_remote_launch` 让指定 lcore 的 EAL 工作线程执行 `dppd_worker_main` |
-| 主线程的循环 | [app/dppd/main.c:622](../../../app/dppd/main.c#L622) · `main` | 周期检查运行状态，处理管理请求、统计和维护工作 |
-| worker 的循环 | [lib/dataplane/worker.c:575](../../../lib/dataplane/worker.c#L575) · `dppd_worker_main` | 按自己的队列编号扫描各网口，处理包后报告安全点与心跳 |
+| 连接规则与管理入口 | [app/dppd/main.c:495](../../../app/dppd/main.c#L495) · `main` | 初始化 control，将软件规则对象交给 runtime，建立管理 socket |
+| 提交 worker 任务 | [lib/runtime/runtime.c:286](../../../lib/runtime/runtime.c#L286) · `dppd_runtime_start` | `rte_eal_remote_launch` 让指定 lcore 的 EAL 工作线程执行 `dppd_worker_main` |
+| 主线程的循环 | [app/dppd/main.c:652](../../../app/dppd/main.c#L652) · `main` | 周期检查运行状态，处理管理请求、统计和维护工作 |
+| worker 的循环 | [lib/dataplane/worker.c:573](../../../lib/dataplane/worker.c#L573) · `dppd_worker_main` | 按自己的队列编号扫描各网口，处理包后报告安全点与心跳 |
 | 逐包处理入口 | [lib/dataplane/worker.c:527](../../../lib/dataplane/worker.c#L527) · `process_ingress` | `rte_eth_rx_burst` 取得 mbuf 指针，再进入 `process_batch` |
-| 通知停止 | [app/dppd/main.c:726](../../../app/dppd/main.c#L726) · `main` | 关闭管理入口，调用 `dppd_runtime_request_stop`，再调用 wait |
-| 等待 worker 返回 | [lib/runtime/runtime.c:275](../../../lib/runtime/runtime.c#L275) · `dppd_runtime_wait` | 使用 `rte_eal_wait_lcore` 确认工作函数返回并取得结果 |
-| 清理资源 | [app/dppd/main.c:748](../../../app/dppd/main.c#L748) · `main` | `control_fini` → `runtime_destroy` → `rte_eal_cleanup`；设备清理先关闭网口，再释放池 |
+| 通知停止 | [app/dppd/main.c:756](../../../app/dppd/main.c#L756) · `main` | 关闭管理入口，调用 `dppd_runtime_request_stop`，再调用 wait |
+| 等待 worker 返回 | [lib/runtime/runtime.c:385](../../../lib/runtime/runtime.c#L385) · `dppd_runtime_wait` | 使用 `rte_eal_wait_lcore` 确认工作函数返回并取得结果 |
+| 清理资源 | [app/dppd/main.c:778](../../../app/dppd/main.c#L778) · `main` | `control_fini` → `runtime_destroy` → `rte_eal_cleanup`；设备清理先关闭网口，再释放池 |
 
 ## 读图时抓住三个联系
 

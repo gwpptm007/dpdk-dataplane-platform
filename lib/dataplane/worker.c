@@ -539,18 +539,15 @@ static void process_ingress(struct dppd_worker *worker, const struct dppd_port *
 }
 
 /**
- * 从 ND 等待数组取回本队列的报文，每次最多处理 DPPD_MAX_BURST 个
- *
- * dppd_nd6_take 返回 true → 当前线程重新持有 pending.mbuf
- *   报文失效或原入口已不存在 → 释放 mbuf，更新丢弃统计
- *   否则 → process_batch 重新解析，并按最新软件规则、会话和路由决定去向
- *
- * retry 传 true，避免重复累计 RX 和规则 COUNT；expires_ms 沿用首次入队的截止时间
- * 重新处理后仍缺 MAC 的报文可以再次入队，不能依靠反复入队延长等待期限
+ * 轮询 ND 等待数组，取回本队列的报文，每轮最多处理 DPPD_MAX_BURST 个，不阻塞等待
+ * take 返回 true → worker 重新持有 mbuf → 失效则释放，否则交给 process_batch 重新决定去向
+ * 取回可能因为 MAC 已有、重试到期或记录失效，不等于可以直接发送
+ * retry=true 避免重复累计 RX 和规则 COUNT；再次入队仍沿用首次截止时间
  */
 static void process_waiting(struct dppd_worker *worker)
 {
     struct dppd_nd6_pending pending;
+    /** 各 worker 轮询自己的队列；本轮无可取记录就结束，继续下面的正常收包循环 */
     for (unsigned int i = 0;
          i < DPPD_MAX_BURST && dppd_nd6_take(worker->runtime->nd6, worker->queue_id, dppd_monotonic_ms(), &pending);
          ++i) {
@@ -563,6 +560,7 @@ static void process_waiting(struct dppd_worker *worker)
             if (ingress != NULL)
                 dppd_stats_add(&worker->port_stats[ingress - worker->runtime->devices.ports], &dropped);
         } else
+            /** &pending.mbuf 按一个包的数组传入，数量为 1；重试沿用原 mbuf 和原截止时间 */
             process_batch(worker, ingress, &pending.mbuf, 1, true, pending.expires_ms);
     }
 }
@@ -571,7 +569,7 @@ static void process_waiting(struct dppd_worker *worker)
  * EAL 在选定 lcore 上执行的工作函数，arg 是 runtime_start 传入的 worker 地址
  *
  * 取得 worker 和 runtime → 注册软件规则、路由读者 → 发布 RUNNING 状态
-     *   → 循环：队列 0 推进 ND 定时任务 → 各队列处理等待报文和收包 → 报告安全点和心跳
+ *   → 循环：队列 0 推进 ND 定时任务 → 各队列处理等待报文和收包 → 报告安全点和心跳
  *   → 停止或设备门禁生效：退出循环 → 注销读者 → 发布 STOPPED，返回 0
  *
  * 参数或读者注册失败返回 -1，尚未进入正常收包循环

@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-11-06",
+  "updated_at": "2026-11-10",
   "material_sync": {
-    "updated_at": "2026-11-06",
-    "description": "已补充 ND 初始化与检测收发、NS 对本机地址的应答、NA 标志与已有邻居更新，并连接到后续等待业务包的重处理",
+    "updated_at": "2026-11-10",
+    "description": "已补齐启动前信号与诊断命令注册、设备检查和恢复状态分支，并连接正常路径的 worker 提交；关键分支用 plain text 同步到源码",
     "topics": [
       {"title": "程序启动、运行、退出：先看全景", "href": "startup/index.html#overview"},
       {"title": "程序启动、运行与停止：分区 Mermaid 总图", "href": "startup/startup-stop.md"},
@@ -18,24 +18,24 @@
   "basis": "按实际源码走读与本次对话确认，已读过不等于已熟练掌握",
   "summary": "报文处理与规则管理已有走读记录；启动、运行和退出虽然讲过，但用户尚未建立整体理解。当前回到程序全貌，用固定例子重新梳理，连接跟踪与 NAT 暂缓展开",
   "current": {
-    "title": "3.1 NS 应答与 NA 邻居更新",
-    "description": "已走读 NS 学习请求者并回复 NA、R/S/O 标志、NA 只更新已有邻居以及 MAC 覆盖和可达状态的处理顺序；尚未确认掌握",
+    "title": "3.1 启动前检查与 worker 提交",
+    "description": "已串联退出信号、telemetry 查询副本、设备检查返回值与恢复状态，以及正常路径提交 worker 的条件，分支图已记录在代码判断前；尚未确认掌握",
     "section": "3.1",
-    "file": "lib/dataplane/nd6.c",
-    "fn": "dppd_nd6_input",
-    "review_href": "startup/startup-stop.md#ns-应答与-na-邻居更新",
-    "review_label": "回顾 NS 怎样应答、NA 怎样更新邻居缓存"
+    "file": "app/dppd/main.c",
+    "fn": "main",
+    "review_href": "startup/startup-stop.md#启动前检查与-worker-提交",
+    "review_label": "回顾管理入口之后怎样决定进入恢复循环或提交 worker"
   },
   "next": {
-    "title": "邻居解析后，等待的业务包怎样继续处理",
-    "description": "从 ND 接收更新返回 worker 循环，进入 process_waiting 与 dppd_nd6_take，查看等待包如何交回原队列并重新进入 process_batch",
+    "title": "主线程与 worker 怎样并行运行",
+    "description": "从正常路径 runtime_start 返回后继续，查看运行时长与统计计时、主线程管理轮询和 worker 收包分工，以及正常或异常退出条件",
     "href": "startup/index.html#stage-2",
     "link_label": "对照收发资源准备阶段",
-    "file": "lib/dataplane/worker.c",
-    "fn": "process_waiting",
-    "caller_fn": "process_waiting",
-    "caller_anchor": "dppd_nd6_take(worker->runtime->nd6, worker->queue_id, dppd_monotonic_ms(), &pending);",
-    "caller_label": "查看等待业务包怎样从 ND 数组取回",
+    "file": "app/dppd/main.c",
+    "fn": "main",
+    "caller_fn": "main",
+    "caller_anchor": "timer_hz = rte_get_timer_hz();",
+    "caller_label": "定位 worker 提交之后的运行计时准备",
     "note": "沿已学的启动主线补齐配置与实际收包的联系；连接跟踪与 NAT 仍暂缓，已讲解不作为掌握依据"
   },
   "recent_flow": "程序外：按模式准备大页、权限和设备驱动 → 执行 dppd\n程序内：EAL → 参数 → runtime 初始化收发资源 → control 与管理入口\n运行：主线程管理；worker 按自己的队列处理报文\n退出：关闭入口 → 请求停止 → 等待 worker → 清理控制面、设备和池 → EAL 清理",
@@ -49,7 +49,7 @@
     "2.2": {"status": "最近重点复习", "detail": "匹配表构建、原子发布、QSBR、安全点、回收链表与计数器引用"},
     "2.3": {"status": "单条主流程已有走读记录", "detail": "新建、版本检查、修改和删除已讲，原理集中保存为参考；不表示全部分支已经掌握"},
     "2.4": {"status": "回滚与保存已有走读记录", "detail": "事务清理、保存失败、补写与隔离已讲，后续按需查阅"},
-    "3.1": {"status": "启动至停止已重新走读，尚未确认理解", "detail": "已串联 ND 检测收发、冲突处理、NS 应答与 NA 邻居更新；下一步查看等待业务包重处理，尚未确认掌握"}
+    "3.1": {"status": "启动至停止已重新走读，尚未确认理解", "detail": "已串联规则恢复、管理与诊断入口、设备状态和 worker 提交；下一步查看主线程与 worker 并行运行及退出条件，尚未确认掌握"}
   },
   "language_topics": ["函数指针与回调", "void *context 与对象地址", "结构体内容复制", "二级指针删除链表节点", "原子发布与读者安全点", "计数器引用管理"],
   "follow_up": [

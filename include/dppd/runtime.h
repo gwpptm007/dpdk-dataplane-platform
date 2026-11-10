@@ -76,6 +76,7 @@ struct dppd_runtime {
     uint16_t nb_workers;
     /** 停止请求只通知线程结束循环，不表示线程已经退出；释放共享资源前仍需等待 */
     atomic_bool stop_requested;
+    /** 本次 pdump IPC 初始化是否成功，退出时据此注销，不表示已经开始捕获报文 */
     bool pdump_initialized;
     bool workers_started;
     struct dppd_device_recovery device_recovery;

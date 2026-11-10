@@ -348,6 +348,12 @@ static int restore_actual_rules(struct dppd_control_service *service, struct dpp
     return rc;
 }
 
+/**
+ * 准备规则管理所需的记录、软件匹配表和网卡规则管理资源，供后续安装与查询使用
+ * 创建规则记录 → 准备网卡规则管理 → 登记配置网口 → 创建软件规则表
+ * topology 借用 runtime 的设备拓扑，rule_capacity 是规则记录数量上限
+ * 成功返回 0；失败按已完成的步骤调用对应清理，再返回负错误码
+ */
 int dppd_control_init(struct dppd_control_service *service, const struct dppd_topology *topology,
     uint32_t rule_capacity, const struct dppd_flow_api *flow_api)
 {
@@ -1825,7 +1831,11 @@ int dppd_control_remove_batch(struct dppd_control_service *service,
     return finish_observed(service, observed, rc);
 }
 
-/** 启动重放算一笔操作，缺文件时建立空快照的内部保存不会再增加一笔 flush */
+/**
+ * 启动时加载 path 中的规则，重新安装到软件表或网卡；文件不存在时建立空快照
+ * 成功返回 0，失败返回负错误码，调用方还需检查恢复状态
+ * 整次重放计一笔操作，建立空快照的内部保存不另计 flush
+ */
 int dppd_control_persistence_restore(struct dppd_control_service *service, const char *path)
 {
     bool observed = begin_observed(service, DPPD_RULE_OPERATION_RESTORE, 0, 0, 0, false, 0);

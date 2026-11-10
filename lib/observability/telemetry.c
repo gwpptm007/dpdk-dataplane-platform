@@ -588,7 +588,11 @@ static int latency_callback(const char *command, const char *parameters, struct 
     return 0;
 }
 
-/** 注册失败时保留已完成的进度，重试只补剩余命令，所有回调在绑定前都返回不可用 */
+/**
+ * 注册统计与规则诊断命令，先建立规则副本，全部命令注册成功后再绑定 runtime
+ * 例如 /dppd/stats 查询收发统计，/dppd/rules 查询已发布的规则副本
+ * 成功返回 0，失败返回负错误码；重试时只补未完成的命令注册
+ */
 int dppd_telemetry_register(const struct dppd_runtime *runtime, const struct dppd_control_service *control)
 {
     static const struct {

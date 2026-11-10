@@ -632,12 +632,14 @@ int dppd_nd6_resolve(struct dppd_nd6 *table, uint16_t port, const uint8_t addres
         goto done;
     }
     entry->used_ms = table->clock;
+    /** 失败冷却 5 秒后，只有再次查询才重启解析；tick 不会自动把 FAILED 改回 INCOMPLETE */
     if (entry->state == DPPD_ND6_FAILED && entry->due_ms <= table->clock) {
         entry->probes = 0;
         state(table, entry, DPPD_ND6_INCOMPLETE, table->clock);
     }
     if (entry->state == DPPD_ND6_REACHABLE && entry->due_ms <= table->clock)
         state(table, entry, DPPD_ND6_STALE, 0);
+    /** 实际使用 STALE 才安排 5 秒后的探测，当前包仍可沿用 MAC；无流量时不主动进入 DELAY */
     if (entry->state == DPPD_ND6_STALE)
         state(table, entry, DPPD_ND6_DELAY, table->clock + 5000);
     if (entry->state == DPPD_ND6_INCOMPLETE)
@@ -656,6 +658,8 @@ done:
  * worker 的队列 0 反复调用，每次到达扫描期限才处理；send 与 context 用于发送控制报文
  * 本机地址：检测 NS 提交成功 → 等待 1 秒 → 仍为 TENTATIVE 则改为 PREFERRED
  * 发送失败则保留待检测状态重试，接收路径发现冲突则改为 DUPLICATE
+ * 动态邻居：维护可达期限，推进 DELAY 到期后的单播探测，以及 INCOMPLETE 的组播解析
+ * 每次解析或探测最多尝试 3 次、间隔 1 秒；预算耗尽转为 FAILED，并保留 5 秒冷却期限
  */
 void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, void *context)
 {
@@ -692,8 +696,10 @@ void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, voi
         struct dppd_nd6_entry *entry = &table->entries[i];
         if (entry->id == 0)
             continue;
+        /** 可达期限结束只转 STALE，不清掉 MAC，也不立即发探测 */
         if (entry->state == DPPD_ND6_REACHABLE && entry->due_ms <= table->clock)
             state(table, entry, DPPD_ND6_STALE, 0);
+        /** STALE/FAILED 自创建或最近 resolve 查询起已闲置 60 秒，清理邻居槽位，不在此释放等待包 */
         if ((entry->state == DPPD_ND6_STALE || entry->state == DPPD_ND6_FAILED) &&
             table->clock - entry->used_ms >= 60000) {
             memset(entry, 0, sizeof(*entry));
@@ -701,6 +707,7 @@ void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, voi
             advance_revision(table);
             continue;
         }
+        /** DELAY 的 5 秒等待到期，清零本轮计数；下面可在同一次扫描中发送首次单播探测 */
         if (entry->state == DPPD_ND6_DELAY && entry->due_ms <= table->clock) {
             entry->probes = 0;
             state(table, entry, DPPD_ND6_PROBE, table->clock);
@@ -708,8 +715,10 @@ void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, voi
         if ((entry->state != DPPD_ND6_INCOMPLETE && entry->state != DPPD_ND6_PROBE) || entry->due_ms > table->clock)
             continue;
         struct local_address *owner = local(table, entry->port_id, NULL);
+        /** 用于发送 NS 的本机地址尚未可用时，暂不发探测，也不增加尝试计数 */
         if (owner == NULL || owner->state != DPPD_ND6_PREFERRED)
             continue;
+        /** 第三次尝试后仍等满 1 秒，到下次期限时才判失败；已有等待包由 take 标记失效 */
         if (entry->probes == 3) {
             state(table, entry, DPPD_ND6_FAILED, table->clock + 5000);
             table->status.failed++;
@@ -717,10 +726,12 @@ void dppd_nd6_tick(struct dppd_nd6 *table, uint64_t now, dppd_nd6_send send, voi
         }
         uint8_t destination[16];
         solicited(entry->address, destination);
+        /** INCOMPLETE 用组播询问未知 MAC；PROBE 已有缓存 MAC，改用单播确认对方是否仍可达 */
         bool unicast = entry->state == DPPD_ND6_PROBE;
         transmit(table, owner, DPPD_ICMPV6_NEIGHBOR_SOLICITATION, owner->configuration.address,
             unicast ? entry->address : destination,
             entry->address, unicast ? entry->mac : NULL, 0, send, context);
+        /** 计数的是发送尝试，回调失败也消耗预算；下一次至少 1 秒后处理 */
         entry->probes++;
         entry->due_ms = table->clock + 1000;
     }
@@ -776,14 +787,10 @@ int dppd_nd6_hold(struct dppd_nd6 *table, uint16_t port, const uint8_t address[1
     return rc;
 }
 /**
- * 从 ND 等待数组取出属于指定处理队列的一个报文，将 mbuf 交回调用方
- * queue 指定原处理队列，now 为当前毫秒时间，pending 是调用方提供的非空输出区
- *
- * 返回 true：已输出报文记录并清空对应等待槽位，pending->expired 表示是否须丢弃
- * 返回 false：当前没有可取出的记录，调用方不能使用 pending 中的内容
- *
- * 可取出情形：邻居已有 MAC、未完成解析但重试时间已到、报文或邻居状态已经失效
- * 因此返回 true 只表示取回一个包，不保证 MAC 已有或最终可以转发
+ * 按 queue 取出本队列一个可处理的等待包，now 用于判断重试和超时，pending 接收记录
+ * 可取出：邻居已有 MAC、INCOMPLETE 重试到期、报文或邻居记录失效
+ * true → 复制记录并清空槽位，mbuf 交回调用方，expired 表示须丢弃；不保证可直接转发
+ * false → 当前没有可取记录，不等待，调用方不能使用 pending 中的内容
  */
 bool dppd_nd6_take(struct dppd_nd6 *table, uint16_t queue, uint64_t now, struct dppd_nd6_pending *pending)
 {
@@ -797,6 +804,7 @@ bool dppd_nd6_take(struct dppd_nd6 *table, uint16_t queue, uint64_t now, struct 
         /** 只取本队列的有效记录，避免把同一 mbuf 同时交给不同处理队列 */
         if (waiting->packet.mbuf == NULL || waiting->packet.queue != queue)
             continue;
+        /** 按入队时保存的邻居 ID 查找，不能仅凭槽位下标，否则复用槽位会串到另一个邻居 */
         struct dppd_nd6_entry *entry = NULL;
         for (uint32_t j = 0; j < DPPD_ND6_LIMIT; ++j)
             if (table->entries[j].id == waiting->neighbor_id)
@@ -806,7 +814,7 @@ bool dppd_nd6_take(struct dppd_nd6 *table, uint16_t queue, uint64_t now, struct 
         /** 仍在等待 MAC 且未到重试时间才继续留队；MAC 已可用或记录失效时可提前取出 */
         if (!expired && entry->state == DPPD_ND6_INCOMPLETE && waiting->retry_ms > table->clock)
             continue;
-        /** 复制记录后释放等待槽位，mbuf 本身未释放，现在由调用方继续处理 */
+        /** 只复制记录和 mbuf 指针，不复制报文字节；清空槽位后，等待数组不再持有这个包 */
         *pending = waiting->packet;
         pending->expired = expired;
         memset(waiting, 0, sizeof(*waiting));

@@ -24,7 +24,11 @@ static void observe(struct dppd_runtime *runtime, struct dppd_device_event_snaps
     status->destroy_event_ports = event->destroy_ports;
 }
 
-/** 这里只读原子事件并封住本地仓库，不在回调或事务内部执行 stop/reset */
+/**
+ * 操作网卡规则前检查设备状态，context 是所属 runtime
+ * 读取设备事件 → 与上次确认的状态比较
+ * 正常返回 0；状态无法确认时暂停规则操作、请求 worker 停止，返回 -EUCLEAN
+ */
 static int driver_ready(void *context)
 {
     struct dppd_runtime *runtime = context;
@@ -40,11 +44,20 @@ static int driver_ready(void *context)
     return 0;
 }
 
+/**
+ * 让 control 在操作网卡规则前检查 runtime 记录的设备状态，须在 worker 启动前完成
+ * 保存对象地址和检查函数 → 登记移除、复位等事件 → 确认登记期间没有异常
+ * 成功返回 0，参数、事件登记或状态核对失败返回负错误码
+ */
 int dppd_runtime_device_bind(struct dppd_runtime *runtime, struct dppd_control_service *control)
 {
     if (runtime == NULL || control == NULL || runtime->workers_started || runtime->device_recovery.status.bound)
         return -EINVAL;
     struct dppd_device_recovery *recovery = &runtime->device_recovery;
+    /**
+     * 后续规则操作调用 driver_ready(driver_context) → 实际执行 driver_ready(runtime)
+     * 发现设备异常后，检查函数通过 recovery->control 暂停规则操作
+     */
     recovery->control = control;
     control->rte_flow.driver_ready = driver_ready;
     control->rte_flow.driver_context = runtime;
@@ -63,6 +76,10 @@ int dppd_runtime_device_bind(struct dppd_runtime *runtime, struct dppd_control_s
     return 0;
 }
 
+/**
+ * 检查设备事件，发生变化则暂停规则操作，请求并等待 worker 退出
+ * 返回 0 表示检查或停止处理完成，失败返回负错误码；调用方仍需检查 control 的恢复状态
+ */
 int dppd_runtime_device_poll(struct dppd_runtime *runtime)
 {
     if (runtime == NULL)

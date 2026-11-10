@@ -125,10 +125,15 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
         runtime->conntrack_owned = true;
     }
 
+    /**
+     * --enable-pdump 只初始化抓包 IPC 请求处理，具体端口和文件由独立抓包程序选择
+     * 本项目脚本调用 dpdk-dumpcap 发起捕获，此处不自动抓包或写文件
+     */
     if (cfg->enable_pdump) {
         rc = rte_pdump_init();
         if (rc != 0) {
             fprintf(stderr, "[dppd] cannot initialize pdump service\n");
+            /** worker 尚未启动，先清理已建的 ND、会话表并调用设备清理，再将失败返回 main */
             dppd_nd6_destroy(runtime->nd6);
             runtime->nd6 = NULL;
             runtime->nd6_owned = false;
@@ -138,18 +143,28 @@ int dppd_runtime_init(struct dppd_runtime *runtime, const struct dppd_config *cf
             dppd_devices_stop(&runtime->devices);
             return -EIO;
         }
+        /** 记录本次初始化成功，runtime_destroy 据此调用对应的 uninit */
         runtime->pdump_initialized = true;
     }
+    /** 收发资源准备结束，返回 main 继续控制与管理入口初始化；worker 要等 runtime_start 提交 */
     return 0;
 }
 
+/**
+ * 将已创建的软件规则表交给 runtime 使用，供 worker 查询已发布的规则快照
+ * worker->runtime → runtime.software_backend → 调用方的软件规则对象
+ * 只保存地址，对象仍由调用方持有，须等 worker 停止使用后才能销毁
+ */
 void dppd_runtime_set_software_backend(struct dppd_runtime *runtime, struct dppd_software_backend *software_backend)
 {
-    /** 保存 control.software 的地址供 worker 查表；启动前绑定，运行时不替换此指针 */
     if (runtime != NULL)
         runtime->software_backend = software_backend;
 }
 
+/**
+ * 在 worker 启动前保存路由器地址，供收包路径查询 IPv4/IPv6 路由和静态邻居
+ * 只借用调用方的 router，不复制路由表；runtime 为空或 worker 已启动时不修改
+ */
 void dppd_runtime_set_ipv4_router(struct dppd_runtime *runtime, struct dppd_ipv4_router *router)
 {
     if (runtime != NULL && !runtime->workers_started)
@@ -476,6 +491,7 @@ int dppd_runtime_destroy(struct dppd_runtime *runtime)
         if (runtime->workers_started)
             return waited != 0 ? waited : -EBUSY;
     }
+    /** 工作线程退出后，仅对本次初始化成功的 pdump 注销抓包 IPC 请求处理 */
     if (runtime->pdump_initialized) {
         (void)rte_pdump_uninit();
         runtime->pdump_initialized = false;
