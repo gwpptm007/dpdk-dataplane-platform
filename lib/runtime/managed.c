@@ -145,6 +145,15 @@ int dppd_managed_run(const struct dppd_config *config, struct dppd_recovery_scop
             nd_ports[i].port_id = runtime.devices.ports[i].port_id;
             memcpy(nd_ports[i].mac, runtime.devices.ports[i].mac.addr_bytes, 6);
         }
+        struct dppd_arp_port arp_ports[DPPD_MAX_PORTS] = {0};
+        for (uint16_t i = 0; i < runtime.devices.nb_ports; ++i) {
+            arp_ports[i].port_id = nd_ports[i].port_id;
+            memcpy(arp_ports[i].mac, nd_ports[i].mac, 6);
+        }
+        rc = dppd_flow_store_arp_bind(store, arp_ports, runtime.devices.nb_ports, dppd_monotonic_ms());
+        if (rc != 0)
+            goto destroy;
+        runtime.arp = dppd_flow_store_arp(store);
         rc = dppd_flow_store_nd6_bind(store, nd_ports, runtime.devices.nb_ports, dppd_monotonic_ms());
         /** 恢复的 ND 地址也需要真实网卡接收组播，准备失败时不能启动 DAD 和报文转发 */
         struct dppd_flow_nd6_view nd_view;
@@ -240,6 +249,8 @@ destroy:
         rc = -EIO;
     /** dirty 时 store 会拒绝关闭，先归还其等待包，不能让这些包留到 runtime 释放缓冲池之后 */
     dppd_nd6_discard_pending(runtime.nd6);
+    dppd_arp_discard_pending(runtime.arp);
+    runtime.arp = NULL;
     /** store 即将释放借出的容器，先清掉已停止 runtime 中的引用，避免清理路径留下悬空指针 */
     if (!runtime.conntrack_owned)
         (void)dppd_runtime_set_conntrack(&runtime, NULL);

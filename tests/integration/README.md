@@ -946,3 +946,17 @@ generation 保持，COUNT 归零；TCP 仍被阻断并重新计数到 64/4736，
 始终存在；不作为物理热拔插、持续流量中途移除或硬件 flow 恢复验收。
 日志和逐阶段统计在 `/tmp/dppd-rss-validation/pmd-removal-*.log`、
 `pmd-removal-verification.json`。
+
+## 动态 ARP 统一管理
+
+```sh
+sudo unshare --net python3 tests/integration/managed_arp.py --build-dir build \
+  --report-dir build/managed-arp-tap --tap
+```
+
+使用至少两个可用 CPU、三 TAP 和正式 daemon/CLI/HTTP 入口，独立套接字扮演下一跳
+检查三次地址探测、两次通告、首包等待、NAT 双向整帧、非法 ARP、版本保护、静态优先、
+有界重试、队列溢出、ACL 重查、地址冲突、VLAN、ND 共存、崩溃恢复及写盘失败停机
+每个注入的数据包均归入转发或丢弃，ARP 控制包另行验证，退出检查子进程及 sanitizer 日志
+双标签收发格式、缓存满额、分页、发包失败和 v5→v6 文件兼容另由单测覆盖
+验收细节与不支持范围见 [动态 ARP 与统一管理](../../docs/managed_arp.md)

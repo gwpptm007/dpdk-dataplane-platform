@@ -503,7 +503,7 @@ int dppd_config_validate(const struct dppd_config *cfg, char *error, uint32_t er
     if (cfg->managed_routing && (cfg->flow_state_path[0] == '\0' || cfg->conntrack_capacity != 0 ||
             cfg->snat.enabled || cfg->snat6.enabled || cfg->dnat_count != 0 || cfg->nd6_count != 0)) {
         /** 统一模式只接受持久请求中的策略，不能再从旧启动参数读第二份配置 */
-        snprintf(error, error_len, "managed-routing requires flow-state; configure CT, NAT and ND through managed requests");
+        snprintf(error, error_len, "managed-routing requires flow-state; configure CT, NAT, ND and ARP through managed requests");
         return -1;
     }
     if (cfg->nd6_count > DPPD_ND6_LOCAL_LIMIT ||
@@ -639,7 +639,7 @@ void dppd_config_print_usage(const char *program)
     printf("  --enable-pdump      initialize the packet capture service\n");
     printf("  --control-socket P  management socket path (default %s)\n", DPPD_MANAGEMENT_DEFAULT_SOCKET);
     printf("  --flow-state P      restore complete M4 software configuration in exclusive managed mode\n");
-    printf("  --managed-routing   enable dual-stack routes and static neighbors in the same flow-state file\n");
+    printf("  --managed-routing   manage dual-stack routes, CT/NAT, ND and ARP in the same flow-state file\n");
     printf("  --worker-timeout-ms N  managed worker progress timeout, 0 disables, 100..600000 (default 5000)\n");
     printf("  --rule-capacity N   maximum number of desired rules (default %u)\n", DPPD_DEFAULT_RULE_CAPACITY);
     printf("  --state-path P      enable durable rule snapshot and startup replay\n");

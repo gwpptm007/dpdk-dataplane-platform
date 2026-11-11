@@ -35,10 +35,15 @@
     F(ipv6_unsupported_drops) \
     F(ipv6_rewrite_drops)     \
     F(nd6_rx_packets)         \
+    F(arp_rx_packets)         \
     F(nd6_tx_packets)         \
+    F(arp_tx_packets)         \
     F(nd6_queued)             \
+    F(arp_queued)             \
     F(nd6_queue_drops)        \
+    F(arp_queue_drops)        \
     F(nd6_not_ready_drops)    \
+    F(arp_not_ready_drops)    \
     F(tunnel_vxlan_packets)   \
     F(tunnel_geneve_packets)  \
     F(tunnel_gre_packets)     \

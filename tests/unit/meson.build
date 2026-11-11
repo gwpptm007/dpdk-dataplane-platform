@@ -500,3 +500,10 @@ test('M5 reproducible package and managed deployment safety', python_test,
   args: [meson.current_source_dir() / 'test_m5_release.py'], timeout: 120)
 test('M5 production acceptance evidence boundaries', python_test,
   args: [meson.current_source_dir() / 'test_m5_production_acceptance.py'], timeout: 60)
+
+# ARP 真实字节与等待包所有权，以及持久策略和失败回执
+arp_test = executable('test_arp', 'test_arp.c', dependencies: dppd_core_dep)
+test('dynamic ARP lifecycle and ownership', arp_test)
+flow_arp_test = executable('test_flow_arp', 'test_flow_arp.c', dependencies: dppd_core_dep,
+  link_args: ['-Wl,--wrap=fsync'])
+test('managed ARP persistence and neighbor guards', flow_arp_test, timeout: 120)

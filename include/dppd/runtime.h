@@ -10,6 +10,7 @@
 #include "dppd/stats.h"
 #include "dppd/conntrack.h"
 #include "dppd/nd6.h"
+#include "dppd/arp.h"
 #include "dppd/device_recovery.h"
 
 struct dppd_runtime;
@@ -72,6 +73,8 @@ struct dppd_runtime {
     /** 普通模式拥有 ND 表，统一管理模式借用 store 的稳定容器和等待队列 */
     struct dppd_nd6 *nd6;
     bool nd6_owned;
+    /** 统一管理的 ARP 容器由 store 持有，runtime 仅在 worker 运行期间借用 */
+    struct dppd_arp *arp;
     struct dppd_worker workers[DPPD_MAX_WORKERS];
     uint16_t nb_workers;
     /** 停止请求只通知线程结束循环，不表示线程已经退出；释放共享资源前仍需等待 */

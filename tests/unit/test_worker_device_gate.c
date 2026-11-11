@@ -104,7 +104,7 @@ int main(void)
     flush_egress(worker, &runtime.devices.ports[1], batch, lengths, 2, &ingress, &output);
     assert(tx_calls == 1 && freed == 2 && ingress.egress_drops == 2 && ingress.policy_drops == 2);
     uint8_t wire[14] = {0};
-    assert(send_nd6(worker, 1, wire, sizeof(wire)) == -ENODEV && tx_calls == 1);
+    assert(send_neighbor(worker, 1, wire, sizeof(wire)) == -ENODEV && tx_calls == 1);
 
     /** 原有普通停止与永久移除仍能封住入口，不依赖新事件跟踪默认开启 */
     worker = setup();

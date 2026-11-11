@@ -70,6 +70,9 @@ static void test_lookup(void)
     assert(forward.port_id == 7 && forward.destination_mac[5] == 3 && forward.next_hop_be == ip("10.2.3.4"));
     /* 最长前缀的邻居缺失时不能偷偷改走短前缀，否则会绕过用户选定的出口 */
     assert(dppd_ipv4_router_lookup(router, ip("10.2.3.5"), &forward) == -EHOSTUNREACH);
+    /** 缺 MAC 不丢掉路由结果，动态 ARP 必须使用最长前缀选定的出口与下一跳 */
+    assert(forward.port_id == 7 && forward.next_hop_be == ip("10.2.3.5") && forward.generation == 2);
+    assert(memcmp(forward.destination_mac, (uint8_t[6]){0}, 6) == 0);
     configuration.routes[3] = (struct dppd_ipv4_route){.prefix_be = ip("10.2.3.4"), .depth = 32, .port_id = 3};
     configuration.route_count++;
     configuration.neighbors[3] =

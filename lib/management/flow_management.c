@@ -92,6 +92,11 @@ static void health(struct dppd_runtime *runtime, const struct dppd_flow_store_st
     for (uint32_t i = 0; neighbors.enabled && i < neighbors.local_count; ++i)
         if (neighbors.locals[i].state != DPPD_ND6_PREFERRED)
             output->blockers |= DPPD_HEALTH_ND6_NOT_READY;
+    struct dppd_arp_status arp_neighbors;
+    dppd_arp_status(runtime->arp, &arp_neighbors);
+    for (uint32_t i = 0; arp_neighbors.enabled && i < arp_neighbors.local_count; ++i)
+        if (arp_neighbors.locals[i].state != DPPD_ARP_PREFERRED)
+            output->blockers |= DPPD_HEALTH_ARP_NOT_READY;
     output->ready = output->blockers == 0;
 }
 
@@ -150,6 +155,31 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
             request->payload.conntrack.expected_revision);
         if (rc == 0)
             rc = dppd_flow_store_nd6_status(flows->store, &response->payload.nd6);
+        break;
+    case DPPD_MANAGEMENT_ARP_POLICY_GET:
+        rc = dppd_flow_store_arp_get(flows->store, &response->payload.arp_policy);
+        break;
+    case DPPD_MANAGEMENT_ARP_STATUS:
+        rc = dppd_flow_store_arp_status(flows->store, &response->payload.arp);
+        break;
+    case DPPD_MANAGEMENT_ARP_LIST:
+        rc = dppd_flow_store_arp_list(flows->store, request->payload.conntrack.after_id,
+            request->payload.conntrack.expected_epoch, request->payload.conntrack.expected_revision,
+            &response->payload.arp_neighbors);
+        break;
+    case DPPD_MANAGEMENT_ARP_FLUSH:
+        if (status.ready && request->payload.conntrack.expected_epoch != 0 &&
+            request->payload.conntrack.expected_revision != 0) {
+            rc = quiesce_neighbors(runtime);
+            if (rc != 0) {
+                response->status = rc;
+                return rc;
+            }
+        }
+        rc = dppd_flow_store_arp_flush(flows->store, request->payload.conntrack.expected_epoch,
+            request->payload.conntrack.expected_revision);
+        if (rc == 0)
+            rc = dppd_flow_store_arp_status(flows->store, &response->payload.arp);
         break;
     case DPPD_MANAGEMENT_CONNTRACK_POLICY_GET:
         rc = dppd_flow_store_conntrack_get(flows->store, &response->payload.conntrack_policy);
@@ -210,6 +240,22 @@ int dppd_flow_management_handle(struct dppd_flow_management *flows, struct dppd_
                         break;
                     }
                     receive_prepared = true;
+                }
+            }
+        }
+        if (request->payload.durable_request.operation == DPPD_FLOW_REQUEST_ARP_REPLACE && status.ready) {
+            struct dppd_flow_request_result previous;
+            int found = dppd_flow_store_request_get(flows->store, request->payload.durable_request.key, &previous);
+            /** 已存在的键只查询或比较内容，不再暂停线程，也不会再次触发 ACD */
+            if (found == -ENOENT && request->payload.durable_request.count == 1 &&
+                request->payload.durable_request.queue == 0 &&
+                request->payload.durable_request.payload.arp.expected_neighbor_epoch != 0 &&
+                request->payload.durable_request.payload.arp.expected_neighbor_revision != 0 &&
+                dppd_arp_policy_validate(&request->payload.durable_request.payload.arp.policy) == 0) {
+                rc = quiesce_neighbors(runtime);
+                if (rc != 0) {
+                    response->status = rc;
+                    return rc;
                 }
             }
         }

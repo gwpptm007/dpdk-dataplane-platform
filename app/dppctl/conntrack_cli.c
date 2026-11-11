@@ -200,6 +200,53 @@ int dppctl_nd6_policy_read(const char *path, struct dppd_nd6_policy *policy)
 }
 
 /** 查询可从当前集合开始，清空必须携带精确修订号，不能误删查询后新出现的会话 */
+static int arp_policy_line(char **words, unsigned int count, void *context, bool *header)
+{
+    struct dppd_arp_policy *policy = context;
+    if (strcmp(words[0], "arp") == 0) {
+        uint64_t reachable;
+        if (*header || count != 2 || number(words[1], &reachable) != 0 ||
+            (reachable != 0 && (reachable < 1000 || reachable > 3600000)))
+            return -EINVAL;
+        policy->reachable_ms = (uint32_t)reachable;
+        *header = true;
+        return 0;
+    }
+    if (strcmp(words[0], "local") != 0 || count < 3 || count > 5 || policy->local_count == DPPD_ARP_LOCAL_LIMIT)
+        return -EINVAL;
+    struct dppd_arp_local *local = &policy->locals[policy->local_count];
+    struct in_addr address;
+    if (port_number(words[1], &local->port_id, true) != 0 || inet_pton(AF_INET, words[2], &address) != 1 ||
+        ((ntohl(address.s_addr) >> 24) == 0 || (ntohl(address.s_addr) >> 24) == 127 || (ntohl(address.s_addr) >> 24) >= 224))
+        return -EINVAL;
+    memcpy(local->address, &address, sizeof(local->address));
+    local->vlan_depth = (uint8_t)(count - 3U);
+    for (unsigned int i = 0; i < local->vlan_depth; ++i)
+        if (port_number(words[i + 3U], &local->vlan[i], false) != 0 || local->vlan[i] == 0 || local->vlan[i] > 4094)
+            return -EINVAL;
+    /** 同一网口共享一个 VLAN 域，地址重复或域不一致会让邻居选择含糊，文件阶段就拒绝 */
+    for (uint32_t i = 0; i < policy->local_count; ++i) {
+        const struct dppd_arp_local *previous = &policy->locals[i];
+        if (previous->port_id == local->port_id && (memcmp(previous->address, local->address, sizeof(local->address)) == 0 ||
+            previous->vlan_depth != local->vlan_depth || memcmp(previous->vlan, local->vlan, sizeof(local->vlan)) != 0))
+            return -EINVAL;
+    }
+    ++policy->local_count;
+    return 0;
+}
+
+int dppctl_arp_policy_read(const char *path, struct dppd_arp_policy *policy)
+{
+    if (policy == NULL)
+        return -EINVAL;
+    memset(policy, 0, sizeof(*policy));
+    int rc = policy_file_read(path, policy, arp_policy_line);
+    if (rc == 0 && ((policy->local_count == 0) != (policy->reachable_ms == 0)))
+        rc = -EINVAL;
+    return rc;
+}
+
+/** 查询可从当前集合开始，清空必须携带精确修订号，不能误删查询后新出现的会话 */
 int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request *request,
     void (*initialize)(struct dppd_management_request *, enum dppd_management_operation))
 {
@@ -226,12 +273,20 @@ int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request
         operation = DPPD_MANAGEMENT_ND6_LIST;
     else if (strcmp(argv[0], "nd6-flush") == 0)
         operation = DPPD_MANAGEMENT_ND6_FLUSH;
+    else if (strcmp(argv[0], "arp-status") == 0)
+        operation = DPPD_MANAGEMENT_ARP_STATUS;
+    else if (strcmp(argv[0], "arp-policy-show") == 0)
+        operation = DPPD_MANAGEMENT_ARP_POLICY_GET;
+    else if (strcmp(argv[0], "arp-list") == 0)
+        operation = DPPD_MANAGEMENT_ARP_LIST;
+    else if (strcmp(argv[0], "arp-flush") == 0)
+        operation = DPPD_MANAGEMENT_ARP_FLUSH;
     else
         return -ENOSYS;
     initialize(request, operation);
     if (operation == DPPD_MANAGEMENT_DNAT_LIST)
         return argc == 1 || (argc == 2 && number(argv[1], &request->payload.conntrack.after_id) == 0) ? 0 : -EINVAL;
-    if (operation == DPPD_MANAGEMENT_CONNTRACK_FLUSH || operation == DPPD_MANAGEMENT_ND6_FLUSH) {
+    if (operation == DPPD_MANAGEMENT_CONNTRACK_FLUSH || operation == DPPD_MANAGEMENT_ND6_FLUSH || operation == DPPD_MANAGEMENT_ARP_FLUSH) {
         if (argc < 2 || argc > 3 ||
             number(argv[1], &request->payload.conntrack.expected_revision) != 0 ||
             request->payload.conntrack.expected_revision == 0 ||
@@ -240,7 +295,7 @@ int dppctl_conntrack_build(int argc, char **argv, struct dppd_management_request
             return -EINVAL;
         return 0;
     }
-    if (operation == DPPD_MANAGEMENT_CONNTRACK_LIST || operation == DPPD_MANAGEMENT_ND6_LIST) {
+    if (operation == DPPD_MANAGEMENT_CONNTRACK_LIST || operation == DPPD_MANAGEMENT_ND6_LIST || operation == DPPD_MANAGEMENT_ARP_LIST) {
         if (argc > 4 ||
             (argc >= 2 && number(argv[1], &request->payload.conntrack.after_id) != 0) ||
             (argc >= 3 &&
@@ -332,6 +387,66 @@ static bool nd6_print(const struct dppd_management_response *response)
     return true;
 }
 
+static bool arp_print(const struct dppd_management_response *response)
+{
+    if (response->operation == DPPD_MANAGEMENT_ARP_POLICY_GET) {
+        const struct dppd_flow_arp_view *view = &response->payload.arp_policy;
+        printf("# generation=%" PRIu64 " revision=%" PRIu64 " durable-revision=%" PRIu64
+               " neighbor-epoch=%" PRIu64 " neighbor-revision=%" PRIu64 "\narp %u\n",
+            view->generation, view->revision, view->durable_revision, view->neighbor_epoch,
+            view->neighbor_revision, view->policy.reachable_ms);
+        for (uint32_t i = 0; i < view->policy.local_count && i < DPPD_ARP_LOCAL_LIMIT; ++i) {
+            const struct dppd_arp_local *local = &view->policy.locals[i];
+            char text[INET_ADDRSTRLEN];
+            (void)inet_ntop(AF_INET, local->address, text, sizeof(text));
+            printf("local %u %s", local->port_id, text);
+            for (uint8_t v = 0; v < local->vlan_depth && v < 2; ++v)
+                printf(" %u", local->vlan[v]);
+            putchar('\n');
+        }
+        return true;
+    }
+    if (response->operation < DPPD_MANAGEMENT_ARP_STATUS || response->operation > DPPD_MANAGEMENT_ARP_FLUSH)
+        return false;
+    if (response->operation == DPPD_MANAGEMENT_ARP_STATUS) {
+        const struct dppd_arp_status *status = &response->payload.arp;
+        printf("arp enabled=%s epoch=%" PRIu64 " revision=%" PRIu64 " active=%u pending=%u local-count=%u reachable-ms=%u"
+               " requests=%" PRIu64 " replies=%" PRIu64 " invalid=%" PRIu64 " tx-errors=%" PRIu64
+               " queue-drops=%" PRIu64 " resolved=%" PRIu64 " failed=%" PRIu64 " persistent=no\n",
+            status->enabled ? "yes" : "no", status->epoch, status->revision, status->active, status->pending, status->local_count,
+            status->reachable_ms, status->requests, status->replies, status->invalid, status->tx_errors,
+            status->queue_drops, status->resolved, status->failed);
+        for (uint32_t i = 0; i < status->local_count; ++i) {
+            char address[INET_ADDRSTRLEN];
+            const struct dppd_arp_local *local = &status->locals[i].configuration;
+            inet_ntop(AF_INET, local->address, address, sizeof(address));
+            printf("local port=%u address=%s state=%s vlan-depth=%u vlan=%u/%u\n", local->port_id, address,
+                status->locals[i].state == DPPD_ARP_PREFERRED       ? "preferred"
+                    : status->locals[i].state == DPPD_ARP_DUPLICATE ? "duplicate"
+                                                                    : "tentative",
+                local->vlan_depth, local->vlan[0], local->vlan[1]);
+        }
+    } else if (response->operation == DPPD_MANAGEMENT_ARP_LIST) {
+        const struct dppd_arp_page *page = &response->payload.arp_neighbors;
+        static const char *states[] = {"none", "incomplete", "reachable", "stale", "delay", "probe", "failed"};
+        printf("arp epoch=%" PRIu64 " revision=%" PRIu64 " count=%u next-id=%" PRIu64 " more=%s\n",
+            page->epoch, page->revision, page->count,
+            page->next_id, page->more ? "yes" : "no");
+        for (uint32_t i = 0; i < page->count; ++i) {
+            const struct dppd_arp_entry *entry = &page->entries[i];
+            char address[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, entry->address, address, sizeof(address));
+            printf("neighbor id=%" PRIu64 " port=%u address=%s mac=%02x:%02x:%02x:%02x:%02x:%02x state=%s probes=%u"
+                   " changed-ms=%" PRIu64 " due-ms=%" PRIu64 " used-ms=%" PRIu64 "\n",
+                entry->id, entry->port_id, address, entry->mac[0], entry->mac[1], entry->mac[2], entry->mac[3],
+                entry->mac[4], entry->mac[5], entry->state <= DPPD_ARP_FAILED ? states[entry->state] : "unknown",
+                entry->probes, entry->changed_ms, entry->due_ms, entry->used_ms);
+        }
+    } else
+        puts("arp cache flushed");
+    return true;
+}
+
 /** 完整查询按文件语法列出策略，各版本放在注释行，复制保存后仍能被整策略命令读取 */
 static void policy_print(const struct dppd_flow_conntrack_view *view)
 {
@@ -367,7 +482,7 @@ static void policy_print(const struct dppd_flow_conntrack_view *view)
 
 bool dppctl_conntrack_print(const struct dppd_management_response *response)
 {
-    if (nd6_print(response))
+    if (nd6_print(response) || arp_print(response))
         return true;
     if (response->operation == DPPD_MANAGEMENT_CONNTRACK_POLICY_GET) {
         policy_print(&response->payload.conntrack_policy);

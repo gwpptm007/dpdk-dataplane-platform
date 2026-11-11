@@ -531,11 +531,12 @@ int dppd_ipv4_router_lookup(struct dppd_ipv4_router *router, uint32_t destinatio
         .address_be = route->gateway_be != 0 ? route->gateway_be : destination_be};
     const struct dppd_ipv4_neighbor *neighbor =
         bsearch(&key, configuration->neighbors, configuration->neighbor_count, sizeof(key), compare_neighbor);
-    if (neighbor == NULL)
-        return -EHOSTUNREACH;
+    /** 没有静态 MAC 时仍交回出口和下一跳，让 worker 可以继续请求动态 ARP */
     forward->generation = configuration->generation;
     forward->port_id = route->port_id;
     forward->next_hop_be = key.address_be;
+    if (neighbor == NULL)
+        return -EHOSTUNREACH;
     memcpy(forward->destination_mac, neighbor->mac, sizeof(neighbor->mac));
     return 0;
 }

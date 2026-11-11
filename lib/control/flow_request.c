@@ -3,6 +3,7 @@
 #include "flow_routing_io.h"
 #include "flow_conntrack_io.h"
 #include "flow_nd6_io.h"
+#include "flow_arp_io.h"
 
 #include <errno.h>
 #include <string.h>
@@ -41,7 +42,7 @@ static int rule_bytes(uint8_t *data, uint32_t *offset, const struct dppd_rule *i
 int dppd_flow_request_encode(const struct dppd_flow_request *r, uint8_t *data, uint32_t *length)
 {
     if (r == NULL || data == NULL || length == NULL || r->key.client == 0 || r->key.sequence == 0 ||
-        r->operation < DPPD_FLOW_REQUEST_CREATE || r->operation > DPPD_FLOW_REQUEST_ND6_REPLACE || r->count == 0 ||
+        r->operation < DPPD_FLOW_REQUEST_CREATE || r->operation > DPPD_FLOW_REQUEST_ARP_REPLACE || r->count == 0 ||
         r->count > (r->operation == DPPD_FLOW_REQUEST_CONFIGURE ? 8U : 4U))
         return -EINVAL;
     uint32_t offset = 0;
@@ -57,6 +58,19 @@ int dppd_flow_request_encode(const struct dppd_flow_request *r, uint8_t *data, u
         number(data, &offset, r->payload.nd6.expected_neighbor_revision);
         size_t size;
         int rc = dppd_flow_nd6_encode(&r->payload.nd6.policy, data + offset, DPPD_REQUEST_BYTES - offset, &size);
+        if (rc == 0)
+            *length = offset + size;
+        return rc;
+    }
+    if (r->operation == DPPD_FLOW_REQUEST_ARP_REPLACE) {
+        if (r->count != 1 || r->queue != 0 || r->payload.arp.expected_neighbor_epoch == 0 ||
+            r->payload.arp.expected_neighbor_revision == 0)
+            return -EINVAL;
+        number(data, &offset, r->payload.arp.reset_neighbors);
+        number(data, &offset, r->payload.arp.expected_neighbor_epoch);
+        number(data, &offset, r->payload.arp.expected_neighbor_revision);
+        size_t size;
+        int rc = dppd_flow_arp_encode(&r->payload.arp.policy, data + offset, DPPD_REQUEST_BYTES - offset, &size);
         if (rc == 0)
             *length = offset + size;
         return rc;
@@ -140,7 +154,7 @@ int dppd_flow_request_ledger_validate(const struct dppd_flow_request_ledger *led
         if (r->key.client == 0)
             continue;
         if (r->key.sequence == 0 || r->operation < DPPD_FLOW_REQUEST_CREATE ||
-            r->operation > DPPD_FLOW_REQUEST_ND6_REPLACE || r->phase < DPPD_FLOW_REQUEST_PENDING ||
+            r->operation > DPPD_FLOW_REQUEST_ARP_REPLACE || r->phase < DPPD_FLOW_REQUEST_PENDING ||
             r->phase > DPPD_FLOW_REQUEST_DONE || r->count == 0 ||
             r->count > (r->operation == DPPD_FLOW_REQUEST_CONFIGURE ? 8U : 4U) || r->revision > revision ||
             r->status > 0 || r->status < -4095 || record->length == 0 || record->length > DPPD_REQUEST_BYTES ||

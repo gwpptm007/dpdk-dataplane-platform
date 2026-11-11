@@ -33,7 +33,8 @@
 /** v31 将双栈路由整表纳入持久请求，查询同时返回路由代次和统一配置修订号 */
 /** v32 将连接跟踪与双栈 NAT 策略纳入持久请求，会话操作还要核对本次启动标识 */
 /** v33 将动态 ND 配置纳入持久请求，缓存操作核对启动身份，在线替换重新执行地址检测 */
-#define DPPD_MANAGEMENT_VERSION 33U
+/** v34 接入动态 ARP 的持久策略、冲突检测与独立缓存版本，客户端和服务端需一起升级 */
+#define DPPD_MANAGEMENT_VERSION 34U
 #define DPPD_MANAGEMENT_DEFAULT_SOCKET "/tmp/dppd-control.sock"
 /* sockaddr_un.sun_path 在 Linux 上通常为 108 字节，最后一字节留给 '\0' */
 #define DPPD_MANAGEMENT_SOCKET_PATH_MAX 107U
@@ -132,6 +133,10 @@ enum dppd_management_operation {
     DPPD_MANAGEMENT_REQUEST_GET,
     DPPD_MANAGEMENT_CONNTRACK_POLICY_GET,
     DPPD_MANAGEMENT_ND6_POLICY_GET,
+    DPPD_MANAGEMENT_ARP_POLICY_GET,
+    DPPD_MANAGEMENT_ARP_STATUS,
+    DPPD_MANAGEMENT_ARP_LIST,
+    DPPD_MANAGEMENT_ARP_FLUSH,
 };
 
 /** 随机启动标识阻止重启前的任务凭据误领本次进程的新任务 */
@@ -389,6 +394,7 @@ enum dppd_management_health_blocker {
     DPPD_HEALTH_WORKER_FAILED = 1U << 9,
     DPPD_HEALTH_ROUTING_DIRTY = 1U << 10,
     DPPD_HEALTH_ND6_NOT_READY = 1U << 11,
+    DPPD_HEALTH_ARP_NOT_READY = 1U << 12,
 };
 
 /**
@@ -452,6 +458,9 @@ struct dppd_management_response {
         struct dppd_flow_nd6_view nd6_policy;
         struct dppd_nd6_status nd6;
         struct dppd_nd6_page dynamic_neighbors;
+        struct dppd_flow_arp_view arp_policy;
+        struct dppd_arp_status arp;
+        struct dppd_arp_page arp_neighbors;
         struct dppd_connection_page connections;
         struct dppd_dnat_page dnat;
         struct dppd_routing_status routing_status;

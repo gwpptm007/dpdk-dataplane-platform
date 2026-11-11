@@ -4,6 +4,7 @@
 #include "flow_routing_io.h"
 #include "flow_conntrack_io.h"
 #include "flow_nd6_io.h"
+#include "flow_arp_io.h"
 #include "dppd/software_shared.h"
 
 #include <errno.h>
@@ -43,6 +44,9 @@ struct dppd_flow_store {
     struct dppd_nd6 *nd6;
     struct dppd_nd6_port nd6_ports[DPPD_MAX_PORTS];
     uint16_t nd6_port_count;
+    struct dppd_arp *arp;
+    struct dppd_arp_port arp_ports[DPPD_MAX_PORTS];
+    uint16_t arp_port_count;
     uint64_t durable_routing_generation;
 };
 
@@ -241,6 +245,8 @@ static int teardown(struct dppd_flow_store *s)
     s->conntrack = NULL;
     dppd_nd6_destroy(s->nd6);
     s->nd6 = NULL;
+    dppd_arp_destroy(s->arp);
+    s->arp = NULL;
     if (cleanup_configuration(s) != 0)
         return -EUCLEAN;
     if (s->service != NULL) {
@@ -831,6 +837,123 @@ int dppd_flow_store_nd6_flush(struct dppd_flow_store *s, uint64_t epoch, uint64_
         rc = -EUCLEAN;
     if (rc == 0)
         rc = s->nd6 == NULL ? -ENOTSUP : dppd_nd6_flush_guarded(s->nd6, epoch, revision);
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_arp_bind(struct dppd_flow_store *s, const struct dppd_arp_port *ports,
+    uint16_t count, uint64_t now_ms)
+{
+    if (s == NULL || ports == NULL || count == 0 || count > DPPD_MAX_PORTS)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = writable(s);
+    if (rc == 0 && s->state->routing == NULL)
+        rc = -ENOTSUP;
+    if (rc == 0 && count != s->state->routing->binding_count)
+        rc = -ESTALE;
+    for (uint16_t i = 0; rc == 0 && i < count; ++i) {
+        bool found = false;
+        for (uint16_t j = 0; j < count; ++j)
+            found |= ports[i].port_id == s->state->routing->bindings[j].port_id;
+        if (!found)
+            rc = -ESTALE;
+        for (uint16_t j = 0; j < i; ++j)
+            if (ports[i].port_id == ports[j].port_id)
+                rc = -EINVAL;
+    }
+    if (rc == 0 && s->arp != NULL) {
+        /** 改变排列不改变绑定，运行中换 MAC 或端口必须退出并重新核对设备 */
+        for (uint16_t i = 0; i < count; ++i) {
+            bool found = false;
+            for (uint16_t j = 0; j < s->arp_port_count; ++j)
+                found |= ports[i].port_id == s->arp_ports[j].port_id &&
+                    memcmp(ports[i].mac, s->arp_ports[j].mac, 6) == 0;
+            if (!found)
+                rc = -ESTALE;
+        }
+    } else if (rc == 0) {
+        const struct dppd_arp_policy disabled = {0};
+        rc = dppd_arp_create_policy(&s->arp, s->state->arp == NULL ? &disabled : &s->state->arp->policy,
+            ports, count, now_ms);
+        if (rc == 0) {
+            memcpy(s->arp_ports, ports, count * sizeof(*ports));
+            s->arp_port_count = count;
+        }
+    }
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+struct dppd_arp *dppd_flow_store_arp(struct dppd_flow_store *s)
+{
+    if (s == NULL)
+        return NULL;
+    pthread_mutex_lock(&s->lock);
+    struct dppd_arp *table = s->arp;
+    pthread_mutex_unlock(&s->lock);
+    return table;
+}
+
+int dppd_flow_store_arp_get(struct dppd_flow_store *s, struct dppd_flow_arp_view *view)
+{
+    if (s == NULL || view == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = s->arp == NULL ? -ENOTSUP : 0;
+    memset(view, 0, sizeof(*view));
+    if (rc == 0) {
+        struct dppd_arp_status status;
+        dppd_arp_status(s->arp, &status);
+        if (s->state->arp != NULL) {
+            view->policy = s->state->arp->policy;
+            view->generation = s->state->arp->generation;
+        }
+        view->revision = s->state->revision;
+        view->durable_revision = s->status.durable_revision;
+        view->neighbor_epoch = status.epoch;
+        view->neighbor_revision = status.revision;
+    }
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_arp_status(struct dppd_flow_store *s, struct dppd_arp_status *status)
+{
+    if (s == NULL || status == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = s->arp == NULL ? -ENOTSUP : 0;
+    if (rc == 0)
+        dppd_arp_status(s->arp, status);
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_arp_list(struct dppd_flow_store *s, uint64_t after, uint64_t epoch, uint64_t revision,
+    struct dppd_arp_page *page)
+{
+    if (s == NULL || page == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = s->arp == NULL ? -ENOTSUP : dppd_arp_list_guarded(s->arp, after, epoch, revision, page);
+    pthread_mutex_unlock(&s->lock);
+    return rc;
+}
+
+int dppd_flow_store_arp_flush(struct dppd_flow_store *s, uint64_t epoch, uint64_t revision)
+{
+    if (s == NULL)
+        return -EINVAL;
+    pthread_mutex_lock(&s->lock);
+    int rc = writable(s);
+    struct dppd_flow_service_status status;
+    if (rc == 0)
+        rc = dppd_flow_service_status(s->service, &status);
+    if (rc == 0 && status.isolated)
+        rc = -EUCLEAN;
+    if (rc == 0)
+        rc = s->arp == NULL ? -ENOTSUP : dppd_arp_flush_guarded(s->arp, epoch, revision);
     pthread_mutex_unlock(&s->lock);
     return rc;
 }
@@ -1581,6 +1704,54 @@ static void nd6_replace_locked(struct dppd_flow_store *s, const struct dppd_flow
     (void)flush(s);
 }
 
+struct arp_publish_context {
+    struct dppd_flow_store *store;
+    struct dppd_flow_arp_state candidate;
+};
+
+/** 引擎已预备好本机地址表，只有全局版本推进成功，才能丢弃旧缓存并重新执行 ACD */
+static int arp_publish(void *context)
+{
+    struct arp_publish_context *c = context;
+    struct dppd_flow_store *s = c->store;
+    int rc = dppd_flow_service_config_revision(s->service, s->state->revision);
+    if (rc == 0) {
+        *s->state->arp = c->candidate;
+        ++s->state->revision;
+    }
+    return rc;
+}
+
+static void arp_replace_locked(struct dppd_flow_store *s, const struct dppd_flow_request *request,
+    struct dppd_flow_request_record *record)
+{
+    struct dppd_flow_service_status status;
+    int rc = writable(s);
+    if (rc == 0)
+        rc = dppd_flow_service_status(s->service, &status);
+    if (rc == 0 && (status.jobs != 0 || status.isolated))
+        rc = -EBUSY;
+    if (rc == 0 && request->expected_revision != status.revision)
+        rc = -ESTALE;
+    if (rc == 0 && (status.revision >= UINT64_MAX - 1U || s->state->arp->generation >= UINT64_MAX - 1U))
+        rc = -EOVERFLOW;
+    struct arp_publish_context context = {.store = s,
+        .candidate = {.generation = s->state->arp->generation + 1U, .policy = request->payload.arp.policy}};
+    if (rc == 0)
+        rc = dppd_flow_arp_validate(&context.candidate, s->state->routing);
+    if (rc == 0)
+        rc = dppd_arp_replace(s->arp, &context.candidate.policy, request->payload.arp.reset_neighbors,
+            request->payload.arp.expected_neighbor_epoch, request->payload.arp.expected_neighbor_revision,
+            now_ns() / UINT64_C(1000000), arp_publish, &context);
+    record->result.phase = DPPD_FLOW_REQUEST_DONE;
+    record->result.status = rc;
+    record->result.applied = rc == 0;
+    record->result.revision = s->state->revision;
+    record->result.generations[0] = s->state->arp->generation;
+    s->requests_dirty = true;
+    (void)flush(s);
+}
+
 /** 持久受理在进入异步队列前完成，掉电后最多保留明确中止，不能重复执行原键 */
 int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_request *request, uint64_t now,
     struct dppd_flow_request_result *result)
@@ -1617,6 +1788,10 @@ int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_re
         goto done;
     }
     if (request->operation == DPPD_FLOW_REQUEST_ND6_REPLACE && s->nd6 == NULL) {
+        rc = -ENOTSUP;
+        goto done;
+    }
+    if (request->operation == DPPD_FLOW_REQUEST_ARP_REPLACE && s->arp == NULL) {
         rc = -ENOTSUP;
         goto done;
     }
@@ -1673,6 +1848,14 @@ int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_re
             goto done;
         }
     }
+    /** 只有请求确实能够登记时才升级文件，旧文件不会因为过期序号或满账本被无意改版 */
+    if (request->operation == DPPD_FLOW_REQUEST_ARP_REPLACE && s->state->arp == NULL) {
+        s->state->arp = calloc(1, sizeof(*s->state->arp));
+        if (s->state->arp == NULL) {
+            rc = -ENOMEM;
+            goto done;
+        }
+    }
     struct dppd_flow_request_record *record = &ledger->receipts[slot];
     memset(record, 0, sizeof(*record));
     record->length = length;
@@ -1694,7 +1877,9 @@ int dppd_flow_store_request(struct dppd_flow_store *s, const struct dppd_flow_re
         rc = request_result(s, (uint32_t)slot, result);
         goto done;
     }
-    if (request->operation == DPPD_FLOW_REQUEST_ND6_REPLACE) {
+    if (request->operation == DPPD_FLOW_REQUEST_ARP_REPLACE) {
+        arp_replace_locked(s, request, record);
+    } else if (request->operation == DPPD_FLOW_REQUEST_ND6_REPLACE) {
         nd6_replace_locked(s, request, record);
     } else if (request->operation == DPPD_FLOW_REQUEST_CONNTRACK_REPLACE) {
         conntrack_replace_locked(s, request, record);

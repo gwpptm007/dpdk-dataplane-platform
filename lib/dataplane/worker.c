@@ -67,13 +67,13 @@ static void flush_egress(struct dppd_worker *worker, const struct dppd_port *egr
 }
 
 /**
- * 将 ND 回调传入的完整报文字节复制到新 mbuf，再提交给当前 worker 的 TX 队列
+ * 将 ARP 或 ND 回调传入的完整报文字节复制到新 mbuf，再提交给当前 worker 的 TX 队列
  * context 是 worker，port_id 指定出口；wire 只在调用期间借用，不修改收到的业务报文
  * 分配 mbuf → append 预留数据区 → 复制字节 → 再查网口状态 → TX burst
  * 返回 0 表示驱动接管，不能据此确认对端收到；失败时释放已分配的 mbuf 并返回负错误码
- * 每个 worker 只写自己的 TX 队列，ND 不另建发送线程
+ * 每个 worker 只写自己的 TX 队列，邻居模块不另建发送线程
  */
-static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16_t length)
+static int send_neighbor(void *context, uint16_t port_id, const uint8_t *wire, uint16_t length)
 {
     struct dppd_worker *worker = context;
     const struct dppd_port *port = dppd_devices_find(&worker->runtime->devices, port_id);
@@ -99,7 +99,17 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
         rte_pktmbuf_free(mbuf);
         return -EAGAIN;
     }
-    struct dppd_stats_values output = {.tx_packets = 1, .tx_bytes = length, .nd6_tx_packets = 1};
+    struct dppd_stats_values output = {.tx_packets = 1, .tx_bytes = length};
+    /** 跳过出口 VLAN 标签后辨认协议，不能用报文长度猜测 ARP 或 ND */
+    unsigned int type_offset = 12;
+    while (type_offset + 6 <= length &&
+        ((wire[type_offset] == 0x81 && wire[type_offset + 1] == 0) ||
+         (wire[type_offset] == 0x88 && wire[type_offset + 1] == 0xa8)))
+        type_offset += 4;
+    if (type_offset + 2 <= length && wire[type_offset] == 8 && wire[type_offset + 1] == 6)
+        output.arp_tx_packets = 1;
+    else
+        output.nd6_tx_packets = 1;
     dppd_stats_add(&worker->stats, &output);
     dppd_stats_add(&worker->port_stats[port - worker->runtime->devices.ports], &output);
     return 0;
@@ -107,14 +117,35 @@ static int send_nd6(void *context, uint16_t port_id, const uint8_t *wire, uint16
 
 /**
  * 执行软件规则与出口选择，将动作、原因和出口写入 decision
- * IPv6 缺静态邻居且已启用 ND 时，用出口和下一跳查询动态邻居表，补齐 MAC 或标记等待
- * 转发前检查出口 IPv6 地址是否就绪，将决定交回 process_batch 或 stateful_decide
+ * 缺静态邻居时按地址族查询 ARP 或 ND，补齐 MAC 或标记等待
+ * 转发前检查对应地址族的出口本机地址是否就绪，将决定交回 process_batch 或 stateful_decide
  */
 static void routed_decide(struct dppd_runtime *runtime, uint16_t ingress, int parsed, const struct dppd_packet *packet,
     struct dppd_pipeline_decision *decision, struct dppd_software_count_batch *counts)
 {
     dppd_pipeline_decide_counted(&runtime->snapshot, runtime->software_backend, runtime->ipv4_router, ingress, parsed,
         packet, decision, counts);
+    /** IPv4 缺少静态邻居时才查动态 ARP，静态映射与 ACL 的原有优先级不变 */
+    if (packet->l3_type == DPPD_L3_IPV4) {
+        if (runtime->arp == NULL)
+            return;
+        if (decision->drop_reason == DPPD_DROP_NO_NEIGHBOR) {
+            int rc = dppd_arp_resolve(runtime->arp, decision->ipv4.port_id,
+                (const uint8_t *)&decision->ipv4.next_hop_be, packet, dppd_monotonic_ms(), decision->ipv4.destination_mac);
+            if (rc == 0) {
+                decision->action = DPPD_PACKET_FORWARD;
+                decision->drop_reason = DPPD_DROP_NONE;
+                decision->egress_port = decision->ipv4.port_id;
+                decision->routed = true;
+            } else if (rc == -EAGAIN)
+                decision->drop_reason = DPPD_DROP_ARP_PENDING;
+        }
+        if (decision->action == DPPD_PACKET_FORWARD && !dppd_arp_port_ready(runtime->arp, decision->egress_port)) {
+            decision->action = DPPD_PACKET_DROP;
+            decision->drop_reason = DPPD_DROP_ARP_NOT_READY;
+        }
+        return;
+    }
     if (runtime->nd6 == NULL || packet->l3_type != DPPD_L3_IPV6)
         return;
     /**
@@ -330,8 +361,20 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
                                     ├─ 已处理 → worker 释放当前包，继续下一个
                                     └─ 未处理 → 继续原来的检查和转发流程
          */
+        if (runtime->arp != NULL && parsed != DPPD_PARSE_MALFORMED &&
+            dppd_arp_input(runtime->arp, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_neighbor, worker)) {
+            delta.arp_rx_packets++;
+            rte_pktmbuf_free(rx[i]);
+            continue;
+        }
+        if (packet.l3_type == DPPD_L3_IPV4 && !dppd_arp_port_ready(runtime->arp, ingress->port_id)) {
+            delta.arp_not_ready_drops++;
+            delta.policy_drops++;
+            rte_pktmbuf_free(rx[i]);
+            continue;
+        }
         if (runtime->nd6 != NULL && parsed != DPPD_PARSE_MALFORMED &&
-            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_nd6, worker)) {
+            dppd_nd6_input(runtime->nd6, ingress->port_id, rx[i], &packet, dppd_monotonic_ms(), send_neighbor, worker)) {
             delta.nd6_rx_packets++;
             rte_pktmbuf_free(rx[i]);
             continue;
@@ -359,10 +402,22 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
             routed_decide(runtime, ingress->port_id, parsed, &packet, &decision, &rule_counts);
 
         /**
-         * ND_PENDING 表示下一跳 MAC 尚未取得，先尝试把当前 mbuf 交给 ND 等待队列
+         * ARP_PENDING 或 ND_PENDING 表示下一跳 MAC 尚未取得，先把 mbuf 交给对应等待队列
          * 入队成功 → 队列接管 mbuf，continue 处理下一个包，此处不能释放或发送它
          * 入队失败 → mbuf 仍归当前线程，继续下面的丢弃分支并释放
          */
+        if (decision.drop_reason == DPPD_DROP_ARP_PENDING) {
+            struct dppd_arp_pending pending = {.mbuf = rx[i],
+                .ingress = ingress->port_id,
+                .queue = worker->queue_id,
+                .expires_ms = expires};
+            if (dppd_arp_hold(runtime->arp, decision.ipv4.port_id, (const uint8_t *)&decision.ipv4.next_hop_be, pending,
+                    dppd_monotonic_ms()) == 0) {
+                delta.arp_queued++;
+                continue;
+            }
+            delta.arp_queue_drops++;
+        }
         if (decision.drop_reason == DPPD_DROP_ND_PENDING) {
             struct dppd_nd6_pending pending = {.mbuf = rx[i],
                 .ingress = ingress->port_id,
@@ -382,7 +437,9 @@ static void process_batch(struct dppd_worker *worker, const struct dppd_port *in
         if (decision.action != DPPD_PACKET_FORWARD) {
             if (decision.drop_reason != DPPD_DROP_MALFORMED)
                 delta.policy_drops++;
-            if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)
+            if (decision.drop_reason == DPPD_DROP_ARP_NOT_READY)
+                delta.arp_not_ready_drops++;
+            else if (decision.drop_reason == DPPD_DROP_ND_NOT_READY)
                 delta.nd6_not_ready_drops++;
             else if (decision.drop_reason == DPPD_DROP_POLICY)
                 delta.rule_drops++;
@@ -565,11 +622,32 @@ static void process_waiting(struct dppd_worker *worker)
     }
 }
 
+static void process_arp_waiting(struct dppd_worker *worker)
+{
+    struct dppd_arp_pending pending;
+    /** 各 worker 轮询自己的队列；本轮无可取记录就结束，继续下面的正常收包循环 */
+    for (unsigned int i = 0;
+         i < DPPD_MAX_BURST && dppd_arp_take(worker->runtime->arp, worker->queue_id, dppd_monotonic_ms(), &pending);
+         ++i) {
+        const struct dppd_port *ingress = dppd_devices_find(&worker->runtime->devices, pending.ingress);
+        /** 取回不代表可以发送，失效包或已失去原入口的包在此归还 mbuf */
+        if (pending.expired || ingress == NULL) {
+            rte_pktmbuf_free(pending.mbuf);
+            struct dppd_stats_values dropped = {.policy_drops = 1, .arp_queue_drops = 1};
+            dppd_stats_add(&worker->stats, &dropped);
+            if (ingress != NULL)
+                dppd_stats_add(&worker->port_stats[ingress - worker->runtime->devices.ports], &dropped);
+        } else
+            /** &pending.mbuf 按一个包的数组传入，数量为 1；重试沿用原 mbuf 和原截止时间 */
+            process_batch(worker, ingress, &pending.mbuf, 1, true, pending.expires_ms);
+    }
+}
+
 /**
  * EAL 在选定 lcore 上执行的工作函数，arg 是 runtime_start 传入的 worker 地址
  *
  * 取得 worker 和 runtime → 注册软件规则、路由读者 → 发布 RUNNING 状态
- *   → 循环：队列 0 推进 ND 定时任务 → 各队列处理等待报文和收包 → 报告安全点和心跳
+ *   → 循环：队列 0 推进 ARP 和 ND 定时任务 → 各队列处理等待报文和收包 → 报告安全点和心跳
  *   → 停止或设备门禁生效：退出循环 → 注销读者 → 发布 STOPPED，返回 0
  *
  * 参数或读者注册失败返回 -1，尚未进入正常收包循环
@@ -611,10 +689,15 @@ int dppd_worker_main(void *arg)
     while (!worker_io_quiesced(worker)) {
         uint16_t i;
 
+        if (runtime->arp != NULL) {
+            if (worker->queue_id == 0)
+                dppd_arp_tick(runtime->arp, dppd_monotonic_ms(), send_neighbor, worker);
+            process_arp_waiting(worker);
+        }
         if (runtime->nd6 != NULL) {
             /** ND 表在 runtime_init 中创建；启动后由队列 0 推进检测和探测，其他队列仍正常收包 */
             if (worker->queue_id == 0)
-                dppd_nd6_tick(runtime->nd6, dppd_monotonic_ms(), send_nd6, worker);
+                dppd_nd6_tick(runtime->nd6, dppd_monotonic_ms(), send_neighbor, worker);
             process_waiting(worker);
         }
         /** 依次处理各网口的本 worker 队列，一个 process_batch 返回后继续下一个网口 */

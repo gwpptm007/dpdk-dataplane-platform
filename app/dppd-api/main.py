@@ -379,6 +379,31 @@ def nd6_policy_lines(value):
     return "\n".join(lines) + "\n"
 
 
+def arp_policy_lines(value):
+    """只持久化本机地址与探测参数，邻居学习结果和等待报文不属于配置文件"""
+    fields(value, ("reachable_ms", "locals"))
+    if not isinstance(value["locals"], list) or len(value["locals"]) > 32:
+        raise Failure(400, "invalid_arp_locals")
+    enabled = bool(value["locals"])
+    reachable = integer(value["reachable_ms"], 1000 if enabled else 0, 3600000 if enabled else 0)
+    lines = [f"arp {reachable}"]
+    domains, identities = {}, set()
+    for item in value["locals"]:
+        fields(item, ("port_id", "address", "vlans"))
+        port = integer(item["port_id"], 0, 65534)
+        address = routing_address(item["address"], 4)
+        if not isinstance(item["vlans"], list) or len(item["vlans"]) > 2:
+            raise Failure(400, "invalid_arp_vlan_domain")
+        vlans = tuple(integer(vid, 1, 4094) for vid in item["vlans"])
+        if (port, address) in identities or (port in domains and domains[port] != vlans):
+            raise Failure(400, "conflicting_arp_local")
+        identities.add((port, address))
+        domains[port] = vlans
+        # 声明顺序可能影响探测源地址选择，不能为请求去重而重新排序
+        lines.append(" ".join(("local", port, address, *vlans)))
+    return "\n".join(lines) + "\n"
+
+
 class Backend:
     def __init__(self, program, control_socket, timeout=10.0):
         self.program, self.control_socket, self.timeout = str(program), str(control_socket), timeout
@@ -470,7 +495,7 @@ class Application:
                       "/v1/persistence": "persistence-status", "/v1/routing": "routing-show",
                       "/v1/routing/status": "routing-status", "/v1/conntrack/policy": "conntrack-policy-show",
                       "/v1/conntrack/status": "conntrack-status", "/v1/nd6/policy": "nd6-policy-show",
-                      "/v1/nd6/status": "nd6-status"}
+                      "/v1/nd6/status": "nd6-status", "/v1/arp/policy": "arp-policy-show", "/v1/arp/status": "arp-status"}
             if path in simple:
                 fields(query)
                 arguments = [simple[path]]
@@ -478,12 +503,14 @@ class Application:
                 fields(query, (), ("port", "queue"))
                 arguments = ["stats", *["all" if query.get(name, "all") == "all" else integer(query[name], 0, 65534)
                                         for name in ("port", "queue")]]
-            elif path in ("/v1/conntrack/sessions", "/v1/nd6/neighbors"):
+            elif path in ("/v1/conntrack/sessions", "/v1/nd6/neighbors", "/v1/arp/neighbors"):
                 fields(query, (), ("after", "epoch", "revision"))
                 after = integer(query.get("after", "0"), 0, U64)
                 if ("epoch" in query) != ("revision" in query) or (after != "0" and "epoch" not in query):
-                    raise Failure(400, "neighbor_version_required" if path == "/v1/nd6/neighbors" else "session_version_required")
-                arguments = ["nd6-list" if path == "/v1/nd6/neighbors" else "conntrack-list", after]
+                    raise Failure(400, "neighbor_version_required" if path != "/v1/conntrack/sessions" else "session_version_required")
+                command = {"/v1/arp/neighbors": "arp-list", "/v1/nd6/neighbors": "nd6-list",
+                           "/v1/conntrack/sessions": "conntrack-list"}[path]
+                arguments = [command, after]
                 if "epoch" in query:
                     arguments += [integer(query["revision"], 1, U64), integer(query["epoch"], 1, U64)]
             elif path == "/v1/rules":
@@ -520,10 +547,12 @@ class Application:
                 require(principal, "admin")
                 fields(value)
                 arguments = ["persistence-flush" if path.endswith("flush") else "flow-retry"]
-            elif path in ("/v1/conntrack/sessions/flush", "/v1/nd6/neighbors/flush"):
+            elif path in ("/v1/conntrack/sessions/flush", "/v1/nd6/neighbors/flush", "/v1/arp/neighbors/flush"):
                 require(principal, "operator")
                 fields(value, ("epoch", "revision"))
-                arguments = ["nd6-flush" if path == "/v1/nd6/neighbors/flush" else "conntrack-flush",
+                command = {"/v1/arp/neighbors/flush": "arp-flush", "/v1/nd6/neighbors/flush": "nd6-flush",
+                           "/v1/conntrack/sessions/flush": "conntrack-flush"}[path]
+                arguments = [command,
                              integer(value["revision"], 1, U64), integer(value["epoch"], 1, U64)]
             elif path == "/v1/configuration":
                 require(principal, "admin")
@@ -535,7 +564,7 @@ class Application:
                 require(principal, "admin")
                 if not isinstance(value, dict):
                     raise Failure(400, "invalid_fields")
-                operation = choice(value.get("operation"), ("routing_replace", "conntrack_replace", "nd6_replace"))
+                operation = choice(value.get("operation"), ("routing_replace", "conntrack_replace", "nd6_replace", "arp_replace"))
                 if operation == "routing_replace":
                     fields(value, ("operation", "sequence", "revision", "routes", "neighbors", "routes6", "neighbors6"))
                     content = routing_lines(value)
@@ -556,11 +585,11 @@ class Application:
                                    "expected_neighbor_revision", "policy"))
                     if not isinstance(value["reset_neighbors"], bool):
                         raise Failure(400, "invalid_boolean")
-                    content = nd6_policy_lines(value["policy"])
+                    content = (arp_policy_lines if operation == "arp_replace" else nd6_policy_lines)(value["policy"])
                     file_suffix = [integer(value["revision"], 0, U64 - 2), str(value["reset_neighbors"]).lower(),
                                    integer(value["expected_neighbor_epoch"], 1, U64),
                                    integer(value["expected_neighbor_revision"], 1, U64)]
-                    command = "nd6-replace"
+                    command = "arp-replace" if operation == "arp_replace" else "nd6-replace"
                 arguments = ["request-submit", principal.client, integer(value["sequence"], 1), command]
             elif path in ("/v1/rules/create", "/v1/rules/update"):
                 require(principal, "operator")

@@ -274,6 +274,133 @@ static void test_conntrack_json(void)
 }
 
 /** 地址顺序决定默认探测源地址，策略解析不能排序，也不能把坏文件误认为关闭 ND */
+static void test_arp_policy_arguments(void)
+{
+    struct dppd_management_request request;
+    char *query[] = {"arp-policy-show"};
+    assert(build_request(1, query, &request) == 0 && request.operation == DPPD_MANAGEMENT_ARP_POLICY_GET);
+    char *list[] = {"arp-list", "4", "6", "18446744073709551615"};
+    assert(build_request(4, list, &request) == 0 && request.payload.conntrack.expected_epoch == UINT64_MAX);
+    char *flush[] = {"arp-flush", "6", "5"};
+    assert(build_request(3, flush, &request) == 0 && request.payload.conntrack.expected_epoch == 5);
+    flush[2] = "0";
+    assert(build_request(3, flush, &request) == -EINVAL);
+    char path[] = "/tmp/dppctl-arp-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    const char text[] = "# preserve the first source address\narp 30000\nlocal 7 192.0.2.7 100 200\n"
+                        "local 7 198.51.100.7 100 200\nlocal 2 198.51.100.2\n";
+    assert(write(fd, text, sizeof(text) - 1) == sizeof(text) - 1);
+    char *replace[] = {"request-submit", "81", "9", "arp-replace", path, "0", "false",
+        "18446744073709551615", "9007199254740993"};
+    assert(build_request(9, replace, &request) == 0);
+    const struct dppd_flow_request *durable = &request.payload.durable_request;
+    const struct dppd_arp_policy *policy = &durable->payload.arp.policy;
+    assert(durable->operation == DPPD_FLOW_REQUEST_ARP_REPLACE && durable->expected_revision == 0);
+    assert(durable->key.client == 81 && durable->key.sequence == 9 && durable->count == 1);
+    assert(!durable->payload.arp.reset_neighbors && durable->payload.arp.expected_neighbor_epoch == UINT64_MAX);
+    assert(durable->payload.arp.expected_neighbor_revision == UINT64_C(9007199254740993));
+    assert(policy->reachable_ms == 30000 && policy->local_count == 3);
+    assert(policy->locals[0].port_id == 7 && policy->locals[0].address[0] == 192);
+    assert(policy->locals[1].address[0] == 198 && policy->locals[2].port_id == 2);
+    assert(policy->locals[0].vlan_depth == 2 && policy->locals[0].vlan[1] == 200);
+    replace[6] = "true";
+    assert(build_request(9, replace, &request) == 0 && durable->payload.arp.reset_neighbors);
+    replace[6] = "yes";
+    assert(build_request(9, replace, &request) == -EINVAL);
+    replace[6] = "false";
+    assert(build_request(8, replace, &request) == -EINVAL);
+    replace[7] = "0";
+    assert(build_request(9, replace, &request) == -EINVAL);
+    replace[7] = "1";
+    const char *invalid[] = {"", "local 7 192.0.2.7\n", "arp 0\nlocal 7 192.0.2.7\n", "arp 1000\n",
+        "arp 999\nlocal 7 192.0.2.7\n", "arp 3600001\nlocal 7 192.0.2.7\n", "arp 0\narp 0\n",
+        "arp 1000\nlocal 7 ::\n", "arp 1000\nlocal 7 ::1\n", "arp 1000\nlocal 7 ff02::1\n",
+        "arp 1000\nlocal 7 ::ffff:192.0.2.7\n", "arp 1000\nlocal 7 192.0.2.7%eth0\n",
+        "arp 1000\nlocal 65535 192.0.2.7\n", "arp 1000\nlocal 7 192.0.2.7 0\n",
+        "arp 1000\nlocal 7 192.0.2.7 4095\n", "arp 1000\nlocal 7 192.0.2.7 100 200 300\n",
+        "arp 1000\nlocal 7 192.0.2.7\nlocal 7 192.0.2.7\n",
+        "arp 1000\nlocal 7 192.0.2.7\nlocal 7 192.0.2.8 100\n"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        assert(ftruncate(fd, 0) == 0 && lseek(fd, 0, SEEK_SET) == 0);
+        assert(write(fd, invalid[i], strlen(invalid[i])) == (ssize_t)strlen(invalid[i]));
+        assert(build_request(9, replace, &request) == -EINVAL);
+    }
+    assert(ftruncate(fd, 0) == 0 && lseek(fd, 0, SEEK_SET) == 0);
+    const char disabled[] = "arp 0\n";
+    assert(write(fd, disabled, sizeof(disabled) - 1) == sizeof(disabled) - 1);
+    assert(build_request(9, replace, &request) == 0 && policy->local_count == 0 && policy->reachable_ms == 0);
+    assert(write(fd, "\0", 1) == 1);
+    assert(build_request(9, replace, &request) == -EINVAL);
+    assert(ftruncate(fd, 16385) == 0);
+    assert(build_request(9, replace, &request) != 0);
+    close(fd);
+    assert(unlink(path) == 0);
+    assert(build_request(9, replace, &request) == -ENOENT);
+}
+
+/** JSON 的启动身份始终用十进制字符串，本机检测结果与动态缓存分别展示 */
+static void test_arp_json(void)
+{
+    struct dppd_management_request request = {0};
+    struct dppd_management_response response = {.operation = DPPD_MANAGEMENT_ARP_POLICY_GET};
+    response.payload.arp_policy = (struct dppd_flow_arp_view){.revision = UINT64_C(9007199254740993),
+        .neighbor_epoch = UINT64_MAX, .neighbor_revision = 2, .generation = 3};
+    response.payload.arp_policy.policy = (struct dppd_arp_policy){.reachable_ms = 30000, .local_count = 1};
+    struct dppd_arp_local *local = &response.payload.arp_policy.policy.locals[0];
+    local->port_id = 7;
+    local->vlan_depth = 1;
+    local->vlan[0] = 100;
+    assert(inet_pton(AF_INET, "192.0.2.7", local->address) == 1);
+    FILE *output = tmpfile();
+    assert(output != NULL && fflush(stdout) == 0);
+    int saved = dup(STDOUT_FILENO);
+    assert(saved >= 0 && dup2(fileno(output), STDOUT_FILENO) >= 0);
+    assert(dppctl_json_response(&request, &response) == 0);
+    response = (struct dppd_management_response){.operation = DPPD_MANAGEMENT_ARP_STATUS};
+    response.payload.arp = (struct dppd_arp_status){.enabled = true, .epoch = UINT64_MAX,
+        .revision = UINT64_C(9007199254740993), .local_count = 1};
+    response.payload.arp.locals[0].state = DPPD_ARP_DUPLICATE;
+    assert(inet_pton(AF_INET, "192.0.2.7", response.payload.arp.locals[0].configuration.address) == 1);
+    assert(dppctl_json_response(&request, &response) == 0);
+    response = (struct dppd_management_response){.operation = DPPD_MANAGEMENT_ARP_LIST};
+    response.payload.arp_neighbors = (struct dppd_arp_page){.epoch = UINT64_MAX, .revision = 2, .count = 1};
+    response.payload.arp_neighbors.entries[0].id = UINT64_C(9007199254740993);
+    response.payload.arp_neighbors.entries[0].state = DPPD_ARP_REACHABLE;
+    assert(dppctl_json_response(&request, &response) == 0);
+    response = (struct dppd_management_response){.operation = DPPD_MANAGEMENT_REQUEST_GET};
+    response.payload.durable_result = (struct dppd_flow_request_result){.operation = DPPD_FLOW_REQUEST_ARP_REPLACE,
+        .count = 1, .generations = {4}};
+    assert(dppctl_json_response(&request, &response) == 0);
+    assert(fflush(stdout) == 0 && fseek(output, 0, SEEK_SET) == 0);
+    char text[8192] = {0};
+    assert(fread(text, 1, sizeof(text) - 1, output) > 0);
+    assert(strstr(text, "\"revision\":\"9007199254740993\"") != NULL);
+    assert(strstr(text, "\"neighbor_epoch\":\"18446744073709551615\"") != NULL);
+    assert(strstr(text, "\"address\":\"192.0.2.7\",\"vlans\":[100]") != NULL);
+    assert(strstr(text, "\"neighbors_persistent\":false") != NULL && strstr(text, "\"state\":\"duplicate\"") != NULL);
+    assert(strstr(text, "\"entries\":[{\"id\":\"9007199254740993\"") != NULL);
+    assert(strstr(text, "\"operation\":\"arp_replace\"") != NULL && strstr(text, "\"arp_generation\":\"4\"") != NULL);
+    assert(dup2(saved, STDOUT_FILENO) >= 0);
+    close(saved);
+    fclose(output);
+    response.payload.durable_result.count = 2;
+    assert(dppctl_json_response(&request, &response) == -EPROTO);
+    response = (struct dppd_management_response){.operation = DPPD_MANAGEMENT_ARP_POLICY_GET};
+    response.payload.arp_policy.policy.local_count = DPPD_ARP_LOCAL_LIMIT + 1;
+    assert(dppctl_json_response(&request, &response) == -EPROTO);
+    response.payload.arp_policy.policy.local_count = 1;
+    response.payload.arp_policy.policy.locals[0].vlan_depth = 3;
+    assert(dppctl_json_response(&request, &response) == -EPROTO);
+    response = (struct dppd_management_response){.operation = DPPD_MANAGEMENT_ARP_STATUS};
+    response.payload.arp.local_count = DPPD_ARP_LOCAL_LIMIT + 1;
+    assert(dppctl_json_response(&request, &response) == -EPROTO);
+    response = (struct dppd_management_response){.operation = DPPD_MANAGEMENT_ARP_LIST};
+    response.payload.arp_neighbors.count = DPPD_ARP_PAGE_SIZE + 1;
+    assert(dppctl_json_response(&request, &response) == -EPROTO);
+}
+
+/** 状态查询默认读当前版本，也可携带精确非零版本，非法参数要在连接服务前被拒绝 */
 static void test_nd6_policy_arguments(void)
 {
     struct dppd_management_request request;
@@ -866,6 +993,8 @@ int main(void)
     test_conntrack_json();
     test_nd6_policy_arguments();
     test_nd6_json();
+    test_arp_policy_arguments();
+    test_arp_json();
     test_ipv6_arguments();
     test_probe_arguments();
     test_history_arguments();
